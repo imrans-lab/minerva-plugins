@@ -155,6 +155,29 @@ func _check_a_clean_design_with_declared_contacts_passes() -> void:
 				and (reply["fasteners"] as Array).is_empty(),
 			"reply = %s" % str(reply))
 
+	# WHAT EACH LEG WAS ASKED. The verdict above is folded from canned
+	# reports, so it would read the same if the verb had dropped the
+	# declarations, the required gap or the screw on the way in. The three
+	# legs are asked one question each and each one has to carry the caller's
+	# terms: the declared contact reaches interference and clearance by node,
+	# the gap reaches clearance, and the screw reaches the fastener leg.
+	var declared_i: Array = panel.interference_args.get("expected_contacts", []) as Array
+	var declared_c: Array = panel.clearance_args.get("expected_contacts", []) as Array
+	check("each leg is asked the caller's own question: the declared contact "
+			+ "reaches interference and clearance, required_mm reaches "
+			+ "clearance and the screw reaches the fastener leg",
+			declared_i.size() == 1
+				and str((declared_i[0] as Dictionary).get("node", "")) == "board/Body"
+				and declared_c.size() == 1
+				and str((declared_c[0] as Dictionary).get("node", "")) == "board/Body"
+				and absf(float(panel.clearance_args.get("required_mm", 0.0))
+					- REQUIRED_MM) < 1e-6
+				and absf(float((panel.fastener_args.get("screw", {}) as Dictionary)
+					.get("dia_mm", 0.0)) - 3.0) < 1e-6,
+			"interference = %s, clearance = %s, fasteners = %s" % [
+				str(panel.interference_args), str(panel.clearance_args),
+				str(panel.fastener_args)])
+
 	# The same design, asked about without a screw.
 	panel.fasteners = _fastener_report([])
 	var no_screw: Dictionary = await PanelTools.handle(panel,
@@ -362,6 +385,12 @@ class _DesignStandIn extends Node:
 	## the panel's own per-evaluation check does while it holds the collider.
 	var busy_replies: int = 0
 	var interference_calls: int = 0
+	## The args each leg was actually handed. The verb builds these from the
+	## caller's, and a stand-in that ignored them would make the pass-through
+	## unfalsifiable: the same canned reports come back whatever is asked.
+	var interference_args: Dictionary = {}
+	var clearance_args: Dictionary = {}
+	var fastener_args: Dictionary = {}
 
 	var _gauge: _GaugeStandIn = null
 	var _features: _FeatureStandIn = null
@@ -387,8 +416,9 @@ class _DesignStandIn extends Node:
 	func ensure_gauge_built() -> void:
 		pass
 
-	func check_interference(_args: Dictionary) -> Dictionary:
+	func check_interference(args: Dictionary) -> Dictionary:
 		interference_calls += 1
+		interference_args = args.duplicate(true)
 		if busy_replies > 0:
 			busy_replies -= 1
 			return {"checked": false, "busy": true, "holder_ticket": 7,
@@ -396,10 +426,12 @@ class _DesignStandIn extends Node:
 				"reason": "the evaluation's own check holds the geometry"}
 		return interference.duplicate(true)
 
-	func check_clearance(_args: Dictionary) -> Dictionary:
+	func check_clearance(args: Dictionary) -> Dictionary:
+		clearance_args = args.duplicate(true)
 		return clearance.duplicate(true)
 
-	func check_fasteners(_args: Dictionary) -> Dictionary:
+	func check_fasteners(args: Dictionary) -> Dictionary:
+		fastener_args = args.duplicate(true)
 		return fasteners.duplicate(true)
 
 

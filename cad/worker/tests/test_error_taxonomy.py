@@ -9,7 +9,8 @@ Two questions, one suite:
   DSL binding that was building and carry the whole traceback?
 
 ORACLE. The kinds are the contract the panel and the modeling skill are written
-against (manifest.json §6: parse / translate / occt). The attribution is checked
+against (manifest.json §6: parse / translate / occt / python). The attribution
+is checked
 against the exception the kernel actually raises for the sources here — a fillet
 larger than the solid, and the three-section `hump_in` loft of enclosure-rev3,
 which is the reproduction on record for the tessellation failure. Neither source
@@ -123,3 +124,74 @@ def test_the_three_section_hump_attributes_its_tessellation_failure() -> None:
     # all it is a place in the model to look, so it must carry a location.
     for face in err["details"].get("untriangulated_faces", []):
         assert len(face["center"]) == 3, face
+
+
+#: A build the kernel refuses at tessellation with a BUILTIN exception type —
+#: `AttributeError: 'NoneType' object has no attribute 'NbNodes'` from a
+#: zero-radius cylinder. The class alone cannot tell this apart from a bug in
+#: the DSL's own frames, so it is the case the attribution has to get right.
+KERNEL_BUILTIN_SOURCE = "part = cylinder(r=0, h=10)"
+
+
+def _build_failure(cause: BaseException, *, binding: str, line: int):
+    from mcad.build_trace import BuildFailure
+
+    return BuildFailure(binding=binding, stage="build", cause=cause, line=line)
+
+
+def test_a_kernel_failure_raised_as_a_builtin_is_still_a_kernel_failure() -> None:
+    """The exception CLASS does not decide the kind; the frame that raised does.
+
+    ORACLE: the real reply for a zero-radius cylinder. build123d hands back a
+    shape OCCT will not mesh and the failure surfaces as a bare AttributeError
+    — a type the DSL's own frames raise too — so a reader that split the kinds
+    on the class would file this under the user's Python instead of the
+    kernel, and the untriangulated-face list it carries would make no sense.
+    """
+    err = _error(KERNEL_BUILTIN_SOURCE)
+    assert err["kind"] == "occt", err
+    assert err["details"]["exception"] == "AttributeError", err
+    assert err["details"]["stage"] == "tessellate", err
+    assert "geometry kernel" in err["message"], err
+
+
+def test_a_python_error_while_building_keeps_the_binding_but_not_the_kernel() -> None:
+    """A non-kernel exception is attributed, not blamed on OCCT.
+
+    The `except Exception` around each statement is a net for anything the
+    kernel packages did not raise as well — an arithmetic slip, a bad keyword
+    argument, a control-flow signal escaping its module. Those must keep the
+    binding and the line, which is the whole point of running the statements
+    one at a time, while reporting the kind that sends the reader to the right
+    place.
+
+    ORACLE: two exceptions that really were raised, one in this module's own
+    frames and one inside build123d, put through the same constructor. No
+    stand-ins: the kernel one is produced by asking build123d to build a solid
+    with a negative dimension.
+
+    Nothing in the V1 DSL is known to reach the python branch end to end —
+    every arithmetic, argument and control-flow path measured is guarded and
+    lands on `translate` or `parse` first — so the seam is tested where it
+    exists rather than through a source string that cannot trigger it.
+    """
+    try:
+        1 / 0
+    except ZeroDivisionError as exc:
+        arithmetic = _build_failure(exc, binding="lid", line=7)
+    assert arithmetic.kind == "python"
+    assert arithmetic.details()["binding"] == "lid"
+    assert arithmetic.details()["line"] == 7
+    assert "geometry kernel" not in str(arithmetic)
+    assert "lid" in str(arithmetic) and "line 7" in str(arithmetic)
+
+    from build123d import Box
+
+    try:
+        Box(-1, -1, -1)
+    except BaseException as exc:  # noqa: BLE001 — whatever the kernel raises
+        kernel = _build_failure(exc, binding="lid", line=7)
+    else:
+        pytest.skip("the kernel now accepts a negative box")
+    assert kernel.kind == "occt"
+    assert "geometry kernel" in str(kernel)

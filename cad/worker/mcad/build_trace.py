@@ -7,6 +7,11 @@ statements one at a time here, instead of inside ``Translator.translate``,
 costs nothing extra (it is the same single pass over the same AST) and turns
 those into a :class:`BuildFailure` that names the binding, the line and the
 stage. Nothing in this module re-translates or re-evaluates anything.
+
+The attribution is per exception, not per statement: a failure raised from
+inside the kernel packages is reported as a kernel failure, while one raised
+in the DSL's own frames (a division by zero in an expression, a bad keyword
+argument) keeps the binding and the line but is reported as a Python failure.
 """
 
 from __future__ import annotations
@@ -60,6 +65,13 @@ _RESULT_BINDING = "result"
 _MAX_FACES_PROBED = 400
 _MAX_PROBE_SECONDS = 10.0
 
+#: Import roots whose code IS the geometry kernel. A failure raised from
+#: inside one of these is a kernel failure; a ZeroDivisionError or a TypeError
+#: raised in the DSL's own frames is a Python failure that happens to have
+#: occurred while a binding was building, and calling it "occt" sends the
+#: reader to look for a geometry problem that is not there.
+_KERNEL_PACKAGES = ("OCP", "OCC", "build123d", "cadquery")
+
 
 class BuildFailure(Exception):
     """A kernel error raised while building or tessellating one binding.
@@ -87,12 +99,13 @@ class BuildFailure(Exception):
         self.cause_traceback = "".join(
             traceback.format_exception(type(cause), cause, cause.__traceback__)
         )
+        self.kind = _failure_kind(cause)
         where = f" (line {line})" if line else ""
         verb = "Tessellating" if stage == "tessellate" else "Building"
+        blame = ("failed in the geometry kernel" if self.kind == "occt"
+                 else "raised a Python error")
         detail = f"{type(cause).__name__}: {cause}"
-        super().__init__(
-            f"{verb} '{binding}'{where} failed in the geometry kernel — {detail}"
-        )
+        super().__init__(f"{verb} '{binding}'{where} {blame} — {detail}")
 
     def details(self) -> dict[str, Any]:
         """The structured half of the error payload."""
@@ -106,6 +119,33 @@ class BuildFailure(Exception):
         if self.faces:
             detail["untriangulated_faces"] = self.faces
         return detail
+
+
+def _failure_kind(cause: BaseException) -> str:
+    """"occt" when the kernel raised, "python" otherwise.
+
+    The kernel's own exception classes live in the kernel packages, but it
+    also raises plain ``ValueError``/``AttributeError`` from inside them, so
+    the deepest frame the traceback reached decides: that is the code that
+    actually failed. With no traceback to read, only the class can speak.
+    """
+    if _in_kernel(type(cause).__module__):
+        return "occt"
+    frame = cause.__traceback__
+    deepest = None
+    while frame is not None:
+        deepest = frame
+        frame = frame.tb_next
+    if deepest is not None:
+        module = deepest.tb_frame.f_globals.get("__name__", "")
+        if _in_kernel(module):
+            return "occt"
+    return "python"
+
+
+def _in_kernel(module: str) -> bool:
+    root = (module or "").split(".", 1)[0]
+    return root in _KERNEL_PACKAGES
 
 
 def describe_statement(stmt: Any) -> tuple[str, int]:

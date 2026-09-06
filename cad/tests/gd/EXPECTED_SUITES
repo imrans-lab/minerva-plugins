@@ -706,7 +706,7 @@ test_eval_banner.gd assertions=9
 # rather than pass + 1 a leg refused with `busy` is retried until it answers
 # + 2 a clearance still in the worker comes back as one ticket beside the rows
 # already in hand, and a crash still reads fail.
-test_check_design.gd assertions=12
+test_check_design.gd assertions=13
 
 # minerva_cad_snapshot_fit: a capture framed on the evaluated solid, a named
 # reference or a world box, rendered from a camera of its own so the pane the

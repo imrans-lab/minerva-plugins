@@ -27,6 +27,7 @@ from pathlib import Path
 import pytest
 
 from mcad_worker import clearance as clr
+from mcad_worker import curvature as curv
 from mcad_worker import features as feat
 
 # --- the fixture, in millimetres -------------------------------------------
@@ -758,12 +759,27 @@ class TestClearanceVerb:
         angle then holds.
 
         ORACLE: the spheroid's analytic pole radius, a^2/c = 500 mm, which the
-        sampled reading must reach from below — the grid does not land exactly
-        on the pole, so it may only approach it — and never exceed. The reply
-        must then be BOUNDED at the tolerance asked for, with the source text
-        saying the curvature was sampled; a part whose every curved face has
-        an analytic radius, and a part with no curved face at all, stay
-        bounded and say neither.
+        sampled reading must reach from below — the pole is a degenerate point
+        the evaluator will not answer at, so it may only approach it — and
+        never exceed.
+
+        The floor follows from HOW the reading is made rather than from a
+        round number. A bare grid stops at its nearest usable node: with
+        SAMPLES_PER_DIRECTION nodes the pole's neighbour sits a whole grid
+        step of latitude short of it, where this spheroid's meridional radius
+        is only ~431 mm — 14 % under, which the floor below therefore rejects.
+        The refinement pass halves that offset REFINEMENT_ROUNDS times, so the
+        latitude still separating the reading from the pole is a grid step
+        over 2**rounds; the radius near a pole falls off as the square of that
+        offset, so the shortfall the method itself allows is far under a
+        thousandth. The floor is set a decade looser than that, and the
+        remaining slack is the kernel's own spline fit of a scaled sphere, not
+        the search.
+
+        The reply must then be BOUNDED at the tolerance asked for, with the
+        source text saying the curvature was sampled; a part whose every
+        curved face has an analytic radius, and a part with no curved face at
+        all, stay bounded and say neither.
         """
         pytest.importorskip("fcl")
         pytest.importorskip("build123d")
@@ -786,10 +802,18 @@ class TestClearanceVerb:
         report = feat.curvature_report(spheroid, tolerance_mm=requested)
         assert report["unrecognised_faces"] == 0
         assert report["sampled_faces"] == 1
+        # The offset the refinement leaves, in units of a grid step, and the
+        # relative radius shortfall it implies on this spheroid (the radius
+        # falls off quadratically in the latitude offset from the pole).
+        grid_step_rad = math.pi / (curv.SAMPLES_PER_DIRECTION - 1)
+        residual_rad = grid_step_rad / 2 ** curv.REFINEMENT_ROUNDS
+        method_shortfall = 1.5 * residual_rad * residual_rad
+        assert method_shortfall < 1.0e-4
         # From below and close: the bbox guess (50 mm) is an order of
-        # magnitude short of this, so a fallback cannot pass the test.
+        # magnitude short of this, and the nearest grid node is 14 % short, so
+        # neither a fallback nor an unrefined grid can pass the test.
         assert report["largest_radius_mm"] <= pole_radius * (1.0 + 1.0e-9)
-        assert report["largest_radius_mm"] >= pole_radius * 0.9
+        assert report["largest_radius_mm"] >= pole_radius * (1.0 - 1.0e-3)
 
         sampled = _reply(spheroid)
         assert sampled["checked"] is True

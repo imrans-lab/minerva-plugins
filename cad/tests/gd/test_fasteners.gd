@@ -187,9 +187,9 @@ const BORE_FLOOR_T := BOARD_HALF_THICKNESS + BORE_LENGTH
 const BOTTOMING_TIP_T := -BOARD_HALF_THICKNESS + BOTTOMING_SCREW_LENGTH
 
 # --- the two-shell stack (a screw arriving from BELOW) -----------------------
-## The enclosure the DCR is actually about, in miniature and on the same board:
-## a tray floor under the board, a boss carrying the board's underside, and a
-## post above it carrying the pilot the screw threads into. The screw comes up
+## The two-shell enclosure in miniature, on the same board: a tray floor under
+## the board, a boss carrying the board's underside, and a post above it
+## carrying the pilot the screw threads into. The screw comes up
 ## from below, its head counterbored into the tray floor, so the seat is a face
 ## of the SOLID and every axial number is measured from a plane 8.3 mm short of
 ## the hole. Distances are in the board's own frame, z = 0 at mid-thickness.

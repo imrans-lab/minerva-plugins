@@ -125,8 +125,10 @@ def _defects_for_source(source: str) -> tuple[dict, str, int]:
     if _last_program is None or _last_program[0] != hash(source):
         return {}, "", 0
     cached = _last_program[1]
+    counts = (cached["mesh_defects"] if "mesh_defects" in cached
+              else _mesh_defects(cached.get("mesh") or {}))
     return (
-        cached.get("mesh_defects") or _mesh_defects(cached.get("mesh") or {}),
+        counts,
         str(cached.get("shape_name", "")),
         int(cached.get("body_count", 0)),
     )
@@ -298,14 +300,15 @@ def _evaluate(params: dict) -> dict:
             },
         }
     except BuildFailure as exc:
-        # A kernel error inside one build step: the message names the binding,
-        # the payload carries the underlying traceback whole. Truncating it
-        # would drop the innermost frame, which is the only line that says
-        # which kernel call failed.
+        # A failure inside one build step: the message names the binding, the
+        # payload carries the underlying traceback whole. Truncating it would
+        # drop the innermost frame, which is the only line that says what
+        # failed — and it is also the frame that decided exc.kind, which
+        # separates a kernel failure from a Python one raised while building.
         return {
             "ok": False,
             "error": {
-                "kind": "occt",
+                "kind": exc.kind,
                 "message": str(exc),
                 "details": exc.details(),
                 "traceback": exc.cause_traceback,
@@ -365,11 +368,12 @@ def _evaluate(params: dict) -> dict:
     }
     # One walk of the tessellation, cached with it: the counts the summary and
     # the 3MF refusal quote, and the positions that say WHICH edge is bad.
+    # Stored even when empty — "clean" is a result, and dropping it makes
+    # every later summary of this cache entry walk the tessellation again to
+    # rediscover it. Readers publish only the non-empty halves.
     _report = _defect_module.defect_report(result_dict["mesh"] or {})
-    if _report["counts"]:
-        result_dict["mesh_defects"] = _report["counts"]
-    if _report["sites"]:
-        result_dict["mesh_defect_sites"] = _report["sites"]
+    result_dict["mesh_defects"] = _report["counts"]
+    result_dict["mesh_defect_sites"] = _report["sites"]
     _last_program = (h, result_dict)
     # A document made only of references builds no part; leave the previous
     # shape in place rather than caching a None an export would trip over.
@@ -450,6 +454,9 @@ def _export(params: dict) -> dict:
                          export call rejected the result.
         - "occt"     — the geometry kernel failed inside one build step;
                        names the binding and carries its traceback.
+                       A non-kernel exception raised while a binding was
+                       building keeps the binding and line but reports as
+                       "python".
         - "mesh_invalid" — 3MF only: the writer refused the part because its
                        triangulation is not a closed manifold solid; the
                        message names the defect classes and counts from the
@@ -548,7 +555,7 @@ def _export(params: dict) -> dict:
         return {
             "ok": False,
             "error": {
-                "kind": "occt",
+                "kind": exc.kind,
                 "message": str(exc),
                 "details": exc.details(),
                 "traceback": exc.cause_traceback,

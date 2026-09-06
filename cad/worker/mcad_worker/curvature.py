@@ -30,11 +30,23 @@ where the reported radius runs to kilometres and is mostly the evaluator's own
 noise, from asking for a mesh nobody can hold. What survives is curvature that
 could really break the tolerance, reported at its measured radius.
 
+FINDING THE FLATTEST POINT, NOT THE FLATTEST NODE
+A uniform grid reports the flattest NODE, which is not the flattest point: on
+an oblate spheroid the flattest point is the pole, the grid's nearest usable
+node sits a whole grid step short of it, and the radius read there is well
+under the pole's. So the grid pass only locates the neighbourhood; a
+refinement pass then bisects the parametric cell around the widest sample,
+halving its step each round, and keeps whichever of the surrounding samples is
+wider. The centre walks toward the true maximum — including one sitting on a
+parametric boundary, which is where a degenerate pole lives — and the residual
+offset left after the last round is one grid step divided by 2**rounds.
+
 THE HONEST LIMIT
-The grid is a sample, not a proof: a curvature spike between two samples is not
-seen. The grid is therefore fine enough that a feature it steps over is
-smaller than the facets the mesher would put there anyway, and the reply that
-carries this number says the radius was sampled rather than read.
+The search is still a sample, not a proof: a curvature spike in a cell the
+grid steps over entirely, and far from the widest node, is not seen. The grid
+is therefore fine enough that a feature it steps over is smaller than the
+facets the mesher would put there anyway, and the reply that carries this
+number says the radius was sampled and refined rather than read.
 """
 
 from __future__ import annotations
@@ -55,6 +67,12 @@ FLAT_CURVATURE_PER_MM = 1.0e-7
 
 #: Parametric resolution handed to the curvature evaluator, millimetres.
 _PROP_RESOLUTION_MM = 1.0e-7
+
+#: Bisections of the parametric cell around the widest grid sample. Each round
+#: costs eight evaluations, so the whole refinement is cheaper than the grid
+#: that seeds it, and it leaves the reading within one grid step / 2**rounds
+#: of the parametric point it converged on.
+REFINEMENT_ROUNDS = 10
 
 
 def binding_radius(occt: dict, face, tolerance_mm: Optional[float]
@@ -92,28 +110,79 @@ def binding_radius(occt: dict, face, tolerance_mm: Optional[float]
     steps = SAMPLES_PER_DIRECTION
     evaluated = False
     widest: Optional[float] = None
+    best_uv: Optional[tuple[float, float]] = None
     for i in range(steps):
         u = u0 + (u1 - u0) * i / (steps - 1)
         for j in range(steps):
             v = v0 + (v1 - v0) * j / (steps - 1)
-            try:
-                props = props_class(adaptor, u, v, 2, _PROP_RESOLUTION_MM)
-                if not props.IsCurvatureDefined():
-                    continue
-                principals = (abs(float(props.MaxCurvature())),
-                              abs(float(props.MinCurvature())))
-            except BaseException:  # noqa: BLE001 — a degenerate sample
-                continue
-            if not all(math.isfinite(value) for value in principals):
-                continue
-            evaluated = True
-            for curvature in principals:
-                if curvature <= floor:
-                    continue
-                radius = 1.0 / curvature
-                if widest is None or radius > widest:
-                    widest = radius
+            radius, defined = _radius_at(props_class, adaptor, u, v, floor)
+            evaluated = evaluated or defined
+            if radius is not None and (widest is None or radius > widest):
+                widest, best_uv = radius, (u, v)
+
+    if best_uv is not None:
+        du = (u1 - u0) / (steps - 1)
+        dv = (v1 - v0) / (steps - 1)
+        widest, best_uv = _refine(props_class, adaptor, floor, widest, best_uv,
+                                  du, dv, (u0, u1), (v0, v1))
     return widest, evaluated
+
+
+def _radius_at(props_class, adaptor, u: float, v: float, floor: float
+               ) -> tuple[Optional[float], bool]:
+    """(the widest principal radius above `floor` here, was curvature defined).
+
+    A radius of None with True means the sample evaluated but carries only
+    curvature too slight to bind anything.
+    """
+    try:
+        props = props_class(adaptor, u, v, 2, _PROP_RESOLUTION_MM)
+        if not props.IsCurvatureDefined():
+            return None, False
+        principals = (abs(float(props.MaxCurvature())),
+                      abs(float(props.MinCurvature())))
+    except BaseException:  # noqa: BLE001 — a degenerate sample
+        return None, False
+    if not all(math.isfinite(value) for value in principals):
+        return None, False
+    widest: Optional[float] = None
+    for curvature in principals:
+        if curvature <= floor:
+            continue
+        radius = 1.0 / curvature
+        if widest is None or radius > widest:
+            widest = radius
+    return widest, True
+
+
+def _refine(props_class, adaptor, floor: float, widest: Optional[float],
+            centre: tuple[float, float], du: float, dv: float,
+            u_range: tuple[float, float], v_range: tuple[float, float]
+            ) -> tuple[Optional[float], tuple[float, float]]:
+    """Walk the widest sample toward the flattest point around it.
+
+    Each round samples the eight neighbours of the current centre at the
+    current step and moves to the widest of them, then halves the step. The
+    centre therefore travels at most 2*du (2*dv) in total, enough to cross the
+    grid cell it started in and settle onto a maximum that lies on the
+    parametric boundary, and the step it stops at is the offset still
+    separating it from that maximum.
+    """
+    u0, u1 = u_range
+    v0, v1 = v_range
+    for _ in range(REFINEMENT_ROUNDS):
+        for offset_u in (-du, 0.0, du):
+            for offset_v in (-dv, 0.0, dv):
+                if offset_u == 0.0 and offset_v == 0.0:
+                    continue
+                u = min(max(centre[0] + offset_u, u0), u1)
+                v = min(max(centre[1] + offset_v, v0), v1)
+                radius, _ = _radius_at(props_class, adaptor, u, v, floor)
+                if radius is not None and (widest is None or radius > widest):
+                    widest, centre = radius, (u, v)
+        du *= 0.5
+        dv *= 0.5
+    return widest, centre
 
 
 def _extent(occt: dict, face) -> Optional[float]:

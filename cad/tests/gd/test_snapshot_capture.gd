@@ -78,13 +78,15 @@ const IDLE_FRAMES := 60
 ## The panes an owner judges a wall by, and the shell they timed out on: a
 ## grid of this many cells is 37,249 vertices and 73,728 triangles, the size
 ## of the rev-3 enclosure. Four consecutive calls is what the report was made
-## of, and the budget covers the mesh arriving as well as the four rounds —
-## the outline used to be rebuilt for every pane on arrival AND on every draw.
+## of. The outline used to be rebuilt for every pane on arrival AND on every
+## draw; that the caches now hold is asserted as COUNTS of adjacency walks and
+## projections, not as elapsed time. ORTHO_BUDGET_MS is only a ceiling on a
+## hang — generous enough that a loaded CI machine cannot trip it.
 const ORTHO_PANES: PackedStringArray = ["top", "front", "right"]
 const ORTHO_SOLID_CELLS := 192
 const ORTHO_MIN_VERTICES := 35000
 const ORTHO_BURST := 4
-const ORTHO_BUDGET_MS := 5000
+const ORTHO_BUDGET_MS := 30000
 
 ## Filled from the pane's own SubViewport, so the stand-in target is the size
 ## the real one would be.
@@ -321,6 +323,16 @@ func _run() -> void:
 
 	# Timed from the mesh arriving, because handing it to the panes used to
 	# cost as much as capturing them.
+	# Anything the overlays drew before the shell arrived is not this repro's;
+	# the counters run for the silhouette's whole life, so the baseline is
+	# taken here and subtracted below.
+	var builds_before := 0
+	var projections_before := 0
+	for pane_id in ORTHO_PANES:
+		var before: Control = panel._geometry_overlays[pane_id] as Control
+		builds_before += before._silhouette.adjacency_builds()
+		projections_before += before._silhouette.projections()
+
 	var burst_started := Time.get_ticks_msec()
 	panel._last_mesh_data = shell
 	panel._edge_registry = []
@@ -356,25 +368,41 @@ func _run() -> void:
 
 	check("the repro: %d consecutive captures of each of top, front and right "
 			% ORTHO_BURST + "all answer with an image, and the mesh arriving "
-			+ "plus every one of them fits in %d ms — the verb spends its "
-			% ORTHO_BUDGET_MS + "budget on pictures, not on redrawing the "
-			+ "outline once per call",
+			+ "plus every one of them stays inside a %d ms ceiling — a "
+			% ORTHO_BUDGET_MS + "sanity bound on a hang, not a performance "
+			+ "oracle; what the work actually costs is counted below",
 			captured == ORTHO_BURST * ORTHO_PANES.size()
 				and burst_ms < ORTHO_BUDGET_MS,
 			"%d of %d captured in %d ms" % [
 				captured, ORTHO_BURST * ORTHO_PANES.size(), burst_ms])
 
-	var repeat_ms: int = 0
-	for burst_round in range(1, round_ms.size()):
-		repeat_ms += round_ms[burst_round]
-	check("and the wait is named: the outline is walked on the first round "
-			+ "and kept, so the three rounds after it — same mesh, same "
-			+ "cameras, same pane sizes — cost less between them than the "
-			+ "first one did alone",
-			round_ms.size() == ORTHO_BURST and repeat_ms <= round_ms[0],
-			"rounds %s ms" % str(round_ms))
-	print("    ortho: %d segments, mesh + %d rounds in %d ms, rounds %s"
-		% [outline_segments, ORTHO_BURST, burst_ms, str(round_ms)])
+	# WHAT THE REPEAT ROUNDS COST, COUNTED. A wall clock cannot say this: a
+	# loaded machine makes the first round cheap or the last one dear, and the
+	# comparison flips without anything about the panel changing. The two
+	# caches have their own counters, and the claim is exact — over
+	# ORTHO_BURST rounds of the same mesh, the same cameras and the same pane
+	# sizes, each pane walks its adjacency ONCE and projects its edges ONCE,
+	# so every round after the first walks and projects nothing at all.
+	var builds := 0
+	var projections := 0
+	for pane_id in ORTHO_PANES:
+		var overlay: Control = panel._geometry_overlays[pane_id] as Control
+		builds += overlay._silhouette.adjacency_builds()
+		projections += overlay._silhouette.projections()
+	builds -= builds_before
+	projections -= projections_before
+	check("and the wait is named: over %d rounds of the same mesh, the same "
+			% ORTHO_BURST + "cameras and the same pane sizes, each of the "
+			+ "three panes walked its adjacency once and projected once — "
+			+ "the rounds after the first drew the outline from the cache",
+			round_ms.size() == ORTHO_BURST
+				and builds == ORTHO_PANES.size()
+				and projections == ORTHO_PANES.size(),
+			"%d builds, %d projections over %d panes; rounds %s ms" % [
+				builds, projections, ORTHO_PANES.size(), str(round_ms)])
+	print("    ortho: %d segments, mesh + %d rounds in %d ms, %d builds, "
+		% [outline_segments, ORTHO_BURST, burst_ms, builds]
+		+ "%d projections, rounds %s" % [projections, str(round_ms)])
 
 	# ── The narrow layout: one pane, one projection, one honest answer ────
 	panel._apply_width_class(&"sm")

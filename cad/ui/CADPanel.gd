@@ -1382,8 +1382,9 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 
 
 ## Say what this evaluation found. Called from _evaluate_and_render's failure
-## paths so a failed render is never silent (the empty-render symptom of RCA
-## 019e46b5), and from its success path for a reference or interference report.
+## paths, so a render that produced nothing says why instead of leaving an
+## empty pane, and from its success path for a reference or interference
+## report.
 ## The evaluation the message belongs to is _last_eval_result, which every
 ## caller has already written before it gets here.
 func _show_eval_error(message: String) -> void:

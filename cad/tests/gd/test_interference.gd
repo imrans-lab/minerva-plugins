@@ -1907,9 +1907,9 @@ func _check_scoping(gauge: Node, checks: RefCounted) -> void:
 ## meant to rest on and the traces nothing may touch — so each declaration is
 ## drawn as a world box round one boss and has to leave the other graded.
 ##
-## ORACLE: the fixture'"'"'s own numbers. Each boss passes clean through the board,
-## so the overlap a declaration has to allow is the board'"'"'s 1.6 mm thickness,
-## and the crossings of the two bosses partition the node'"'"'s crossings — the
+## ORACLE: the fixture's own numbers. Each boss passes clean through the board,
+## so the overlap a declaration has to allow is the board's 1.6 mm thickness,
+## and the crossings of the two bosses partition the node's crossings — the
 ## undeclared remainder of one run plus the undeclared remainder of the other
 ## is the whole count, with nothing invented and nothing lost.
 func _check_expected_contacts(gauge: Node, checks: RefCounted) -> void:
@@ -2020,7 +2020,7 @@ func _check_expected_contacts(gauge: Node, checks: RefCounted) -> void:
 ## A parsed declaration round one boss: the world box the crossings of that
 ## boss fall in, allowing `required_mm` of overlap (negative is a press fit).
 ## The box is built from the POSED axis point, so a check that matched regions
-## in the reference'"'"'s own frame would find nothing.
+## in the reference's own frame would find nothing.
 func _declaration(centre: Vector2, required_mm: float) -> Dictionary:
 	var axis: Vector3 = _pose * Vector3(centre.x, centre.y, 0.0)
 	var half := Vector3.ONE * REGION_HALF_MM

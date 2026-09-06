@@ -53,6 +53,13 @@ var _points_valid: bool = false
 var _points_xform: Transform3D = Transform3D.IDENTITY
 var _points_size: Vector2 = Vector2.ZERO
 
+# What the caches have actually saved, as counts rather than as milliseconds.
+# Every capture of a pane reads its outline, and the whole point of the two
+# caches is that a repeat capture of an unmoved camera walks no edge and
+# projects no point. A clock cannot say that on a loaded machine; these can.
+var _adjacency_builds: int = 0
+var _projections: int = 0
+
 
 ## Hand over the mesh in the panel's own {vertices, faces} shape. Nothing is
 ## walked here: the adjacency is built the first time a pane actually asks for
@@ -78,6 +85,7 @@ func points_for(camera: Camera3D, pane_size: Vector2) -> PackedVector2Array:
 	if not _adjacency_built:
 		_build_adjacency()
 	_points = _project(camera)
+	_projections += 1
 	_points_valid = true
 	_points_xform = xform
 	_points_size = pane_size
@@ -94,6 +102,20 @@ func edge_count() -> int:
 	return _edge_a.size()
 
 
+## How many times an adjacency has been walked over this silhouette's whole
+## life. One per mesh handed to it is the contract: a second walk for a mesh
+## that has not changed is exactly the cost the cache exists to remove.
+func adjacency_builds() -> int:
+	return _adjacency_builds
+
+
+## How many times the edges have been projected over this silhouette's whole
+## life. One per distinct camera pose and pane size; a repeat with neither
+## moved is served from `_points` and does not count.
+func projections() -> int:
+	return _projections
+
+
 func _clear_adjacency() -> void:
 	_edge_a = PackedVector3Array()
 	_edge_b = PackedVector3Array()
@@ -105,6 +127,7 @@ func _clear_adjacency() -> void:
 func _build_adjacency() -> void:
 	_clear_adjacency()
 	_adjacency_built = true
+	_adjacency_builds += 1
 	if _raw_verts.is_empty() or _raw_faces.is_empty():
 		return
 	var point_index := {}

@@ -71,7 +71,11 @@ const PAIR_ENTRY_BYTES: int = 16
 ##    references_moved, engine, cache, bound, note}
 ##
 ## sorted closest first. `checked: false` with a `reason` is not the same
-## answer as "everything clears".
+## answer as "everything clears": it means the geometry in scope had no pair
+## to measure. A CALL that cannot be scoped at all — no reference=/against=,
+## a name nothing has mounted, the same reference on both sides — returns
+## `{error}` instead, the way the clearance path refuses an unmounted
+## reference, so the verb reports a failure rather than a clean sheet.
 ##
 ## AN OVERLAP HERE IS NOT THE INTERFERENCE CHECK'S OVERLAP. A mesh-to-mesh
 ## distance is unsigned: one part wholly inside another measures 0, exactly as
@@ -95,7 +99,9 @@ func check_reference_pairs(panel: Object, args: Dictionary = {}) -> Dictionary:
 
 	var scope := _pair_scope(records, args)
 	if scope.has("error"):
-		return _no_pairs(str(scope["error"]))
+		# Nothing was measured because the call named nothing measurable. That
+		# is the caller's error, not a verdict about the assembly.
+		return {"error": str(scope["error"])}
 	var parts: Array = scope["parts"]
 
 	var targets: Array = []

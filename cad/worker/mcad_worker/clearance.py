@@ -383,7 +383,11 @@ UNRECOGNISED_CURVATURE = ("a curved face OCCT would not let this reader "
 #: Named in the `how` when the widest radius was sampled off the surface
 #: rather than read off it, because the two are not the same kind of fact.
 SAMPLED_CLAUSE = (", whose curvature was sampled across the face rather than "
-                  "read off an analytic surface")
+                  "read off an analytic surface: a parametric grid whose "
+                  "widest sample is then bisected onto the flattest point "
+                  "beside it, so the radius is that point's and not the "
+                  "nearest grid node's, while curvature inside a cell the "
+                  "grid steps over entirely is still unseen")
 
 
 def _prepare_solid(source: str, tolerance_mm: float,

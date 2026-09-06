@@ -1,4 +1,4 @@
-extends "reference_pairs.gd"
+extends "interference_report.gd"
 ## geometry_checks.gd — does the evaluated solid run into anything?
 ##
 ## An enclosure is designed AGAINST foreign geometry: a board, a connector, a
@@ -59,10 +59,18 @@ extends "reference_pairs.gd"
 ## queried inside one step.
 ##
 ## THE OTHER HALF. Clearance — "by how much do they miss" — is a worker round
-## trip and not a ray walk, and lives in clearance_client.gd, which this script
-## extends: one object carries both halves, so the panel, panel_tools and
-## fastener_checks each hold a single geometry-checks instance as they always
-## have. The frame helpers both halves read live down there too.
+## trip and not a ray walk, and lives in clearance_client.gd, at the bottom of
+## the chain this script extends: one object carries both halves, so the
+## panel, panel_tools and fastener_checks each hold a single geometry-checks
+## instance as they always have. The frame helpers both halves read live down
+## there too.
+##
+## WHAT THIS FILE HOLDS. The walk only: building the solid's collider, the
+## reservation that keeps one check running at a time, the rays, and the
+## markers. Turning the crossings it finds into the reply — the pairs, the
+## penetration depths, the declared-contact accounting and the status line —
+## is interference_report.gd, which this script extends and whose state the
+## walk writes.
 ##
 ## No class_name: off-tree plugin scripts cannot use class_name.
 ## Consumers: preload("scripts/geometry_checks.gd") from CADPanel.gd.
@@ -82,9 +90,6 @@ const MARKER_COLOR: Color = Color(0.95, 0.12, 0.12, 1.0)
 ## Arm length of one marker cross, in millimetres. Small enough to point at a
 ## feature rather than cover it.
 const MARKER_ARM_MM: float = 1.5
-## Markers drawn at most. A shell buried in a board can produce thousands of
-## crossings and drawing them all says nothing more than drawing two hundred.
-const MAX_MARKERS: int = 200
 
 ## Contacts within this distance of a surface are the same surface: a designed
 ## flush fit, not an overlap. Float precision on a hundred-millimetre part is
@@ -134,9 +139,6 @@ const _PROBE_DIRECTIONS: Array[Vector3] = [
 	Vector3.RIGHT, Vector3.LEFT, Vector3.BACK, Vector3.FORWARD,
 	Vector3.UP, Vector3.DOWN,
 ]
-## Points listed per interfering pair. The pair's own point_count is the whole
-## number; this bounds what travels in the reply.
-const MAX_POINTS_PER_PAIR: int = 8
 
 ## Rays spent on the solid's own edges in one check, and reference triangles
 ## examined. Both are ceilings on a pathological document, not a sampling
@@ -177,43 +179,10 @@ var _solid_bounds: AABB = AABB()
 ## collider is not cached across evaluations.
 var _solid_generation: int = 0
 
-## The reference records the running check was started with: name, pose and
-## converted parts. Snapshotted before the job is submitted, because the
-## document may change while the job waits for a physics step.
-var _records: Array = []
-## Points the last check found, world millimetres, for the markers.
-var _marker_points: PackedVector3Array = PackedVector3Array()
-## Ray casts spent by the running check — reported, because the cost of this
-## check is the one thing a per-evaluation feature has to be honest about.
-var _casts: int = 0
-## Ceilings the running check hit, in prose.
-var _limits: PackedStringArray = PackedStringArray()
-## The solid's edges as the running check treated them: how many it holds,
-## how many of those could reach a reference at all, and how many of THOSE it
-## actually cast a ray from. The three are what the report says it did.
-var _edges_total: int = 0
-var _edges_reaching: int = 0
-var _edges_cast: int = 0
 ## Rays the check may spend on solid edges. Read from the variable rather
 ## than the constant so a suite can drive the ceiling without generating a
 ## hundred thousand edges; nothing in the panel ever writes it.
 var max_solid_edge_casts: int = MAX_SOLID_EDGES
-## Nodes whose containment question could not be answered, as
-## {reference, node, reason}. A rejected probe is not a clean node.
-var _undecided: Array = []
-## The declarations the running check was called with, parsed. Empty is the
-## default and is every check that came before the argument existed.
-var _expected: Array = []
-## Crossings the running check folded into a DECLARATION instead of into an
-## interference pair, keyed pair-key + declaration index. A bucket carries the
-## same fields a pair does, so it can be promoted back into the report whole
-## when its measured overlap runs past what was declared.
-var _declared: Dictionary = {}
-## Declaration indices something was measured against, so the reply can name
-## the ones that matched nothing.
-var _declared_matched: Dictionary = {}
-## Wall clock of the running check, microseconds.
-var _started_us: int = 0
 
 ## Requests made, ever. The module holds ONE solid collider and one set of
 ## counters, so two checks in flight would answer each other's geometry: a
@@ -251,13 +220,6 @@ var _holder: int = 0
 ## Emitted when a check releases the module. Waited on by a request that found
 ## one already running.
 signal check_finished
-
-
-## The reference records this check runs against — {name, pose, parts} as the
-## panel reports them. Snapshotted before the job is submitted, because the
-## document may change while the job waits for a physics step.
-func set_records(records: Array) -> void:
-	_records = records
 
 
 ## Give the module a home in the scene tree. The solid's world hangs off
@@ -1693,320 +1655,6 @@ func _solid_parity(
 
 
 # ---------------------------------------------------------------------------
-# Report
-# ---------------------------------------------------------------------------
-
-## Fold one crossing into its (reference, node) pair. `node_scope` drops
-## crossings on other nodes; the pair carries the points in the order they were
-## found.
-func _absorb(pairs: Dictionary, crossing: Dictionary, node_scope: String) -> void:
-	var node_path := str(crossing.get("node", ""))
-	if not _node_matches(node_path, node_scope):
-		return
-	var reference_name := str(crossing.get("reference", ""))
-	var point: Vector3 = crossing.get("point", Vector3.ZERO)
-	# A crossing a declaration covers goes into that declaration's bucket
-	# rather than into the interference pair. It is measured exactly as it
-	# would have been — the bucket carries the same fields — and the depth it
-	# reaches decides, in _report, whether the declaration holds.
-	var declared := _declared_index(reference_name, node_path, point)
-	var pair: Dictionary = _declared_pair(declared, reference_name, node_path) \
-		if declared >= 0 \
-		else _pair_for(pairs, reference_name, node_path)
-	pair["point_count"] = int(pair["point_count"]) + 1
-	var points: Array = pair["points"]
-	if points.size() < MAX_POINTS_PER_PAIR:
-		points.append(point)
-	# A declared contact is not painted red: its crosses are what the design
-	# means to happen. A bucket promoted back into the report in _report takes
-	# its markers with it.
-	if declared < 0 and _marker_points.size() < MAX_MARKERS:
-		_marker_points.append(point)
-	if crossing.has("containment"):
-		pair["note"] = str(crossing["containment"])
-
-
-## Which declaration covers a crossing at `point`, or -1 when none does.
-func _declared_index(reference_name: String, node_path: String,
-		point: Vector3) -> int:
-	if _expected.is_empty():
-		return -1
-	var index: int = _Expected.index_for(_expected, reference_name, node_path,
-		[point])
-	if index >= 0:
-		_declared_matched[index] = true
-	return index
-
-
-## One bucket per (pair, declaration): a node can carry an intended contact
-## inside a declared region and an unintended one outside it, and folding both
-## under the node would lose exactly the distinction the region was drawn for.
-func _declared_pair(index: int, reference_name: String,
-		node_path: String) -> Dictionary:
-	var key := "%d\n%s" % [index, _pair_key(reference_name, node_path)]
-	if not _declared.has(key):
-		_declared[key] = {
-			"reference": reference_name,
-			"node": node_path,
-			"entry": _expected[index],
-			"points": [],
-			"point_count": 0,
-			"penetration_mm": 0.0,
-			"note": "",
-		}
-	return _declared[key]
-
-
-## How deep ONE edge went inside each node it crossed. The crossings of a given
-## node along one edge alternate in and out, so consecutive pairs of them bound
-## a run inside that node and the longest run is the penetration.
-##
-## It is a LOWER BOUND and is reported as one: the deepest point of an overlap
-## need not lie on an edge of either body. An odd number of crossings means an
-## endpoint of the edge is buried, and bounds no run at all — that case is
-## still interference, just without a depth.
-func _absorb_runs(pairs: Dictionary, crossings: Array, node_scope: String) -> void:
-	var by_node := {}
-	for entry in crossings:
-		var crossing: Dictionary = entry
-		var node_path := str(crossing.get("node", ""))
-		if not _node_matches(node_path, node_scope):
-			continue
-		var reference_name := str(crossing.get("reference", ""))
-		# The declared crossings are grouped apart from the rest, so a
-		# declaration's depth is measured over the runs it actually covers.
-		var declared := _declared_index(reference_name, node_path,
-			crossing.get("point", Vector3.ZERO))
-		var key := _pair_key(reference_name, node_path)
-		if declared >= 0:
-			key = "%d\n%s" % [declared, key]
-		if not by_node.has(key):
-			by_node[key] = []
-		(by_node[key] as Array).append(float(crossing.get("distance", 0.0)))
-	for key in by_node.keys():
-		var distances: Array = by_node[key]
-		var table: Dictionary = _declared if _declared.has(key) else pairs
-		if distances.size() < 2 or not table.has(key):
-			continue
-		var pair: Dictionary = table[key]
-		var index := 0
-		while index + 1 < distances.size():
-			pair["penetration_mm"] = maxf(float(pair["penetration_mm"]),
-				float(distances[index + 1]) - float(distances[index]))
-			index += 2
-
-
-func _pair_for(pairs: Dictionary, reference_name: String, node_path: String) -> Dictionary:
-	var key := _pair_key(reference_name, node_path)
-	if not pairs.has(key):
-		pairs[key] = {
-			"reference": reference_name,
-			"node": node_path,
-			"points": [],
-			"point_count": 0,
-			"penetration_mm": 0.0,
-			"note": "",
-		}
-	return pairs[key]
-
-
-func _report(pairs: Dictionary) -> Dictionary:
-	var out: Array = []
-	var total := 0
-	for key in pairs.keys():
-		var entry := _pair_row(pairs[key])
-		total += int(entry["point_count"])
-		out.append(entry)
-	# What the declarations excused, and what they did not. A bucket whose
-	# measured overlap runs past the depth that was declared is put back among
-	# the pairs, so an exclusion can never be the reason a crash went unsaid.
-	var declared_rows: Array = []
-	var excluded := 0
-	for key in _declared.keys():
-		var bucket: Dictionary = _declared[key]
-		var entry: Dictionary = bucket["entry"]
-		var depth := float(bucket["penetration_mm"])
-		var allowed: float = _Expected.allowance_mm(entry)
-		# Depth is the only evidence a declaration can be checked against, and
-		# a pair found by parity alone has none: unprovable is not clean.
-		var holds: bool = depth > 0.0 and depth <= allowed
-		declared_rows.append(_Expected.row(entry, str(bucket["reference"]),
-			str(bucket["node"]), "overlap", depth, holds))
-		if holds:
-			excluded += 1
-			continue
-		var row := _pair_row(bucket)
-		row["declared_intended"] = true
-		var found := str(row.get("note", ""))
-		row["note"] = (found + "; " if not found.is_empty() else "") \
-			+ ("declared an intended contact, but %s: the "
-			+ "declaration allows %s mm of overlap") % [
-				("the overlap here measures %s mm" % depth) if depth > 0.0
-					else "this overlap has no measured depth to check it "
-						+ "against (it was found by ray parity, not by a "
-						+ "crossing)", allowed]
-		# Its crossings were held back from the pane while the declaration
-		# stood; the pair is interference after all, so they are painted.
-		for point in (bucket["points"] as Array):
-			if _marker_points.size() < MAX_MARKERS:
-				_marker_points.append(point as Vector3)
-		total += int(row["point_count"])
-		out.append(row)
-	var sampling := ("none: every one of the %d solid edges that reach a "
-		+ "reference was cast (of %d the solid has; the rest stand clear of "
-		+ "everything in scope, where no ray could cross anything), as was "
-		+ "every edge of every reference triangle overlapping the solid") \
-		% [_edges_cast, _edges_total]
-	if not _limits.is_empty():
-		sampling = "TRUNCATED — %s; the counts are floors" % ", ".join(_limits)
-	var report := {
-		"checked": true,
-		"units": "mm",
-		# GRADED OVER THE PAIRS THAT REMAIN. A declaration whose overlap it
-		# excused is out of this count and listed under expected_contacts with
-		# what was measured for it; one it could not excuse is back in.
-		"pass": out.is_empty() and _undecided.is_empty(),
-		"count": out.size(),
-		"point_count": total,
-		"pairs": out,
-		# A node here was NOT cleared: its containment could not be decided.
-		# Reporting it beside the pairs is what keeps "no interference" an
-		# answer about geometry rather than about the probes that failed.
-		"undecidable": _undecided,
-		"undecidable_note": ("containment is decided from a probe verified "
-			+ "inside its own body; a node listed here offered none, so it is "
-			+ "neither clean nor reported as interfering"),
-		"sampling": sampling,
-		# What the walk actually covered: every edge the solid has, the ones
-		# whose box reaches a reference, and the ones a ray was cast from.
-		"solid_edges": _edges_total,
-		"edges_reaching": _edges_reaching,
-		"edges_cast": _edges_cast,
-		"casts": _casts,
-		"elapsed_ms": float(Time.get_ticks_usec() - _started_us) / 1000.0,
-		# The cost of a per-evaluation check is part of its answer: a reader
-		# deciding whether to keep it on can only do that with the bound.
-		"cost": "one ray per solid edge whose box reaches a reference, three "
-			+ "per overlapping reference triangle, a probe of the runs either "
-			+ "side of each crossing that survived, and two or three parity "
-			+ "rays when nothing crossed; everything else is an AABB test",
-	}
-	if not _expected.is_empty():
-		report["expected_contacts"] = declared_rows
-		report["excluded_count"] = excluded
-		report["expected_contacts_unmatched"] = _Expected.unmatched(_expected,
-			_declared_matched)
-		report["expected_contacts_note"] = "a declared contact is excluded "\
-			+ "from `count` only while its MEASURED overlap stays inside the "\
-			+ "depth it declared; every declaration is listed above with the "\
-			+ "overlap measured for it, and one that ran deeper is back among "\
-			+ "the pairs carrying declared_intended"
-	return report
-
-
-## One reported pair: its crossing points in both frames, how many there were,
-## and how deep the deepest run went. Shared with the declaration buckets,
-## which are the same shape and are reported the same way when a declaration
-## turns out not to cover them.
-func _pair_row(pair: Dictionary) -> Dictionary:
-	var pose := _pose_for(str(pair["reference"]))
-	var points: Array = []
-	for point in (pair["points"] as Array):
-		points.append({
-			"world": _vec(point),
-			"local": _vec(pose.affine_inverse() * point),
-		})
-	var entry := {
-		"reference": pair["reference"],
-		"node": pair["node"],
-		"points_mm": points,
-		"point_count": int(pair["point_count"]),
-	}
-	if float(pair["penetration_mm"]) > 0.0:
-		entry["penetration_mm"] = float(pair["penetration_mm"])
-		entry["penetration_note"] = "the deepest run of one body's edge " \
-			+ "inside the other; a lower bound on the penetration"
-	if not str(pair["note"]).is_empty():
-		entry["note"] = str(pair["note"])
-	return entry
-
-
-## A report for a question that could not be asked. `checked` false with a
-## reason is not the same answer as "no interference", and a reader that
-## cannot tell them apart will trust a check that never ran.
-func _nothing(reason: String) -> Dictionary:
-	return {
-		"checked": false,
-		"units": "mm",
-		# A check that never ran passes nothing.
-		"pass": false,
-		"count": 0,
-		"point_count": 0,
-		"pairs": [],
-		"undecidable": [],
-		"reason": reason,
-		"casts": 0,
-		"elapsed_ms": 0.0,
-	}
-
-
-## One line for the panel's status banner, or "" when there is nothing to say.
-## It names the FIRST offender rather than summarising: an enclosure is fixed
-## one collision at a time. A node whose containment could not be decided is
-## named too, WHETHER OR NOT anything else was found: an evaluation that
-## reports a pin and stays silent about the washer beside it reads on screen
-## as "the washer is fine", which is the one thing it does not know.
-func status_line(report: Dictionary) -> String:
-	var undecided: Array = report.get("undecidable", []) as Array
-	var pairs: Array = report.get("pairs", []) as Array
-	if int(report.get("count", 0)) <= 0 or pairs.is_empty():
-		if not undecided.is_empty():
-			var one: Dictionary = undecided[0]
-			return "Interference: undecided for %s%s — %s." % [
-				_undecided_name(one),
-				_undecided_others(undecided),
-				str(one.get("reason", "")),
-			]
-		return ""
-	var first: Dictionary = pairs[0]
-	var where := ""
-	var points: Array = first.get("points_mm", []) as Array
-	if not points.is_empty():
-		var world: Array = (points[0] as Dictionary).get("world", []) as Array
-		if world.size() >= 3:
-			where = " at (%.2f, %.2f, %.2f) mm" % [
-				float(world[0]), float(world[1]), float(world[2])]
-	var suffix := ""
-	if int(report.get("count", 0)) > 1:
-		suffix = " (and %d other node(s))" % (int(report.get("count", 0)) - 1)
-	var open_tail := ""
-	if not undecided.is_empty():
-		open_tail = " %s%s undecided." % [
-			_undecided_name(undecided[0]), _undecided_others(undecided)]
-	return "Interference: the solid runs into %s/%s%s — %d point(s)%s.%s" % [
-		str(first.get("reference", "")),
-		str(first.get("node", "")),
-		where,
-		int(report.get("point_count", 0)),
-		suffix,
-		open_tail,
-	]
-
-
-## What to call an undecided entry on the banner: its node, or the reference
-## when the record carried no node path.
-func _undecided_name(one: Dictionary) -> String:
-	var name := str(one.get("node", ""))
-	return name if not name.is_empty() \
-		else str(one.get("reference", "the reference"))
-
-
-func _undecided_others(undecided: Array) -> String:
-	return " (and %d other)" % (undecided.size() - 1) \
-		if undecided.size() > 1 else ""
-
-
-# ---------------------------------------------------------------------------
 # Markers
 # ---------------------------------------------------------------------------
 
@@ -2088,10 +1736,6 @@ func _solid_ray(
 	params.hit_back_faces = true
 	_casts += 1
 	return solid_state.intersect_ray(params)
-
-
-func _pose_for(reference_name: String) -> Transform3D:
-	return _pose_in(_records, reference_name)
 
 
 ## World bounds of the references in scope, or an empty box when the records
