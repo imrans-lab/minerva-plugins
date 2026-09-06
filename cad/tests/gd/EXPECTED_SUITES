@@ -707,3 +707,20 @@ test_eval_banner.gd assertions=9
 # + 2 a clearance still in the worker comes back as one ticket beside the rows
 # already in hand, and a crash still reads fail.
 test_check_design.gd assertions=12
+
+# minerva_cad_snapshot_fit: a capture framed on the evaluated solid, a named
+# reference or a world box, rendered from a camera of its own so the pane the
+# owner is looking at never moves. Headless draws no frames, so the framing is
+# graded on where the box's eight corners UNPROJECT — Godot's own projection
+# matrix — and not on pixels.
+# 11 assertions = 1 the fixture (a perspective iso pane over a 98 x 177 mm
+# body, and fit='solid' resolving to exactly that box) + 1 the defect (the
+# pane's own auto-framed camera leaves it filling under 55% of either axis)
+# + 3 the framing (a fitted perspective camera fills 90%+ of the axis it binds
+# on; no corner is cut off; an orthographic camera obeys the same rule)
+# + 3 what `fit` may name (two corners in either order, an unmounted reference
+# refused by name, a nonsense fit refused with the three forms spelled out)
+# + 1 an ortho pane refused rather than answered with a render of the world
+# + 2 the pane camera identical field by field after a fitted capture, and the
+# capture saying no frame was drawn instead of waiting for one that never comes.
+test_snapshot_fit.gd assertions=11

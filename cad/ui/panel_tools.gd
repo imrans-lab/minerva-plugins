@@ -13,6 +13,9 @@ extends RefCounted
 ##   minerva_cad_gauge           put a pin or a block somewhere and ask whether
 ##                               it fits, and if not, where it touched.
 ##   minerva_cad_probe           what is under this pixel of this pane.
+##   minerva_cad_snapshot_fit    the pane, rendered offscreen from a camera
+##                               framed on the solid, a reference or a world
+##                               box, so the geometry fills the pixels.
 ##   minerva_cad_check_interference
 ##                               where the evaluated solid runs INTO a
 ##                               reference — the same report every evaluation
@@ -81,6 +84,8 @@ const _DesignCheck: Script = preload("scripts/design_check.gd")
 const _ReferenceVerbs: Script = preload("scripts/reference_verbs.gd")
 ## The node boxes as keep-out source a shell can subtract (emit_dsl=true).
 const _KeepoutDsl: Script = preload("scripts/keepout_dsl.gd")
+## The framed capture: fit resolution, the offscreen camera and the PNG.
+const _FitCapture: Script = preload("scripts/fit_capture.gd")
 
 ## Default hole diameters to look for, in millimetres. Wide enough for a via
 ## and a mounting hole, narrow enough to leave the outline alone.
@@ -128,6 +133,8 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 			return await _fresh(panel, args, _gauge)
 		"minerva_cad_probe":
 			return await _fresh(panel, args, _probe)
+		"minerva_cad_snapshot_fit":
+			return await _FitCapture.snapshot(panel, args)
 		"minerva_cad_check_interference":
 			# against= (or reference="all-pairs") asks about two REFERENCES
 			# and not about the solid, so it never scopes to a DSL part.
