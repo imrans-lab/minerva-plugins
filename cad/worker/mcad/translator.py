@@ -2415,11 +2415,12 @@ def export_shape(shape: Any, filename: str, node_name: str = "part") -> str:
     elif ext == ".stl":
         export_stl(shape, str(output_path))
     elif ext == ".3mf":
-        from build123d import Mesher
+        # Sibling module: the Mesher validates what it is handed, and a
+        # refusal has to reach the reply as something better than a bare
+        # RuntimeError.
+        from .mesh_export import write_3mf
 
-        mesher = Mesher()
-        mesher.add_shape(shape)
-        mesher.write(str(output_path))
+        return write_3mf(shape, str(output_path), node_name=node_name)
     else:
         raise TranslatorError(f"Unsupported export format: {ext}")
 

@@ -491,13 +491,20 @@ func asWorkerErr(err error, target **bridge.WorkerError) bool {
 
 // workerErrorToast maps a WorkerError to a (level, message) pair for toast
 // display. Spawn/crash errors surface at "error"; validation failures at
-// "warning" so the user can act without alarm.
+// "warning" so the user can act without alarm. A kind whose message is
+// already a complete sentence about the geometry is passed through as it
+// stands rather than being prefixed with a category the user cannot use.
 func workerErrorToast(toolName string, we *bridge.WorkerError) (level, message string) {
 	switch we.Kind {
 	case "crashed", "python", "internal":
 		return "error", fmt.Sprintf("CAD plugin [%s]: worker error (%s) — %s", toolName, we.Kind, we.Message)
 	case "parse", "translate", "occt":
 		return "warning", fmt.Sprintf("CAD plugin [%s]: validation failed (%s) — %s", toolName, we.Kind, we.Message)
+	case "mesh_invalid":
+		// A 3MF the writer refused. The message already names the defect
+		// class, its count and the part, so it goes to the user verbatim:
+		// "worker error" told the owner nothing they could act on.
+		return "warning", fmt.Sprintf("CAD plugin [%s]: %s", toolName, we.Message)
 	case "timeout":
 		return "warning", fmt.Sprintf("CAD plugin [%s]: request timed out — %s", toolName, we.Message)
 	case "cancelled":

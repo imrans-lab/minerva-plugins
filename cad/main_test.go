@@ -105,6 +105,7 @@ func TestWorkerErrorToastLevels(t *testing.T) {
 		{"parse", "warning", true},
 		{"translate", "warning", true},
 		{"occt", "warning", true},
+		{"mesh_invalid", "warning", true},
 		{"timeout", "warning", true},
 		{"cancelled", "info", false}, // suppressed — empty message
 		{"unknown_kind", "error", true},

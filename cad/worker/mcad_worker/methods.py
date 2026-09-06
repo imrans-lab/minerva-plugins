@@ -145,6 +145,78 @@ def _mesh_defects(mesh: dict) -> dict:
     return {name: count for name, count in reported.items() if count > 0}
 
 
+def _defects_for_source(source: str) -> tuple[dict, str, int]:
+    """The last evaluation's defect counts for *source*, plus what it built.
+
+    A lookup, not a second validation pass: the counts are the ones the panel
+    already reported in last_eval. Returns ({}, "", 0) when this source is not
+    the one standing in the cache — an export of never-evaluated source has
+    nothing measured to quote.
+    """
+    if _last_program is None or _last_program[0] != hash(source):
+        return {}, "", 0
+    cached = _last_program[1]
+    return (
+        _mesh_defects(cached.get("mesh") or {}),
+        str(cached.get("shape_name", "")),
+        int(cached.get("body_count", 0)),
+    )
+
+
+def _phrase_defects(defects: dict) -> str:
+    """"28 non-manifold edges, 642 degenerate faces" — counts a reader can act on."""
+    parts: list[str] = []
+    for name, count in defects.items():
+        noun = name.replace("_", " ").replace("non manifold", "non-manifold")
+        if count == 1 and noun.endswith("s"):
+            noun = noun[:-1]
+        parts.append(f"{count} {noun}")
+    return ", ".join(parts)
+
+
+def _mesh_invalid_error(exc: Exception, source: str) -> dict:
+    """The reply for a 3MF the writer refused, naming the defect that stands.
+
+    The 3MF writer validates its own triangulation and says only "3mf mesh is
+    invalid"; the defect classes and counts come from the evaluation the panel
+    already ran (a different triangulation, so they locate the fault rather
+    than being the writer's own check), and the binding name is the nearest
+    thing to a body name the exporter has.
+    """
+    defects, shape_name, body_count = _defects_for_source(source)
+    name = shape_name or getattr(exc, "node_name", "") or "part"
+    where = f"body '{name}'" if body_count <= 1 else f"'{name}' ({body_count} bodies)"
+    if defects:
+        detail = (
+            f"{_phrase_defects(defects)} in {where}"
+            " (counts from the last evaluation's mesh_defects)"
+        )
+    else:
+        detail = (
+            f"{where} has not been evaluated here, so the defect counts are not"
+            " known — evaluate the source (cad.evaluate summary=true) and read"
+            " mesh_defects"
+        )
+    return {
+        "ok": False,
+        "error": {
+            "kind": "mesh_invalid",
+            "message": (
+                "3MF export refused: the part is not a closed manifold solid — "
+                f"{detail}. 3MF requires one; STL and STEP accept this part as "
+                f"it stands. Writer: {exc}"
+            ),
+            "details": {
+                "format": "3mf",
+                "shape_name": name,
+                "body_count": body_count,
+                "mesh_defects": defects,
+                "counts_from": "last_evaluation" if defects else "unavailable",
+            },
+        },
+    }
+
+
 def _summarise(result: dict) -> dict:
     """An evaluation reply WITHOUT its mesh: what the geometry is, how big it
     is and whether the tessellation is sound. On a real enclosure the mesh is
@@ -386,6 +458,10 @@ def _export(params: dict) -> dict:
                          export call rejected the result.
         - "occt"     — the geometry kernel failed inside one build step;
                        names the binding and carries its traceback.
+        - "mesh_invalid" — 3MF only: the writer refused the part because its
+                       triangulation is not a closed manifold solid; the
+                       message names the defect classes and counts from the
+                       last evaluation.
         - "io"       — disk write failed (permission, missing parent dir
                        even after mkdir, etc).
         - "python"   — unhandled exception; includes traceback.
@@ -436,6 +512,7 @@ def _export(params: dict) -> dict:
         from mcad.build_trace import BuildFailure
         from mcad.evaluator import ExportError, export_built, export_source
         from mcad.lexer import LexError
+        from mcad.mesh_export import MeshNotSolid
         from mcad.parser import ParseError
         from mcad.translator import TranslatorError
     except ImportError as exc:
@@ -485,6 +562,8 @@ def _export(params: dict) -> dict:
                 "traceback": exc.cause_traceback,
             },
         }
+    except MeshNotSolid as exc:
+        return _mesh_invalid_error(exc, source)
     except ExportError as exc:
         cause = exc.__cause__
         if isinstance(cause, ParseError):

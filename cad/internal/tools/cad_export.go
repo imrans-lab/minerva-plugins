@@ -55,6 +55,9 @@ var Export = ToolSpec{
 		"to collect the finished export. " +
 		"Errors are returned as data: kind=running (still building, ask again), " +
 		"kind=parse|translate (bad DSL), " +
+		"kind=mesh_invalid (3MF only — the part is not a closed manifold solid; " +
+		"the message names the defect class and count from the last evaluation, " +
+		"and STL/STEP still export it), " +
 		"kind=io (disk write failed), kind=internal (bad params).",
 	InputSchema: json.RawMessage(`{
 		"type": "object",
