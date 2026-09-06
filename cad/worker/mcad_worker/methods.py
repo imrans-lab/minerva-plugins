@@ -79,6 +79,84 @@ except Exception:
     pass
 
 
+def _mesh_bbox(mesh: dict) -> Optional[dict]:
+    """The axis-aligned bounds of a tessellated mesh, or None when it has no
+    vertices. Millimetres, in the same frame the mesh is reported in."""
+    vertices = mesh.get("vertices") or []
+    if not vertices:
+        return None
+    xs = [v[0] for v in vertices]
+    ys = [v[1] for v in vertices]
+    zs = [v[2] for v in vertices]
+    return {
+        "min": [min(xs), min(ys), min(zs)],
+        "max": [max(xs), max(ys), max(zs)],
+        "size": [max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs)],
+    }
+
+
+def _mesh_defects(mesh: dict) -> dict:
+    """The four ways a tessellation can be wrong, counted over its faces.
+
+    A summary reply carries no mesh, so it has to carry what a reader would
+    otherwise have checked the mesh for: an open edge is a hole in the
+    surface, a non-manifold edge is three faces meeting on one edge, a
+    degenerate face repeats a vertex index and a duplicate face is the same
+    triangle twice. Only non-zero counts are reported — a clean mesh has
+    nothing to say. The panel counts the same four over the same
+    tessellation, so the two agree.
+    """
+    faces = mesh.get("faces") or []
+    edge_uses: dict = {}
+    seen_faces: set = set()
+    degenerate = 0
+    duplicate = 0
+    for face in faces:
+        if len(set(face)) != len(face):
+            degenerate += 1
+            continue
+        key = tuple(sorted(face))
+        if key in seen_faces:
+            duplicate += 1
+        else:
+            seen_faces.add(key)
+        for i in range(len(face)):
+            a, b = face[i], face[(i + 1) % len(face)]
+            edge = (a, b) if a < b else (b, a)
+            edge_uses[edge] = edge_uses.get(edge, 0) + 1
+    open_edges = sum(1 for count in edge_uses.values() if count == 1)
+    non_manifold = sum(1 for count in edge_uses.values() if count > 2)
+    reported = {
+        "open_edges": open_edges,
+        "non_manifold_edges": non_manifold,
+        "degenerate_faces": degenerate,
+        "duplicate_faces": duplicate,
+    }
+    return {name: count for name, count in reported.items() if count > 0}
+
+
+def _summarise(result: dict) -> dict:
+    """An evaluation reply WITHOUT its mesh: what the geometry is, how big it
+    is and whether the tessellation is sound. On a real enclosure the mesh is
+    the whole cost of the reply, and a caller checking that an edit landed
+    never reads a vertex. The mesh is one more call away (summary=false)."""
+    mesh: dict = result.get("mesh") or {}
+    summary = {
+        "summary": True,
+        "shape_name": result.get("shape_name", ""),
+        "body_count": result.get("body_count", 0),
+        "bbox": _mesh_bbox(mesh),
+        "vertex_count": len(mesh.get("vertices") or []),
+        "face_count": len(mesh.get("faces") or []),
+        "edge_count": len(result.get("edges") or []),
+        "reference_count": len(result.get("references") or []),
+    }
+    defects = _mesh_defects(mesh)
+    if defects:
+        summary["mesh_defects"] = defects
+    return summary
+
+
 def _evaluate(params: dict) -> dict:
     """Run the full mcad pipeline (lex → parse → translate → tessellate).
 
@@ -89,6 +167,10 @@ def _evaluate(params: dict) -> dict:
     Maintains the module-level ``_last_program`` cache (design §5): if the
     same source is evaluated twice, the second call returns the cached dict
     without re-tessellating.
+
+    ``params.summary`` replaces the reply with :func:`_summarise` — the same
+    evaluation, reported without its mesh. The cache still holds the full
+    result, so a summary call followed by a full one costs one tessellation.
     """
     global _last_program, _last_shape
 
@@ -105,9 +187,12 @@ def _evaluate(params: dict) -> dict:
     tolerance: float = float(params.get("tolerance", 0.1))
     angular_tolerance: float = float(params.get("angular_tolerance", 0.1))
 
+    summary_only = bool(params.get("summary", False))
+
     h = hash(source)
     if _last_program is not None and _last_program[0] == h:
-        return {"ok": True, "result": _last_program[1]}
+        cached = _last_program[1]
+        return {"ok": True, "result": _summarise(cached) if summary_only else cached}
 
     try:
         from mcad.evaluator import EvaluationError, evaluate_source
@@ -201,6 +286,8 @@ def _evaluate(params: dict) -> dict:
     # shape in place rather than caching a None an export would trip over.
     if result.shape is not None:
         _last_shape = (_digest(source), result.shape_name, result.shape)
+    if summary_only:
+        return {"ok": True, "result": _summarise(result_dict)}
     return {"ok": True, "result": result_dict}
 
 

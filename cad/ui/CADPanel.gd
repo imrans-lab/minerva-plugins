@@ -172,6 +172,9 @@ var _eval_give_up_ms: int = 900000
 ## (non-paired_dsl) path.
 var _eval_debounce_timer: Timer = null
 const _EVAL_DEBOUNCE_SEC: float = 0.25
+## How often await_evaluation looks again. Short enough that the wait costs
+## the caller nothing it would notice, long enough not to spin.
+const _AWAIT_POLL_SEC: float = 0.05
 
 # ── Edge enumeration / overlay state ────────────────────────────────────────
 
@@ -1011,6 +1014,44 @@ func _on_panel_apply_sync(document: Dictionary) -> Dictionary:
 		"ok": status == "ok",
 		"last_eval": _EvalReplyScript.last_eval_for_mcp(_last_eval_result),
 	}
+
+
+## Wait until the panel has PAINTED an evaluation, and report the one it did.
+##
+## Backs minerva_cad_await_eval. An edit that arrives through the shared
+## buffer — minerva_doc_edit, or the user typing — starts a debounce and then
+## a worker round-trip, and neither is over when the write tool returns: a
+## check_* call made straight afterwards measures the PREVIOUS geometry with
+## nothing in its reply to say so. This is the wait for that, and it waits for
+## the queued edit too: a debounce still running is an evaluation that has not
+## started, which is no more settled than one that has not answered.
+##
+## Returns the wire form of last_eval plus `waited_ms` and `timed_out`. A
+## timeout is not an error — the evaluation is still running, and the reply
+## says so with the status the panel is showing.
+func await_evaluation(timeout_ms: int) -> Dictionary:
+	var started_ms: int = Time.get_ticks_msec()
+	var timed_out := false
+	while _evaluation_is_unsettled():
+		if Time.get_ticks_msec() - started_ms >= timeout_ms:
+			timed_out = true
+			break
+		await get_tree().create_timer(_AWAIT_POLL_SEC).timeout
+		if not is_instance_valid(self):
+			return {"status": "closed", "timed_out": false, "waited_ms": 0}
+	return {
+		"last_eval": _EvalReplyScript.last_eval_for_mcp(_last_eval_result),
+		"timed_out": timed_out,
+		"waited_ms": Time.get_ticks_msec() - started_ms,
+	}
+
+
+## True while an evaluation is either queued behind the debounce or still out
+## with the worker.
+func _evaluation_is_unsettled() -> bool:
+	if str(_last_eval_result.get("status", "")) == "pending":
+		return true
+	return _eval_debounce_timer != null and _eval_debounce_timer.time_left > 0.0
 
 
 func _on_panel_load_request(document: Dictionary) -> void:

@@ -73,6 +73,7 @@ func _run() -> void:
 	await _test_one_open_is_one_evaluation()
 	await _test_giving_up_is_said_out_loud()
 	await _test_a_newer_evaluation_still_preempts_an_older_one()
+	await _test_awaiting_covers_the_debounce_as_well_as_the_worker()
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +241,65 @@ func _test_a_newer_evaluation_still_preempts_an_older_one() -> void:
 	check("supersede: the newest evaluation's answer is the one that paints",
 			_status(panel) == "ok",
 			"last_eval = %s" % str(_last_eval(panel)))
+	_teardown(rig)
+
+
+# ---------------------------------------------------------------------------
+# Waiting on a buffer edit: the debounce is part of the wait
+# ---------------------------------------------------------------------------
+
+## minerva_doc_edit reaches the panel as a buffer text_changed, which arms the
+## debounce and returns. For the quarter-second before that timer fires there
+## is no evaluation in flight and last_eval still holds the PREVIOUS result:
+## a wait that only watched for status "pending" would return immediately and
+## hand the caller the geometry the edit replaced.
+func _test_awaiting_covers_the_debounce_as_well_as_the_worker() -> void:
+	var rig := _make_rig("cad_panel_await_verb")
+	if rig.is_empty():
+		return
+	var panel: Node = rig["panel"]
+	panel._eval_await_chunk_ms = CHUNK_MS
+	panel._eval_give_up_ms = PATIENT_GIVE_UP_MS
+
+	_attach_document(rig, SOURCE)
+	var opened: Array = _evaluations(rig["dispatched"])
+	if opened.is_empty():
+		_teardown(rig)
+		return
+	_reply(rig, str((opened[0] as Dictionary)["reply_id"]), _worker_answer())
+	await create_timer(0.2).timeout
+
+	# The edit lands. Nothing has been dispatched yet — the debounce is armed.
+	(rig["buffer"] as Object).apply_edit(EDITED_SOURCE)
+	# A lambda captures by VALUE, so the result comes back through a shared
+	# Dictionary rather than through an assignment the caller would never see.
+	var outcome: Dictionary = {"settled": false, "reply": {}}
+	var wait := func() -> void:
+		var answer: Dictionary = await panel.await_evaluation(5000)
+		outcome["reply"] = answer
+		outcome["settled"] = true
+	wait.call()
+	await create_timer(0.1).timeout
+	check("await: an edit still inside the debounce is not settled — the "
+			+ "previous result is not the answer to this edit",
+			not bool(outcome["settled"]),
+			"the wait returned %s while the debounce was still running"
+				% str(outcome["reply"]))
+
+	# The debounce fires, the evaluation goes out, and the worker answers.
+	await create_timer(0.4).timeout
+	var dispatched: Array = _evaluations(rig["dispatched"])
+	if dispatched.size() >= 2:
+		_reply(rig, str((dispatched[1] as Dictionary)["reply_id"]), _worker_answer())
+	await create_timer(0.4).timeout
+	check("await: it returns once the panel has PAINTED, with the status it "
+			+ "painted and the time it waited",
+			bool(outcome["settled"])
+				and not bool((outcome["reply"] as Dictionary).get("timed_out", true))
+				and str(((outcome["reply"] as Dictionary).get("last_eval", {})
+					as Dictionary).get("status", "")) == "ok"
+				and int((outcome["reply"] as Dictionary).get("waited_ms", 0)) >= 100,
+			"waited = %s" % str(outcome["reply"]))
 	_teardown(rig)
 
 

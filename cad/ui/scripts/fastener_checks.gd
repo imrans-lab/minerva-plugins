@@ -85,6 +85,8 @@ extends RefCounted
 const _MeshFeatures: Script = preload("mesh_features.gd")
 const _WorkerReply: Script = preload("worker_reply.gd")
 const _MeshGauge: Script = preload("mesh_gauge.gd")
+## The index list the `pairs` override is written against.
+const _ReplyShape: Script = preload("reply_shape.gd")
 
 ## The IPC channel that answers with the solid's B-Rep cylinders. Channel name
 ## = MCP tool name; the worker method behind it is "cylindrical_features".
@@ -410,6 +412,7 @@ func _run(
 		unpaired["solid_features"] = loose
 	if pairing["pairs"].is_empty():
 		var empty := _report([], pairing, screw, args, axis_source)
+		empty["reference_hole_index"] = pairing["reference_hole_index"]
 		empty["note"] = "no solid bore lines up with any of the reference " \
 			+ "holes given; every feature is listed under `unpaired`"
 		return empty
@@ -441,6 +444,7 @@ func _run(
 	if answer.has("error"):
 		return _nothing(str(answer["error"]))
 	answer["unpaired"] = pairing["unpaired"]
+	answer["reference_hole_index"] = pairing["reference_hole_index"]
 	if not fit_reason.is_empty():
 		answer["fit_note"] = fit_reason
 	return answer
@@ -1548,8 +1552,15 @@ func _pair(bores: Array, holes: Array, args: Dictionary) -> Dictionary:
 			"node": str(hole.get("node", "")),
 			"dia_mm": float(hole.get("dia_mm", 0.0)),
 		})
+	# The holes AS INDEXED. A hole with no usable axis never reaches
+	# prepared_holes, so a list built from the caller's own holes array would
+	# name rows the override does not address.
+	var indexed: Array = []
+	for prepared_entry in prepared_holes:
+		indexed.append((prepared_entry as Dictionary)["hole"])
 	return {
 		"pairs": pairs,
+		"reference_hole_index": _ReplyShape.hole_index_rows(indexed),
 		"unpaired": {
 			"solid_features": loose_bores,
 			"reference_holes": loose_holes,

@@ -361,6 +361,79 @@ class TestEvaluatePipelineIntegration:
 
 
 @_b123d_mark
+class TestEvaluateSummary:
+    """summary=true is the cheap "did this compile, and how big is it" call.
+
+    ORACLE: the same source evaluated both ways. The summary must agree with
+    the full reply about every number it reports — a summary computed from
+    anything but the evaluation it summarises would drift — must carry no
+    mesh, and must cost fewer bytes than the mesh alone.
+    """
+
+    _CUBE_SOURCE = (
+        "sketch:\n"
+        "    s = rect(10, 10)\n"
+        "b = extrude(s, 10)\n"
+    )
+
+    def test_summary_agrees_with_the_full_reply_and_drops_the_mesh(self):
+        import json
+
+        import mcad_worker.methods as _methods
+
+        _methods.reset_caches()
+        full = _methods._evaluate({"source": self._CUBE_SOURCE})["result"]
+        summary = _methods._evaluate(
+            {"source": self._CUBE_SOURCE, "summary": True}
+        )["result"]
+
+        assert "mesh" not in summary and "edges" not in summary
+        assert summary["summary"] is True
+        assert summary["shape_name"] == full["shape_name"]
+        assert summary["body_count"] == full["body_count"]
+        assert summary["vertex_count"] == len(full["mesh"]["vertices"])
+        assert summary["face_count"] == len(full["mesh"]["faces"])
+        assert summary["edge_count"] == len(full["edges"])
+
+        # The bbox is the tessellation's own extent: a 10 mm cube.
+        bbox = summary["bbox"]
+        for axis in range(3):
+            assert bbox["min"][axis] == pytest.approx(
+                min(v[axis] for v in full["mesh"]["vertices"])
+            )
+            assert bbox["size"][axis] == pytest.approx(10.0, abs=0.2)
+
+        # A closed cube has no open or non-manifold edges and no repeats.
+        assert "mesh_defects" not in summary
+
+        summary_bytes = len(json.dumps(summary))
+        assert summary_bytes < len(json.dumps(full["mesh"])) / 4
+
+    def test_summary_counts_the_defects_of_an_open_mesh(self):
+        import mcad_worker.methods as _methods
+
+        # One triangle plus a face with a repeated index: three edges used
+        # once each (all open) and one degenerate face. The summary has to
+        # carry this — nothing else in it would show a caller with no mesh
+        # that the surface has a hole in it.
+        lone = _methods._mesh_defects({
+            "vertices": [[0, 0, 0], [1, 0, 0], [0, 1, 0]],
+            "faces": [[0, 1, 2], [0, 0, 1]],
+        })
+        assert lone["open_edges"] == 3
+        assert lone["degenerate_faces"] == 1
+        assert "duplicate_faces" not in lone
+
+        # The same triangle twice: its edges are now used twice, so nothing is
+        # open — what is wrong with it is the repeat.
+        doubled = _methods._mesh_defects({
+            "vertices": [[0, 0, 0], [1, 0, 0], [0, 1, 0]],
+            "faces": [[0, 1, 2], [0, 1, 2]],
+        })
+        assert doubled == {"duplicate_faces": 1}
+
+
+@_b123d_mark
 class TestListEdges:
     """Tests for the real list_edges implementation (build123d required)."""
 

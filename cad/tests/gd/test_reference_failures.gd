@@ -383,7 +383,10 @@ func _test_the_verb_carries_the_status() -> void:
 	root.add_child(panel)
 	# handle() is a coroutine because the measurement verbs await a physics
 	# step; _references does not, so this await resolves without suspending.
-	var payload: Dictionary = await PanelTools.handle(panel, "minerva_cad_references", {})
+	# detail="full": the load statistics asserted below are what the full row
+	# is for, and the lean default drops them (see test_mcp_boundary).
+	var payload: Dictionary = await PanelTools.handle(
+			panel, "minerva_cad_references", {"detail": "full"})
 	var references: Array = payload.get("references", [])
 
 	check("minerva_cad_references lists the failed reference alongside the good one",

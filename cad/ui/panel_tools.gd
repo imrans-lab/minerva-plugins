@@ -29,6 +29,9 @@ extends RefCounted
 ##                               the same selection, made from here.
 ##   minerva_cad_view_overlay    draw a millimetre grid and the world axes in
 ##                               the panes, and report each pane's scale.
+##   minerva_cad_await_eval      block until the panel has painted an
+##                               evaluation — the wait a buffer edit needs
+##                               before anything measures the result.
 ##
 ## WHY THESE ARE PANEL VERBS AND NOT CORE ONES. minerva_cad_get_mesh_info and
 ## minerva_cad_snapshot live in Minerva's own MCPCadTools; extending them is a
@@ -54,6 +57,9 @@ const _FastenerChecks: Script = preload("scripts/fastener_checks.gd")
 ## The MCP rendering of an interference report: the panel keeps the full
 ## records digest for its joins, the wire carries a hash of it.
 const _EvalReplyScript: Script = preload("scripts/eval_reply.gd")
+## How much of an answer travels: the lean/full choice, the clearance
+## filters, the obstruction collapse and the hole census as DSL.
+const _ReplyShape: Script = preload("scripts/reply_shape.gd")
 
 ## Default hole diameters to look for, in millimetres. Wide enough for a via
 ## and a mounting hole, narrow enough to leave the outline alone.
@@ -62,6 +68,11 @@ const DEFAULT_MAX_DIA_MM: float = 30.0
 ## A wall has to go this far round for the fitter to call it a hole rather than
 ## a fillet.
 const DEFAULT_MIN_COVERAGE: float = 0.6
+## How long minerva_cad_await_eval waits by default, and the most it will
+## wait when asked. A heavy document is minutes of worker time, and the cap
+## is what stops a caller's own request window being spent inside the panel.
+const DEFAULT_AWAIT_TIMEOUT_MS: int = 30000
+const MAX_AWAIT_TIMEOUT_MS: int = 300000
 ## Ray-grid fallback pitch, used only when the fitter proposes nothing at all.
 const FALLBACK_PITCH_MM: float = 1.0
 ## When two fitted cylinders are the same physical hole seen in two nodes:
@@ -114,6 +125,8 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 			return await _fresh(panel, args, _select_reference)
 		"minerva_cad_view_overlay":
 			return _view_overlay(panel, args)
+		"minerva_cad_await_eval":
+			return await _await_eval(panel, args)
 	return {}
 
 
@@ -170,12 +183,20 @@ static func _view_state(panel, _args: Dictionary) -> Dictionary:
 ## A failed one is reported with a status and a reason rather than left out:
 ## the list has to match the mesh() calls in the source, or the answer to
 ## "where is my board" is a shorter list with nothing to explain it.
-static func _references(panel, _args: Dictionary) -> Dictionary:
+static func _references(panel, args: Dictionary) -> Dictionary:
+	var asked := str(args.get("reference", ""))
+	var full := str(args.get("detail", "lean")) == "full"
 	var records := _status_records(panel)
 	var out: Array = []
+	var named: Array = []
 	var failed := 0
+	var matched := false
 	for entry in records:
 		var record: Dictionary = entry
+		named.append(str(record.get("name", "")))
+		if not asked.is_empty() and str(record.get("name", "")) != asked:
+			continue
+		matched = true
 		var pose: Transform3D = record.get("pose", Transform3D.IDENTITY)
 		var nodes: Array = []
 		for node_entry in record.get("node_bounds", []):
@@ -189,7 +210,7 @@ static func _references(panel, _args: Dictionary) -> Dictionary:
 		var status := str(record.get("status", _ReferenceMeshes.STATUS_OK))
 		if status != _ReferenceMeshes.STATUS_OK:
 			failed += 1
-		out.append({
+		var row := {
 			"name": str(record.get("name", "")),
 			"path": str(record.get("path", "")),
 			"resolved_path": str(record.get("resolved_path", "")),
@@ -203,19 +224,33 @@ static func _references(panel, _args: Dictionary) -> Dictionary:
 			"pose": _matrix(pose),
 			"bbox_mm": _boxes(record.get("local_aabb", AABB()), pose),
 			"nodes": nodes,
-		})
+		}
+		out.append(row if full else _ReplyShape.lean_reference(row))
+	# A reference= that names nothing is a typo about the document, not an
+	# empty scene: answering "no references" would hide it.
+	if not asked.is_empty() and not matched:
+		return _err("no reference named '%s' is mounted; mounted: %s"
+			% [asked, ", ".join(named)])
+	# The note is part of the reply's cost, so the lean one is a pointer and
+	# the full one is the explanation.
+	var note := "Lean rows: name, status, world bbox, node count. " \
+		+ "detail=\"full\" adds the paths, the 4x4 pose, both frames and the " \
+		+ "per-node boxes; reference=<name> scopes to one."
+	if full:
+		note = "The evaluated solid is described by minerva_cad_get_mesh_info; " \
+			+ "this verb describes the foreign meshes named by mesh(). A " \
+			+ "reference whose status is not 'ok' is drawn as a wireframe " \
+			+ "marker at its pose and has loaded no geometry; `reason` says " \
+			+ "why and names the file. A node's `path` from the file root is " \
+			+ "its identity — `name` is only the leaf and two branches may " \
+			+ "share one — and node= filters accept either."
 	return _ok({
 		"units": "mm",
 		"references": out,
 		"count": out.size(),
 		"failed": failed,
-		"note": "The evaluated solid is described by minerva_cad_get_mesh_info; "
-			+ "this verb describes the foreign meshes named by mesh(). A "
-			+ "reference whose status is not 'ok' is drawn as a wireframe "
-			+ "marker at its pose and has loaded no geometry; `reason` says "
-			+ "why and names the file. A node's `path` from the file root is "
-			+ "its identity — `name` is only the leaf and two branches may "
-			+ "share one — and node= filters accept either.",
+		"detail": "full" if full else "lean",
+		"note": note,
 	})
 
 
@@ -302,7 +337,7 @@ static func _find_holes(panel, args: Dictionary) -> Dictionary:
 
 	if not node_matched and not node_missing.is_empty():
 		return _err("; ".join(node_missing))
-	return _ok({
+	var payload := {
 		"units": "mm",
 		"holes": holes,
 		"count": holes.size(),
@@ -310,7 +345,24 @@ static func _find_holes(panel, args: Dictionary) -> Dictionary:
 		"seeded_by_ray_grid": fell_back,
 		"segment_ms": segment_ms,
 		"collider_count": int(gauge.call("get_shape_count")),
-	})
+	}
+	# The census as DSL. Retyping four measured centres into the source is
+	# where a digit gets dropped, and the numbers are already here.
+	if bool(args.get("emit_dsl", false)):
+		var emitted: Dictionary = _ReplyShape.holes_as_dsl(
+			holes,
+			str(args.get("dsl_kind", "hole")),
+			float(args.get("dsl_clearance_mm", 0.0)),
+			float(args.get("dsl_depth_mm", 0.0)))
+		payload["dsl"] = str(emitted["dsl"])
+		payload["dsl_note"] = "world millimetres, one slug per radius and "\
+			+ "axis; paste it into the document and subtract (or add) the "\
+			+ "bound name. Only holes whose axis is square to a world axis "\
+			+ "are written."
+		var skipped: Array = emitted["skipped"] as Array
+		if not skipped.is_empty():
+			payload["dsl_skipped"] = skipped
+	return _ok(payload)
 
 
 static func _find_cylinders(panel, args: Dictionary) -> Dictionary:
@@ -477,6 +529,34 @@ static func _gauge(panel, args: Dictionary) -> Dictionary:
 	return _ok(payload)
 
 
+## minerva_cad_await_eval — block until the panel's evaluation has settled.
+##
+## The write verbs answer before the worker does when the edit went through
+## the shared buffer (minerva_doc_edit, or the user typing), so a measurement
+## made straight after a write can describe the geometry the edit replaced.
+## This verb closes that gap: it returns the status the panel PAINTED, and a
+## timeout is reported rather than raised — the evaluation is still running.
+static func _await_eval(panel, args: Dictionary) -> Dictionary:
+	if panel == null or not panel.has_method("await_evaluation"):
+		return _err("this panel cannot report evaluation status")
+	var timeout_ms := int(args.get("timeout_ms", DEFAULT_AWAIT_TIMEOUT_MS))
+	timeout_ms = clampi(timeout_ms, 0, MAX_AWAIT_TIMEOUT_MS)
+	var settled: Dictionary = await panel.await_evaluation(timeout_ms)
+	if not is_instance_valid(panel):
+		return _err("the CAD panel closed while its evaluation was awaited")
+	var payload := {
+		"timed_out": bool(settled.get("timed_out", false)),
+		"waited_ms": int(settled.get("waited_ms", 0)),
+		"timeout_ms": timeout_ms,
+		"last_eval": settled.get("last_eval", {}),
+	}
+	if bool(payload["timed_out"]):
+		payload["note"] = "still evaluating after the timeout; the status is "\
+			+ "the one the panel is showing now, and asking again resumes "\
+			+ "the wait. Nothing was cancelled."
+	return _ok(payload)
+
+
 ## minerva_cad_check_interference — where the solid and the references overlap.
 ##
 ## The panel runs this check on every evaluation anyway; the verb exists so an
@@ -517,7 +597,8 @@ static func _check_clearance(panel, args: Dictionary) -> Dictionary:
 		var collected: Dictionary = await panel.check_clearance({"ticket": handle})
 		if collected.has("error"):
 			return _err(str(collected["error"]))
-		return _ok(collected)
+		return _ok(_ReplyShape.filter_clearance(collected,
+			int(args.get("limit", 0)), bool(args.get("failing_only", false))))
 	var asked := str(args.get("reference", ""))
 	if not asked.is_empty() and not _has_reference(panel, asked):
 		return _err("no reference named '%s' is mounted" % asked)
@@ -532,7 +613,8 @@ static func _check_clearance(panel, args: Dictionary) -> Dictionary:
 	})
 	if report.has("error"):
 		return _err(str(report["error"]))
-	return _ok(report)
+	return _ok(_ReplyShape.filter_clearance(report,
+		int(args.get("limit", 0)), bool(args.get("failing_only", false))))
 
 
 ## minerva_cad_check_fasteners — will these screws actually go in?
@@ -573,7 +655,14 @@ static func _check_fasteners(panel, args: Dictionary) -> Dictionary:
 	})
 	if report.has("error"):
 		return _err(str(report["error"]))
+	report = _ReplyShape.collapse_report_obstructions(report)
 	report["holes_considered"] = int(holes.get("count", 0))
+	report["pairs_note"] = "reference_hole_index[].index is the number a "\
+		+ "pairs entry's `reference_hole` names — a hole with no usable axis "\
+		+ "is not in it, so the numbering is the check's own and not the "\
+		+ "order minerva_cad_find_holes reported. Obstruction rows are "\
+		+ "collapsed to one per (node, span), keeping the nearest crossing "\
+		+ "with a count and the axial range the rays met it over."
 	return _ok(report)
 
 

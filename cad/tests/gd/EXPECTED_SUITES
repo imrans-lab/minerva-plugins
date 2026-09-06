@@ -488,13 +488,35 @@ test_flush_contact.gd assertions=14
 # scenes under two tab titles, addressed through the host's own panel-tool
 # dispatcher; and a doc_write reply about a 45-node reference measured in
 # bytes.
-# 9 assertions = 4 addressing (two panels load; each registers its own host
+# Each size case asserts the FULL reply really is the cost that was measured
+# before asserting the shaped one fits its budget, and every one of them also
+# asserts the shaped reply still carries the answer — leanness that dropped
+# the answer would pass a byte assertion on its own.
+# 34 assertions = 4 addressing (two panels load; each registers its own host
 # under its own title; each host answers with its own panel; the dispatcher
-# answers a verb addressed by the tab title) + 5 size (the fixture's digest
-# really is thousands of characters; the reply fits 2 KB; what it carries is
-# 16 hex; that hash still tells two reference sets apart; and the panel still
-# holds the whole digest for the clearance join).
-test_mcp_boundary.gd assertions=9
+# answers a verb addressed by the tab title) + 5 the records digest (the
+# fixture's digest really is thousands of characters; the reply fits 2 KB;
+# what it carries is 16 hex; that hash still tells two reference sets apart;
+# and the panel still holds the whole digest for the clearance join) + 5
+# last_eval (a 12-node crossing report is kilobytes; the wire form fits the
+# doc_write budget; the status line still names the nodes and the counts; the
+# points are not in it and it says where they are; a clean reference is
+# dropped and a failed one is kept) + 6 references (the full 45-node listing
+# is kilobytes; the default fits its budget; it still names status, world box
+# and node count; doubling the nodes does not grow it; detail="full" carries
+# the pose, both frames and every node box; a reference= naming nothing is an
+# error) + 5 clearance (50 pairs really are kilobytes; limit=5 fits its
+# budget; it keeps the five CLOSEST; the verdict and the totals are
+# unchanged; failing_only keeps only failures) + 2 obstructions (120
+# crossings of two nodes collapse to two rows; each counts its rays, keeps
+# the nearest crossing and states the axial range) + 2 the hole index (only
+# addressable holes are indexed; the numbering is the pairing's own, with
+# centres) + 3 the DSL census (slugs at the measured world centres with the
+# clearance asked for; a skewed hole is named rather than guessed at; posts
+# add at the same centres) + 2 await_eval (it returns the status the panel
+# painted with the time it waited; a timeout reports the current status and
+# cancels nothing).
+test_mcp_boundary.gd assertions=34
 
 # Each wide pane carries the SAME projection dropdown the one-pane layout has,
 # driving that pane's own camera. A SLOT ("top") is a place on screen and keeps
@@ -558,7 +580,7 @@ test_ortho_speckles.gd assertions=17
 # Waiting for a worker that takes minutes. The panel's await window and give-up
 # budget are shortened to milliseconds and a stand-in hands the answer back
 # through the broker, so the reply's TIMING is the suite's to choose.
-# 18 assertions = 5 rigs (the panel scene instantiates, once per case)
+# 21 assertions = 6 rigs (the panel scene instantiates, once per case)
 # + 4 the late answer (one evaluation on attach; still pending — not abandoned
 # — after eight expiries of the await window; the answer that lands afterwards
 # is recorded ok with its vertex count; and it reaches the pane as geometry)
@@ -567,5 +589,8 @@ test_ortho_speckles.gd assertions=17
 # request_id so a newer one can cancel it) + 2 the give-up (status timeout
 # with the elapsed time; the banner says it gave up) + 3 supersession (the
 # newer evaluation cancels the older by request id; the displaced answer is
-# not painted; the newest one is).
-test_eval_await.gd assertions=18
+# not painted; the newest one is) + 2 the await verb's wait (an edit still
+# inside the debounce is NOT settled — the previous result is not this edit's
+# answer; the wait returns once the panel has painted, with that status and
+# the time it waited).
+test_eval_await.gd assertions=21
