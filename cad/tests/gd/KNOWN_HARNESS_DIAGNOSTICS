@@ -53,3 +53,9 @@
 # host startup noise present in every suite's log regardless of what the
 # suite does. Pinned to the exact function+file.
 ^SCRIPT ERROR: Invalid call\. Nonexistent function 'new' in base 'GDScript'\. @@ at: initialize_plugins \(res://Scripts/Models/singleton_object\.gd:
+
+# The same double-load symptom, reached from the host's MCP manager instead of
+# plugin initialisation: a suite that waits on real timers for several seconds
+# lives long enough for MCPManager's deferred auto-connect to run under
+# --script, where the class it instantiates is a bare GDScript.
+^SCRIPT ERROR: Invalid call\. Nonexistent function 'new' in base 'GDScript'\. @@ at: MCPManager\.connect_server \(res://Scripts/Services/MCP/MCPManager\.gd:
