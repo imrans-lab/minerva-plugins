@@ -30,8 +30,8 @@ from mcad.parser import parse
 from mcad.edge_polyline import EDGE_POLYLINE_DEFLECTION
 from mcad.translator import Translator
 
-# The smallest repro of the speckle the owner reported: one cylinder fused into
-# a two-section oval loft, standing near enough the rim that it breaks out
+# The smallest repro of the reported speckle: one cylinder fused into a
+# two-section oval loft, standing near enough the rim that it breaks out
 # through the SLOPED side rather than the flat top. That intersection is
 # neither a line nor a circle, so before this it was the one thing the registry
 # could not describe.
@@ -44,11 +44,13 @@ post = translate([{POST_X},0,4], cylinder(h=14, r={POST_RADIUS}))
 body = body + post
 """
 
-# A boss on a plate, both raised in ONE extrusion. The extruded fast path
-# numbers only the Z-, X- and Y-parallel edges it can read off the 2D profile,
-# so the boss's two arcs and the four edges where it meets the plate used to
-# have no entry at all — and an outline drawn from entries would have left them
-# off the drawing.
+# A plate and a round post, both raised in ONE extrusion. The circle sits clear
+# of the rectangle in the profile — a rect(40, 40) is centred, so it ends at
+# x = 20, and the circle is centred at x = 30 — so the extrusion is two
+# disjoint bodies. The extruded fast path numbers only the Z-, X- and
+# Y-parallel edges it can read off the 2D profile, so the post's two arcs used
+# to have no entry at all, and an outline drawn from entries would have left
+# them off the drawing.
 BOSS_RADIUS = 8.0
 BOSS_SOURCE = f"""sketch:
     p = rect(40, 40) + circle({BOSS_RADIUS}) center at point(30, 0)
@@ -164,8 +166,8 @@ class TestTheSeamThatSpeckled:
     def test_each_seam_is_drawn_as_a_curve_and_not_as_a_chord(self):
         for seam in self._seams():
             assert len(seam["polyline"]) > 2, seam["id"]
-            # Two points would draw a line that leaves the surface by far more
-            # than the sampling tolerance, which is what the owner would see.
+            # Two points would draw a line that leaves the surface by far
+            # more than the sampling tolerance, which is what shows on the pane.
             assert (
                 _max_offset_from_chord(seam["polyline"])
                 > EDGE_POLYLINE_DEFLECTION
@@ -217,7 +219,7 @@ class TestTheRegistryIsTheWholePart:
 
     def test_the_profiles_arc_is_in_the_registry_at_its_stated_radius(self):
         arcs = [e for e in _registry(BOSS_SOURCE) if e["kind"] == "circle"]
-        assert len(arcs) == 2, "the boss has a rim at each end of the extrusion"
+        assert len(arcs) == 2, "the post has a rim at each end of the extrusion"
         assert all(abs(arc["radius"] - BOSS_RADIUS) < 1e-6 for arc in arcs)
         assert all(len(arc["polyline"]) > 2 for arc in arcs)
 
@@ -226,9 +228,9 @@ class TestTheRegistryIsTheWholePart:
         translator.translate(parse(BOSS_SOURCE))
         name, shape = translator.last_part()
         registry = translator.get_edge_registry(name)
-        # 15 edges: 12 of the plate and boss outline plus the boss's two rims
-        # and the parametric seam up its wall. The seam is a closure artifact
-        # of OCCT's rolled surface, not a feature, and is filtered out.
+        # 15 edges: the plate's own 12 plus the post's two rims and the
+        # parametric seam up its wall. The seam is a closure artifact of OCCT's
+        # rolled surface, not a feature, and is filtered out.
         assert len(list(shape.edges())) == 15
         assert len(registry) == 14
         assert len({e["id"] for e in registry}) == 14, "ids must be unique"

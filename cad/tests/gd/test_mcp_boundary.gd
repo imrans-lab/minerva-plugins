@@ -43,6 +43,13 @@ const MeshGauge := preload("res://../../minerva-plugins/cad/ui/scripts/mesh_gaug
 ## Two anonymous editors, named as a user would name them.
 const FIRST_TITLE := "HITL enclosure"
 const SECOND_TITLE := "Second enclosure"
+## A third, for the edge-listing size question.
+const EDGE_TITLE := "Edge listing"
+
+## The edge registry the size assertion is made against: an enclosure's edge
+## count, each edge sampled the way a curved one is.
+const REGISTRY_EDGES := 700
+const REGISTRY_POLYLINE_POINTS := 24
 
 ## Nodes in the reference the size assertion is made against — the board the
 ## HITL session mounted.
@@ -99,6 +106,7 @@ func _run() -> void:
 	_check_reference_holes_are_indexed_as_paired()
 	_check_a_hole_census_becomes_dsl()
 	await _check_await_eval_reports_what_the_panel_painted()
+	await _check_the_edge_listing_carries_no_drawing()
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +173,89 @@ func _panel_titled(title: String) -> Node:
 		"editor": editor,
 	})
 	return panel
+
+
+# ---------------------------------------------------------------------------
+# How big — the edge listing
+# ---------------------------------------------------------------------------
+
+## Every registry edge carries its own sampled polyline so the panel can draw
+## it. The host copy is read by cad_list_edges_live / cad_get_edge, which the
+## modeling skill has an agent call before an authoring turn, so those points
+## would be paid for on every one of those calls.
+##
+## ORACLE: the fixture's own size. The listing a reader gets is asserted
+## against the registry the panel was handed — an implementation that passed
+## the array through cannot be within a fraction of it — while the caller's own
+## array is asserted to still have the points, so stripping in place (which
+## would blank the outline) fails too.
+func _check_the_edge_listing_carries_no_drawing() -> void:
+	var panel := _panel_titled(EDGE_TITLE)
+	check("setup: a panel for the edge-listing question",
+			panel != null, "could not instantiate %s" % PANEL_SCENE_PATH)
+	if panel == null:
+		return
+	await process_frame
+	var host = AnnotationHostRegistry.get_host(EDGE_TITLE)
+	check("setup: it registered a host", host != null)
+	if host == null:
+		panel.free()
+		return
+
+	var registry := _sampled_registry()
+	var drawable_bytes := JSON.stringify(registry).to_utf8_buffer().size()
+	check(("fixture: a %d-edge registry sampled for drawing really is the "
+			+ "cost being measured — over a hundred kilobytes")
+			% REGISTRY_EDGES,
+			drawable_bytes > 100000, "registry is %d bytes" % drawable_bytes)
+
+	host.set_edge_registry(registry)
+	var listed: Array = host.get_edge_registry()
+	var listed_bytes := JSON.stringify(listed).to_utf8_buffer().size()
+	var with_points: int = 0
+	for entry in listed:
+		if (entry as Dictionary).has("polyline"):
+			with_points += 1
+	check("what a reader gets back is the same edges without the points",
+			listed.size() == registry.size() and with_points == 0,
+			"%d of %d entries still carry points" % [with_points, listed.size()])
+	check("which costs a fraction of the drawable registry",
+			listed_bytes * 5 < drawable_bytes,
+			"listing is %d bytes against %d" % [listed_bytes, drawable_bytes])
+	check("and still answers what an edge IS: its id, kind and both ends, "
+			+ "which is what an anchor and a fillet call read",
+			(listed[0] as Dictionary).has("id")
+				and (listed[0] as Dictionary).has("kind")
+				and (listed[0] as Dictionary).has("start")
+				and (listed[0] as Dictionary).has("end"),
+			"first entry = %s" % str(listed[0]))
+	var caller_points: Array = (registry[0] as Dictionary).get("polyline", [])
+	check("the panel's own copy keeps the points: they are the outline it "
+			+ "draws, and stripping them in place would empty the panes",
+			caller_points.size() == REGISTRY_POLYLINE_POINTS,
+			"caller's first entry has %d points" % caller_points.size())
+
+	panel.free()
+
+
+## An edge registry the shape the worker returns one, every edge sampled.
+func _sampled_registry() -> Array:
+	var edges: Array = []
+	for id in range(REGISTRY_EDGES):
+		var polyline: Array = []
+		for step in range(REGISTRY_POLYLINE_POINTS):
+			var angle := TAU * float(step) / float(REGISTRY_POLYLINE_POINTS)
+			polyline.append([cos(angle) * 12.5, sin(angle) * 12.5, float(id)])
+		edges.append({
+			"id": id,
+			"kind": "circle",
+			"start": polyline[0],
+			"end": polyline[-1],
+			"radius": 12.5,
+			"center": [0.0, 0.0, float(id)],
+			"polyline": polyline,
+		})
+	return edges
 
 
 # ---------------------------------------------------------------------------

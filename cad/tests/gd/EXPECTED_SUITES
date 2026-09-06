@@ -473,16 +473,22 @@ test_stl_reference.gd assertions=18
 # the discarded hit is still handed to the contact-run rule as a run BOUNDARY,
 # the surviving rim crossing measures its run out to the far end of the
 # triangle, through the air past the boss, and a designed contact is reported.
-# 14 assertions = 2 fixture premises (the plate really is grid-triangulated;
+# The swapped set ends the same way, and there the tilt is the FALSIFIER for
+# the reference leg's own keep: an exactly coplanar swapped case has both ends
+# of a plate chord penetrating the rim, so its run is bounded either way, while
+# the tilted one needs the discarded top-face hit as its far bound.
+# 15 assertions = 2 fixture premises (the plate really is grid-triangulated;
 # its underside edges really do cross the rim) + 1 collider built + 2 the
 # flush boss reports nothing, exactly coplanar and a hundred-thousandth of a
 # millimetre out + 2 the bitten boss reports the board's node and, because no
 # single edge spans a half-millimetre disc, no depth with it + 1 the depth
 # control (the same boss driven clean through the board reports the board's
-# thickness) + 1 the tilted board is still a contact + 5 swapped (1 the boss became the one reference collider, 2 the
-# two lifts inside the touch epsilon are contacts, 2 the lift past it and the
-# half-millimetre bite are interference on the boss's node).
-test_flush_contact.gd assertions=14
+# thickness) + 1 the tilted board is still a contact + 6 swapped (1 the boss
+# became the one reference collider, 2 the two lifts inside the touch epsilon
+# are contacts, 2 the lift past it and the half-millimetre bite are
+# interference on the boss's node, 1 the tilted plate over an exactly coplanar
+# boss is a contact on the reference-cast leg).
+test_flush_contact.gd assertions=15
 
 # Which panel a cad verb reaches, and how big its reply is. Two real CADPanel
 # scenes under two tab titles, addressed through the host's own panel-tool
@@ -492,7 +498,7 @@ test_flush_contact.gd assertions=14
 # before asserting the shaped one fits its budget, and every one of them also
 # asserts the shaped reply still carries the answer — leanness that dropped
 # the answer would pass a byte assertion on its own.
-# 34 assertions = 4 addressing (two panels load; each registers its own host
+# 41 assertions = 4 addressing (two panels load; each registers its own host
 # under its own title; each host answers with its own panel; the dispatcher
 # answers a verb addressed by the tab title) + 5 the records digest (the
 # fixture's digest really is thousands of characters; the reply fits 2 KB;
@@ -515,8 +521,13 @@ test_flush_contact.gd assertions=14
 # clearance asked for; a skewed hole is named rather than guessed at; posts
 # add at the same centres) + 2 await_eval (it returns the status the panel
 # painted with the time it waited; a timeout reports the current status and
-# cancels nothing).
-test_mcp_boundary.gd assertions=34
+# cancels nothing) + 7 the edge listing (a panel and its host; a 700-edge
+# registry sampled for drawing really is over a hundred kilobytes; the host
+# copy the MCP listing verbs read carries none of those points, costs a fifth
+# of the registry at most, and still names each edge's id, kind and both ends;
+# the caller's own array still has the points, because that is what the panes
+# draw).
+test_mcp_boundary.gd assertions=41
 
 # Each wide pane carries the SAME projection dropdown the one-pane layout has,
 # driving that pane's own camera. A SLOT ("top") is a place on screen and keeps

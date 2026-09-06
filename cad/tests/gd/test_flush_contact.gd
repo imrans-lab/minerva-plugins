@@ -53,14 +53,21 @@ extends SceneTree
 ## in two directions and each has its own copy of the contact-run gate. With
 ## the plate as the reference and the boss as the solid it is the SOLID-path
 ## copy that clears the rim chords (_cross_into_solid); the boss's own edges
-## barely reach the plate, so the reference-path copy
-## (_cross_into_references -> _drop_contact_runs) decides nothing and could be
-## deleted with this suite still green. Making the PLATE the solid puts its
-## dense underside edges on the reference-cast path, and there the chords are
-## cleared by _drop_contact_runs alone: the boss's own crossings of the plate
-## sit within TOUCH_EPSILON_MM of the edge start at these lifts and are
-## already dropped as touches, so direction two contributes nothing to the
-## swapped verdict.
+## barely reach the plate, so the reference-path copy contributes nothing.
+## Making the PLATE the solid puts its dense underside edges on the
+## reference-cast path (_cross_into_references -> _drop_contact_runs), and
+## there the chords are cleared by that copy alone: the boss's own crossings of
+## the plate sit within TOUCH_EPSILON_MM of the edge start at these lifts and
+## are already dropped as touches, so direction two contributes nothing to the
+## swapped verdict either.
+##
+## THE SWAPPED SET ENDS TILTED for the same reason the unswapped one does. On
+## an exactly coplanar swapped case both ends of a plate chord penetrate the
+## rim, so the run is bounded whether or not the reference leg keeps the hits
+## it discarded; only the tilt sends the chord out through the TOP FACE, whose
+## hit no per-crossing test vouches for. That case is the falsifier for the
+## reference leg's keep: drop the discarded hits there and the run measures on
+## to the far end of the triangle, and the designed contact is reported.
 ##
 ## MUTATION THAT MUST TURN THE SWAPPED CASES RED: make _drop_contact_runs
 ## return `crossings` unchanged. The plate's underside chords over the boss
@@ -322,6 +329,28 @@ func _swapped_roles(gauge: Node, checks: RefCounted) -> void:
 					.get("node", "")) == BOSS_NODE_PATH,
 			"report = %s" % str(bitten))
 
+	# The modeller's contact on THIS leg. Exactly coplanar, both rim hits of a
+	# plate chord penetrate and the run is bounded either way; it is the tilt
+	# that makes the chord leave through the top face, and that exit is the hit
+	# no per-crossing test vouches for. With the plate as the solid those
+	# chords are cast at the reference, so this is the case that needs
+	# _cross_into_references to KEEP its bound-only hits: without the exit the
+	# run runs on to the far end of the triangle, through the air past the
+	# boss, and the designed contact is reported as millimetres of overlap.
+	# ORACLE: the two controls above, unchanged — the same lifts must still be
+	# a contact and a bite.
+	_mount_boss(gauge, checks, 0.0)
+	checks.build_solid(_tilted_plate_solid())
+	var tilted: Dictionary = await _submit(gauge, checks)
+	check("swapped: a plate tilted five microradians onto the boss — coplanar "
+			+ "to within float noise, the way one arrives from a modeller — is "
+			+ "a contact when the plate's own edges are the ones cast",
+			bool(tilted.get("checked", false))
+				and int(tilted.get("count", 0)) == 0
+				and int(tilted.get("point_count", 0)) == 0
+				and _penetration_of(tilted) == 0.0,
+			"report = %s" % str(tilted))
+
 
 ## Re-mount the plate as the sole reference, rotated by BOARD_TILT_RAD about
 ## Y. The rotation is about the origin, which is 1.2 mm from the boss's axis,
@@ -483,6 +512,24 @@ func _boss_world_box(lift: float) -> AABB:
 			lift - BOSS_HEIGHT),
 		Vector3(BOSS_RADIUS * 2.0, BOSS_RADIUS * 2.0, BOSS_HEIGHT)
 	).grow(0.001)
+
+
+## The plate as the evaluated solid, tilted the same five microradians about Y
+## through the origin. The tilt is what makes its underside weave through the
+## boss's top-face plane instead of lying in it; as the SOLID, those underside
+## edges are cast at the reference, which is the leg the unswapped tilted case
+## never reaches.
+func _tilted_plate_solid() -> Dictionary:
+	var tilt := Basis(Vector3(0.0, 1.0, 0.0), BOARD_TILT_RAD)
+	var data := _solid_from(_grid_plate())
+	var tilted: Array = []
+	for entry in (data.get("vertices", []) as Array):
+		var point: Array = entry
+		var moved: Vector3 = tilt * Vector3(
+			float(point[0]), float(point[1]), float(point[2]))
+		tilted.append([moved.x, moved.y, moved.z])
+	data["vertices"] = tilted
+	return data
 
 
 ## An ArrayMesh from worker mesh data, for mounting a body that the unswapped

@@ -766,7 +766,8 @@ func resolve_point_anchor(anchor: Dictionary) -> Variant:
 var _mesh_data: Dictionary = {}
 
 ## Edge registry last pushed by CADPanel after a successful cad.evaluate reply.
-## Array of edge dicts; exact shape from the worker (id, kind, length/radius, …).
+## Array of edge dicts; the worker's shape (id, kind, length/radius, start,
+## end, …) minus the sampled polyline — see set_edge_registry.
 var _edge_registry_data: Array = []
 
 ## Document source last pushed by CADPanel on load / evaluate.
@@ -780,8 +781,22 @@ func set_mesh_data(mesh: Dictionary) -> void:
 
 
 ## Called by CADPanel after a successful cad.evaluate IPC reply.
+##
+## The panel's copy keeps each edge's sampled polyline — that is what draws the
+## outline — but every reader of THIS copy (the MCP listing verbs, the edge
+## anchors, the edge-number tool) wants the topology, and the points are tens
+## of thousands of coordinates on a real part. They are dropped here rather
+## than at each reader, and the caller's array is left alone.
 func set_edge_registry(edges: Array) -> void:
-	_edge_registry_data = edges
+	var stripped: Array = []
+	for entry in edges:
+		if not (entry is Dictionary):
+			stripped.append(entry)
+			continue
+		var edge_info: Dictionary = (entry as Dictionary).duplicate()
+		edge_info.erase("polyline")
+		stripped.append(edge_info)
+	_edge_registry_data = stripped
 
 
 ## Return the current mesh data dict (may be empty if not yet evaluated).
