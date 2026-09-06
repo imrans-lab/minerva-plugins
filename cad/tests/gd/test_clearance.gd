@@ -1473,11 +1473,11 @@ func _worker_answer(args: Dictionary) -> Dictionary:
 		if min_mm <= 0.0:
 			pair["interference"] = true
 			pair["note"] = "the meshes touch or overlap"
-		else:
-			# The realising points: the middle of the square where the bars
-			# cross, on each of the two facing planes.
-			pair["solid_point_mm"] = [POSE_ORIGIN.x, POSE_ORIGIN.y, solid_bottom_z]
-			pair["reference_point_mm"] = [POSE_ORIGIN.x, POSE_ORIGIN.y, top_z]
+		# The realising points: the middle of the square where the bars
+		# cross, on each of the two facing planes. A distance of zero still
+		# has them — they are where the surfaces meet.
+		pair["solid_point_mm"] = [POSE_ORIGIN.x, POSE_ORIGIN.y, solid_bottom_z]
+		pair["reference_point_mm"] = [POSE_ORIGIN.x, POSE_ORIGIN.y, top_z]
 		pairs.append(pair)
 	pairs.sort_custom(func(a, b): return float(a["min_mm"]) < float(b["min_mm"]))
 	return {"ok": true, "result": {

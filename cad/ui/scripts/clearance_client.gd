@@ -781,6 +781,12 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 			pair["bound_mm"] = 0.0
 			pair["pass"] = false
 			pair["touching"] = true
+			if bool(pair.get("interference", false)):
+				# A node the interference report found inside the solid has no
+				# nearest-surface pair worth quoting: the unsigned distance's
+				# witness points are wherever two surfaces happened to meet.
+				pair.erase("solid_point_mm")
+				pair.erase("reference_point_mm")
 			if not pair.has("note"):
 				pair["note"] = _contact_note(buried)
 			pairs.append(pair)

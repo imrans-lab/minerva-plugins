@@ -56,6 +56,10 @@ func _init() -> void:
 	await process_frame
 	await _run()
 	_cleanup()
+	# Two frames so the rendering server releases the freed panels' viewport
+	# textures before quit; otherwise they are reported as leaked at exit.
+	await process_frame
+	await process_frame
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
