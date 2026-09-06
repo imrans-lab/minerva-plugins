@@ -55,6 +55,7 @@ extends SceneTree
 
 const MeshGauge := preload("res://../../minerva-plugins/cad/ui/scripts/mesh_gauge.gd")
 const GeometryChecks := preload("res://../../minerva-plugins/cad/ui/scripts/geometry_checks.gd")
+const ExpectedContacts := preload("res://../../minerva-plugins/cad/ui/scripts/expected_contacts.gd")
 
 ## Board: 80 x 60 in X and Y, 1.6 thick in Z, centred on its own origin, so its
 ## faces are at z = -0.8 and z = +0.8.
@@ -92,6 +93,16 @@ const STRAY_TRIANGLES := 40
 const STRAY_LIFT_MM := 500.0
 const BAR_CENTRE_Z := 1.05
 const SLIVER_OVERLAP_MM := 0.2
+
+## The second boss of the two-boss shell, in the board's own frame: far enough
+## from the first that a box round one cannot reach the other, and through the
+## board like it. Two intended-contact declarations, one per boss, are the case
+## a node-name exclusion cannot express — the node is the same one.
+const SECOND_BOSS_XY := Vector2(-15.0, -10.0)
+## Half-width of the world box a declaration is drawn with. Bigger than the
+## boss it surrounds and a quarter of the distance between the two, so each box
+## holds every crossing of its own boss and none of the other's.
+const REGION_HALF_MM := 4.0
 
 ## The buried cube: 0.5 mm on a side at the board's centre, inside 1.6 mm of
 ## material.
@@ -299,6 +310,7 @@ func _run() -> void:
 	await _check_enclosed(gauge, checks)
 	await _check_flush(gauge, checks)
 	await _check_scoping(gauge, checks)
+	await _check_expected_contacts(gauge, checks)
 	await _check_supersession(gauge, checks)
 	await _check_busy_refusal(gauge, checks)
 	await _check_colliders_behind_the_poses(gauge, checks)
@@ -1883,6 +1895,162 @@ func _check_scoping(gauge: Node, checks: RefCounted) -> void:
 
 
 # ---------------------------------------------------------------------------
+# EXPECTED CONTACTS — what the design MEANT to touch, and what it did not
+# ---------------------------------------------------------------------------
+
+## A declaration is per PAIR, not per node, and it excuses only the depth it
+## declared.
+##
+## The fixture is two bosses through the SAME board node. Excluding by node
+## name would excuse both of them at once, which is exactly the case the
+## argument exists to avoid — a real board node carries the bosses the shell is
+## meant to rest on and the traces nothing may touch — so each declaration is
+## drawn as a world box round one boss and has to leave the other graded.
+##
+## ORACLE: the fixture'"'"'s own numbers. Each boss passes clean through the board,
+## so the overlap a declaration has to allow is the board'"'"'s 1.6 mm thickness,
+## and the crossings of the two bosses partition the node'"'"'s crossings — the
+## undeclared remainder of one run plus the undeclared remainder of the other
+## is the whole count, with nothing invented and nothing lost.
+func _check_expected_contacts(gauge: Node, checks: RefCounted) -> void:
+	var shell: Dictionary = await _shell_mesh(BOSS_THROUGH_BOTTOM_Z,
+		[SECOND_BOSS_XY])
+	checks.build_solid(shell)
+	var control: Dictionary = await _submit(gauge, checks, "", "")
+	var whole := _first_pair(control)
+	check("expected: the two-boss shell crosses the board as ONE pair, and "
+			+ "no declaration means no expected_contacts in the reply",
+			int(control.get("count", 0)) == 1
+				and int(whole.get("point_count", 0)) > 0
+				and not bool(control.get("pass", true))
+				and not control.has("expected_contacts"),
+			"report = %s" % str(control))
+
+	# One boss declared as a press fit deep enough to cover the board.
+	checks.build_solid(shell)
+	var first: Dictionary = await _submit(gauge, checks, "", "",
+		[_declaration(BOSS_CENTRE_XY, -3.0)])
+	var left_over := _first_pair(first)
+	var excused: Dictionary = _first_expected(first)
+	check("expected: the declared boss leaves the count — with its measured "
+			+ "overlap on the record — and the OTHER contact on the same node "
+			+ "is still reported",
+			int(first.get("excluded_count", 0)) == 1
+				and bool(excused.get("excluded", false))
+				and absf(float(excused.get("measured_mm", 0.0)) - BOARD.z)
+					< POINT_TOLERANCE_MM
+				and int(first.get("count", 0)) == 1
+				and int(left_over.get("point_count", 0))
+					< int(whole.get("point_count", 0))
+				and not bool(first.get("pass", true)),
+			"report = %s" % str(first))
+
+	checks.build_solid(shell)
+	var second: Dictionary = await _submit(gauge, checks, "", "",
+		[_declaration(SECOND_BOSS_XY, -3.0)])
+	var other := _first_pair(second)
+	check("expected: the same declaration drawn round the OTHER boss excuses "
+			+ "the other crossings — the two remainders add up to the whole, "
+			+ "so a region picks a place and not a node",
+			int(second.get("excluded_count", 0)) == 1
+				and int(other.get("point_count", 0))
+					+ int(left_over.get("point_count", 0))
+					== int(whole.get("point_count", 0)),
+			"first = %d, second = %d, whole = %d" % [
+				int(left_over.get("point_count", 0)),
+				int(other.get("point_count", 0)),
+				int(whole.get("point_count", 0))])
+
+	checks.build_solid(shell)
+	var both: Dictionary = await _submit(gauge, checks, "", "", [
+		_declaration(BOSS_CENTRE_XY, -3.0),
+		_declaration(SECOND_BOSS_XY, -3.0)])
+	check("expected: with both contacts declared the check PASSES, and says "
+			+ "over what: two exclusions and no pair left",
+			bool(both.get("pass", false))
+				and int(both.get("count", 0)) == 0
+				and int(both.get("point_count", 0)) == 0
+				and int(both.get("excluded_count", 0)) == 2,
+			"report = %s" % str(both))
+
+	# THE FALSIFIER. The same two declarations, each allowing half a
+	# millimetre of overlap, against bosses that are 1.6 mm through the board.
+	checks.build_solid(shell)
+	var deeper: Dictionary = await _submit(gauge, checks, "", "", [
+		_declaration(BOSS_CENTRE_XY, -0.5),
+		_declaration(SECOND_BOSS_XY, -0.5)])
+	var declared_rows: Array = deeper.get("expected_contacts", []) as Array
+	var every_row := declared_rows.size() == 2
+	for entry in declared_rows:
+		var row: Dictionary = entry
+		var measured := float(row.get("measured_mm", 0.0))
+		if bool(row.get("excluded", true)) \
+				or absf(measured - BOARD.z) >= POINT_TOLERANCE_MM:
+			every_row = false
+	var promoted := 0
+	for entry in (deeper.get("pairs", []) as Array):
+		if bool((entry as Dictionary).get("declared_intended", false)):
+			promoted += 1
+	check("expected: a contact that runs DEEPER than it was declared is "
+			+ "reported as interference anyway, carrying declared_intended, "
+			+ "and excuses nothing",
+			every_row and promoted == 2
+				and int(deeper.get("excluded_count", 0)) == 0
+				and int(deeper.get("point_count", 0))
+					== int(whole.get("point_count", 0))
+				and not bool(deeper.get("pass", true)),
+			"report = %s" % str(deeper))
+
+	checks.build_solid(shell)
+	var stale: Dictionary = await _submit(gauge, checks, "", "", [
+		_declaration(BOSS_CENTRE_XY, -3.0),
+		(ExpectedContacts.parse({"expected_contacts": [{
+			"reference": BOARD_REFERENCE, "node": "no-such-node"}]})["entries"]
+			as Array)[0]])
+	var unmatched: Array = stale.get("expected_contacts_unmatched", []) as Array
+	check("expected: a declaration nothing was measured against is listed as "
+			+ "unmatched, so a contact that has moved does not pass unread",
+			unmatched.size() == 1
+				and str((unmatched[0] as Dictionary).get("node", ""))
+					== "no-such-node"
+				and int(stale.get("excluded_count", 0)) == 1,
+			"unmatched = %s" % str(unmatched))
+
+
+## A parsed declaration round one boss: the world box the crossings of that
+## boss fall in, allowing `required_mm` of overlap (negative is a press fit).
+## The box is built from the POSED axis point, so a check that matched regions
+## in the reference'"'"'s own frame would find nothing.
+func _declaration(centre: Vector2, required_mm: float) -> Dictionary:
+	var axis: Vector3 = _pose * Vector3(centre.x, centre.y, 0.0)
+	var half := Vector3.ONE * REGION_HALF_MM
+	var low := axis - half
+	var high := axis + half
+	# Through the argument's own reader, so the shape asserted here is the
+	# shape the verb accepts.
+	var parsed: Dictionary = ExpectedContacts.parse({"expected_contacts": [{
+		"reference": BOARD_REFERENCE,
+		"required_mm": required_mm,
+		"why": "the boss is meant to stand in this hole",
+		"region_mm": {
+			"min_mm": [low.x, low.y, low.z],
+			"max_mm": [high.x, high.y, high.z],
+		},
+	}]})
+	return (parsed["entries"] as Array)[0]
+
+
+func _first_pair(report: Dictionary) -> Dictionary:
+	var pairs: Array = report.get("pairs", []) as Array
+	return pairs[0] if not pairs.is_empty() else {}
+
+
+func _first_expected(report: Dictionary) -> Dictionary:
+	var rows: Array = report.get("expected_contacts", []) as Array
+	return rows[0] if not rows.is_empty() else {}
+
+
+# ---------------------------------------------------------------------------
 # Driving the check
 # ---------------------------------------------------------------------------
 
@@ -1900,7 +2068,8 @@ func _submit(
 	gauge: Node,
 	checks: RefCounted,
 	reference: String,
-	node_filter: String
+	node_filter: String,
+	expected: Array = []
 ) -> Dictionary:
 	var mask: int = int(gauge.mask_for(reference)) if not reference.is_empty() \
 		else int(MeshGauge.ALL_LAYERS)
@@ -1909,6 +2078,7 @@ func _submit(
 		"mask": mask,
 		"reference": reference,
 		"node": node_filter,
+		"expected": expected,
 	})
 
 
@@ -1932,7 +2102,7 @@ func _bake_board() -> ArrayMesh:
 ## The shell: a lid over the board on one boss whose underside sits at
 ## `boss_bottom_z` in the BOARD's frame. Returned posed into the world, which
 ## is where an evaluated solid always lives.
-func _shell_mesh(boss_bottom_z: float) -> Dictionary:
+func _shell_mesh(boss_bottom_z: float, extra: Array = []) -> Dictionary:
 	var combiner := CSGCombiner3D.new()
 	combiner.name = "Shell"
 	var lid := CSGBox3D.new()
@@ -1940,18 +2110,26 @@ func _shell_mesh(boss_bottom_z: float) -> Dictionary:
 	lid.position = Vector3(BOSS_CENTRE_XY.x, BOSS_CENTRE_XY.y, LID_CENTRE_Z)
 	combiner.add_child(lid)
 
-	var boss := CSGCylinder3D.new()
-	boss.radius = BOSS_RADIUS
-	boss.sides = BOSS_FACETS
-	boss.smooth_faces = false
 	var top: float = LID_CENTRE_Z - LID.z * 0.5
-	boss.height = top - boss_bottom_z
-	# A CSG cylinder runs along its own +Y; a quarter turn about X takes that
-	# to +Z, which is the CAD world's up and the axis the boss is drilled on.
-	boss.rotation = Vector3(PI * 0.5, 0.0, 0.0)
-	boss.position = Vector3(
-		BOSS_CENTRE_XY.x, BOSS_CENTRE_XY.y, (top + boss_bottom_z) * 0.5)
-	combiner.add_child(boss)
+	# The lid's own boss, plus one per `extra` centre: a second boss through
+	# the same board node is a second contact the declarations have to tell
+	# apart by WHERE it is.
+	var centres: Array = [BOSS_CENTRE_XY]
+	centres.append_array(extra)
+	for centre in centres:
+		var boss := CSGCylinder3D.new()
+		boss.radius = BOSS_RADIUS
+		boss.sides = BOSS_FACETS
+		boss.smooth_faces = false
+		boss.height = top - boss_bottom_z
+		# A CSG cylinder runs along its own +Y; a quarter turn about X takes
+		# that to +Z, which is the CAD world's up and the axis the boss is
+		# drilled on.
+		boss.rotation = Vector3(PI * 0.5, 0.0, 0.0)
+		boss.position = Vector3(
+			(centre as Vector2).x, (centre as Vector2).y,
+			(top + boss_bottom_z) * 0.5)
+		combiner.add_child(boss)
 
 	root.add_child(combiner)
 	await process_frame

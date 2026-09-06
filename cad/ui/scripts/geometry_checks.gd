@@ -201,6 +201,17 @@ var max_solid_edge_casts: int = MAX_SOLID_EDGES
 ## Nodes whose containment question could not be answered, as
 ## {reference, node, reason}. A rejected probe is not a clean node.
 var _undecided: Array = []
+## The declarations the running check was called with, parsed. Empty is the
+## default and is every check that came before the argument existed.
+var _expected: Array = []
+## Crossings the running check folded into a DECLARATION instead of into an
+## interference pair, keyed pair-key + declaration index. A bucket carries the
+## same fields a pair does, so it can be promoted back into the report whole
+## when its measured overlap runs past what was declared.
+var _declared: Dictionary = {}
+## Declaration indices something was measured against, so the reply can name
+## the ones that matched nothing.
+var _declared_matched: Dictionary = {}
 ## Wall clock of the running check, microseconds.
 var _started_us: int = 0
 
@@ -392,8 +403,9 @@ func get_solid_edge_count() -> int:
 
 ## Run the whole check for `panel` and return the report:
 ##
-##   {count, pairs: [{reference, node, points_mm: [{world, local}], point_count,
-##    penetration_mm?}], point_count, sampling, casts, checked, painted}
+##   {pass, count, pairs: [{reference, node, points_mm: [{world, local}],
+##    point_count, penetration_mm?}], point_count, sampling, casts, checked,
+##    painted, expected_contacts?, excluded_count?}
 ##
 ## `painted` says whether this reply's crossings are the ones on screen; it is
 ## false, with `paint_withheld`, when a newer evaluation queued while this
@@ -405,6 +417,13 @@ func get_solid_edge_count() -> int:
 ##
 ## `args` may carry reference= and node= to narrow the question; the mask is
 ## derived from the reference here, so no caller has to know about layers.
+##
+## `args` may also carry expected_contacts= — the contacts the design MEANS to
+## have, per pair. A crossing one of them covers is measured exactly as any
+## other and then held out of `count` while the overlap it reaches stays
+## inside the depth that declaration allows; every declaration is listed in
+## the reply with what was measured for it, and one whose overlap ran deeper
+## is reported as interference anyway. See scripts/expected_contacts.gd.
 func check(panel: Object, args: Dictionary = {}) -> Dictionary:
 	# An agent's verb call says so and is refused while a check runs; the
 	# panel's own per-evaluation check says nothing and queues.
@@ -630,6 +649,13 @@ func _run(panel: Object, args: Dictionary, ticket: int = 0) -> Dictionary:
 	if int(panel.ensure_gauge_built()) <= 0:
 		return _nothing("no reference mesh is mounted; there is nothing to run into")
 
+	# A declaration nobody can read is refused rather than dropped: an author
+	# who mistyped a reference believes that pair is excused.
+	var declared: Dictionary = _Expected.parse(args)
+	if not (declared["errors"] as Array).is_empty():
+		return _nothing("expected_contacts: %s"
+			% ", ".join(PackedStringArray(declared["errors"] as Array)))
+
 	var document: Dictionary = {}
 	if panel.has_method("get_document_state"):
 		document = panel.get_document_state()
@@ -703,6 +729,7 @@ func _run(panel: Object, args: Dictionary, ticket: int = 0) -> Dictionary:
 		"mask": mask,
 		"reference": reference_scope,
 		"node": str(args.get("node", "")),
+		"expected": declared["entries"],
 	})
 	# THE COLLIDERS THE RAYS MET MUST BE THE ONES STAMPED ABOVE. The gauge is
 	# shared: a newer evaluation re-poses its references and rebuilds it
@@ -749,6 +776,9 @@ func run_check(gauge: Object, state: PhysicsDirectSpaceState3D, args: Dictionary
 	_casts = 0
 	_limits = PackedStringArray()
 	_undecided = []
+	_expected = args.get("expected", []) as Array
+	_declared = {}
+	_declared_matched = {}
 	var mask := int(args.get("mask", ALL_LAYERS))
 	var reference_scope := str(args.get("reference", ""))
 	var node_scope := str(args.get("node", ""))
@@ -1673,16 +1703,58 @@ func _absorb(pairs: Dictionary, crossing: Dictionary, node_scope: String) -> voi
 	var node_path := str(crossing.get("node", ""))
 	if not _node_matches(node_path, node_scope):
 		return
-	var pair: Dictionary = _pair_for(pairs, str(crossing.get("reference", "")), node_path)
+	var reference_name := str(crossing.get("reference", ""))
 	var point: Vector3 = crossing.get("point", Vector3.ZERO)
+	# A crossing a declaration covers goes into that declaration's bucket
+	# rather than into the interference pair. It is measured exactly as it
+	# would have been — the bucket carries the same fields — and the depth it
+	# reaches decides, in _report, whether the declaration holds.
+	var declared := _declared_index(reference_name, node_path, point)
+	var pair: Dictionary = _declared_pair(declared, reference_name, node_path) \
+		if declared >= 0 \
+		else _pair_for(pairs, reference_name, node_path)
 	pair["point_count"] = int(pair["point_count"]) + 1
 	var points: Array = pair["points"]
 	if points.size() < MAX_POINTS_PER_PAIR:
 		points.append(point)
-	if _marker_points.size() < MAX_MARKERS:
+	# A declared contact is not painted red: its crosses are what the design
+	# means to happen. A bucket promoted back into the report in _report takes
+	# its markers with it.
+	if declared < 0 and _marker_points.size() < MAX_MARKERS:
 		_marker_points.append(point)
 	if crossing.has("containment"):
 		pair["note"] = str(crossing["containment"])
+
+
+## Which declaration covers a crossing at `point`, or -1 when none does.
+func _declared_index(reference_name: String, node_path: String,
+		point: Vector3) -> int:
+	if _expected.is_empty():
+		return -1
+	var index: int = _Expected.index_for(_expected, reference_name, node_path,
+		[point])
+	if index >= 0:
+		_declared_matched[index] = true
+	return index
+
+
+## One bucket per (pair, declaration): a node can carry an intended contact
+## inside a declared region and an unintended one outside it, and folding both
+## under the node would lose exactly the distinction the region was drawn for.
+func _declared_pair(index: int, reference_name: String,
+		node_path: String) -> Dictionary:
+	var key := "%d\n%s" % [index, _pair_key(reference_name, node_path)]
+	if not _declared.has(key):
+		_declared[key] = {
+			"reference": reference_name,
+			"node": node_path,
+			"entry": _expected[index],
+			"points": [],
+			"point_count": 0,
+			"penetration_mm": 0.0,
+			"note": "",
+		}
+	return _declared[key]
 
 
 ## How deep ONE edge went inside each node it crossed. The crossings of a given
@@ -1700,15 +1772,23 @@ func _absorb_runs(pairs: Dictionary, crossings: Array, node_scope: String) -> vo
 		var node_path := str(crossing.get("node", ""))
 		if not _node_matches(node_path, node_scope):
 			continue
-		var key := _pair_key(str(crossing.get("reference", "")), node_path)
+		var reference_name := str(crossing.get("reference", ""))
+		# The declared crossings are grouped apart from the rest, so a
+		# declaration's depth is measured over the runs it actually covers.
+		var declared := _declared_index(reference_name, node_path,
+			crossing.get("point", Vector3.ZERO))
+		var key := _pair_key(reference_name, node_path)
+		if declared >= 0:
+			key = "%d\n%s" % [declared, key]
 		if not by_node.has(key):
 			by_node[key] = []
 		(by_node[key] as Array).append(float(crossing.get("distance", 0.0)))
 	for key in by_node.keys():
 		var distances: Array = by_node[key]
-		if distances.size() < 2 or not pairs.has(key):
+		var table: Dictionary = _declared if _declared.has(key) else pairs
+		if distances.size() < 2 or not table.has(key):
 			continue
-		var pair: Dictionary = pairs[key]
+		var pair: Dictionary = table[key]
 		var index := 0
 		while index + 1 < distances.size():
 			pair["penetration_mm"] = maxf(float(pair["penetration_mm"]),
@@ -1734,28 +1814,44 @@ func _report(pairs: Dictionary) -> Dictionary:
 	var out: Array = []
 	var total := 0
 	for key in pairs.keys():
-		var pair: Dictionary = pairs[key]
-		var pose := _pose_for(str(pair["reference"]))
-		var points: Array = []
-		for point in (pair["points"] as Array):
-			points.append({
-				"world": _vec(point),
-				"local": _vec(pose.affine_inverse() * point),
-			})
-		var entry := {
-			"reference": pair["reference"],
-			"node": pair["node"],
-			"points_mm": points,
-			"point_count": int(pair["point_count"]),
-		}
-		if float(pair["penetration_mm"]) > 0.0:
-			entry["penetration_mm"] = float(pair["penetration_mm"])
-			entry["penetration_note"] = "the deepest run of one body's edge " \
-				+ "inside the other; a lower bound on the penetration"
-		if not str(pair["note"]).is_empty():
-			entry["note"] = str(pair["note"])
-		total += int(pair["point_count"])
+		var entry := _pair_row(pairs[key])
+		total += int(entry["point_count"])
 		out.append(entry)
+	# What the declarations excused, and what they did not. A bucket whose
+	# measured overlap runs past the depth that was declared is put back among
+	# the pairs, so an exclusion can never be the reason a crash went unsaid.
+	var declared_rows: Array = []
+	var excluded := 0
+	for key in _declared.keys():
+		var bucket: Dictionary = _declared[key]
+		var entry: Dictionary = bucket["entry"]
+		var depth := float(bucket["penetration_mm"])
+		var allowed: float = _Expected.allowance_mm(entry)
+		# Depth is the only evidence a declaration can be checked against, and
+		# a pair found by parity alone has none: unprovable is not clean.
+		var holds: bool = depth > 0.0 and depth <= allowed
+		declared_rows.append(_Expected.row(entry, str(bucket["reference"]),
+			str(bucket["node"]), "overlap", depth, holds))
+		if holds:
+			excluded += 1
+			continue
+		var row := _pair_row(bucket)
+		row["declared_intended"] = true
+		var found := str(row.get("note", ""))
+		row["note"] = (found + "; " if not found.is_empty() else "") \
+			+ ("declared an intended contact, but %s: the "
+			+ "declaration allows %s mm of overlap") % [
+				("the overlap here measures %s mm" % depth) if depth > 0.0
+					else "this overlap has no measured depth to check it "
+						+ "against (it was found by ray parity, not by a "
+						+ "crossing)", allowed]
+		# Its crossings were held back from the pane while the declaration
+		# stood; the pair is interference after all, so they are painted.
+		for point in (bucket["points"] as Array):
+			if _marker_points.size() < MAX_MARKERS:
+				_marker_points.append(point as Vector3)
+		total += int(row["point_count"])
+		out.append(row)
 	var sampling := ("none: every one of the %d solid edges that reach a "
 		+ "reference was cast (of %d the solid has; the rest stand clear of "
 		+ "everything in scope, where no ray could cross anything), as was "
@@ -1763,9 +1859,13 @@ func _report(pairs: Dictionary) -> Dictionary:
 		% [_edges_cast, _edges_total]
 	if not _limits.is_empty():
 		sampling = "TRUNCATED — %s; the counts are floors" % ", ".join(_limits)
-	return {
+	var report := {
 		"checked": true,
 		"units": "mm",
+		# GRADED OVER THE PAIRS THAT REMAIN. A declaration whose overlap it
+		# excused is out of this count and listed under expected_contacts with
+		# what was measured for it; one it could not excuse is back in.
+		"pass": out.is_empty() and _undecided.is_empty(),
 		"count": out.size(),
 		"point_count": total,
 		"pairs": out,
@@ -1791,6 +1891,44 @@ func _report(pairs: Dictionary) -> Dictionary:
 			+ "side of each crossing that survived, and two or three parity "
 			+ "rays when nothing crossed; everything else is an AABB test",
 	}
+	if not _expected.is_empty():
+		report["expected_contacts"] = declared_rows
+		report["excluded_count"] = excluded
+		report["expected_contacts_unmatched"] = _Expected.unmatched(_expected,
+			_declared_matched)
+		report["expected_contacts_note"] = "a declared contact is excluded "\
+			+ "from `count` only while its MEASURED overlap stays inside the "\
+			+ "depth it declared; every declaration is listed above with the "\
+			+ "overlap measured for it, and one that ran deeper is back among "\
+			+ "the pairs carrying declared_intended"
+	return report
+
+
+## One reported pair: its crossing points in both frames, how many there were,
+## and how deep the deepest run went. Shared with the declaration buckets,
+## which are the same shape and are reported the same way when a declaration
+## turns out not to cover them.
+func _pair_row(pair: Dictionary) -> Dictionary:
+	var pose := _pose_for(str(pair["reference"]))
+	var points: Array = []
+	for point in (pair["points"] as Array):
+		points.append({
+			"world": _vec(point),
+			"local": _vec(pose.affine_inverse() * point),
+		})
+	var entry := {
+		"reference": pair["reference"],
+		"node": pair["node"],
+		"points_mm": points,
+		"point_count": int(pair["point_count"]),
+	}
+	if float(pair["penetration_mm"]) > 0.0:
+		entry["penetration_mm"] = float(pair["penetration_mm"])
+		entry["penetration_note"] = "the deepest run of one body's edge " \
+			+ "inside the other; a lower bound on the penetration"
+	if not str(pair["note"]).is_empty():
+		entry["note"] = str(pair["note"])
+	return entry
 
 
 ## A report for a question that could not be asked. `checked` false with a
@@ -1800,6 +1938,8 @@ func _nothing(reason: String) -> Dictionary:
 	return {
 		"checked": false,
 		"units": "mm",
+		# A check that never ran passes nothing.
+		"pass": false,
 		"count": 0,
 		"point_count": 0,
 		"pairs": [],

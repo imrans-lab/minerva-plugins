@@ -19,6 +19,9 @@ extends RefCounted
 
 const _WorkerReply: Script = preload("worker_reply.gd")
 const _MeshGauge: Script = preload("mesh_gauge.gd")
+## The contacts the caller declared intended, and the rule for what a
+## declaration does and does not excuse.
+const _Expected: Script = preload("expected_contacts.gd")
 
 ## The phrase every unbounded-tolerance pass_reason is built from, and the one
 ## the status line reads back to tell that cause from a join failure.
@@ -214,7 +217,17 @@ func release() -> void:
 ## every reference node in scope, against `required_mm`.
 ##
 ## `args`: required_mm (mandatory), reference=, node=, tolerance_mm=,
-## accept_unbounded_tolerance= (default false), ticket= (collect only).
+## accept_unbounded_tolerance= (default false), expected_contacts=,
+## ticket= (collect only).
+##
+## EXPECTED CONTACTS. An assembled design touches itself on purpose — a keycap
+## on an actuator, a holder on a door — and grading those against required_mm
+## leaves no reachable pass. A pair named in expected_contacts is graded
+## against the gap IT declares (0, the default, means they may touch) instead
+## of required_mm, and appears in `expected_contacts` with the value measured
+## for it beside `excluded_count`. Material overlap deeper than the
+## declaration allows still fails: an exclusion cannot hide a crash. See
+## scripts/expected_contacts.gd.
 ##
 ## IT ALWAYS ANSWERS, WHETHER OR NOT IT HAS MEASURED. The worker re-tessellates
 ## the solid at the measurement tolerance, and on a lofted shell that is
@@ -229,12 +242,13 @@ func release() -> void:
 ##
 ## The reply is the worker's, re-framed:
 ##
-##   {checked, units, pass, pass_reason?, required_mm,
+##   {checked, units, pass, pass_reason?, required_mm, expected_contacts?,
+##    excluded_count?,
 ##    tessellation_tolerance_mm, requested_tolerance_mm, tolerance_bounded,
 ##    bound, references_moved,
 ##    pairs: [{reference, node, min_mm, bound_mm, pass, solid_point_mm,
 ##             reference_point_mm: {world, local}, interference?, touching?,
-##             note?}],
+##             expected?, required_mm?, note?}],
 ##    solid_triangles, cache, engine, interference_join}
 ##
 ## sorted by min_mm, closest first. `solid_point_mm` is a bare world triple
@@ -297,6 +311,12 @@ func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
 	var tolerance_mm := float(args.get("tolerance_mm", CLEARANCE_TOLERANCE_MM))
 	if tolerance_mm <= 0.0:
 		return _no_clearance("tolerance_mm must be greater than zero")
+	# A declaration nobody can read is refused rather than dropped: an author
+	# who mistyped a reference believes that pair is excused.
+	var declared: Dictionary = _Expected.parse(args)
+	if not (declared["errors"] as Array).is_empty():
+		return _no_clearance("expected_contacts: %s"
+			% ", ".join(PackedStringArray(declared["errors"] as Array)))
 
 	var document: Dictionary = {}
 	if panel.has_method("get_document_state"):
@@ -395,7 +415,8 @@ func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
 	# still lands in its job.
 	_measure_into(job, panel, head, plan["batches"] as Array, records,
 		_buried_pairs(document, source, records, panel),
-		bool(args.get("accept_unbounded_tolerance", false)), bar)
+		bool(args.get("accept_unbounded_tolerance", false)), bar,
+		declared["entries"] as Array)
 	await _wait_for(job, first_reply_ms)
 	if str(job["status"]) == "running":
 		return _running(issued, job)
@@ -420,14 +441,15 @@ func _wait_for(job: Dictionary, budget_ms: int) -> void:
 ## here so it covers exactly the time the worker is being asked.
 func _measure_into(job: Dictionary, panel: Object, head: Dictionary,
 		batches: Array, records: Array, buried: Dictionary,
-		accept_unbounded: bool, bar: Dictionary) -> void:
+		accept_unbounded: bool, bar: Dictionary,
+		expected: Array = []) -> void:
 	# The keys this call names are pinned for as long as it runs. Two calls
 	# share _blobs and the blob directory, so a reference re-posed between one
 	# call's two attempts would otherwise let the other's sweep delete the file
 	# the retry names — a single-shot "could not read" with nothing wrong.
 	var pinned := _pin(batches)
 	var report := await _measure(panel, head, batches, records, buried,
-		accept_unbounded, bar)
+		accept_unbounded, bar, expected)
 	_unpin(pinned)
 	if bool(report.get("checked", false)):
 		report["references_moved"] = is_instance_valid(panel) \
@@ -512,7 +534,8 @@ func _sweep_jobs() -> void:
 ## Ask every batch and fold the replies into one report. Split out so the pin
 ## its caller takes is dropped on every path out of the measurement.
 func _measure(panel: Object, head: Dictionary, batches: Array, records: Array,
-		buried: Dictionary, accept_unbounded: bool, bar: Dictionary = {}) -> Dictionary:
+		buried: Dictionary, accept_unbounded: bool, bar: Dictionary = {},
+		expected: Array = []) -> Dictionary:
 	var envelope: Dictionary = {}
 	var raw_pairs: Array = []
 	for batch_entry in batches:
@@ -528,7 +551,8 @@ func _measure(panel: Object, head: Dictionary, batches: Array, records: Array,
 		envelope = reply
 		raw_pairs.append_array(reply.get("pairs", []) as Array)
 	envelope.merge(bar, true)
-	return _clearance_report(envelope, raw_pairs, records, buried, accept_unbounded)
+	return _clearance_report(envelope, raw_pairs, records, buried,
+		accept_unbounded, expected)
 
 
 ## Compare names, exact poses, mesh identities and each part's local transform.
@@ -721,11 +745,16 @@ func _blob_path(digest: String) -> String:
 ## batch agrees on them); `raw_pairs` is every batch's pairs together, which
 ## have to be re-sorted because each batch only sorted its own.
 func _clearance_report(envelope: Dictionary, raw_pairs: Array,
-		records: Array, buried: Dictionary, accept_unbounded: bool) -> Dictionary:
+		records: Array, buried: Dictionary, accept_unbounded: bool,
+		expected: Array = []) -> Dictionary:
 	var overlapping: Dictionary = buried.get("nodes", {})
 	var undecided: Dictionary = buried.get("undecided", {})
 	var undecided_references: Dictionary = buried.get("undecided_references", {})
 	var pairs: Array = []
+	# Which declaration each pair answered to, and what was measured for it.
+	var declared_rows: Array = []
+	var matched: Dictionary = {}
+	var excluded := 0
 	for entry in raw_pairs:
 		var raw: Dictionary = entry
 		var pair := {
@@ -738,6 +767,18 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 			"bound_mm": float(raw.get("bound_mm", raw.get("min_mm", 0.0))),
 			"pass": bool(raw.get("pass", false)),
 		}
+		# The declaration is matched on the points the WORKER measured, before
+		# anything below erases them: a region is a place in the world, and a
+		# pair with no located point can only be declared by name.
+		var declared: int = _Expected.index_for(expected,
+			str(pair["reference"]), str(pair["node"]),
+			_witness_points(raw))
+		var rule: Dictionary = expected[declared] if declared >= 0 else {}
+		if declared >= 0:
+			matched[declared] = true
+			pair["expected"] = true
+			pair["required_mm"] = _Expected.required_mm(rule)
+			pair["note"] = _Expected.describe(rule)
 		if overlapping.has(_pair_key(pair["reference"], pair["node"])):
 			# The worker measured surface to surface and found air between two
 			# faces; the interference check found this node crossing the solid
@@ -750,6 +791,27 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 			pair["note"] = "the interference check found this node crossing " \
 				+ "the solid or lying inside it; a mesh-to-mesh distance is " \
 				+ "unsigned and cannot see material a node is already inside"
+			if declared >= 0:
+				# A declaration says these surfaces MEET. Overlap is excused
+				# only up to the depth it declared, and only when that depth
+				# was actually measured — a node found by ray parity alone has
+				# none, and unprovable is not clean.
+				var depth := float(overlapping[
+					_pair_key(pair["reference"], pair["node"])])
+				var allowed: float = _Expected.allowance_mm(rule)
+				var holds: bool = depth > 0.0 and depth <= allowed
+				pair["pass"] = holds
+				pair["overlap_mm"] = depth
+				var measured := "; the overlap measures %s mm" % depth
+				if depth <= 0.0:
+					measured = "; this overlap has no measured depth (the " \
+						+ "interference check found it by ray parity, not " \
+						+ "by a crossing), so the declaration cannot excuse it"
+				pair["note"] = _Expected.describe(rule) + measured
+				declared_rows.append(_Expected.row(rule, str(pair["reference"]),
+					str(pair["node"]), "overlap", depth, holds))
+				if holds:
+					excluded += 1
 			pairs.append(pair)
 			continue
 		var doubt := ""
@@ -783,8 +845,21 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 			# keeps the doubt it was already given as its note.
 			pair["min_mm"] = 0.0
 			pair["bound_mm"] = 0.0
-			pair["pass"] = false
+			# A declared contact with no gap to keep is what these two are
+			# MEANT to do; the interference report named no crossing here, so
+			# there is nothing beyond the touch to excuse.
+			pair["pass"] = declared >= 0 \
+				and float(pair["required_mm"]) <= 0.0 \
+				and not bool(pair.get("containment_undecidable", false))
 			pair["touching"] = true
+			if declared >= 0:
+				pair["note"] = _Expected.describe(rule) \
+					+ "; the surfaces meet at 0 mm" + ("" if bool(pair["pass"])
+						else ", and this declaration does not cover that")
+				declared_rows.append(_Expected.row(rule, str(pair["reference"]),
+					str(pair["node"]), "gap", 0.0, bool(pair["pass"])))
+				if bool(pair["pass"]):
+					excluded += 1
 			if bool(pair.get("interference", false)):
 				# A node the interference report found inside the solid has no
 				# nearest-surface pair worth quoting: the unsigned distance's
@@ -795,6 +870,17 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 				pair["note"] = _contact_note(buried)
 			pairs.append(pair)
 			continue
+		if declared >= 0:
+			# Graded against the gap THIS pair declared rather than the call's.
+			pair["pass"] = float(pair["bound_mm"]) >= float(pair["required_mm"]) \
+				and not bool(pair.get("containment_undecidable", false))
+			pair["note"] = _Expected.describe(rule) \
+				+ "; the gap measures %s mm" % float(pair["min_mm"])
+			declared_rows.append(_Expected.row(rule, str(pair["reference"]),
+				str(pair["node"]), "gap", float(pair["min_mm"]),
+				bool(pair["pass"])))
+			if bool(pair["pass"]):
+				excluded += 1
 		if not str(raw.get("note", "")).is_empty() and not pair.has("note"):
 			pair["note"] = str(raw["note"])
 		pairs.append(pair)
@@ -815,7 +901,7 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 				continue
 			pair["bound_mm"] = float(pair["min_mm"])
 			pair["pass"] = float(pair["min_mm"]) > 0.0 \
-				and float(pair["min_mm"]) >= required
+				and float(pair["min_mm"]) >= _required_for(pair, required)
 			pair["graded_on"] = "min_mm alone (less the float32 quantization " \
 				+ "of the vertices): the tolerance bar was waived by " \
 				+ "accept_unbounded_tolerance"
@@ -858,7 +944,8 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 					or bool(pair.get("touching", false)):
 				continue
 			pair["bound_mm"] = maxf(float(pair["bound_mm"]) - quantization, 0.0)
-			if bool(pair.get("pass", false)) and float(pair["bound_mm"]) < required:
+			if bool(pair.get("pass", false)) \
+					and float(pair["bound_mm"]) < _required_for(pair, required):
 				pair["pass"] = false
 				pair["note"] = ("the gap clears required_mm by less than the "
 					+ "float32 quantization of the reference vertices (%s mm)") \
@@ -900,6 +987,17 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 		"interference_join": _join_note(buried),
 		"pairs": pairs,
 	}
+	if not expected.is_empty():
+		report["expected_contacts"] = declared_rows
+		report["excluded_count"] = excluded
+		report["expected_contacts_unmatched"] = _Expected.unmatched(expected,
+			matched)
+		report["expected_contacts_note"] = "a declared pair is graded on the "\
+			+ "gap IT declared instead of required_mm, and is listed above "\
+			+ "with the value measured for it; material overlap deeper than "\
+			+ "the declaration allows still fails, so an exclusion cannot "\
+			+ "hide a crash"
+	
 	if not pass_reason.is_empty():
 		report["pass_reason"] = pass_reason
 	if waived:
@@ -911,6 +1009,24 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 	return report
 
 
+## Where in the world a worker pair was realised: the two witness points, when
+## it has them. A declaration carrying a region is matched against these, so a
+## region drawn round the bosses does not excuse a contact at the far end of
+## the same node.
+func _witness_points(raw: Dictionary) -> Array:
+	var out: Array = []
+	if raw.has("solid_point_mm"):
+		out.append(_vector(raw["solid_point_mm"]))
+	if raw.has("reference_point_mm"):
+		out.append(_vector(raw["reference_point_mm"]))
+	return out
+
+
+## The gap this pair is graded against: the one it declared, or the call's.
+func _required_for(pair: Dictionary, fallback: float) -> float:
+	return float(pair["required_mm"]) if pair.has("required_mm") else fallback
+
+
 ## The (reference, node) pairs the panel's latest interference report names as
 ## crossing the solid or lying inside it, keyed the way a clearance pair is.
 ##
@@ -918,8 +1034,11 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 ## last eval result, so the answer is already there; asking again would rebuild
 ## the solid's collider for a question that has been answered.
 ##
-## Returns {fresh, stale?, reason?, nodes: {key: true}, undecided: {key: reason},
-## undecided_references: {reference: reason}}.
+## Returns {fresh, stale?, reason?, nodes: {key: penetration_mm}, undecided:
+## {key: reason}, undecided_references: {reference: reason}}. The depth travels
+## because a declared contact is excused only up to the overlap it declared,
+## and the unsigned distance has no depth of its own to compare; 0 means the
+## report found the pair but bounded no run inside it.
 ## `fresh` is false when no report describes the source about to be measured —
 ## the reply then says the join was unavailable rather than implying the
 ## distances are signed.
@@ -974,7 +1093,8 @@ func _buried_pairs(document: Dictionary, source: String, records: Array,
 	var nodes: Dictionary = out["nodes"]
 	for entry in (interference.get("pairs", []) as Array):
 		var pair: Dictionary = entry
-		nodes[_pair_key(str(pair.get("reference", "")), str(pair.get("node", "")))] = true
+		nodes[_pair_key(str(pair.get("reference", "")),
+			str(pair.get("node", "")))] = float(pair.get("penetration_mm", 0.0))
 	var undecided: Dictionary = out["undecided"]
 	var references: Dictionary = out["undecided_references"]
 	for entry in (interference.get("undecidable", []) as Array):

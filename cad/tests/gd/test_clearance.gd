@@ -223,6 +223,7 @@ func _run() -> void:
 	await _check_refusals(panel, checks)
 	await _check_buried(panel, checks)
 	await _check_flush_contact(panel, checks)
+	await _check_expected_contacts(panel, checks)
 	await _check_pin_across_a_repose(panel, checks)
 	await _check_pose_rewritten_in_place(panel, checks)
 	await _check_parts_changed_during_await(panel, checks)
@@ -878,6 +879,134 @@ func _check_flush_contact(panel: Node, checks: RefCounted) -> void:
 	panel.last_eval = _interference_over(SOURCE, [])
 
 
+# ---------------------------------------------------------------------------
+# EXPECTED CONTACTS — the pairs the design MEANT to touch
+# ---------------------------------------------------------------------------
+
+## An assembled design touches itself on purpose, and a check with no way to be
+## told that has no reachable pass.
+##
+## The fixture is the near bar brought to 0.2 mm of the solid — a designed
+## press, well inside a 1 mm requirement — and the same pair driven half a
+## millimetre INTO it through the interference join.
+##
+## ORACLE: the stand-in worker derives every distance from the bytes the module
+## shipped, so the 0.2 mm is the fixture's own, and the 0.5 mm overlap is the
+## depth the interference report carries. The declaration must pass the first
+## and fail the second; a declaration that allows half a millimetre of press
+## fit must pass the second. The region is checked on the third case, where one
+## declaration naming NO node has to pick exactly one of two pairs by where it
+## was measured — the two nodes are ten millimetres apart along z and nothing
+## else tells them apart.
+func _check_expected_contacts(panel: Node, checks: RefCounted) -> void:
+	panel.last_eval = _interference_over(SOURCE, [])
+	_gap_mm = 0.2
+	var intended: Array = [{"reference": REFERENCE_NAME, "node": NEAR_NODE,
+		"required_mm": 0.0, "why": "the cap must press the switch"}]
+	var declared: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 1.0, "expected_contacts": intended})
+	var near := _pair_for(declared, NEAR_NODE)
+	check("expected: a designed 0.2 mm contact declared intended PASSES a "
+			+ "1 mm requirement, keeps its measured gap, and is listed with "
+			+ "what was measured for it",
+			bool(declared.get("pass", false))
+				and bool(near.get("pass", false))
+				and bool(near.get("expected", false))
+				and absf(float(near.get("min_mm", -1.0)) - 0.2) < GAP_TOLERANCE_MM
+				and int(declared.get("excluded_count", 0)) == 1
+				and (declared.get("expected_contacts", []) as Array).size() == 1
+				and bool((((declared.get("expected_contacts", []) as Array)[0])
+					as Dictionary).get("excluded", false)),
+			"report = %s" % str(declared))
+
+	# THE FALSIFIER. The same declaration, with the cap half a millimetre INSIDE
+	# the switch: the interference report names the node and measures the depth.
+	panel.last_eval = _interference_over(SOURCE, [NEAR_NODE], [], "", 0.5)
+	var crashed: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 1.0, "expected_contacts": intended})
+	var buried := _pair_for(crashed, NEAR_NODE)
+	var crashed_row: Dictionary = (crashed.get("expected_contacts", []) as Array)[0]
+	check("expected: the SAME declaration over a pair that is 0.5 mm into the "
+			+ "solid still reports interference for that pair and fails — a "
+			+ "declaration cannot hide a crash",
+			not bool(crashed.get("pass", true))
+				and not bool(buried.get("pass", true))
+				and bool(buried.get("interference", false))
+				and absf(float(buried.get("overlap_mm", 0.0)) - 0.5) < 1e-6
+				and not bool(crashed_row.get("excluded", true))
+				and int(crashed.get("excluded_count", 0)) == 0,
+			"pair = %s, row = %s" % [str(buried), str(crashed_row)])
+
+	# And the depth is GRADED, not merely reported: a press fit declared deep
+	# enough to cover the same half millimetre passes.
+	var press: Array = [{"reference": REFERENCE_NAME, "node": NEAR_NODE,
+		"required_mm": -1.0, "why": "the pin is a 1 mm interference fit"}]
+	var fitted: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 1.0, "expected_contacts": press})
+	check("expected: an interference fit declared a millimetre deep DOES "
+			+ "cover the same 0.5 mm overlap, so the allowance is graded "
+			+ "rather than assumed",
+			bool(fitted.get("pass", false))
+				and bool(_pair_for(fitted, NEAR_NODE).get("pass", false))
+				and int(fitted.get("excluded_count", 0)) == 1,
+			"report = %s" % str(fitted))
+
+	# The region picks a PLACE, not a name. One declaration, no node named, a
+	# box round the far bar's contact: the near pair on the same reference is
+	# graded as if nothing had been declared.
+	panel.last_eval = _interference_over(SOURCE, [])
+	var far_z := POSE_ORIGIN.z - FAR_DROP_MM
+	var located: Array = [{"reference": REFERENCE_NAME, "required_mm": 0.0,
+		"region_mm": {
+			"min_mm": [POSE_ORIGIN.x - 5.0, POSE_ORIGIN.y - 5.0, far_z - 5.0],
+			"max_mm": [POSE_ORIGIN.x + 5.0, POSE_ORIGIN.y + 5.0, far_z + 5.0],
+		}}]
+	var placed: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 20.0, "expected_contacts": located})
+	var near_row := _pair_for(placed, NEAR_NODE)
+	var far_row := _pair_for(placed, FAR_NODE)
+	check("expected: a declaration with a region excuses only the pair "
+			+ "measured INSIDE it — the other pair of the same reference is "
+			+ "still graded against required_mm and still fails",
+			bool(far_row.get("expected", false))
+				and bool(far_row.get("pass", false))
+				and not bool(near_row.get("expected", false))
+				and not bool(near_row.get("pass", true))
+				and int(placed.get("excluded_count", 0)) == 1
+				and not bool(placed.get("pass", true)),
+			"near = %s, far = %s" % [str(near_row), str(far_row)])
+
+	# The same region drawn where this node is NOT: a stale exclusion grades
+	# nothing and says so.
+	var elsewhere: Array = [{"reference": REFERENCE_NAME, "node": NEAR_NODE,
+		"required_mm": 0.0, "region_mm": {
+			"min_mm": [POSE_ORIGIN.x - 5.0, POSE_ORIGIN.y - 5.0, far_z - 5.0],
+			"max_mm": [POSE_ORIGIN.x + 5.0, POSE_ORIGIN.y + 5.0, far_z + 5.0],
+		}}]
+	var missed: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 1.0, "expected_contacts": elsewhere})
+	check("expected: a declaration whose region holds no measured contact "
+			+ "matches nothing, is listed as unmatched, and leaves its node "
+			+ "graded against required_mm",
+			(missed.get("expected_contacts_unmatched", []) as Array).size() == 1
+				and int(missed.get("excluded_count", 0)) == 0
+				and not bool(_pair_for(missed, NEAR_NODE).get("pass", true))
+				and not bool(missed.get("pass", true)),
+			"report = %s" % str(missed))
+
+	var refused: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 1.0, "expected_contacts": [{"node": NEAR_NODE}]})
+	check("expected: a declaration that names no reference is REFUSED, not "
+			+ "dropped — an author who mistyped it would believe that pair "
+			+ "was excused",
+			not bool(refused.get("checked", true))
+				and str(refused.get("reason", "")).contains("expected_contacts"),
+			"report = %s" % str(refused))
+
+	_gap_mm = GAP_MM
+	panel.last_eval = _interference_over(SOURCE, [])
+
+
 ## An eval result carrying an interference report over `nodes`, stamped with
 ## the digest of `source` — the same SHA-256 of the DSL text the check writes
 ## on its own report, which is how a clearance call tells a report about this
@@ -886,13 +1015,17 @@ func _check_flush_contact(panel: Node, checks: RefCounted) -> void:
 ## collider generation, which is how it tells a report about these poses from
 ## one about where the references used to stand.
 func _interference_over(source: String, nodes: Array,
-		undecided: Array = [], whole_reference: String = "") -> Dictionary:
+		undecided: Array = [], whole_reference: String = "",
+		penetration_mm: float = 0.0) -> Dictionary:
 	var hasher := HashingContext.new()
 	hasher.start(HashingContext.HASH_SHA256)
 	hasher.update(source.to_utf8_buffer())
 	var pairs: Array = []
 	for node in nodes:
-		pairs.append({"reference": REFERENCE_NAME, "node": str(node)})
+		# The depth travels with the pair: a declared contact is excused only
+		# up to the overlap it declared, and the unsigned distance has none.
+		pairs.append({"reference": REFERENCE_NAME, "node": str(node),
+			"penetration_mm": penetration_mm})
 	var open_questions: Array = []
 	for node in undecided:
 		open_questions.append({

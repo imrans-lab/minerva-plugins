@@ -619,6 +619,9 @@ static func _await_eval(panel, args: Dictionary) -> Dictionary:
 ## The panel runs this check on every evaluation anyway; the verb exists so an
 ## agent can ask about ONE reference or ONE node, and so it can ask again after
 ## an edit without having to find the last eval result.
+##
+## expected_contacts declares the contacts the design means to have, per pair;
+## `count` then covers the rest. See scripts/expected_contacts.gd.
 static func _check_interference(panel, args: Dictionary) -> Dictionary:
 	if panel == null or not panel.has_method("check_interference"):
 		return _err("interference checking is not available on this panel")
@@ -634,6 +637,10 @@ static func _check_interference(panel, args: Dictionary) -> Dictionary:
 		# digest and the clearance join lines up per part.
 		"mesh": args.get("mesh", {}),
 		"source": str(args.get("source", "")),
+		# The contacts this design MEANS to have: measured like any other and
+		# then held out of the count while the overlap stays inside what was
+		# declared.
+		"expected_contacts": args.get("expected_contacts", []),
 		# An agent asking now: refused with `busy` while an evaluation's own
 		# check holds the geometry, rather than queued behind it. The caller
 		# can ask again; a wait it cannot see would just look like a hang.
@@ -676,6 +683,10 @@ static func _check_clearance(panel, args: Dictionary) -> Dictionary:
 		"node": str(args.get("node", "")),
 		"accept_unbounded_tolerance":
 			bool(args.get("accept_unbounded_tolerance", false)),
+		# The pairs this design MEANS to touch: graded against the gap each one
+		# declares instead of required_mm, and listed in the reply with what
+		# was measured for them.
+		"expected_contacts": args.get("expected_contacts", []),
 	})
 	if report.has("error"):
 		return _err(str(report["error"]))

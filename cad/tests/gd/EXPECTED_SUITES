@@ -238,7 +238,12 @@ test_cad_note.gd assertions=40
 # stray edges outnumber the whole budget still reports the unbounded
 # answer untruncated; one ray short, the ceiling is stated with the count
 # it left uncast).
-test_interference.gd assertions=71
+# + 6 expected contacts (two bosses through the SAME board node: the control,
+# a region round one of them leaving the other graded, the same region round
+# the other with the two remainders adding up to the whole, both declared and
+# the check passing, the falsifier — a contact 1.6 mm deep against a
+# declaration allowing 0.5 — and a declaration that matched nothing).
+test_interference.gd assertions=77
 
 # Clearance between the evaluated solid and a reference: two bars crossing at
 # right angles with 0.8 mm of air between them, the reference YAWED 30 degrees
@@ -329,7 +334,14 @@ test_interference.gd assertions=71
 # assertions: a pair at 0 mm whose interference join found no overlap is
 # touching, not interference; lifted 1e-5 mm it is a positive distance with
 # neither flag.
-test_clearance.gd assertions=66
+# Plus 6 expected-contact assertions: a designed 0.2 mm contact declared
+# intended passes a 1 mm requirement; the same declaration over a pair 0.5 mm
+# INTO the solid still reports interference and fails; a press fit declared a
+# millimetre deep does cover that 0.5; a region excuses only the pair measured
+# inside it and leaves the other pair of the same reference graded; a region
+# holding no measured contact is unmatched; a declaration naming no reference
+# is refused rather than dropped.
+test_clearance.gd assertions=72
 
 # Fasteners: a 60 x 60 x 1.6 board posed away from the origin AND TURNED (a
 # yaw and a lean, so the screw axis is nowhere near world z) with five 3.4 mm
