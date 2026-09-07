@@ -160,10 +160,10 @@ var _pinned_digests: Dictionary = {}
 ## is handed back, so a ticket names one answer exactly once.
 var _jobs: Dictionary = {}
 var _next_ticket: int = 0
-## How long the verb waits before handing back a ticket. Read from the
-## variable rather than the constant so a suite can drive the handover
-## without spending the window waiting for it; nothing in the panel ever
-## writes it.
+## How long the verb waits before handing back a ticket when the call does
+## not say (`wait_ms`). Read from the variable rather than the constant so a
+## suite can drive the handover without spending the window waiting for it;
+## nothing in the panel ever writes it.
 var first_reply_ms: int = FIRST_REPLY_MS
 
 
@@ -302,7 +302,7 @@ func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
 		return _no_clearance("the CAD panel is gone")
 	var handle := str(args.get("ticket", ""))
 	if not handle.is_empty():
-		return _collect(handle)
+		return await _collect(handle, maxi(int(args.get("wait_ms", 0)), 0))
 	_sweep_jobs()
 	var required_mm := float(args.get("required_mm", 0.0))
 	if required_mm <= 0.0:
@@ -417,7 +417,10 @@ func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
 		_buried_pairs(document, source, records, panel),
 		bool(args.get("accept_unbounded_tolerance", false)), bar,
 		declared["entries"] as Array)
-	await _wait_for(job, first_reply_ms)
+	# `wait_ms` is the caller's own budget for this call: 0 starts the
+	# measurement and hands the ticket straight back, which is how a caller
+	# with several parts to measure starts every one before waiting on any.
+	await _wait_for(job, maxi(int(args.get("wait_ms", first_reply_ms)), 0))
 	if str(job["status"]) == "running":
 		return _running(issued, job)
 	_jobs.erase(issued)
@@ -463,10 +466,11 @@ func _measure_into(job: Dictionary, panel: Object, head: Dictionary,
 	job["status"] = "settled"
 
 
-## Collect a ticket. A ticket is spent when its report is handed back: the
-## answer describes geometry that is already ageing, and a reader asking twice
-## must measure again rather than be handed a second copy of the old one.
-func _collect(handle: String) -> Dictionary:
+## Collect a ticket, waiting up to `wait_ms` for a running job to settle
+## first. A ticket is spent when its report is handed back: the answer
+## describes geometry that is already ageing, and a reader asking twice must
+## measure again rather than be handed a second copy of the old one.
+func _collect(handle: String, wait_ms: int = 0) -> Dictionary:
 	_sweep_jobs()
 	if not _jobs.has(handle):
 		return _no_clearance(("no clearance measurement is filed under ticket "
@@ -474,6 +478,8 @@ func _collect(handle: String) -> Dictionary:
 			+ "for %d s and it was dropped; ask again without a ticket to "
 			+ "start a new measurement") % [handle, TICKET_KEEP_MS / 1000])
 	var job: Dictionary = _jobs[handle]
+	if str(job["status"]) == "running" and wait_ms > 0:
+		await _wait_for(job, wait_ms)
 	if str(job["status"]) == "running":
 		return _running(handle, job)
 	_jobs.erase(handle)
@@ -935,7 +941,9 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 		pass_reason = ("%d declared contact(s) could only be applied "
 			+ "advisorily — an overlap held by a lower-bound chord, or a "
 			+ "region that excuses one witness point while the pair is "
-			+ "ungraded outside it; pass is withheld rather than certified")\
+			+ "ungraded outside it; pass is withheld rather than certified, "
+			+ "and those rows are advisory, not failures — no violation is "
+			+ "established by them")\
 			% unproven
 	if not bounded and not accept_unbounded:
 		verdict = false

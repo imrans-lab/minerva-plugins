@@ -8,14 +8,18 @@ pair is clear. Nothing short of a containment test settles it, and this
 module is that test.
 
 WHERE IT IS WORTH ASKING
-Only where one node's bounding box lies inside the other's. A mesh cannot be
-inside another whose box it is not inside, so every other pair is settled by
-its boxes, and the probe is paid for only on the pairs that need it.
+Only where the two nodes' bounding boxes overlap, and then PER CONNECTED
+COMPONENT: a node is often several disconnected shells (a header's pins, a
+part with a loose cap), and one of them can sit inside the other mesh while
+the node's box as a whole does not. Each component whose own box lies inside
+the other mesh's box is probed; a component whose box does not is settled by
+its box, and a pair whose boxes share nothing is never probed at all.
 
 HOW IT DECIDES
-One vertex of the inner mesh is enough: the two surfaces do not intersect
-(the distance between them is positive), so the whole inner mesh lies on one
-side of the outer surface and every one of its vertices answers the same way.
+One vertex of the inner component is enough: the two surfaces do not
+intersect (the distance between the meshes is positive), so the whole
+component lies on one side of the outer surface and every one of its
+vertices answers the same way.
 The side is read by ray parity — an odd number of crossings with the outer
 mesh's triangles means inside — along three directions chosen to lie on no
 axis and no edge in common; a direction that grazes an edge or a vertex can
@@ -89,6 +93,52 @@ def is_closed(vertices, faces) -> bool:
     return bool(len(counts)) and bool(np.all(counts == 2))
 
 
+def _welded(vertices, faces):
+    """Face corners as indices into the position-welded vertex set."""
+    import numpy as np
+
+    keys = np.round(np.asarray(vertices, dtype=float), _WELD_DECIMALS)
+    _unique, weld = np.unique(keys, axis=0, return_inverse=True)
+    return np.asarray(weld).reshape(-1)[np.asarray(faces, dtype=np.int64)]
+
+
+def components(vertices, faces) -> list:
+    """The connected components of a mesh, each as an array of face rows.
+
+    Connectivity is over welded edges: two faces sharing a position-welded
+    vertex are one component. Labels propagate by min-over-edges with
+    pointer jumping, which settles in a few passes over any mesh a node
+    holds.
+    """
+    import numpy as np
+
+    faces = np.asarray(faces, dtype=np.int64)
+    if len(vertices) == 0 or len(faces) == 0:
+        return []
+    tri = _welded(vertices, faces)
+    labels = np.arange(int(tri.max()) + 1)
+    edges = np.concatenate([tri[:, [0, 1]], tri[:, [1, 2]], tri[:, [2, 0]]])
+    while True:
+        low = np.minimum(labels[edges[:, 0]], labels[edges[:, 1]])
+        new = labels.copy()
+        np.minimum.at(new, edges[:, 0], low)
+        np.minimum.at(new, edges[:, 1], low)
+        new = new[new]
+        if np.array_equal(new, labels):
+            break
+        labels = new
+    face_label = labels[tri[:, 0]]
+    return [faces[face_label == label] for label in np.unique(face_label)]
+
+
+def _box_of(vertices, faces):
+    """Bounds of the vertices these faces use, ((min), (max))."""
+    import numpy as np
+
+    used = np.asarray(vertices, dtype=float)[np.unique(np.asarray(faces))]
+    return tuple(used.min(axis=0)), tuple(used.max(axis=0))
+
+
 def _crossings(origin, direction, vertices, faces) -> int:
     """How many triangles the ray from `origin` along `direction` crosses.
 
@@ -125,47 +175,85 @@ def point_inside(point, vertices, faces) -> Optional[bool]:
     return readings.pop()
 
 
+def _overlapping(box_a, box_b) -> bool:
+    """Do two boxes share any volume (faces included)?"""
+    return all(lo_a <= hi_b and lo_b <= hi_a for lo_a, lo_b, hi_a, hi_b
+               in zip(box_a[0], box_b[0], box_a[1], box_b[1]))
+
+
+def _components_inside(inner, outer, inner_name: str, outer_name: str,
+                       outer_box) -> Optional[dict]:
+    """Probe every component of `inner` whose box lies inside `outer`'s box.
+
+    Returns the first decisive verdict (contained or undecidable), the
+    "none" verdict when every probed component was outside, or None when no
+    component's box lies inside the outer box.
+    """
+    probed = 0
+    outer_closed: Optional[bool] = None
+    for faces in components(inner[0], inner[1]):
+        if nested(_box_of(inner[0], faces), outer_box) != "a_in_b":
+            continue
+        probed += 1
+        if outer_closed is None:
+            outer_closed = is_closed(outer[0], outer[1])
+        if not outer_closed:
+            return {
+                "containment": "undecidable",
+                "note": ("a component of %s has its box inside %s's, and %s "
+                         "is not a closed mesh, so ray parity cannot say "
+                         "whether %s is inside it"
+                         % (inner_name, outer_name, outer_name, inner_name)),
+            }
+        inside = point_inside(inner[0][int(faces[0][0])], outer[0], outer[1])
+        if inside is None:
+            return {
+                "containment": "undecidable",
+                "note": ("a component of %s has its box inside %s's and the "
+                         "three parity rays disagreed, so whether %s is "
+                         "inside %s is not decided"
+                         % (inner_name, outer_name, inner_name, outer_name)),
+            }
+        if inside:
+            return {
+                "containment": "%s_inside_%s" % (inner_name, outer_name),
+                "note": ("a component of %s lies wholly inside %s: the "
+                         "surfaces do not meet, but there is no air between "
+                         "the parts" % (inner_name, outer_name)),
+            }
+    if probed == 0:
+        return None
+    return {
+        "containment": "none",
+        "note": ("%d component(s) of %s have their box inside %s's, and a "
+                 "parity probe found each outside %s's material"
+                 % (probed, inner_name, outer_name, outer_name)),
+    }
+
+
 def containment(arrays_a, arrays_b, box_a, box_b) -> Optional[dict]:
     """The containment verdict for a pair with air between its surfaces.
 
     `arrays_*` are (vertices, faces); `box_*` their bounds. Returns None when
-    neither box lies inside the other (nothing to ask), else
+    the boxes share nothing or no component's box lies inside the other
+    mesh's box (nothing to ask), else
     {"containment": "a_inside_b" | "b_inside_a" | "none" | "undecidable",
-     "note": why}.
+     "note": why}. Missing arrays or boxes are undecidable, never clean: the
+    question cannot be asked without the triangles.
     """
-    which = nested(box_a, box_b)
-    if which is None:
-        return None
-    inner, outer = (arrays_a, arrays_b) if which == "a_in_b" else (arrays_b, arrays_a)
-    inner_name = "a" if which == "a_in_b" else "b"
-    outer_name = "b" if which == "a_in_b" else "a"
-    if not is_closed(outer[0], outer[1]):
+    if arrays_a is None or arrays_b is None or box_a is None or box_b is None:
         return {
             "containment": "undecidable",
-            "note": ("%s's box lies inside %s's, and %s is not a closed mesh, "
-                     "so ray parity cannot say whether %s is inside it"
-                     % (inner_name, outer_name, outer_name, inner_name)),
+            "note": ("the triangles or bounds of one mesh were not available "
+                     "to the containment probe, so whether one part lies "
+                     "inside the other is not decided"),
         }
-    if len(inner[0]) == 0:
+    if not _overlapping(box_a, box_b):
         return None
-    inside = point_inside(inner[0][0], outer[0], outer[1])
-    if inside is None:
-        return {
-            "containment": "undecidable",
-            "note": ("%s's box lies inside %s's and the three parity rays "
-                     "disagreed, so whether %s is inside %s is not decided"
-                     % (inner_name, outer_name, inner_name, outer_name)),
-        }
-    if inside:
-        return {
-            "containment": "%s_inside_%s" % (inner_name, outer_name),
-            "note": ("%s lies wholly inside %s: the surfaces do not meet, "
-                     "but there is no air between the parts"
-                     % (inner_name, outer_name)),
-        }
-    return {
-        "containment": "none",
-        "note": ("%s's box lies inside %s's, and a parity probe found %s "
-                 "outside %s's material" % (inner_name, outer_name,
-                                             inner_name, outer_name)),
-    }
+    verdict = _components_inside(arrays_a, arrays_b, "a", "b", box_b)
+    if verdict is not None and verdict["containment"] != "none":
+        return verdict
+    other = _components_inside(arrays_b, arrays_a, "b", "a", box_a)
+    if other is not None and other["containment"] != "none":
+        return other
+    return verdict or other

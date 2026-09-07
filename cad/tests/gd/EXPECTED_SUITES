@@ -346,7 +346,7 @@ test_interference.gd assertions=77
 # tolerance grades EVERY row false; the reply states how many pairs were
 # hidden and states none when nothing was filtered; limit applies to what
 # survives the filter, so the surviving row can be the further of the two.
-test_clearance.gd assertions=75
+test_clearance.gd assertions=76
 
 # Reference against reference, and how tall the references are over a
 # footprint. Two 6 x 8 x 4 blocks posed 0.5 mm apart (their faces overlapping,
@@ -706,7 +706,7 @@ test_eval_banner.gd assertions=9
 # rather than pass + 1 a leg refused with `busy` is retried until it answers
 # + 2 a clearance still in the worker comes back as one ticket beside the rows
 # already in hand, and a crash still reads fail.
-test_check_design.gd assertions=16
+test_check_design.gd assertions=22
 
 # minerva_cad_snapshot_fit: a capture framed on the evaluated solid, a named
 # reference or a world box, rendered from a camera of its own so the pane the

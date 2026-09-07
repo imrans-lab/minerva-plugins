@@ -302,6 +302,20 @@ func _check_ticket(panel: Node, checks: RefCounted) -> void:
 				and same_distance,
 			"collected = %s" % str(collected))
 
+	# wait_ms is the caller's own budget: 0 hands the ticket straight back,
+	# and a collect with a budget waits inside it for the report.
+	var quick: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5, "wait_ms": 0})
+	var waited: Dictionary = await checks.check_clearance(panel,
+		{"ticket": str(quick.get("ticket", "")), "wait_ms": 2000})
+	check("ticket: wait_ms=0 starts and hands the ticket back at once, and a "
+			+ "collect with wait_ms waits for the report inside that budget",
+			str(quick.get("status", "")) == "running"
+				and bool(waited.get("checked", false))
+				and str(waited.get("status", "")) == "complete"
+				and str(waited.get("ticket", "")) == str(quick.get("ticket", "")),
+			"quick = %s, waited = %s" % [str(quick), str(waited)])
+
 	var again: Dictionary = await checks.check_clearance(panel,
 		{"ticket": handle})
 	check("ticket: a ticket is spent once its report is handed back — asking "

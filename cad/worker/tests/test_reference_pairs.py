@@ -256,6 +256,90 @@ class TestContainment:
         assert pair["pass"] is False and result["pass"] is False
 
 
+def _union(*meshes):
+    """Several closed boxes as ONE mesh: a node made of disconnected shells."""
+    verts, faces = [], []
+    for box_verts, box_faces in meshes:
+        base = len(verts)
+        verts.extend(box_verts)
+        faces.extend(tuple(base + i for i in tri) for tri in box_faces)
+    return verts, faces
+
+
+class TestContainmentPerComponent:
+    """A node is often several disconnected shells, and the node's box as a
+    whole says nothing about where each shell is.
+
+    ORACLE: B is two cubes, [2,3]^3 inside A = [0,10]^3 and [20,21]^3 far
+    beside it. B's whole box, [2,21]^3, neither contains A's nor lies inside
+    it, so a probe keyed on whole-node boxes asks nothing and passes the pair
+    at 2 mm of surface distance — with B's first shell buried in A's material.
+    Probed per component, the pair is b_inside_a and fails. The same B with
+    its near shell moved to [12,13]^3 has both shells outside A and passes.
+    """
+
+    def test_a_disconnected_shell_inside_the_other_part_is_an_overlap(self, tmp_path):
+        pytest.importorskip("fcl")
+        verts_a, faces_a = _box((0.0, 0.0, 0.0), (10.0, 10.0, 10.0))
+        verts_b, faces_b = _union(_box((2.0, 2.0, 2.0), (3.0, 3.0, 3.0)),
+                                  _box((20.0, 20.0, 20.0), (21.0, 21.0, 21.0)))
+        result = rp.reference_pairs({
+            "required_mm": 0.5,
+            "targets": [_target(tmp_path, "shell", "Shell/Body", verts_a, faces_a),
+                        _target(tmp_path, "pins", "Pins/Body", verts_b, faces_b)],
+        })["result"]
+        pair = result["pairs"][0]
+        assert pair["min_mm"] == pytest.approx(2.0, abs=1e-4)
+        assert pair["containment"] == "b_inside_a"
+        assert pair["overlap"] is True
+        assert pair["pass"] is False and result["pass"] is False
+
+    def test_two_shells_both_beside_the_other_part_pass(self, tmp_path):
+        pytest.importorskip("fcl")
+        verts_a, faces_a = _box((0.0, 0.0, 0.0), (10.0, 10.0, 10.0))
+        verts_b, faces_b = _union(_box((12.0, 2.0, 2.0), (13.0, 3.0, 3.0)),
+                                  _box((20.0, 20.0, 20.0), (21.0, 21.0, 21.0)))
+        result = rp.reference_pairs({
+            "required_mm": 0.5,
+            "targets": [_target(tmp_path, "shell", "Shell/Body", verts_a, faces_a),
+                        _target(tmp_path, "pins", "Pins/Body", verts_b, faces_b)],
+        })["result"]
+        pair = result["pairs"][0]
+        assert pair["min_mm"] == pytest.approx(2.0, abs=1e-4)
+        assert "containment" not in pair
+        assert pair["pass"] is True and result["pass"] is True
+
+
+class TestContainmentSurvivesEviction:
+    """The tree cache is a bounded LRU shared by every request, and a request
+    that names more targets than it holds evicts its own first target while
+    the later ones are built.
+
+    ORACLE: nested A = [0,10]^3 and B = [2,3]^3 plus a far C, under an LRU of
+    two. A is built first and evicted by C; the request still holds A's tree
+    locally, so the distance reads 2 mm, and the containment probe must read
+    A's triangles from the same place — a probe that asked the cache would
+    find nothing, ask nothing, and pass the buried part.
+    """
+
+    def test_a_target_evicted_mid_request_is_still_probed(self, tmp_path, monkeypatch):
+        pytest.importorskip("fcl")
+        monkeypatch.setattr(clr, "_reference_trees", clr._LRU(2))
+        verts_a, faces_a = _box((0.0, 0.0, 0.0), (10.0, 10.0, 10.0))
+        verts_b, faces_b = _box((2.0, 2.0, 2.0), (3.0, 3.0, 3.0))
+        verts_c, faces_c = _box((40.0, 0.0, 0.0), (41.0, 1.0, 1.0))
+        targets = [_target(tmp_path, "shell", "Shell/Body", verts_a, faces_a),
+                   _target(tmp_path, "cap", "Cap/Body", verts_b, faces_b),
+                   _target(tmp_path, "far", "Far/Body", verts_c, faces_c)]
+        result = rp.reference_pairs({"required_mm": 0.5, "targets": targets,
+                                     "pairs": [[0, 1], [0, 2]]})["result"]
+        assert clr._reference_trees.get(targets[0]["key"]) is None
+        nested_pair = [p for p in result["pairs"] if p["b"]["node"] == "Cap/Body"][0]
+        assert nested_pair["min_mm"] == pytest.approx(2.0, abs=1e-4)
+        assert nested_pair["containment"] == "b_inside_a"
+        assert nested_pair["pass"] is False and result["pass"] is False
+
+
 def test_containment_probe_needs_no_geometry_backend():
     """The parity walk is numpy over the triangles: the cube's own vertex at
     (2,2,2) is inside [0,10]^3 and a point at (12,2,2) is not."""
@@ -267,3 +351,12 @@ def test_containment_probe_needs_no_geometry_backend():
     assert ct.point_inside((12.0, 2.0, 2.0), verts, faces) is False
     assert ct.nested(((2, 2, 2), (3, 3, 3)), ((0, 0, 0), (10, 10, 10))) == "a_in_b"
     assert ct.nested(((0, 0, 0), (10, 10, 10)), ((12, 2, 2), (13, 3, 3))) is None
+    # Two boxes in one mesh are two components; missing triangles are
+    # undecidable, never clean.
+    two = _union(_box((2, 2, 2), (3, 3, 3)), _box((20, 20, 20), (21, 21, 21)))
+    assert len(ct.components(*two)) == 2
+    assert ct.containment(None, (verts, faces), None,
+                          ((0, 0, 0), (10, 10, 10)))["containment"] == "undecidable"
+    inside = ct.containment(two, (verts, faces), ((2, 2, 2), (21, 21, 21)),
+                            ((0, 0, 0), (10, 10, 10)))
+    assert inside["containment"] == "a_inside_b"

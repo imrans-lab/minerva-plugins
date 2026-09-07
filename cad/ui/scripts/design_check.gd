@@ -26,6 +26,21 @@ extends RefCounted
 ## reply has the same shape and every row in it describes the geometry
 ## standing now.
 ##
+## WITH PARTS, EVERY CLEARANCE LEG STARTS BEFORE ANY IS WAITED ON. Each part
+## is its own worker measurement, so they are started with no wait and then
+## collected against ONE window shared by all of them; two slow parts cost
+## one window, not one each. A part still running after that travels as its
+## own ticket under tickets.clearance, collected through
+## minerva_cad_check_clearance — never as this verb's single ticket, because
+## collecting that folds one part's leg and would lose the rows the finished
+## parts already put in this reply.
+##
+## UNCERTIFIED IS NOT FAILED. A clearance row the check excused on evidence
+## it could not certify (an overlap inside its allowance on a sampled depth,
+## a region that leaves the pair ungraded outside its box) travels under
+## `uncertified_rows`, never among the failing rows: it makes the verdict
+## advisory, and a real violation beside it still fails.
+##
 ## No class_name: off-tree plugin scripts cannot use class_name.
 ## Consumers: ui/panel_tools.gd (the verb layer).
 
@@ -44,6 +59,14 @@ const DEFAULT_CLEARANCE_LIMIT: int = 10
 ## the pair and put the reader at the crash; the full point list, in both
 ## frames, is one minerva_cad_check_interference call away.
 const MAX_CROSSING_POINTS: int = 3
+
+const _ReplyShape: Script = preload("reply_shape.gd")
+
+## The one window every part's clearance leg is collected against, in
+## milliseconds. The same length the clearance client waits for a single
+## measurement before it hands back a ticket: inside the caller's own tool
+## window, whatever the number of parts.
+const CLEARANCE_WINDOW_MS: int = 20000
 
 
 ## Run the three checks and fold them into one reply.
@@ -72,7 +95,10 @@ static func run(panel, args: Dictionary, per_part: Callable,
 		# part-scoped call has one leg per part, and a ticket that did not
 		# travel is a measurement nobody can collect.
 		"tickets": {},
+		# Clearance rows excused on evidence the check could not certify.
+		"uncertified": [],
 	}
+	var scoped := not (args.get("parts", []) as Array).is_empty()
 
 	var solid_args := args.duplicate(true)
 	# The ticket names a clearance measurement and nothing else; the other two
@@ -89,16 +115,21 @@ static func run(panel, args: Dictionary, per_part: Callable,
 	if int(clearance_args.get("limit", 0)) <= 0:
 		clearance_args["limit"] = DEFAULT_CLEARANCE_LIMIT
 	var clearance_reply: Dictionary = {}
-	if handle.is_empty():
-		clearance_reply = await _unbusy(panel, clearance_args, per_part, clearance)
-	else:
+	if not handle.is_empty():
 		# A ticket is collected directly: the per-part wrapper would start a
 		# second measurement beside the one being collected.
 		clearance_reply = await clearance.call(panel, clearance_args)
+	elif scoped:
+		clearance_args["wait_ms"] = 0
+		clearance_reply = await _collect_window(panel, clearance_args,
+			await _unbusy(panel, clearance_args, per_part, clearance), clearance)
+	else:
+		clearance_reply = await _unbusy(panel, clearance_args, per_part, clearance)
 	var clearance_rows: Array = _fold_clearance(clearance_reply, state)
 
 	var failing := interference_rows.size() + clearance_rows.size() \
 		+ fastener_rows.size()
+	var uncertified: Array = state["uncertified"]
 	var out := {
 		"success": true,
 		"units": "mm",
@@ -109,29 +140,65 @@ static func run(panel, args: Dictionary, per_part: Callable,
 		"clearance": clearance_rows,
 		"fasteners": fastener_rows,
 		"failing_rows": failing,
+		"uncertified_rows": uncertified,
+		"uncertified": uncertified.size(),
 		"hidden_counts": state["counts"],
 		"checks": state["checks"],
 		"verdict_note": "fail = a row below is wrong. advisory = nothing "
-			+ "failed but something could not be decided — read `checks` and "
-			+ "`notes`. pass = every check ran and every row cleared, with "
-			+ "the contacts in expected_contacts held out by name.",
+			+ "failed but something could not be decided — read `checks`, "
+			+ "`notes` and `uncertified_rows` (declared contacts excused on "
+			+ "evidence that could not be certified; not failures). pass = "
+			+ "every check ran and every row cleared, with the contacts in "
+			+ "expected_contacts held out by name.",
 	}
 	if not (state["notes"] as Array).is_empty():
 		out["notes"] = state["notes"]
-	_attach_tickets(out, state["tickets"] as Dictionary)
+	_attach_tickets(out, state["tickets"] as Dictionary, scoped)
 	return out
 
 
+## Give every part's clearance leg one shared window. The legs were started
+## with no wait, so `reply` holds a ticket per part that did not answer at
+## once; each is collected in turn with whatever is left of the window, and
+## a collected report replaces that part's row. A part still running when
+## the window closes keeps its ticket for the fold to carry.
+static func _collect_window(panel, args: Dictionary, reply: Dictionary,
+		clearance: Callable) -> Dictionary:
+	if not (reply.get("parts", null) is Array):
+		return reply
+	var deadline := Time.get_ticks_msec() + CLEARANCE_WINDOW_MS
+	var rows: Array = reply["parts"]
+	for index in range(rows.size()):
+		var row: Dictionary = rows[index]
+		var ticket := str(row.get("ticket", ""))
+		if str(row.get("status", "")) != "running" or ticket.is_empty():
+			continue
+		var left := deadline - Time.get_ticks_msec()
+		if left <= 0:
+			continue
+		var collected: Dictionary = await clearance.call(panel, {
+			"ticket": ticket, "wait_ms": left,
+			"limit": int(args.get("limit", 0)),
+			"failing_only": bool(args.get("failing_only", false)),
+		})
+		collected["part"] = str(row.get("part", ""))
+		rows[index] = collected
+	return reply
+
+
 ## The clearance tickets a reply has to carry, whichever shape they came in.
-## One part (or none) is one ticket, collected by calling this verb again
-## with it; several parts are one ticket EACH, and each is collected on its
-## own through minerva_cad_check_clearance, because this verb's own ticket
-## argument names one measurement.
-static func _attach_tickets(out: Dictionary, tickets: Dictionary) -> void:
+## An unscoped call is one measurement and one ticket, collected by calling
+## this verb again with it. A part-scoped call is one ticket per part still
+## running, each collected on its own through minerva_cad_check_clearance —
+## even when only one part is left, because this verb's own ticket argument
+## folds ONE leg, and the rows the finished parts put in this reply would
+## not be in that fold.
+static func _attach_tickets(out: Dictionary, tickets: Dictionary,
+		scoped: bool) -> void:
 	if tickets.is_empty():
 		return
 	out["status"] = "running"
-	if tickets.size() == 1:
+	if tickets.size() == 1 and not scoped:
 		var ticket := str(tickets.values()[0])
 		out["ticket"] = ticket
 		out["tickets"] = {"clearance": ticket}
@@ -143,11 +210,13 @@ static func _attach_tickets(out: Dictionary, tickets: Dictionary) -> void:
 		return
 	out["tickets"] = {"clearance": tickets.duplicate()}
 	out["ticket_note"] = ("the clearance leg is still in the worker for %d "
-		+ "parts, one ticket each under tickets.clearance; the interference "
-		+ "and fastener rows above are complete. Collect each with "
-		+ "minerva_cad_check_clearance ticket=<ticket> (failing_only=true "
-		+ "for the rows this verb would show), or call this verb again "
-		+ "without parts= once they have had their window.") % tickets.size()
+		+ "part(s), one ticket each under tickets.clearance; the interference "
+		+ "and fastener rows above are complete, and so are the clearance "
+		+ "rows of every part that finished — this verdict already counts "
+		+ "them. Collect each ticket with minerva_cad_check_clearance "
+		+ "ticket=<ticket> (failing_only=true for the rows this verb would "
+		+ "show); do NOT pass it to this verb, which would fold that one "
+		+ "part alone and drop the finished parts' rows.") % tickets.size()
 
 
 # ---------------------------------------------------------------------------
@@ -264,9 +333,10 @@ static func _fold_interference(reply: Dictionary, state: Dictionary) -> Array:
 
 ## The failing clearance rows. The verb layer has already dropped the pairs
 ## that cleared and kept the closest of what is left, and its own counts say
-## how many rows are behind the filter. The leg's own verdict is read as
-## well: a report that failed for a reason no row carries is folded as
-## unknown, never as clean.
+## how many rows are behind the filter. A row the check excused without
+## certifying it goes to `uncertified` instead — advisory, not failed. The
+## leg's own verdict is read as well: a report that failed for a reason no
+## row carries is folded as unknown, never as clean.
 static func _fold_clearance(reply: Dictionary, state: Dictionary) -> Array:
 	var rows: Array = []
 	var total := 0
@@ -293,6 +363,13 @@ static func _fold_clearance(reply: Dictionary, state: Dictionary) -> Array:
 			var pair: Dictionary = (entry as Dictionary).duplicate(true)
 			if not part.is_empty():
 				pair["part"] = part
+			if _ReplyShape.pair_uncertified(pair):
+				(state["uncertified"] as Array).append(pair)
+				_unknown(state, ("a declared contact%s (%s/%s) is excused "
+					+ "on evidence the check could not certify; advisory, "
+					+ "not a failure") % [_of(part),
+					str(pair.get("reference", "")), str(pair.get("node", ""))])
+				continue
 			rows.append(pair)
 		if (bool(report.get("advisory", false)) \
 				or not bool(report.get("tolerance_bounded", true))) \

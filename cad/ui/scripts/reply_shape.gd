@@ -91,13 +91,30 @@ static func filter_clearance(report: Dictionary, limit: int, failing_only: bool)
 	var hidden := pairs.size() - shown.size()
 	out["pairs_hidden"] = hidden
 	if failing_only:
-		out["pairs_failing"] = kept.size()
+		# An uncertified row is kept — it did not clear — but it is not a
+		# failure: no violation is established by it, and a count that folded
+		# the two together would turn a declared touch into a defect.
+		var uncertified := 0
+		for entry in kept:
+			if pair_uncertified(entry as Dictionary):
+				uncertified += 1
+		out["pairs_failing"] = kept.size() - uncertified
+		out["pairs_uncertified"] = uncertified
 	if hidden > 0:
 		out["pairs_filter"] = ("%d of %d pairs shown, closest first%s; "
 			+ "%d hidden; `pass` is graded over ALL of them — call again "
 			+ "without limit/failing_only for the rest") % [shown.size(),
 			pairs.size(), " (failing only)" if failing_only else "", hidden]
 	return out
+
+
+## Is this row an ADVISORY exclusion rather than a failure? A declared
+## overlap excused on a sampled depth, or a declared region that leaves the
+## pair ungraded outside its box: neither clears, neither establishes a
+## violation, and a caller folding rows into a verdict keeps them apart.
+static func pair_uncertified(pair: Dictionary) -> bool:
+	return bool(pair.get("excused_uncertified", false)) \
+		or bool(pair.get("ungraded_outside_region", false))
 
 
 ## Did this pair clear the gap it had to keep?

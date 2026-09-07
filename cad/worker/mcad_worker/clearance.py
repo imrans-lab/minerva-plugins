@@ -243,30 +243,33 @@ def _build_tree(vertices, faces):
     return model
 
 
-def _tree_for(key: str, path: Optional[str]) -> tuple[Any, int, bool]:
-    """The cached tree for `key`, building it from `path` on a miss.
+def _entry_for(key: str, path: Optional[str]) -> tuple[tuple, bool]:
+    """The cache entry for `key`, building it from `path` on a miss.
 
-    Returns (tree, triangle count, cached) — `cached` is what lets the reply
-    say whether this call paid for a build, which is the only honest way to
-    report the cost of a check that is meant to run on every evaluation.
-
-    The cache entry also carries the mesh's world bounding box: a built BVH
-    exposes no bounds, and re-reading a blob to recover six numbers would
-    undo the point of caching the tree.
+    The entry is (tree, triangle count, world bounds, (vertices, faces)) and
+    `cached` says whether this call paid for a build. The arrays and bounds
+    ride with the tree because a containment probe walks the triangles the
+    BVH was built from, a built BVH exposes no bounds, and re-reading the
+    blob for either would undo the point of caching. A caller holds the
+    whole entry for the length of its request: the LRU may evict the key
+    while later targets of the same request are built.
     """
     entry = _reference_trees.take(key)
     if entry is not None:
-        return entry[0], entry[1], True
+        return entry, True
     if not path:
         raise KeyError(key)
     vertices, faces = read_blob(path, key)
-    tree = _build_tree(vertices, faces)
-    # The arrays ride along: a containment probe walks the triangles the
-    # BVH was built from, and re-reading the blob for them would undo the
-    # point of caching the tree.
-    _reference_trees.put(key, (tree, len(faces), _bounds_of(vertices),
-                               (vertices, faces)))
-    return tree, len(faces), False
+    entry = (_build_tree(vertices, faces), len(faces), _bounds_of(vertices),
+             (vertices, faces))
+    _reference_trees.put(key, entry)
+    return entry, False
+
+
+def _tree_for(key: str, path: Optional[str]) -> tuple[Any, int, bool]:
+    """(tree, triangle count, cached) for `key` — see _entry_for."""
+    entry, cached = _entry_for(key, path)
+    return entry[0], entry[1], cached
 
 
 def _bounds_of(vertices) -> Optional[tuple[list, list]]:

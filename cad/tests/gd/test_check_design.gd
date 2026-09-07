@@ -63,6 +63,9 @@ func _run() -> void:
 	await _check_a_running_clearance_comes_back_as_a_ticket()
 	await _check_a_certified_failure_the_filter_hides_still_fails()
 	await _check_parts_each_carry_their_own_ticket()
+	await _check_an_uncertified_exclusion_is_advisory_not_a_failure()
+	await _check_a_finished_part_failing_is_not_lost_behind_a_ticket()
+	await _check_parts_share_one_clearance_window()
 
 
 # ---------------------------------------------------------------------------
@@ -336,6 +339,147 @@ func _check_parts_each_carry_their_own_ticket() -> void:
 	panel.free()
 
 
+## ORACLE: a declared contact whose overlap measures 0.05 mm inside a 0.1 mm
+## allowance is excused on a sampled depth (excused_uncertified), and a
+## declared region leaves its pair ungraded outside the box
+## (ungraded_outside_region). Neither establishes a violation: the verdict
+## is advisory, both rows travel under uncertified_rows, and failing_rows is
+## 0. Put a real 0.9 mm pinch beside them and the verdict is fail with
+## exactly that one failing row, the two uncertified rows still apart.
+func _check_an_uncertified_exclusion_is_advisory_not_a_failure() -> void:
+	var panel := _panel()
+	panel.interference = _interference_report([])
+	var seated := _gap(0.0)
+	seated["interference"] = true
+	seated["overlap_mm"] = 0.05
+	seated["expected"] = true
+	seated["required_mm"] = 0.0
+	seated["pass"] = false
+	seated["excused_uncertified"] = true
+	var regional := _gap(2.0)
+	regional["expected"] = true
+	regional["declared_region"] = true
+	regional["pass"] = false
+	regional["ungraded_outside_region"] = true
+	var report := _clearance_report([seated, regional, _gap(3.0)])
+	report["advisory"] = true
+	report["pass_reason"] = "2 declared contact(s) could only be applied "\
+		+ "advisorily; pass is withheld rather than certified"
+	panel.clearance = report
+	panel.fasteners = _fastener_report([_good_screw()])
+	var declared := [{"reference": "board", "node": "board/Body_0",
+		"allowance_mm": 0.1, "why": "seats on the bosses"}]
+	var reply: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_check_design", {"required_mm": REQUIRED_MM,
+				"screw": {"dia_mm": 3.0, "length_mm": 8.0},
+				"expected_contacts": declared})
+	var uncertified: Array = reply.get("uncertified_rows", []) as Array
+	check("an overlap inside its allowance on a sampled depth and a region "
+			+ "declaration are advisory: verdict advisory, failing_rows 0, "
+			+ "both rows under uncertified_rows",
+			str(reply.get("verdict", "")) == "advisory"
+				and int(reply.get("failing_rows", -1)) == 0
+				and (reply["clearance"] as Array).is_empty()
+				and uncertified.size() == 2
+				and int(reply.get("uncertified", 0)) == 2,
+			"reply = %s" % str(reply))
+
+	report["pairs"] = [seated, _pinch(), regional]
+	panel.clearance = report
+	var mixed: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_check_design", {"required_mm": REQUIRED_MM,
+				"screw": {"dia_mm": 3.0, "length_mm": 8.0},
+				"expected_contacts": declared})
+	var rows: Array = mixed["clearance"]
+	check("a real pinch beside them still fails, as the one failing row, "
+			+ "with the two uncertified rows kept apart from it",
+			str(mixed.get("verdict", "")) == "fail"
+				and int(mixed.get("failing_rows", 0)) == 1
+				and rows.size() == 1
+				and absf(float((rows[0] as Dictionary)["min_mm"]) - PINCH_MM) < 1e-6
+				and int(mixed.get("uncertified", 0)) == 2,
+			"mixed = %s" % str(mixed))
+	panel.free()
+
+
+## ORACLE: parts=["bottom", "top"]; bottom's clearance finishes with a 0.9 mm
+## pinch and top's is still running. The reply must be verdict fail with
+## bottom's row in it, and top's ticket must travel ONLY under
+## tickets.clearance — never as this verb's own `ticket`, which collects one
+## leg and would fold a verdict without bottom's row.
+func _check_a_finished_part_failing_is_not_lost_behind_a_ticket() -> void:
+	var panel := _panel()
+	panel.interference = _interference_report([])
+	panel.clearance_by_part = {
+		"bottom": _clearance_report([_pinch(), _gap(2.5)]),
+		"top": {"checked": false, "status": "running", "ticket": "per-part",
+			"pairs": [], "elapsed_ms": 2000,
+			"reason": "the measurement is still running in the worker"},
+	}
+	panel.fasteners = _fastener_report([_good_screw()])
+	var reply: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_check_design",
+			{"required_mm": REQUIRED_MM, "parts": ["bottom", "top"]})
+	var rows: Array = reply["clearance"]
+	var tickets: Dictionary = (reply.get("tickets", {}) as Dictionary) \
+		.get("clearance", {}) as Dictionary
+	check("bottom's pinch is a failing row and the verdict is fail even "
+			+ "though top is still measuring",
+			str(reply.get("verdict", "")) == "fail"
+				and rows.size() == 1
+				and str((rows[0] as Dictionary).get("part", "")) == "bottom",
+			"reply = %s" % str(reply))
+	check("top's ticket travels under tickets.clearance only — no "
+			+ "check_design ticket is offered that would fold top alone",
+			str(reply.get("status", "")) == "running"
+				and not reply.has("ticket")
+				and tickets.size() == 1
+				and str(tickets.get("top", "")) == "clearance-top"
+				and str(reply.get("ticket_note", "")).contains("minerva_cad_check_clearance"),
+			"reply = %s" % str(reply))
+	panel.free()
+
+
+## ORACLE: with two parts, both clearance legs are STARTED (wait_ms 0) before
+## either is waited on, and then collected against one shared window; a
+## part that settles inside it is folded from its collected report. The
+## stand-in logs every clearance call in order: two starts, then two
+## collects carrying a positive wait, and top's collected pinch is a row.
+func _check_parts_share_one_clearance_window() -> void:
+	var panel := _panel()
+	panel.interference = _interference_report([])
+	panel.clearance = {"checked": false, "status": "running",
+		"ticket": "per-part", "pairs": [], "elapsed_ms": 2000,
+		"reason": "the measurement is still running in the worker"}
+	panel.collect_replies = {"clearance-top": _clearance_report([_pinch()])}
+	panel.fasteners = _fastener_report([_good_screw()])
+	var reply: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_check_design",
+			{"required_mm": REQUIRED_MM, "parts": ["bottom", "top"]})
+	var calls: Array = panel.clearance_calls
+	check("both legs start with no wait before either is collected, and "
+			+ "the collects carry the shared window",
+			calls.size() == 4
+				and str(calls[0]) == "start:bottom:wait=0"
+				and str(calls[1]) == "start:top:wait=0"
+				and str(calls[2]).begins_with("collect:clearance-bottom:wait=")
+				and not str(calls[2]).ends_with("wait=0")
+				and str(calls[3]).begins_with("collect:clearance-top:wait="),
+			"calls = %s" % str(calls))
+	var rows: Array = reply["clearance"]
+	var tickets: Dictionary = (reply.get("tickets", {}) as Dictionary) \
+		.get("clearance", {}) as Dictionary
+	check("top settled inside the window and its pinch is folded as top's "
+			+ "row; bottom is still running and keeps its ticket",
+			str(reply.get("verdict", "")) == "fail"
+				and rows.size() == 1
+				and str((rows[0] as Dictionary).get("part", "")) == "top"
+				and tickets.size() == 1
+				and str(tickets.get("bottom", "")) == "clearance-bottom",
+			"reply = %s" % str(reply))
+	panel.free()
+
+
 # ---------------------------------------------------------------------------
 # The reports the three checks would have measured
 # ---------------------------------------------------------------------------
@@ -462,6 +606,14 @@ class _DesignStandIn extends Node:
 	var interference_args: Dictionary = {}
 	var clearance_args: Dictionary = {}
 	var fastener_args: Dictionary = {}
+	## Per-part canned clearance replies (part -> report), read before
+	## `clearance` when the part is named there; and per-ticket replies for
+	## a collect, which otherwise answers "still running".
+	var clearance_by_part: Dictionary = {}
+	var collect_replies: Dictionary = {}
+	## Every clearance call in order: "start:<part>:wait=<ms|default>" or
+	## "collect:<ticket>:wait=<ms>".
+	var clearance_calls: Array = []
 
 	var _gauge: _GaugeStandIn = null
 	var _features: _FeatureStandIn = null
@@ -498,15 +650,26 @@ class _DesignStandIn extends Node:
 		return interference.duplicate(true)
 
 	func check_clearance(args: Dictionary) -> Dictionary:
+		var ticket := str(args.get("ticket", ""))
+		if not ticket.is_empty():
+			clearance_calls.append("collect:%s:wait=%d" % [ticket,
+				int(args.get("wait_ms", 0))])
+			return (collect_replies.get(ticket, {"checked": false,
+				"status": "running", "ticket": ticket, "pairs": [],
+				"elapsed_ms": 1, "reason": "still running"}) as Dictionary) \
+				.duplicate(true)
 		clearance_args = args.duplicate(true)
-		var reply := clearance.duplicate(true)
 		# A part-scoped leg is asked with that part's source, which ends in
 		# the binding's name; its ticket is named after it so the fold can be
 		# seen to keep the two apart.
 		var source := str(args.get("source", "")).strip_edges()
+		var part := source.get_slice("\n", source.get_slice_count("\n") - 1)
+		clearance_calls.append("start:%s:wait=%s" % [part,
+			str(args.get("wait_ms", "default"))])
+		var reply: Dictionary = (clearance_by_part.get(part, clearance) \
+			as Dictionary).duplicate(true)
 		if reply.has("ticket") and not source.is_empty():
-			reply["ticket"] = "clearance-" + source.get_slice("\n",
-				source.get_slice_count("\n") - 1)
+			reply["ticket"] = "clearance-" + part
 		return reply
 
 	## What part_scope asks a panel for when `parts` is given: the document's

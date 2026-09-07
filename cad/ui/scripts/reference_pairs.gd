@@ -553,7 +553,8 @@ func _pairs_report(reply: Dictionary, records: Array, required_mm: float,
 		report["pass_reason"] = ("%d declared contact(s) applied advisorily "
 			+ "(an overlap depth that is a sample, or a region that excuses "
 			+ "one witness point) and %d pair(s) whose containment could not "
-			+ "be decided; pass is withheld rather than certified")\
+			+ "be decided; pass is withheld rather than certified, and an "
+			+ "advisory row is not a failure")\
 			% [unproven, undecided]
 	if not expected.is_empty():
 		report["expected_contacts"] = expected_rows

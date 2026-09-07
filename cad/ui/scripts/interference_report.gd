@@ -322,7 +322,7 @@ func _report(pairs: Dictionary) -> Dictionary:
 			report["pass_reason"] = ("%d declared contact(s) excused on a "
 				+ "measured overlap that is a lower-bound chord, not a proven "
 				+ "depth; nothing else was found, and that is advisory rather "
-				+ "than a certified pass") % excluded
+				+ "than a certified pass — not a failure") % excluded
 	return report
 
 

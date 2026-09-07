@@ -724,8 +724,9 @@ static func _check_clearance(panel, args: Dictionary) -> Dictionary:
 	var handle := str(args.get("ticket", ""))
 	if not handle.is_empty():
 		# A ticket names a measurement that was started with its own scope and
-		# tolerance; nothing else in the call is read.
-		var collected: Dictionary = await panel.check_clearance({"ticket": handle})
+		# tolerance; nothing else in the call is read but the wait budget.
+		var collected: Dictionary = await panel.check_clearance({"ticket": handle,
+			"wait_ms": int(args.get("wait_ms", 0))})
 		if collected.has("error"):
 			return _err(str(collected["error"]))
 		return _ok(_ReplyShape.filter_clearance(collected,
@@ -733,7 +734,7 @@ static func _check_clearance(panel, args: Dictionary) -> Dictionary:
 	var asked := str(args.get("reference", ""))
 	if not asked.is_empty() and not _has_reference(panel, asked):
 		return _err("no reference named '%s' is mounted" % asked)
-	var report: Dictionary = await panel.check_clearance({
+	var asked_clearance := {
 		# The clearance measurement re-tessellates in the worker, so a
 		# part-scoped call hands it that part's SOURCE rather than a mesh.
 		"source": str(args.get("source", "")),
@@ -748,7 +749,12 @@ static func _check_clearance(panel, args: Dictionary) -> Dictionary:
 		# declares instead of required_mm, and listed in the reply with what
 		# was measured for them.
 		"expected_contacts": args.get("expected_contacts", []),
-	})
+	}
+	# How long this call may wait before it is handed a ticket; the client's
+	# own window when the caller does not say.
+	if args.has("wait_ms"):
+		asked_clearance["wait_ms"] = int(args["wait_ms"])
+	var report: Dictionary = await panel.check_clearance(asked_clearance)
 	if report.has("error"):
 		return _err(str(report["error"]))
 	return _ok(_ReplyShape.filter_clearance(report,

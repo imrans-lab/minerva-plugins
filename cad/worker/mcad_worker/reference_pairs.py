@@ -22,11 +22,15 @@ clearance.py and are imported rather than copied, so a reference node measured
 against the solid and then against another reference builds its tree once.
 
 CONTAINMENT. A positive distance says only that the two SURFACES are apart;
-a part wholly inside another measures the same air. Wherever one node's box
-lies inside the other's — the only place containment is possible — the pair is
-probed by ray parity (mcad_worker.containment) and a contained pair is an
-overlap with no contact points; an outer mesh that is not closed leaves the
-question undecidable, which the pair reports rather than passes.
+a part wholly inside another measures the same air. Wherever the two boxes
+overlap, every connected component of either node whose box lies inside the
+other's is probed by ray parity (mcad_worker.containment); a contained pair
+is an overlap with no contact points, and an outer mesh that is not closed
+leaves the question undecidable, which the pair reports rather than passes.
+The triangles and bounds the probe needs are held with each target's tree for
+the length of the request — the shared LRU can evict a key while the request's
+later targets are still being built, and a probe that read the cache then
+would find nothing and grade nothing.
 
 CONTACT POINTS. A distance of zero says only that there is no air between the
 two meshes. FCL's mesh-mesh collision names the triangles that overlap and a
@@ -45,8 +49,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from .clearance import (ClearanceError, _require_fcl, _tree_for, arrays_for,
-                        bounds_for)
+from .clearance import ClearanceError, _entry_for, _require_fcl
 from .containment import containment
 
 #: Contacts collected for one overlapping pair. Enough to show where a part
@@ -215,7 +218,9 @@ def reference_pairs(params: dict) -> dict:
         # request over an assembly already touches every one of them; a
         # narrow one must not pay for the rest.
         needed = sorted({index for pair in wanted for index in pair})
-        trees: dict = {}
+        # index -> (tree, triangles, bounds, (vertices, faces)), held here
+        # for the whole request whatever the LRU does meanwhile.
+        entries: dict = {}
         missing: list = []
         hits = 0
         for index in needed:
@@ -223,13 +228,13 @@ def reference_pairs(params: dict) -> dict:
             if not key:
                 return _error("every reference_pairs target needs a key")
             try:
-                tree, triangles, cached = _tree_for(key, targets[index].get("path"))
+                entry, cached = _entry_for(key, targets[index].get("path"))
             except KeyError:
                 if key not in missing:
                     missing.append(key)
                 continue
             hits += 1 if cached else 0
-            trees[index] = (tree, triangles)
+            entries[index] = entry
         if missing:
             return {
                 "ok": True,
@@ -248,8 +253,8 @@ def reference_pairs(params: dict) -> dict:
 
         pairs = []
         for first, second in wanted:
-            tree_a, triangles_a = trees[first]
-            tree_b, triangles_b = trees[second]
+            tree_a, triangles_a, box_a, arrays_a = entries[first]
+            tree_b, triangles_b, box_b, arrays_b = entries[second]
             min_mm, point_a, point_b = _distance(fcl, tree_a, tree_b)
             pair = {
                 "a": _side(targets[first]),
@@ -259,8 +264,7 @@ def reference_pairs(params: dict) -> dict:
                 "triangles": [int(triangles_a), int(triangles_b)],
             }
             if min_mm <= 0.0:
-                box = _shared_box(bounds_for(str(targets[first].get("key", ""))),
-                                  bounds_for(str(targets[second].get("key", ""))))
+                box = _shared_box(box_a, box_b)
                 points, count, depth = _contacts(fcl, tree_a, tree_b, limit, box)
                 pair["overlap"] = True
                 pair["contact_points_mm"] = points
@@ -277,13 +281,9 @@ def reference_pairs(params: dict) -> dict:
                 pair["point_a_mm"] = point_a
                 pair["point_b_mm"] = point_b
                 # Air between the surfaces is not air between the PARTS:
-                # one may lie wholly inside the other. Asked only where one
-                # box lies inside the other's, which is the only place it
-                # can be true.
-                key_a = str(targets[first].get("key", ""))
-                key_b = str(targets[second].get("key", ""))
-                verdict = containment(arrays_for(key_a), arrays_for(key_b),
-                                      bounds_for(key_a), bounds_for(key_b))
+                # one may lie wholly inside the other. Asked only where the
+                # boxes overlap, component by component.
+                verdict = containment(arrays_a, arrays_b, box_a, box_b)
                 if verdict is not None:
                     pair["containment"] = verdict["containment"]
                     pair["containment_note"] = verdict["note"]
@@ -309,8 +309,8 @@ def reference_pairs(params: dict) -> dict:
             "pass": all(p["pass"] for p in pairs),
             "required_mm": required_mm,
             "pairs_measured": len(pairs),
-            "cache": {"hits": hits, "misses": len(trees) - hits,
-                      "entries": len(trees)},
+            "cache": {"hits": hits, "misses": len(entries) - hits,
+                      "entries": len(entries)},
             "engine": "python-fcl swept-sphere BVH, exact triangle-pair minimum",
             "bound": "both sides are the meshes themselves, so no "
                      "tessellation stands between the number and the "
