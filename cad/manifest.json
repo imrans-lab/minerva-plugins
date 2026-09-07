@@ -1,7 +1,7 @@
 {
   "id": "cad",
   "name": "CAD",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "host_api_version": "1",
   "release_targets": ["linux-x86_64", "macos-universal", "windows-x86_64"],
   "backend": {
@@ -609,7 +609,24 @@
           "ui/scripts/edge_outline.gd",
           "ui/scripts/Cad_GeometryOverlay.gd",
           "ui/scripts/orbit_camera.gd",
-          "ui/scripts/pane_projection.gd"
+          "ui/scripts/pane_projection.gd",
+          "ui/kinds/cad_edge_label_layout.gd",
+          "ui/kinds/cad_edge_number_kind.gd",
+          "ui/panel_tools.gd",
+          "ui/scripts/contact_runs.gd",
+          "ui/scripts/design_check.gd",
+          "ui/scripts/eval_banner.gd",
+          "ui/scripts/eval_reply.gd",
+          "ui/scripts/expected_contacts.gd",
+          "ui/scripts/fit_capture.gd",
+          "ui/scripts/keepout_dsl.gd",
+          "ui/scripts/ortho_silhouette.gd",
+          "ui/scripts/part_scope.gd",
+          "ui/scripts/reference_pairs.gd",
+          "ui/scripts/reference_profile.gd",
+          "ui/scripts/reference_verbs.gd",
+          "ui/scripts/stl_reader.gd",
+          "ui/tools/cad_edge_number_tool.gd"
         ],
         "file_extensions": [
           ".mcad"
