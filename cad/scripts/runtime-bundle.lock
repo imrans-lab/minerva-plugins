@@ -22,8 +22,11 @@ CPYTHON="3.12.13"
 # Space-separated, version-pinned pip packages to install into the bundle's
 # site-packages. Transitive deps resolve via pip. For cad-plugin the important
 # transitive is cadquery-ocp (pinned by build123d <7.9,>=7.8 to the 7.8.x line;
-# verified at bundle-build-time via Layer 1 self-test below).
-PIP_PKGS="build123d==0.10.0"
+# verified at bundle-build-time via Layer 1 self-test below). ocp-gordon is
+# pinned too: build123d 0.10.0 pulls it unconstrained, and its 0.3.0 requires
+# cadquery-ocp 8.x (it imports OCP.collections, which 7.8.x has no package
+# for), so the unpinned resolve broke the Layer 1 import on every platform.
+PIP_PKGS="build123d==0.10.0 ocp-gordon==0.2.2"
 
 # Wheels installed WITHOUT their declared dependencies. python-fcl's
 # Requires-Dist names Cython, which only its BUILD needs — `import fcl` works
