@@ -106,17 +106,20 @@ static func filter_clearance(report: Dictionary, limit: int, failing_only: bool)
 ## call's otherwise. `pass` is taken as clearing when it is true, but its
 ## being false is not taken as failing: an unbounded tessellation tolerance
 ## fails every row in the report without saying anything about any one gap.
+## The graded `pass` is read FIRST, before the shapes below: a declared
+## contact is a touching row the check itself graded as clearing, and a rule
+## of our own here would report it as a failure the row does not claim.
 ## A pair the check could not reason about — material overlap, a flush
-## contact, a containment it could not decide — never clears, because the
-## distance is not the answer for it.
+## contact, a containment it could not decide — never clears otherwise,
+## because the distance is not the answer for it.
 static func pair_clears(pair: Dictionary, required_mm: float,
 		quantization_mm: float) -> bool:
+	if bool(pair.get("pass", false)):
+		return true
 	if bool(pair.get("interference", false)) \
 			or bool(pair.get("touching", false)) \
 			or bool(pair.get("containment_undecidable", false)):
 		return false
-	if bool(pair.get("pass", false)):
-		return true
 	var need := float(pair.get("required_mm", required_mm))
 	return float(pair.get("min_mm", 0.0)) - quantization_mm >= need
 

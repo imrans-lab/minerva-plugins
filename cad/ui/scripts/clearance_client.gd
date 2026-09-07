@@ -1161,7 +1161,12 @@ func _join_note(buried: Dictionary) -> String:
 func _source_digest(source: String) -> String:
 	var hasher := HashingContext.new()
 	hasher.start(HashingContext.HASH_SHA256)
-	hasher.update(source.to_utf8_buffer())
+	# update() refuses an empty buffer with an engine error; finish() alone
+	# still gives the digest of the empty string, which is what a document
+	# with no source is.
+	var bytes := source.to_utf8_buffer()
+	if not bytes.is_empty():
+		hasher.update(bytes)
 	return hasher.finish().hex_encode()
 
 

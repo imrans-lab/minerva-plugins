@@ -415,10 +415,11 @@ SAMPLED_CLAUSE = (", whose curvature was sampled across the face rather than "
                   "widest sample is then bisected onto the flattest point "
                   "beside it, so the radius is that point's and not the "
                   "nearest grid node's. The bisection only ever approaches "
-                  "that point from below, so the radius is scaled up by the "
-                  "shortfall its own residual step allows and is an upper "
-                  "bound; curvature inside a cell the grid steps over "
-                  "entirely is still unseen")
+                  "that point from below, so the radius is corrected for the "
+                  "search's residual step; that correction is the width of "
+                  "the search's own uncertainty rather than a proof, and "
+                  "curvature inside a cell the grid steps over entirely is "
+                  "still unseen")
 
 
 def _prepare_solid(source: str, tolerance_mm: float,

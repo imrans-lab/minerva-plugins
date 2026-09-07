@@ -90,11 +90,13 @@ def _contacts(fcl, tree_a, tree_b, limit: int,
     query is not required to compute one, and a zero reported as a depth
     would read as "they just touch".
 
-    `box` is the region the two meshes share. FCL reports a triangle corner
-    rather than a point of the triangle-triangle intersection, so a raw
-    position can land outside the overlap entirely; clamping into the shared
-    box moves such a point back onto the region where the meshes meet and
-    leaves a point that was already inside untouched. With no box, the raw
+    `box` is the two meshes' SHARED BOUNDING BOX — not the overlap itself.
+    FCL reports a triangle corner rather than a point of the
+    triangle-triangle intersection, so a raw position can land outside the
+    boxes entirely; clamping into the shared box brings such a point back to
+    where the two bodies can meet at all and leaves a point that was already
+    inside untouched. A clamped point can still sit in air inside that box,
+    so it locates the contact to the box and no finer. With no box, the raw
     positions are passed through.
     """
     request = fcl.CollisionRequest(num_max_contacts=max(1, limit),
@@ -257,9 +259,10 @@ def reference_pairs(params: dict) -> dict:
                 if depth is not None:
                     pair["penetration_mm"] = depth
                 pair["note"] = ("no air between these two meshes — the "
-                                "contact points lie in the region the two "
-                                "share, located to that region and no finer; "
-                                "a mesh-mesh collision reports no penetration "
+                                "contact points lie in their shared BOUNDING "
+                                "BOX, located to that box and no finer (a "
+                                "point in it can still be in air); a "
+                                "mesh-mesh collision reports no penetration "
                                 "depth unless it found one")
             else:
                 pair["point_a_mm"] = point_a

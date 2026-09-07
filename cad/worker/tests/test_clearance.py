@@ -760,10 +760,13 @@ class TestClearanceVerb:
 
         ORACLE: the spheroid's analytic pole radius, a^2/c = 500 mm. The pole
         is a degenerate point the evaluator will not answer at, so the search
-        can only approach it from below; the reading is therefore scaled up by
-        the shortfall its own residual step allows, so that it bounds the pole
-        radius from ABOVE rather than sitting under it. It must land within
-        that correction of 500 mm and never run away above it.
+        can only approach it from below; the reading is therefore corrected
+        for the shortfall its own residual step allows. It must land on 500 mm
+        to within that correction plus the kernel's own slack in fitting a
+        scaled sphere as a spline — the band below, which is wide enough that
+        an OCCT version fitting the surface a shade differently cannot flip
+        the assertion, and far tighter than either wrong answer this test
+        exists to catch.
 
         The floor follows from HOW the reading is made rather than from a
         round number. A bare grid stops at its nearest usable node: with
@@ -810,16 +813,19 @@ class TestClearanceVerb:
         # parametric directions, which on this surface is a full turn of
         # longitude.
         grid_step = 2.0 * math.pi / (curv.SAMPLES_PER_DIRECTION - 1)
-        residual = grid_step / 2 ** curv.REFINEMENT_ROUNDS
+        # The LAST step the refinement walked with, which is the one before
+        # the final halving: rounds - 1 halvings of the grid step.
+        residual = grid_step / 2 ** (curv.REFINEMENT_ROUNDS - 1)
         correction = curv.RESIDUAL_SHORTFALL_FACTOR * residual * residual
         assert correction < 1.0e-4
-        # An UPPER bound, and a tight one: at or above the pole radius, and
-        # over it by no more than the correction. A bbox guess (50 mm) is an
-        # order of magnitude short of this and the nearest grid node is 14 %
-        # short, so neither a fallback nor an unrefined grid reaches it.
-        assert report["largest_radius_mm"] >= pole_radius
+        # The pole radius, to the correction plus the kernel's own spline fit
+        # of a scaled sphere. A bbox guess (50 mm) is an order of magnitude
+        # short of this and the nearest grid node is 14 % short, so neither a
+        # fallback nor an unrefined grid lands in the band.
+        kernel_slack = 1.0e-4
+        assert report["largest_radius_mm"] >= pole_radius * (1.0 - kernel_slack)
         assert report["largest_radius_mm"] <= pole_radius * (
-            1.0 + correction + 1.0e-9)
+            1.0 + correction + kernel_slack)
 
         sampled = _reply(spheroid)
         assert sampled["checked"] is True

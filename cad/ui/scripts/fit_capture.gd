@@ -178,6 +178,14 @@ static func resolve_box(panel, fit: Variant) -> Dictionary:
 ## the binding axis, WITHOUT turning it: the picture is taken from the same
 ## direction the pane is looking, only closer.
 ##
+## PERSPECTIVE IS FITTED ON THE PROJECTED CORNERS, NOT THE BOX. A camera aimed
+## at the centre of a deep box magnifies the near corner and shrinks the far
+## one, so the silhouette sits off-centre in the frame and the near corner
+## binds while most of the other side is air — a box as deep as it is wide
+## fills barely half the frame that way. The camera is therefore also SLID
+## across its own right/up axes (never turned) until the projected silhouette
+## is centred, and only then pulled in until it binds.
+##
 ## The box's half-extent along a camera axis is the sum of its own half-sizes
 ## projected onto that axis, which is what makes this correct for a camera
 ## looking at the box from any angle and not only down an axis.
@@ -201,6 +209,9 @@ static func frame(camera: Camera3D, box: AABB, viewport_size: Vector2, margin: f
 	var centre := box.get_center()
 
 	var distance: float
+	# How far the camera slides along its own right and up axes to centre the
+	# silhouette. An orthographic picture is centred already.
+	var slide := Vector2.ZERO
 	if camera.projection == Camera3D.PROJECTION_ORTHOGONAL:
 		var height := maxf(half_height, half_width / aspect) * 2.0 * pad
 		var vertical: bool = camera.keep_aspect == Camera3D.KEEP_HEIGHT
@@ -214,10 +225,13 @@ static func frame(camera: Camera3D, box: AABB, viewport_size: Vector2, margin: f
 		var tan_vertical := tangent if camera.keep_aspect == Camera3D.KEEP_HEIGHT \
 			else tangent / aspect
 		var tan_horizontal := tan_vertical * aspect
-		distance = maxf(half_height * pad / tan_vertical,
-			half_width * pad / tan_horizontal) + half_depth
+		var fit := _fit_perspective(box, centre, right, up, forward,
+			tan_horizontal, tan_vertical, half_depth, pad)
+		slide = Vector2(fit.x, fit.y)
+		distance = fit.z
 
-	camera.global_position = centre - forward * distance
+	camera.global_position = centre - forward * distance \
+		+ right * slide.x + up * slide.y
 	camera.near = maxf(0.01, (distance - half_depth) * 0.01)
 	camera.far = distance + half_depth * 2.0 + 1.0
 
@@ -225,6 +239,105 @@ static func frame(camera: Camera3D, box: AABB, viewport_size: Vector2, margin: f
 ## Half-extent of a box of half-sizes `half` along a unit `axis`.
 static func _extent_along(half: Vector3, axis: Vector3) -> float:
 	return absf(axis.x * half.x) + absf(axis.y * half.y) + absf(axis.z * half.z)
+
+
+## How many halvings the two searches spend: one on the slide that centres an
+## axis, one on the distance. Both are cheap — a pass is eight divisions — and
+## fixed, so a fit costs the same on every box.
+const CENTRE_PASSES: int = 28
+const DISTANCE_PASSES: int = 40
+
+
+## The camera placement for a perspective fit, as (slide right, slide up,
+## distance). The framing is read off the box's eight CORNERS at their own
+## depths, which is the only place a perspective camera's picture can be
+## measured: the box's half-extents describe a plane through its centre and
+## say nothing about what stands in front of that plane.
+##
+## The projected extent shrinks monotonically as the camera backs off, so the
+## closest distance that still holds every corner is bisected between a floor
+## that keeps the near face in front of the lens and a reach known to fit.
+## Every candidate is judged with the silhouette re-centred, so the answer is
+## the closest the camera can stand, and not the closest it can stand while
+## aiming at a point the picture is not centred on.
+static func _fit_perspective(box: AABB, centre: Vector3, right: Vector3,
+		up: Vector3, forward: Vector3, tan_horizontal: float,
+		tan_vertical: float, half_depth: float, pad: float) -> Vector3:
+	var corners: Array[Vector3] = []
+	for index in range(8):
+		var offset: Vector3 = box.get_endpoint(index) - centre
+		corners.append(Vector3(offset.dot(right), offset.dot(up),
+			offset.dot(forward)))
+	# The near face has to stand clear of the lens whatever else is asked.
+	var near_limit := half_depth * 1.05 + 0.001
+	# A reach that certainly fits: every corner's lateral offset taken at the
+	# depth of the NEAREST one.
+	var far_limit := near_limit
+	for corner in corners:
+		far_limit = maxf(far_limit,
+			absf(corner.x) * pad / tan_horizontal + half_depth)
+		far_limit = maxf(far_limit,
+			absf(corner.y) * pad / tan_vertical + half_depth)
+	var low := near_limit
+	var high := far_limit
+	for _pass in range(DISTANCE_PASSES):
+		var middle := (low + high) * 0.5
+		if _fit_span(corners, middle, tan_horizontal, tan_vertical).z * pad > 1.0:
+			low = middle
+		else:
+			high = middle
+	var fit := _fit_span(corners, high, tan_horizontal, tan_vertical)
+	return Vector3(fit.x, fit.y, high)
+
+
+## The projected half-extent of the corners at `distance`, with the camera
+## slid to centre them: (slide right, slide up, half-extent in frame halves).
+## One is the frame edge.
+static func _fit_span(corners: Array[Vector3], distance: float,
+		tan_horizontal: float, tan_vertical: float) -> Vector3:
+	var reaches: Array[float] = []
+	var across: Array[float] = []
+	var along: Array[float] = []
+	for corner in corners:
+		reaches.append(maxf(distance + corner.z, 0.001))
+		across.append(corner.x)
+		along.append(corner.y)
+	var horizontal := _centre_axis(across, reaches, tan_horizontal)
+	var vertical := _centre_axis(along, reaches, tan_vertical)
+	return Vector3(horizontal.x, vertical.x, maxf(horizontal.y, vertical.y))
+
+
+## The slide along ONE camera axis that leaves the projected corners centred,
+## and the half-extent they then span: (slide, half-extent).
+##
+## Sliding trades one side of the frame for the other, and the near corners
+## move several times faster than the far ones — the reaches differ by the
+## depth of the box — so the balance point is bisected rather than stepped
+## towards. The offsets themselves bracket it: at the smallest, every corner
+## is on one side; at the largest, every corner is on the other.
+static func _centre_axis(offsets: Array[float], reaches: Array[float],
+		tangent: float) -> Vector2:
+	var low := INF
+	var high := -INF
+	for offset in offsets:
+		low = minf(low, offset)
+		high = maxf(high, offset)
+	var slide := (low + high) * 0.5
+	var extent := 0.0
+	for _pass in range(CENTRE_PASSES):
+		slide = (low + high) * 0.5
+		var over := 0.0
+		var under := 0.0
+		for index in range(offsets.size()):
+			var value := (offsets[index] - slide) / (reaches[index] * tangent)
+			over = maxf(over, value)
+			under = maxf(under, -value)
+		extent = maxf(over, under)
+		if over > under:
+			low = slide
+		else:
+			high = slide
+	return Vector2(slide, extent)
 
 
 # ---------------------------------------------------------------------------

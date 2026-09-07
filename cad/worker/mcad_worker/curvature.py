@@ -41,16 +41,21 @@ wider. The centre walks toward the true maximum — including one sitting on a
 parametric boundary, which is where a degenerate pole lives — and the residual
 offset left after the last round is one grid step divided by 2**rounds.
 
-WHY THE READING IS INFLATED
+WHY THE READING IS CORRECTED
 The refinement converges on the flattest point FROM BELOW: every sample it
 keeps sits some residual offset short of the maximum, and radius falls off
-quadratically in that offset, so the reading is short by roughly 1.5 times the
-square of the residual, relative. A tessellation bound derived from a radius
-that is short is not a bound at all, so the returned radius is inflated by
-(1 + 1.5*res**2), where res is the residual parametric offset the refinement
-stopped at. On a well-conditioned parameterisation that correction is parts
-per million; on a coarsely parameterised face it is the honest width of the
-search's own uncertainty.
+quadratically in that offset, so the reading is short by roughly a constant
+times the square of the residual, relative. The returned radius is therefore
+scaled up by (1 + 1.5*res**2), where res is the last parametric step the
+refinement actually walked with.
+
+THAT CORRECTION IS NOT A PROOF. 1.5 is the second-order coefficient for a
+smooth quadratic maximum of the oblate-spheroid kind this was measured on, not
+a bound over every surface OCCT can hand back: a face whose curvature turns
+over more sharply than that in the last cell can still read a shade short. It
+is the honest width of the search's own residual, and what it removes is the
+systematic shortfall of approaching a maximum from one side — not the
+possibility of a spike the grid never sampled.
 
 THE HONEST LIMIT
 The search is still a sample, not a proof: a curvature spike in a cell the
@@ -88,8 +93,10 @@ REFINEMENT_ROUNDS = 10
 #: The refinement approaches the flattest point from below, so the radius it
 #: stops at is short by about this much, relative, for a residual parametric
 #: offset `res`: radius falls off as the square of the offset from a smooth
-#: maximum. The reading is scaled up by it so the number really is an upper
-#: bound on the face's flattest radius.
+#: maximum. The reading is scaled up by it to remove that shortfall. The
+#: coefficient is second-order for a smooth maximum (measured on an oblate
+#: spheroid's pole) and is a correction, not a proven bound over every
+#: surface.
 RESIDUAL_SHORTFALL_FACTOR = 1.5
 
 
@@ -186,16 +193,19 @@ def _refine(props_class, adaptor, floor: float, widest: Optional[float],
     current step and moves to the widest of them, then halves the step. The
     centre therefore travels at most 2*du (2*dv) in total, enough to cross the
     grid cell it started in and settle onto a maximum that lies on the
-    parametric boundary, and the step it stops at is the offset still
-    separating it from that maximum.
+    parametric boundary.
 
-    Returns that final step as the third value, in the surface's own parameter
-    units: it is what the caller inflates the radius by, since the walk only
-    ever approaches the maximum from below.
+    Returns the last step it actually WALKED with — not the halved one it
+    never used — as the third value, in the surface's own parameter units:
+    that is how far the centre could still be from the maximum, and it is
+    what the caller corrects the radius by, since the walk only ever
+    approaches the maximum from below.
     """
     u0, u1 = u_range
     v0, v1 = v_range
+    walked = max(du, dv)
     for _ in range(REFINEMENT_ROUNDS):
+        walked = max(du, dv)
         for offset_u in (-du, 0.0, du):
             for offset_v in (-dv, 0.0, dv):
                 if offset_u == 0.0 and offset_v == 0.0:
@@ -207,7 +217,7 @@ def _refine(props_class, adaptor, floor: float, widest: Optional[float],
                     widest, centre = radius, (u, v)
         du *= 0.5
         dv *= 0.5
-    return widest, centre, max(du, dv)
+    return widest, centre, walked
 
 
 def _extent(occt: dict, face) -> Optional[float]:

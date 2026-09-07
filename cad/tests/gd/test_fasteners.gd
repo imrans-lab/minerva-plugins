@@ -447,7 +447,7 @@ func _check_lean_unpaired(report: Dictionary) -> void:
 			partial = group
 		else:
 			bores["%s|%s" % [group.get("dia_mm"), group.get("fit")]] = group
-	var thread_2: Dictionary = bores.get("2|thread", {}) as Dictionary
+	var thread_2: Dictionary = bores.get("2.0|thread", {}) as Dictionary
 	var sweep: Dictionary = partial.get("sweep_deg", {}) as Dictionary
 	check("lean: thirty-two features become three rows — two diameters a "
 			+ "micron apart group as one, the undersize bores group apart "

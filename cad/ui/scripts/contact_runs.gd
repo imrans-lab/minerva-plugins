@@ -103,9 +103,17 @@ const MATERIAL_PROBES: int = 2
 ## anything runs through material in no distance, but because two crossings
 ## that coincide bound no contact either, and the crossing's other run is
 ## what should decide it.
+##
+## `probe_mm` is the size of the caller's parity probe. A run no longer than
+## that has nowhere to put the probe: an edge piercing a plate thinner than
+## the probe is bounded by two crossings whose run reads "not in a face" and
+## then "not inside" — the probe simply does not fit — and clearing it would
+## drop a genuine piercing. A run that thin is undecidable, and undecidable
+## counts as material here exactly as it does per crossing.
 static func classify_run(a: Vector3, b: Vector3, epsilon: float,
-		ray: Callable, inside: Callable) -> Run:
-	if a.distance_to(b) <= epsilon:
+		ray: Callable, inside: Callable, probe_mm: float = 0.0) -> Run:
+	var span := a.distance_to(b)
+	if span <= epsilon:
 		return Run.MATERIAL
 	var in_face := true
 	var probes := 0
@@ -117,7 +125,7 @@ static func classify_run(a: Vector3, b: Vector3, epsilon: float,
 			continue
 		in_face = false
 		probes += 1
-		if int(inside.call(point)) != 0:
+		if span <= probe_mm or int(inside.call(point)) != 0:
 			return Run.MATERIAL
 	return Run.CONTACT if in_face else Run.VOID
 
@@ -169,12 +177,14 @@ static func surface_at(point: Vector3, epsilon: float, ray: Callable) -> bool:
 ## material run is enough.
 ##
 ## `inside_for` is func(key: String) -> Callable, the parity probe against
-## that one body, alongside `ray_for`'s ray.
+## that one body, alongside `ray_for`'s ray. `probe_mm` is how big that probe
+## is: a run too short to place it in is undecidable, not clear — see
+## classify_run.
 ##
 ## Returns the surviving indices, in order.
 static func penetrating_indices(a: Vector3, b: Vector3, crossings: Array,
-		epsilon: float, ray_for: Callable,
-		inside_for: Callable) -> PackedInt32Array:
+		epsilon: float, ray_for: Callable, inside_for: Callable,
+		probe_mm: float = 0.0) -> PackedInt32Array:
 	var out := PackedInt32Array()
 	for index in range(crossings.size()):
 		var crossing: Dictionary = crossings[index]
@@ -185,9 +195,10 @@ static func penetrating_indices(a: Vector3, b: Vector3, crossings: Array,
 		var ray: Callable = ray_for.call(key)
 		var inside: Callable = inside_for.call(key)
 		var before := classify_run(_neighbour(crossings, index, -1, key, a),
-			point, epsilon, ray, inside)
+			point, epsilon, ray, inside, probe_mm)
 		var after := classify_run(point,
-			_neighbour(crossings, index, 1, key, b), epsilon, ray, inside)
+			_neighbour(crossings, index, 1, key, b), epsilon, ray, inside,
+			probe_mm)
 		if before == Run.CONTACT or after == Run.CONTACT:
 			continue
 		if before != Run.MATERIAL and after != Run.MATERIAL:

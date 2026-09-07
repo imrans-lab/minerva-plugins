@@ -774,7 +774,7 @@ func run_check(gauge: Object, state: PhysicsDirectSpaceState3D, args: Dictionary
 			_absorb(pairs, crossing as Dictionary, node_scope)
 		# The depth this one edge reached inside each node it crossed. Runs are
 		# measured per EDGE: two crossings on different edges bound nothing.
-		_absorb_runs(pairs, crossings, node_scope)
+		_absorb_runs(pairs, crossings, node_scope, "solid_edge")
 	if _edges_reaching > _edges_cast:
 		_limits.append(("%d of the %d solid edges that reach a reference were "
 			+ "not cast; the first %d spent the ray budget")
@@ -975,7 +975,7 @@ func _drop_contact_runs(a: Vector3, b: Vector3, crossings: Array,
 		return crossings
 	var out: Array = []
 	for kept in _ContactRuns.penetrating_indices(a, b, crossings,
-			TOUCH_EPSILON_MM, ray_for, inside_for):
+			TOUCH_EPSILON_MM, ray_for, inside_for, PARITY_SPHERE_MM):
 		out.append(crossings[kept])
 	return out
 
@@ -1173,7 +1173,8 @@ func _reference_edges_into_solid(
 							})
 						for crossing in crossings:
 							_absorb(pairs, crossing as Dictionary, node_scope)
-						_absorb_runs(pairs, crossings, node_scope)
+						_absorb_runs(pairs, crossings, node_scope,
+							"reference_edge")
 
 
 ## Where the segment a→b crosses the solid's surface, in order.
@@ -1215,7 +1216,8 @@ func _cross_into_solid(
 	for kept in _ContactRuns.penetrating_indices(a, b, candidates,
 			TOUCH_EPSILON_MM,
 			func(_key: String) -> Callable: return _solid_hit.bind(solid_state),
-			func(_key: String) -> Callable: return _solid_inside.bind(solid_state)):
+			func(_key: String) -> Callable: return _solid_inside.bind(solid_state),
+			PARITY_SPHERE_MM):
 		out.append((candidates[kept] as Dictionary).get("point", Vector3.ZERO))
 	return out
 

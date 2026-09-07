@@ -1529,6 +1529,21 @@ func _why(row: Dictionary) -> String:
 			% [float(zone.get("zone_dia_mm", 0.0)) * 0.5,
 			   float(zone.get("allowed_zone_dia_mm", 0.0)),
 			   float(row.get("axis_angle_deg", 0.0))]
+	# THE WRONG BORE COMES FIRST. A row whose bore is not a thread bore is not
+	# a joint that failed, it is a joint that was never asked about: every
+	# other number in it — the path down an axis the screw was never going to
+	# take included — describes a screw driven into a hole it only passes
+	# through. Reporting an obstruction there sends the reader hunting for a
+	# rib when the fix is to pair the hole with the bore the screw bites in.
+	if not bool(row.get("engagement_ok", true)) \
+			and str(row.get("bore_fit", "thread")) != "thread":
+		return ("the screw does not thread into this bore: at %.2f mm it "
+			+ "is a %s hole the screw passes through, so the %.2f mm of "
+			+ "overlap is not engagement — pair the hole with the bore "
+			+ "the screw actually bites in") % [
+				float(row.get("bore_dia_mm", 0.0)),
+				str(row.get("bore_fit", "")),
+				float(row.get("engagement_mm", 0.0))]
 	if not bool(row.get("path_clear", true)):
 		var first: Array = row.get("obstructions", []) as Array
 		if not first.is_empty():
@@ -1538,14 +1553,6 @@ func _why(row: Dictionary) -> String:
 				% [str((first[0] as Dictionary).get("node", "something")), where]
 		return "the screw path is blocked"
 	if not bool(row.get("engagement_ok", true)):
-		if str(row.get("bore_fit", "thread")) != "thread":
-			return ("the screw does not thread into this bore: at %.2f mm it "
-				+ "is a %s hole the screw passes through, so the %.2f mm of "
-				+ "overlap is not engagement — pair the hole with the bore "
-				+ "the screw actually bites in") % [
-					float(row.get("bore_dia_mm", 0.0)),
-					str(row.get("bore_fit", "")),
-					float(row.get("engagement_mm", 0.0))]
 		if not bool(row.get("engagement_certain", true)):
 			return ("the bore's extent is not exact, so the %.2f mm of bite "
 				+ "measured here cannot be graded: the kernel could not read "

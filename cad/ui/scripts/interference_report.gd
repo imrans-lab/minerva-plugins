@@ -132,6 +132,7 @@ func _declared_pair(index: int, reference_name: String,
 			"points": [],
 			"point_count": 0,
 			"penetration_mm": 0.0,
+			"run_max": {},
 			"note": "",
 		}
 	return _declared[key]
@@ -139,13 +140,21 @@ func _declared_pair(index: int, reference_name: String,
 
 ## How deep ONE edge went inside each node it crossed. The crossings of a given
 ## node along one edge alternate in and out, so consecutive pairs of them bound
-## a run inside that node and the longest run is the penetration.
+## a run inside that node and the longest run of that walk is kept.
 ##
-## It is a LOWER BOUND and is reported as one: the deepest point of an overlap
-## need not lie on an edge of either body. An odd number of crossings means an
-## endpoint of the edge is buried, and bounds no run at all — that case is
-## still interference, just without a depth.
-func _absorb_runs(pairs: Dictionary, crossings: Array, node_scope: String) -> void:
+## THE TWO WALKS ARE KEPT APART, and the depth is the SHALLOWER of them. A run
+## is a chord through the overlap along whatever direction that edge happened
+## to point, and the two walks point across each other: a peg through a plate
+## gives runs of the plate's thickness along the peg's own edges and runs of
+## the peg's DIAMETER along the plate's, and the diameter says how wide the peg
+## is, not how far it went in. Taking the larger of the two would report a
+## 1.6 mm overlap as 3.5 mm deep and fail every declaration drawn for it.
+##
+## An odd number of crossings means an endpoint of the edge is buried, and
+## bounds no run at all — that case is still interference, just without a
+## depth. `walk` names which body's edges these crossings were found on.
+func _absorb_runs(pairs: Dictionary, crossings: Array, node_scope: String,
+		walk: String) -> void:
 	var by_node := {}
 	for entry in crossings:
 		var crossing: Dictionary = entry
@@ -169,11 +178,26 @@ func _absorb_runs(pairs: Dictionary, crossings: Array, node_scope: String) -> vo
 		if distances.size() < 2 or not table.has(key):
 			continue
 		var pair: Dictionary = table[key]
+		var runs: Dictionary = pair["run_max"]
 		var index := 0
 		while index + 1 < distances.size():
-			pair["penetration_mm"] = maxf(float(pair["penetration_mm"]),
+			runs[walk] = maxf(float(runs.get(walk, 0.0)),
 				float(distances[index + 1]) - float(distances[index]))
 			index += 2
+		pair["penetration_mm"] = _depth_from(runs)
+
+
+## The overlap depth the runs bound: the shallower of the two walks when both
+## measured one, and the only one measured otherwise. Zero means no run was
+## bounded at all.
+func _depth_from(runs: Dictionary) -> float:
+	var depth := 0.0
+	for key in runs.keys():
+		var run := float(runs[key])
+		if run <= 0.0:
+			continue
+		depth = run if depth <= 0.0 else minf(depth, run)
+	return depth
 
 
 func _pair_for(pairs: Dictionary, reference_name: String, node_path: String) -> Dictionary:
@@ -185,6 +209,7 @@ func _pair_for(pairs: Dictionary, reference_name: String, node_path: String) -> 
 			"points": [],
 			"point_count": 0,
 			"penetration_mm": 0.0,
+			"run_max": {},
 			"note": "",
 		}
 	return pairs[key]
@@ -305,7 +330,9 @@ func _pair_row(pair: Dictionary) -> Dictionary:
 	if float(pair["penetration_mm"]) > 0.0:
 		entry["penetration_mm"] = float(pair["penetration_mm"])
 		entry["penetration_note"] = "the deepest run of one body's edge " \
-			+ "inside the other; a lower bound on the penetration"
+			+ "inside the other, taken from whichever of the two bodies' " \
+			+ "edges ran the shorter: a run across the overlap measures the " \
+			+ "feature's width, not how deep it went"
 	if not str(pair["note"]).is_empty():
 		entry["note"] = str(pair["note"])
 	return entry

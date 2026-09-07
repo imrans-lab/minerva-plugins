@@ -561,7 +561,7 @@ func _check_reference_holes_are_indexed_as_paired() -> void:
 		_hole("board/degenerate", [20.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
 		_hole("board/B", [30.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
 	]
-	var pairing: Dictionary = checks._pair([], holes, {})
+	var pairing: Dictionary = checks._pair([], holes, {}, {})
 	var index: Array = pairing["reference_hole_index"]
 	check("the index lists only the holes the pairing can address",
 			index.size() == 2, "indexed %d of 3 holes" % index.size())
