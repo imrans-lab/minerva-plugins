@@ -71,6 +71,7 @@ func _run() -> void:
 	await _check_a_finished_part_failing_is_not_lost_behind_a_ticket()
 	await _check_parts_share_one_clearance_window()
 	await _check_every_binding_is_evaluated_once()
+	await _check_a_ticket_start_leg_never_aggregates_to_pass()
 
 
 # ---------------------------------------------------------------------------
@@ -724,6 +725,28 @@ func _check_every_binding_is_evaluated_once() -> void:
 				PartCache.part_count(panel)])
 	panel.free()
 	PartCache.clear()
+
+
+## ORACLE (bug 01a079fa07a4): parts=["top"] with wait_ms=0, and the leg comes
+## straight back with a ticket having measured nothing. The per-part fold is
+## shared by every check verb, so the verdict it prints is the one the reader
+## acts on — and a leg that carries no `pass` at all must never be read as one.
+func _check_a_ticket_start_leg_never_aggregates_to_pass() -> void:
+	var panel := _panel()
+	panel.interference = _interference_report([])
+	panel.clearance = {"checked": false, "status": "running",
+		"ticket": "per-part", "pairs": [], "elapsed_ms": 1,
+		"reason": "the measurement is still running in the worker"}
+	var reply: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_check_clearance",
+			{"required_mm": REQUIRED_MM, "parts": ["top"], "wait_ms": 0})
+	check("a clearance leg that only started, and measured nothing, is never "
+			+ "aggregated as pass — the verdict says so and names the ticket",
+			reply.get("pass", null) != true
+				and int(reply.get("failed", 0)) == 1
+				and str(reply.get("pass_reason", "")).contains("clearance-top"),
+			"reply = %s" % str(reply))
+	panel.free()
 
 
 # ---------------------------------------------------------------------------

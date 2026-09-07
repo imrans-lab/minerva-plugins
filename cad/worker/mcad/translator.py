@@ -99,7 +99,44 @@ from .reference import (
 
 
 class TranslatorError(Exception):
-    """Raised when the translator encounters an error during evaluation."""
+    """Raised when the translator encounters an error during evaluation.
+
+    A translate-time error — an unknown function, a wrong argument count, an
+    operator the operand types do not support — is raised deep in expression
+    evaluation, where the statement that is running is not in scope. So the
+    raise sites say only what is wrong, and the statement boundary attaches
+    WHERE with :meth:`locate` (see ``build_trace.translate_program``); the binding
+    and the line then travel in ``str(exc)`` as well as in the attributes, so
+    a reader who only sees the message still knows which line to edit.
+    """
+
+    def __init__(self, message: str, *, binding: str = "", line: int = 0) -> None:
+        super().__init__(message)
+        self.message = message
+        self.binding = binding
+        self.line = line
+
+    def locate(self, binding: str, line: int) -> "TranslatorError":
+        """Attach the statement being translated, unless one is already set.
+
+        Called once, at the top-level statement loop in
+        ``build_trace.translate_program``: an error inside a module body is
+        therefore reported at the statement that called the module.
+        """
+        if not self.binding and not self.line:
+            self.binding = binding
+            self.line = line
+        return self
+
+    def __str__(self) -> str:
+        where = ""
+        if self.binding and self.line:
+            where = f" (in '{self.binding}', line {self.line})"
+        elif self.binding:
+            where = f" (in '{self.binding}')"
+        elif self.line:
+            where = f" (line {self.line})"
+        return f"{self.message}{where}"
 
 
 class _ModuleReturn(Exception):

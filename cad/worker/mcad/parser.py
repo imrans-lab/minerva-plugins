@@ -197,7 +197,7 @@ class Parser:
         self._expect(TT.EQ, "assignment")
         if self._at(TT.KW_LOFT):
             value = self._loft_block()
-            return Assignment(name_tok.value, value)
+            return Assignment(name_tok.value, value, line=name_tok.line)
         value = self._expression()
 
         # Check for at clause
@@ -205,7 +205,7 @@ class Parser:
             value = self._at_clause(value)
 
         self._expect(TT.NEWLINE, "end of assignment")
-        return Assignment(name_tok.value, value)
+        return Assignment(name_tok.value, value, line=name_tok.line)
 
     def _loft_block(self) -> Loft:
         """Parse ``loft:`` followed by indented section lines."""

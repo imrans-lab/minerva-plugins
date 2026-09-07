@@ -79,6 +79,44 @@ def test_lex_parse_and_translate_errors_each_land_on_their_own_kind() -> None:
     assert "boxx" in translated["message"], translated
 
 
+#: A translate-time refusal with NO node of its own to carry a position: the
+#: operator is rejected between two solids, and the expression `base * lid`
+#: knows nothing about where it was written. The statement it belongs to does.
+OPERATOR_SOURCE = (
+    "base = cube(10, 10, 10)\n"
+    "lid = cube(4, 4, 4)\n"
+    "skin_outer = base * lid\n"
+)
+
+#: The other translate class, from a call node that DOES carry a position, so
+#: the two paths into `describe_statement` are both exercised.
+UNKNOWN_FUNCTION_SOURCE = "base = cube(10, 10, 10)\n\nlid = boxx(4, 4, 4)\n"
+
+
+def test_a_translate_error_names_its_binding_and_its_source_line() -> None:
+    """Bug 01a079fa0cc3: "where do I edit" for a DSL-level failure.
+
+    A kernel failure carries a Python traceback and the panel shows its
+    innermost frame. A translate error never reaches code the reader owns, so
+    it had a message and nothing else — `error_frame` came back empty and the
+    banner named no line. Both classes must now answer the same question: the
+    binding being produced, the line it is on, and that line as written.
+    """
+    operator = _error(OPERATOR_SOURCE)
+    assert operator["kind"] == "translate", operator
+    assert operator["details"]["binding"] == "skin_outer", operator
+    assert operator["details"]["line"] == 3, operator
+    assert "skin_outer" in operator["message"] and "line 3" in operator["message"]
+    assert "skin_outer = base * lid" in operator["frame"], operator
+    assert "traceback" not in operator, "a rejected operator is not a crash"
+
+    unknown = _error(UNKNOWN_FUNCTION_SOURCE)
+    assert unknown["kind"] == "translate", unknown
+    assert unknown["details"]["binding"] == "lid", unknown
+    assert unknown["details"]["line"] == 3, unknown
+    assert "lid = boxx(4, 4, 4)" in unknown["frame"], unknown
+
+
 def test_export_reports_a_lex_error_the_same_way_evaluate_does(tmp_path: Path) -> None:
     methods.reset_caches()
     reply = methods._export(

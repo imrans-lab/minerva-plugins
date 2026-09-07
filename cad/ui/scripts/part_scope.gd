@@ -33,6 +33,9 @@ const _WorkerReply: Script = preload("worker_reply.gd")
 ## Evaluated once per (document, binding) and read by every leg after the
 ## first. Without it a three-legged verb pays for each binding three times.
 const _PartCache: Script = preload("part_cache.gd")
+## The per-leg staleness gate: a part that has not started measuring yet is
+## refused when the document has moved past the evaluation.
+const _Freshness: Script = preload("eval_freshness.gd")
 
 ## Channel name = MCP tool name; the worker method behind it is "evaluate".
 const EVALUATE_CHANNEL: String = "cad.evaluate"
@@ -139,3 +142,105 @@ static func resolve(panel: Object, part: String) -> Dictionary:
 	}
 	_PartCache.put_part(panel, part, resolved)
 	return resolved
+
+
+## Run a check once per part and say which part each answer is about.
+##
+## `fresh` is panel_tools' own re-pose wrapper, handed in rather than reached
+## for: this script is preloaded BY the verb layer, and preloading it back
+## would be a cycle.
+##
+## With no `parts` the check runs once, against the shape the document
+## evaluates to, and the reply NAMES that shape — the answer to "which half did
+## you just check" that a two-shell document could not get before. With
+## `parts`, each named binding is evaluated on its own (part_scope appends it
+## as the trailing expression, the DSL's own render-target rule) and checked
+## against its own mesh, and the replies come back together under `parts` with
+## `pass` true only when every one of them passed. The parts run one after
+## another because they share the panel's single solid collider.
+static func per_part(panel, args: Dictionary, verb: Callable,
+		fresh: Callable) -> Dictionary:
+	var wanted: Array = names(args)
+	if wanted.is_empty():
+		var single: Dictionary = await fresh.call(panel, args, verb)
+		var target: String = render_target(panel)
+		if not target.is_empty():
+			single["part"] = target
+		return single
+
+	var rows: Array = []
+	var failed := 0
+	# The legs that answered without measuring anything, named for pass_reason.
+	var unmeasured: Array[String] = []
+	for entry in wanted:
+		var part := str(entry)
+		# RE-GATED PER LEG. A part evaluates in the worker and its check stands
+		# in the collider's wait line, and the document can be edited across
+		# either; the gate in handle() ran before the first leg only. A leg
+		# that has already measured cannot be un-measured, so the reply it
+		# produced keeps its stale stamp — this refuses the legs that have not
+		# started yet rather than adding one more answer about geometry the
+		# document has moved past.
+		var standing: Dictionary = _Freshness.read(panel)
+		if bool(standing.get("stale", false)) and bool(standing.get("known", false)):
+			var refused := {"part": part, "checked": false,
+				"reason": str(standing.get("stale_reason", "")), "stale": true}
+			rows.append(refused)
+			unmeasured.append(_unmeasured_leg(part, refused))
+			failed += 1
+			continue
+		var resolved: Dictionary = await resolve(panel, part)
+		if resolved.has("error"):
+			var unresolved := {"part": part, "checked": false,
+				"reason": str(resolved["error"])}
+			rows.append(unresolved)
+			unmeasured.append(_unmeasured_leg(part, unresolved))
+			failed += 1
+			continue
+		var scoped: Dictionary = args.duplicate(true)
+		scoped.erase("parts")
+		# What the check measures instead of the document's own render target:
+		# this part's tessellation for the colliders, and the source that
+		# produced it for anything the worker re-evaluates.
+		scoped["mesh"] = resolved["mesh"]
+		scoped["source"] = resolved["source"]
+		var one: Dictionary = await fresh.call(panel, scoped, verb)
+		one["part"] = part
+		rows.append(one)
+		# A LEG THAT MEASURED NOTHING IS NOT A PASS. A check that hands back a
+		# ticket answers `checked: false` and carries no verdict at all, so
+		# reading its missing `pass` as true let the aggregate say the design
+		# cleared before a single number existed. Absent `checked` still
+		# defaults to true — only a leg that SAYS it measured nothing counts.
+		if not bool(one.get("checked", true)):
+			unmeasured.append(_unmeasured_leg(part, one))
+			failed += 1
+		elif not bool(one.get("success", true)) or not bool(one.get("pass", true)):
+			failed += 1
+	var reply := {
+		"parts": rows,
+		"count": rows.size(),
+		"failed": failed,
+		"pass": failed == 0 and not rows.is_empty(),
+		"parts_note": "each part is the document evaluated with that binding "
+			+ "as its trailing expression, which is the DSL\'s own "
+			+ "render-target rule; a part that does not evaluate is reported "
+			+ "as checked:false with the reason and does not silently drop "
+			+ "out of the count",
+	}
+	if not unmeasured.is_empty():
+		reply["pass_reason"] = "nothing was measured for %s — this verdict is "\
+			% ", ".join(unmeasured) \
+			+ "not a pass, it is the absence of an answer"
+	reply["success"] = true
+	return reply
+
+
+## How an unmeasured leg is named in `pass_reason`: the ticket it can be
+## collected with when it has one, and its own reason otherwise.
+static func _unmeasured_leg(part: String, row: Dictionary) -> String:
+	var ticket := str(row.get("ticket", ""))
+	if not ticket.is_empty():
+		return "%s (ticket %s, still %s)" % [part, ticket,
+			str(row.get("status", "running"))]
+	return "%s (%s)" % [part, str(row.get("reason", "no reason given"))]

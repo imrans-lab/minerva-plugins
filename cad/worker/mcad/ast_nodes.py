@@ -118,9 +118,16 @@ class Tuple:
 
 @dataclass
 class Assignment:
-    """Variable binding: ``name = value``."""
+    """Variable binding: ``name = value``.
+
+    ``line`` is the target name's position. Only some value nodes carry one of
+    their own (a call does, an operator expression does not), so a diagnostic
+    about ``skin_outer = a * b`` has nowhere else to read the source line from.
+    It defaults to 0 for nodes a test builds by hand.
+    """
     name: str
     value: Any
+    line: int = 0
 
 
 @dataclass

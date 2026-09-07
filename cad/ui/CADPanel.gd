@@ -756,7 +756,13 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 				"ts": Time.get_unix_time_from_system(),
 			}
 			return
-		var frame: String = _EvalReplyScript.innermost_frame(str(err.get("traceback", "")))
+		# The "where do I edit" line. A kernel failure carries a Python
+		# traceback and the innermost frame names the call that raised; a
+		# DSL-level failure has no traceback and the worker hands the source
+		# frame — the binding and the line as written — under `frame`.
+		var frame: String = str(err.get("frame", ""))
+		if frame.is_empty():
+			frame = _EvalReplyScript.innermost_frame(str(err.get("traceback", "")))
 		_last_eval_result = {
 			"status": "error",
 			"error_kind": kind,

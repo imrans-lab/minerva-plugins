@@ -156,7 +156,10 @@ def describe_statement(stmt: Any) -> tuple[str, int]:
     its first argument.
     """
     if isinstance(stmt, Assignment):
-        return stmt.name, getattr(stmt.value, "line", 0) or 0
+        # The value node's own position when it has one (a call carries it),
+        # and the assignment target's otherwise: `a = b * c` is an operator
+        # expression, and no node under it knows what line it was written on.
+        return stmt.name, getattr(stmt.value, "line", 0) or stmt.line
     if isinstance(stmt, Command):
         first = stmt.args[0] if stmt.args else None
         target = first.name if isinstance(first, Identifier) else stmt.name
@@ -174,13 +177,33 @@ def describe_statement(stmt: Any) -> tuple[str, int]:
     return type(stmt).__name__.lower(), 0
 
 
+def source_frame(source: str, binding: str, line: int) -> str:
+    """The DSL frame a translate-time error is shown with: the binding it was
+    producing, the line number, and that line of the program as written.
+
+    The kernel path has a Python traceback whose innermost frame says which
+    call failed; a translate error never reaches Python code the reader owns,
+    so the equivalent "where" is the source line itself.
+    """
+    if not binding and not line:
+        return ""
+    head = f"'{binding}' (line {line})" if line else f"'{binding}'"
+    lines = source.splitlines()
+    if 1 <= line <= len(lines):
+        return f"{head}\n  {lines[line - 1].strip()}"
+    return head
+
+
 def translate_program(translator: Translator, program: Program) -> None:
     """Translate *program* statement by statement, attributing kernel errors.
 
     ``Translator.translate`` runs the same loop; it is repeated here (via the
     per-statement entry point) only so the statement boundary is still in
     scope when an exception escapes. DSL-level errors — lex, parse, translate
-    — pass through untouched so their own kinds survive.
+    — pass through untouched so their own kinds survive, except that a
+    translate error is told WHERE it happened on the way out: it is raised
+    from inside expression evaluation, which does not know which statement is
+    running, and this loop is the only place that does.
 
     A program whose last statement is a bare expression (``hump_in``) selects
     that expression as the result; without one, the last-assigned part stands.
@@ -193,7 +216,11 @@ def translate_program(translator: Translator, program: Program) -> None:
                 _select_result(translator, stmt)
             else:
                 translator._eval_statement(stmt)
-        except (ParseError, TranslatorError, BuildFailure):
+        except TranslatorError as exc:
+            binding, line = describe_statement(stmt)
+            exc.locate(binding, line)
+            raise
+        except (ParseError, BuildFailure):
             raise
         except Exception as exc:
             binding, line = describe_statement(stmt)

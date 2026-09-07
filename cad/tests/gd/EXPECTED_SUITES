@@ -806,7 +806,10 @@ test_eval_banner.gd assertions=9
 # Also the evaluate-once oracle: four parts across three legs cost FOUR
 # worker evaluations and not twelve, an unchanged document costs none, and
 # the next evaluation of the document invalidates every binding.
-test_check_design.gd assertions=29
+# + 1 (bug 01a079fa07a4) a part-scoped leg that only handed back a ticket,
+# having measured nothing, never aggregates to pass:true — the shared
+# per-part fold names the ticket in pass_reason instead.
+test_check_design.gd assertions=30
 
 # minerva_cad_snapshot_fit: a capture framed on the evaluated solid, a named
 # reference or a world box, rendered from a camera of its own so the pane the

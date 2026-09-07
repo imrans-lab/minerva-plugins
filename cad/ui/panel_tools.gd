@@ -241,71 +241,10 @@ static func _fresh(panel, args: Dictionary, verb: Callable) -> Dictionary:
 	return reply
 
 
-## Run a check once per part and say which part each answer is about.
-##
-## With no `parts` the check runs once, against the shape the document
-## evaluates to, and the reply NAMES that shape — the answer to "which half did
-## you just check" that a two-shell document could not get before. With
-## `parts`, each named binding is evaluated on its own (part_scope appends it
-## as the trailing expression, the DSL's own render-target rule) and checked
-## against its own mesh, and the replies come back together under `parts` with
-## `pass` true only when every one of them passed. The parts run one after
-## another because they share the panel's single solid collider.
+## Run a check once per part. The fold lives in part_scope.gd, which owns what
+## a part is; this binds the freshness wrapper every leg goes through.
 static func _per_part(panel, args: Dictionary, verb: Callable) -> Dictionary:
-	var wanted: Array = _PartScope.names(args)
-	if wanted.is_empty():
-		var single: Dictionary = await _fresh(panel, args, verb)
-		var target: String = _PartScope.render_target(panel)
-		if not target.is_empty():
-			single["part"] = target
-		return single
-
-	var rows: Array = []
-	var failed := 0
-	for entry in wanted:
-		var part := str(entry)
-		# RE-GATED PER LEG. A part evaluates in the worker and its check stands
-		# in the collider's wait line, and the document can be edited across
-		# either; the gate in handle() ran before the first leg only. A leg
-		# that has already measured cannot be un-measured, so the reply it
-		# produced keeps its stale stamp — this refuses the legs that have not
-		# started yet rather than adding one more answer about geometry the
-		# document has moved past.
-		var standing: Dictionary = _Freshness.read(panel)
-		if bool(standing.get("stale", false)) and bool(standing.get("known", false)):
-			rows.append({"part": part, "checked": false,
-				"reason": str(standing.get("stale_reason", "")), "stale": true})
-			failed += 1
-			continue
-		var resolved: Dictionary = await _PartScope.resolve(panel, part)
-		if resolved.has("error"):
-			rows.append({"part": part, "checked": false,
-				"reason": str(resolved["error"])})
-			failed += 1
-			continue
-		var scoped: Dictionary = args.duplicate(true)
-		scoped.erase("parts")
-		# What the check measures instead of the document's own render target:
-		# this part's tessellation for the colliders, and the source that
-		# produced it for anything the worker re-evaluates.
-		scoped["mesh"] = resolved["mesh"]
-		scoped["source"] = resolved["source"]
-		var one: Dictionary = await _fresh(panel, scoped, verb)
-		one["part"] = part
-		rows.append(one)
-		if not bool(one.get("success", true)) or not bool(one.get("pass", true)):
-			failed += 1
-	return _ok({
-		"parts": rows,
-		"count": rows.size(),
-		"failed": failed,
-		"pass": failed == 0 and not rows.is_empty(),
-		"parts_note": "each part is the document evaluated with that binding "
-			+ "as its trailing expression, which is the DSL\'s own "
-			+ "render-target rule; a part that does not evaluate is reported "
-			+ "as checked:false with the reason and does not silently drop "
-			+ "out of the count",
-	})
+	return await _PartScope.per_part(panel, args, verb, _fresh)
 
 
 ## The panel's digest of its mounted references, or "" for a panel that has

@@ -231,6 +231,31 @@ def _mesh_invalid_error(exc: Exception, source: str) -> dict:
     }
 
 
+def _translate_error(cause: Any, message: str, source: str) -> dict:
+    """The error payload for a translate-time failure.
+
+    The kernel path answers with a Python traceback and the panel shows its
+    innermost frame; a translate error has no such frame, so it carries the
+    binding, the line and the source line itself under `frame` — the same
+    "where do I edit" the build path gives, from the AST node's position.
+    """
+    from mcad.build_trace import source_frame
+
+    error: dict = {"kind": "translate", "message": message}
+    details: dict = {}
+    if getattr(cause, "binding", ""):
+        details["binding"] = cause.binding
+    if getattr(cause, "line", 0):
+        details["line"] = cause.line
+    if details:
+        error["details"] = details
+    frame = source_frame(source, getattr(cause, "binding", ""),
+                         int(getattr(cause, "line", 0)))
+    if frame:
+        error["frame"] = frame
+    return {"ok": False, "error": error}
+
+
 def _summarise(result: dict) -> dict:
     """An evaluation reply WITHOUT its mesh: what the geometry is, how big it
     is and whether the tessellation is sound. On a real enclosure the mesh is
@@ -371,13 +396,7 @@ def _evaluate(params: dict) -> dict:
                 },
             }
         if isinstance(cause, TranslatorError):
-            return {
-                "ok": False,
-                "error": {
-                    "kind": "translate",
-                    "message": str(exc),
-                },
-            }
+            return _translate_error(cause, str(exc), source)
         # No typed cause or unrecognised cause → treat as OCCT/build123d error.
         return {
             "ok": False,
@@ -603,15 +622,14 @@ def _export(params: dict) -> dict:
     except ExportError as exc:
         cause = exc.__cause__
         if isinstance(cause, ParseError):
-            kind = "parse"
-        elif isinstance(cause, TranslatorError):
-            kind = "translate"
-        else:
-            kind = "translate"
-        return {
-            "ok": False,
-            "error": {"kind": kind, "message": str(exc)},
-        }
+            return {
+                "ok": False,
+                "error": {"kind": "parse", "message": str(exc)},
+            }
+        # Anything else that reached here is a DSL-level refusal; when it is a
+        # translate error it names its binding and line the same way the
+        # evaluate path does.
+        return _translate_error(cause, str(exc), source)
     except OSError as exc:
         return {
             "ok": False,
