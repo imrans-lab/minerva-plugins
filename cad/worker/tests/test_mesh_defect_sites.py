@@ -120,7 +120,14 @@ def test_rev3_fixture_reports_both_edges_with_positions():
     for site in located["sites"]:
         for axis in range(3):
             assert low[axis] - 0.01 <= site["position"][axis] <= high[axis] + 0.01
-    # Degenerate faces travel too, with the "not a defect by itself" note.
-    degenerate = summary["mesh_defect_sites"]["degenerate_faces"]
-    assert degenerate["total"] == summary["mesh_defects"]["degenerate_faces"]
-    assert len(degenerate["sites"]) <= mesh_defects.DEGENERATE_SITE_CAP
+    # Counts and sites agree about degenerate faces. This tessellation has
+    # none, so both keys are absent -- zero-valued classes are filtered out of
+    # counts and never get a sites entry. The sampling itself is covered on a
+    # synthetic mesh above; here the claim is only that the two halves of the
+    # reply cannot disagree.
+    degenerate_count = summary["mesh_defects"].get("degenerate_faces")
+    degenerate = summary["mesh_defect_sites"].get("degenerate_faces")
+    assert (degenerate_count is None) == (degenerate is None)
+    if degenerate is not None:
+        assert degenerate["total"] == degenerate_count
+        assert len(degenerate["sites"]) <= mesh_defects.DEGENERATE_SITE_CAP

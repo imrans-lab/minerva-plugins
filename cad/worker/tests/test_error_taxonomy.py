@@ -105,7 +105,7 @@ def test_a_kernel_failure_names_the_binding_and_keeps_its_traceback() -> None:
 
 
 def test_the_three_section_hump_attributes_its_tessellation_failure() -> None:
-    source = (FIXTURES / "enclosure-rev3.mcad").read_text()
+    source = (FIXTURES / "enclosure-rev3.mcad").read_text(encoding="utf-8")
     assert TWO_SECTION_HUMP in source, "the rev-3 fixture no longer holds hump_in"
     err_source = source.replace(TWO_SECTION_HUMP, THREE_SECTION_HUMP)
 

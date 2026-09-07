@@ -758,10 +758,12 @@ class TestClearanceVerb:
         principal curvatures finds the pole instead, and the pole is what the
         angle then holds.
 
-        ORACLE: the spheroid's analytic pole radius, a^2/c = 500 mm, which the
-        sampled reading must reach from below — the pole is a degenerate point
-        the evaluator will not answer at, so it may only approach it — and
-        never exceed.
+        ORACLE: the spheroid's analytic pole radius, a^2/c = 500 mm. The pole
+        is a degenerate point the evaluator will not answer at, so the search
+        can only approach it from below; the reading is therefore scaled up by
+        the shortfall its own residual step allows, so that it bounds the pole
+        radius from ABOVE rather than sitting under it. It must land within
+        that correction of 500 mm and never run away above it.
 
         The floor follows from HOW the reading is made rather than from a
         round number. A bare grid stops at its nearest usable node: with
@@ -802,18 +804,22 @@ class TestClearanceVerb:
         report = feat.curvature_report(spheroid, tolerance_mm=requested)
         assert report["unrecognised_faces"] == 0
         assert report["sampled_faces"] == 1
-        # The offset the refinement leaves, in units of a grid step, and the
-        # relative radius shortfall it implies on this spheroid (the radius
-        # falls off quadratically in the latitude offset from the pole).
-        grid_step_rad = math.pi / (curv.SAMPLES_PER_DIRECTION - 1)
-        residual_rad = grid_step_rad / 2 ** curv.REFINEMENT_ROUNDS
-        method_shortfall = 1.5 * residual_rad * residual_rad
-        assert method_shortfall < 1.0e-4
-        # From below and close: the bbox guess (50 mm) is an order of
-        # magnitude short of this, and the nearest grid node is 14 % short, so
-        # neither a fallback nor an unrefined grid can pass the test.
-        assert report["largest_radius_mm"] <= pole_radius * (1.0 + 1.0e-9)
-        assert report["largest_radius_mm"] >= pole_radius * (1.0 - 1.0e-3)
+        # The correction the reading carries. The refinement stops a residual
+        # parametric step short of the maximum and inflates by the shortfall
+        # that offset implies; the step it uses is the widest of the two
+        # parametric directions, which on this surface is a full turn of
+        # longitude.
+        grid_step = 2.0 * math.pi / (curv.SAMPLES_PER_DIRECTION - 1)
+        residual = grid_step / 2 ** curv.REFINEMENT_ROUNDS
+        correction = curv.RESIDUAL_SHORTFALL_FACTOR * residual * residual
+        assert correction < 1.0e-4
+        # An UPPER bound, and a tight one: at or above the pole radius, and
+        # over it by no more than the correction. A bbox guess (50 mm) is an
+        # order of magnitude short of this and the nearest grid node is 14 %
+        # short, so neither a fallback nor an unrefined grid reaches it.
+        assert report["largest_radius_mm"] >= pole_radius
+        assert report["largest_radius_mm"] <= pole_radius * (
+            1.0 + correction + 1.0e-9)
 
         sampled = _reply(spheroid)
         assert sampled["checked"] is True

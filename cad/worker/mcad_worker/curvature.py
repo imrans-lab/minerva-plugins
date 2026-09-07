@@ -41,6 +41,17 @@ wider. The centre walks toward the true maximum — including one sitting on a
 parametric boundary, which is where a degenerate pole lives — and the residual
 offset left after the last round is one grid step divided by 2**rounds.
 
+WHY THE READING IS INFLATED
+The refinement converges on the flattest point FROM BELOW: every sample it
+keeps sits some residual offset short of the maximum, and radius falls off
+quadratically in that offset, so the reading is short by roughly 1.5 times the
+square of the residual, relative. A tessellation bound derived from a radius
+that is short is not a bound at all, so the returned radius is inflated by
+(1 + 1.5*res**2), where res is the residual parametric offset the refinement
+stopped at. On a well-conditioned parameterisation that correction is parts
+per million; on a coarsely parameterised face it is the honest width of the
+search's own uncertainty.
+
 THE HONEST LIMIT
 The search is still a sample, not a proof: a curvature spike in a cell the
 grid steps over entirely, and far from the widest node, is not seen. The grid
@@ -73,6 +84,13 @@ _PROP_RESOLUTION_MM = 1.0e-7
 #: that seeds it, and it leaves the reading within one grid step / 2**rounds
 #: of the parametric point it converged on.
 REFINEMENT_ROUNDS = 10
+
+#: The refinement approaches the flattest point from below, so the radius it
+#: stops at is short by about this much, relative, for a residual parametric
+#: offset `res`: radius falls off as the square of the offset from a smooth
+#: maximum. The reading is scaled up by it so the number really is an upper
+#: bound on the face's flattest radius.
+RESIDUAL_SHORTFALL_FACTOR = 1.5
 
 
 def binding_radius(occt: dict, face, tolerance_mm: Optional[float]
@@ -123,8 +141,11 @@ def binding_radius(occt: dict, face, tolerance_mm: Optional[float]
     if best_uv is not None:
         du = (u1 - u0) / (steps - 1)
         dv = (v1 - v0) / (steps - 1)
-        widest, best_uv = _refine(props_class, adaptor, floor, widest, best_uv,
-                                  du, dv, (u0, u1), (v0, v1))
+        widest, best_uv, residual = _refine(props_class, adaptor, floor,
+                                            widest, best_uv, du, dv,
+                                            (u0, u1), (v0, v1))
+        if widest is not None:
+            widest *= 1.0 + RESIDUAL_SHORTFALL_FACTOR * residual * residual
     return widest, evaluated
 
 
@@ -158,7 +179,7 @@ def _radius_at(props_class, adaptor, u: float, v: float, floor: float
 def _refine(props_class, adaptor, floor: float, widest: Optional[float],
             centre: tuple[float, float], du: float, dv: float,
             u_range: tuple[float, float], v_range: tuple[float, float]
-            ) -> tuple[Optional[float], tuple[float, float]]:
+            ) -> tuple[Optional[float], tuple[float, float], float]:
     """Walk the widest sample toward the flattest point around it.
 
     Each round samples the eight neighbours of the current centre at the
@@ -167,6 +188,10 @@ def _refine(props_class, adaptor, floor: float, widest: Optional[float],
     grid cell it started in and settle onto a maximum that lies on the
     parametric boundary, and the step it stops at is the offset still
     separating it from that maximum.
+
+    Returns that final step as the third value, in the surface's own parameter
+    units: it is what the caller inflates the radius by, since the walk only
+    ever approaches the maximum from below.
     """
     u0, u1 = u_range
     v0, v1 = v_range
@@ -182,7 +207,7 @@ def _refine(props_class, adaptor, floor: float, widest: Optional[float],
                     widest, centre = radius, (u, v)
         du *= 0.5
         dv *= 0.5
-    return widest, centre
+    return widest, centre, max(du, dv)
 
 
 def _extent(occt: dict, face) -> Optional[float]:

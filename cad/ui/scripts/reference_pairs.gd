@@ -82,6 +82,8 @@ const PAIR_ENTRY_BYTES: int = 16
 ## two parts resting against each other do. Such a pair is reported with
 ## `overlap` and the contact points the worker found, and it fails any
 ## required gap; nothing here decides containment, and the reply says so.
+## A contact point is located to the box the two meshes share and no finer:
+## the collision names a triangle corner, not a point of the intersection.
 func check_reference_pairs(panel: Object, args: Dictionary = {}) -> Dictionary:
 	if panel == null or not is_instance_valid(panel):
 		return _no_pairs("the CAD panel is gone")

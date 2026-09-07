@@ -67,7 +67,7 @@ def test_committed_notice_passes_the_gate_and_is_not_stale():
     """
     proc = subprocess.run(
         [sys.executable, str(GEN_NOTICE), "--check"],
-        capture_output=True, text=True, cwd=str(REPO),
+        capture_output=True, text=True, encoding="utf-8", cwd=str(REPO),
     )
     assert proc.returncode == 0, (
         f"gen_notice --check failed:\n{proc.stdout}\n{proc.stderr}")
@@ -190,7 +190,7 @@ def test_gate_refuses_when_a_licence_text_is_removed(lock_vars, licence_copy):
 
 
 def test_gate_refuses_an_empty_licence_text(lock_vars, licence_copy):
-    (licence_copy / "libccd-2.1.BSD-LICENSE.txt").write_text("   \n")
+    (licence_copy / "libccd-2.1.BSD-LICENSE.txt").write_text("   \n", encoding="utf-8")
     with pytest.raises(gn.NoticeGateError) as exc:
         gn.render_notice(lock_vars, licence_dir=licence_copy)
     assert "libccd-2.1.BSD-LICENSE.txt" in str(exc.value)
@@ -198,7 +198,7 @@ def test_gate_refuses_an_empty_licence_text(lock_vars, licence_copy):
 
 def test_gate_refuses_a_licence_text_nothing_references(lock_vars, licence_copy):
     """The other direction: a stale text is an attribution we no longer make."""
-    (licence_copy / "leftover-dependency.LICENSE.txt").write_text("whatever")
+    (licence_copy / "leftover-dependency.LICENSE.txt").write_text("whatever", encoding="utf-8")
     with pytest.raises(gn.NoticeGateError) as exc:
         gn.render_notice(lock_vars, licence_dir=licence_copy)
     assert "leftover-dependency.LICENSE.txt" in str(exc.value)
@@ -221,7 +221,7 @@ def test_gate_refuses_when_a_declared_support_file_is_removed(lock_vars,
 def test_gate_refuses_a_file_the_inventory_does_not_declare(lock_vars,
                                                             licence_copy):
     """Anywhere under cad/licenses, not only in runtime/."""
-    (licence_copy.parent / "unexpected.txt").write_text("whatever")
+    (licence_copy.parent / "unexpected.txt").write_text("whatever", encoding="utf-8")
     with pytest.raises(gn.NoticeGateError) as exc:
         gn.render_notice(lock_vars, licence_dir=licence_copy)
     assert "unexpected.txt" in str(exc.value)

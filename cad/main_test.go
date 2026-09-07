@@ -12,17 +12,20 @@ import (
 )
 
 // captureNotify redirects notifyOut to a fresh buffer and resets notifyEnc so
-// that the next emitHostNotify call encodes into the buffer. It registers a
-// cleanup function via t.Cleanup that restores global state after the test.
+// that the next emitHostNotify call encodes into the buffer. Cleanup restores
+// the writer and encoder that were in place before the swap -- clearing them
+// instead would leave notifyOut nil, and a later emitHostNotify would build an
+// encoder over a nil writer and panic.
 // Returns a pointer to the buffer so callers can inspect it at any point.
 func captureNotify(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
+	prevOut, prevEnc := notifyOut, notifyEnc
 	notifyOut = &buf
 	notifyEnc = json.NewEncoder(&buf)
 	t.Cleanup(func() {
-		notifyOut = nil
-		notifyEnc = nil
+		notifyOut = prevOut
+		notifyEnc = prevEnc
 	})
 	return &buf
 }

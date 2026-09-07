@@ -23,8 +23,13 @@ against the solid and then against another reference builds its tree once.
 
 CONTACT POINTS. A distance of zero says only that there is no air between the
 two meshes. FCL's mesh-mesh collision names the triangles that overlap and a
-point on each contact, so an overlapping pair comes back with those points —
-which is what turns "these two touch" into "they touch HERE". Mesh-mesh
+point per contact, so an overlapping pair comes back with points — which is
+what turns "these two touch" into "they touch HERE". The raw position FCL
+hands back is a corner of one of the two intersecting triangles, not a point
+of their intersection, and a corner can sit a whole triangle away from where
+the meshes actually meet. Each point is therefore clamped into the box the two
+meshes share, which always contains the intersection; the reported point is
+"inside the overlapped region", accurate to that box and no better. Mesh-mesh
 collision does not compute a penetration DEPTH; the reply carries a depth only
 where FCL gives a positive one, and never invents one.
 """
@@ -33,7 +38,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from .clearance import ClearanceError, _require_fcl, _tree_for
+from .clearance import ClearanceError, _require_fcl, _tree_for, bounds_for
 
 #: Contacts collected for one overlapping pair. Enough to show where a part
 #: has landed on another and short enough that a badly placed part does not
@@ -65,13 +70,32 @@ def _distance(fcl, tree_a, tree_b) -> tuple[float, list, list]:
     return float(value), point_a, point_b
 
 
-def _contacts(fcl, tree_a, tree_b, limit: int) -> tuple[list, int, Optional[float]]:
+def _shared_box(box_a, box_b):
+    """The box two bounding boxes have in common, or None if they share none."""
+    if box_a is None or box_b is None:
+        return None
+    low = [max(a, b) for a, b in zip(box_a[0], box_b[0])]
+    high = [min(a, b) for a, b in zip(box_a[1], box_b[1])]
+    if any(lo > hi for lo, hi in zip(low, high)):
+        return None
+    return low, high
+
+
+def _contacts(fcl, tree_a, tree_b, limit: int,
+              box=None) -> tuple[list, int, Optional[float]]:
     """Where two overlapping meshes meet: up to `limit` points, world mm.
 
     Returns (points, count, depth). `depth` is FCL's deepest positive
     penetration and is None when it reported none — a mesh-mesh collision
     query is not required to compute one, and a zero reported as a depth
     would read as "they just touch".
+
+    `box` is the region the two meshes share. FCL reports a triangle corner
+    rather than a point of the triangle-triangle intersection, so a raw
+    position can land outside the overlap entirely; clamping into the shared
+    box moves such a point back onto the region where the meshes meet and
+    leaves a point that was already inside untouched. With no box, the raw
+    positions are passed through.
     """
     request = fcl.CollisionRequest(num_max_contacts=max(1, limit),
                                    enable_contact=True)
@@ -87,7 +111,11 @@ def _contacts(fcl, tree_a, tree_b, limit: int) -> tuple[list, int, Optional[floa
     for contact in list(result.contacts or [])[:limit]:
         position = getattr(contact, "pos", None)
         if position is not None:
-            points.append([float(v) for v in position])
+            point = [float(v) for v in position]
+            if box is not None:
+                point = [min(max(v, lo), hi)
+                         for v, lo, hi in zip(point, box[0], box[1])]
+            points.append(point)
         raw = float(getattr(contact, "penetration_depth", 0.0) or 0.0)
         if raw > 0.0 and (depth is None or raw > depth):
             depth = raw
@@ -220,15 +248,18 @@ def reference_pairs(params: dict) -> dict:
                 "triangles": [int(triangles_a), int(triangles_b)],
             }
             if min_mm <= 0.0:
-                points, count, depth = _contacts(fcl, tree_a, tree_b, limit)
+                box = _shared_box(bounds_for(str(targets[first].get("key", ""))),
+                                  bounds_for(str(targets[second].get("key", ""))))
+                points, count, depth = _contacts(fcl, tree_a, tree_b, limit, box)
                 pair["overlap"] = True
                 pair["contact_points_mm"] = points
                 pair["contact_count"] = count
                 if depth is not None:
                     pair["penetration_mm"] = depth
                 pair["note"] = ("no air between these two meshes — the "
-                                "contact points are where they meet; a "
-                                "mesh-mesh collision reports no penetration "
+                                "contact points lie in the region the two "
+                                "share, located to that region and no finer; "
+                                "a mesh-mesh collision reports no penetration "
                                 "depth unless it found one")
             else:
                 pair["point_a_mm"] = point_a

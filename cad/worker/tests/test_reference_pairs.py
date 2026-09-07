@@ -120,9 +120,12 @@ class TestMeasurement:
         the pair is reported as overlap with the contact points and never as a
         gap.
 
-        ORACLE: the fixture's own overlap — the second block starts 1 mm
-        inside the first — and the x of every contact point, which must lie
-        in the overlapped band.
+        ORACLE: the fixture's own overlap, derived from the two blocks. A is
+        x 0..6, y 0..8, z 0..4; B is x 5..11, y 3..11, z 0..4. They share
+        exactly x 5..6, y 3..8, z 0..4, so every reported contact point must
+        lie in that box. FCL's raw position is a corner of an intersecting
+        triangle and lands as far out as x 11 — a point on B's far face,
+        6 mm from anything the two share.
         """
         pytest.importorskip("fcl")
         verts_a, faces_a = _part(0.0)
@@ -142,7 +145,9 @@ class TestMeasurement:
         assert pair["contact_count"] >= 1
         assert pair["contact_points_mm"]
         for point in pair["contact_points_mm"]:
-            assert 4.0 <= point[0] <= 7.0
+            assert 5.0 <= point[0] <= 6.0
+            assert 3.0 <= point[1] <= 8.0
+            assert 0.0 <= point[2] <= 4.0
         assert "point_a_mm" not in pair
 
     def test_a_target_the_worker_has_never_seen_is_asked_for_and_not_failed(

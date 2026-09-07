@@ -249,6 +249,10 @@ def _tree_for(key: str, path: Optional[str]) -> tuple[Any, int, bool]:
     Returns (tree, triangle count, cached) — `cached` is what lets the reply
     say whether this call paid for a build, which is the only honest way to
     report the cost of a check that is meant to run on every evaluation.
+
+    The cache entry also carries the mesh's world bounding box: a built BVH
+    exposes no bounds, and re-reading a blob to recover six numbers would
+    undo the point of caching the tree.
     """
     entry = _reference_trees.take(key)
     if entry is not None:
@@ -257,8 +261,32 @@ def _tree_for(key: str, path: Optional[str]) -> tuple[Any, int, bool]:
         raise KeyError(key)
     vertices, faces = read_blob(path, key)
     tree = _build_tree(vertices, faces)
-    _reference_trees.put(key, (tree, len(faces)))
+    _reference_trees.put(key, (tree, len(faces), _bounds_of(vertices)))
     return tree, len(faces), False
+
+
+def _bounds_of(vertices) -> Optional[tuple[list, list]]:
+    """(min, max) corners of a vertex array in world mm, or None if empty."""
+    if len(vertices) == 0:
+        return None
+    import numpy as np
+
+    array = np.asarray(vertices, dtype=float)
+    return ([float(v) for v in array.min(axis=0)],
+            [float(v) for v in array.max(axis=0)])
+
+
+def bounds_for(key: str) -> Optional[tuple[list, list]]:
+    """The cached mesh's world bounding box, or None if it is not known.
+
+    Reads the LRU without disturbing anything the caller has not already
+    built: a key with no entry, or an entry stored before bounds were kept,
+    answers None rather than reading the blob again.
+    """
+    entry = _reference_trees.get(key)
+    if entry is None or len(entry) < 3:
+        return None
+    return entry[2]
 
 
 # ---------------------------------------------------------------------------
@@ -386,8 +414,11 @@ SAMPLED_CLAUSE = (", whose curvature was sampled across the face rather than "
                   "read off an analytic surface: a parametric grid whose "
                   "widest sample is then bisected onto the flattest point "
                   "beside it, so the radius is that point's and not the "
-                  "nearest grid node's, while curvature inside a cell the "
-                  "grid steps over entirely is still unseen")
+                  "nearest grid node's. The bisection only ever approaches "
+                  "that point from below, so the radius is scaled up by the "
+                  "shortfall its own residual step allows and is an upper "
+                  "bound; curvature inside a cell the grid steps over "
+                  "entirely is still unseen")
 
 
 def _prepare_solid(source: str, tolerance_mm: float,

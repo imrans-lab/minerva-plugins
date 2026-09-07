@@ -18,13 +18,32 @@ _DEBUG_LOG_PATH = "/tmp/cad-worker-edges.log"
 
 
 def _dbg(msg: str) -> None:
+    """Trace line for edge picking. Never allowed to fail the evaluation.
+
+    Both sinks are written as explicit UTF-8 with a replacing error handler:
+    *msg* echoes DSL source, which carries non-ASCII, and under a C/POSIX
+    locale the default codec is ASCII -- an encode error here would surface as
+    a bogus "python" error on an otherwise good evaluate.
+    """
     if not _DEBUG_EDGE_PICK:
         return
-    print(f"[edge-pick-worker] {msg}", file=sys.stderr, flush=True)
+    line = f"[edge-pick-worker] {msg}"
     try:
-        with open(_DEBUG_LOG_PATH, "a") as f:
+        stderr = sys.stderr.buffer  # bypass the locale-encoded text wrapper
+    except AttributeError:
+        stderr = None
+    try:
+        if stderr is not None:
+            stderr.write((line + "\n").encode("utf-8", "replace"))
+            stderr.flush()
+        else:
+            print(line, file=sys.stderr, flush=True)
+    except (OSError, ValueError):
+        pass
+    try:
+        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8", errors="replace") as f:
             f.write(f"{time.strftime('%H:%M:%S')} pid={os.getpid()} {msg}\n")
-    except OSError:
+    except (OSError, ValueError):
         pass
 
 

@@ -41,7 +41,7 @@ _MESH_PATH = re.compile(r'mesh\(\s*"([^"]+)"')
 
 @pytest.mark.parametrize("name", REVISIONS)
 def test_every_mesh_reference_resolves_inside_the_fixture_tree(name: str) -> None:
-    source = (FIXTURES / name).read_text()
+    source = (FIXTURES / name).read_text(encoding="utf-8")
     paths = _MESH_PATH.findall(source)
     assert len(paths) == 6, f"{name} should pose the board plus five off-board parts"
     for path in paths:
@@ -49,7 +49,7 @@ def test_every_mesh_reference_resolves_inside_the_fixture_tree(name: str) -> Non
 
 
 def test_rev3_evaluates_with_six_bodies_and_six_references() -> None:
-    result = evaluate_source((FIXTURES / "enclosure-rev3.mcad").read_text())
+    result = evaluate_source((FIXTURES / "enclosure-rev3.mcad").read_text(encoding="utf-8"))
     assert result.shape_name == "enclosure"
     assert result.body_count == 6
     assert len(result.references) == 6
