@@ -490,11 +490,11 @@ RUNTIME_COMPONENTS: tuple = (
     RuntimeComponent(
         distribution='numpy',
         component='numpy',
-        version='2.5.2',
+        version='2.5.3',
         license='BSD-3-Clause',
         copyright='Copyright (c) 2005-2025, NumPy Developers.',
         source_url='https://github.com/numpy/numpy',
-        license_files=('numpy-2.5.2.LICENSE.txt',),
+        license_files=('numpy-2.5.3.LICENSE.txt',),
         note="Array backbone for the worker's geometry code. The text "
              'inventoried here is not BSD-3-Clause alone: after NumPy\'s own '
              'licence it carries the statements for the shared libraries the '

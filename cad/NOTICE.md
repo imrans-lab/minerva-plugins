@@ -282,13 +282,13 @@ IPython/matplotlib glue.
 
 sympy dependency.
 
-## numpy 2.5.2
+## numpy 2.5.3
 
 - Licence: BSD-3-Clause
 - Copyright (c) 2005-2025, NumPy Developers.
 - Source: https://github.com/numpy/numpy
 - Arrives via: `numpy` wheel
-- Licence text: `cad/licenses/runtime/numpy-2.5.2.LICENSE.txt` (sha256 4860083caa0de2ac3292ca98bd074bd8f45d8b32624e37b1e70a240bff61e488)
+- Licence text: `cad/licenses/runtime/numpy-2.5.3.LICENSE.txt` (sha256 4860083caa0de2ac3292ca98bd074bd8f45d8b32624e37b1e70a240bff61e488)
 
 Array backbone for the worker's geometry code. The text inventoried here is not BSD-3-Clause alone: after NumPy's own licence it carries the statements for the shared libraries the wheel ships in numpy.libs — OpenBLAS and the LAPACK bundled inside it (both BSD-3-Clause), and libgfortran and libquadmath (GPL-3.0-or-later under the GCC Runtime Library Exception, whose full text is included). The wheel ALSO ships per-component texts under its dist-info for source it vendors (Mersenne Twister, PCG64, pocketfft, LAPACK-lite, highway, dragon4, libdivide, x86-simd-sort); those are compiled into _multiarray and friends rather than shipped as separate files.
 
