@@ -481,6 +481,10 @@ static func _gauge(panel, args: Dictionary) -> Dictionary:
 	}
 	if not bool(solid.get("mounted", false)) and solid.has("reason"):
 		payload["measured_against"]["solid_reason"] = str(solid["reason"])
+	# A gauge that met geometry — the not-fitting branches — carries no flag of
+	# its own; its clearance came off a wall, so it is bounded.
+	payload["clearance_bounded"] = bool(result.get(
+		"clearance_bounded", not result.has("clearance_at_least_mm")))
 	# Clearance is only a measurement when a wall stopped it. In open space the
 	# gauge reports the search bound instead, under a key that says so, so the
 	# two can never be confused by a reader of the payload.

@@ -592,7 +592,8 @@ test_flush_contact.gd assertions=20
 # rims, the plate became one collider) + 3 the seat is a contact exactly
 # coplanar, at three ten-thousandths of a millimetre out, and is reported
 # AS a contact + 2 the
-# same boss sunk 0.2 mm is interference and carries a measured run + 2 the
+# same boss sunk 0.2 mm is interference and carries no invented depth (every
+# crossing edge ends buried, so no run bounds it) + 2 the
 # locating spigot clears the hole / cuts it + 1 a drafted boss (ten degrees of
 # draft, so the two surfaces meeting at the rim are oblique) is still a
 # contact + 1 a plate too thin to probe is still reported + 2 declarations (a region grades the seat touching and

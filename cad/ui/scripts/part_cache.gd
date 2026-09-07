@@ -177,8 +177,10 @@ static func _slot(panel: Object) -> Dictionary:
 	var id := int(panel.get_instance_id())
 	for key in _slots.keys():
 		var held: Dictionary = _slots[key]
-		var owner: Object = held["panel"]
-		if owner == null or not is_instance_valid(owner):
+		# Tested through the dictionary, never bound to a typed local first:
+		# assigning a freed instance to an `Object` variable is itself an
+		# engine error, which is exactly the case this sweep exists for.
+		if not is_instance_valid(held.get("panel")):
 			_slots.erase(key)
 			_touched.erase(int(key))
 	if not _slots.has(id):

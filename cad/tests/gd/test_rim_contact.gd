@@ -218,14 +218,18 @@ func _run() -> void:
 				and str(_first_pair(sunk).get("node", "")) == NODE_PATH
 				and not bool(sunk.get("pass", true)),
 			"report = %s" % str(sunk))
-	# The depth here is a LATERAL chord — an underside edge entering the boss's
-	# outer wall and leaving it again — and so is far larger than the sink it
-	# stands for. It is asserted only as evidence that a run was measured at
-	# all; what the number means is interference_report.gd's business.
-	check("and it is reported WITH a measured run, not as an overlap nobody "
-			+ "could put a number on",
-			_penetration_of(sunk) >= SINK_MM,
-			"penetration = %s" % str(_penetration_of(sunk)))
+	# NO DEPTH IS BOUNDED HERE, and the report must not invent one. A run needs
+	# two crossings on ONE edge: every plate edge that meets the sunk boss
+	# enters it and ends inside it, and every boss edge that enters the plate
+	# ends inside the plate — one crossing each. penetration_mm is therefore
+	# absent from the row, which is the documented "still interference, just
+	# without a depth" case, and the pair still fails the check on its own.
+	check("and it carries no invented depth — every crossing edge ends buried, "
+			+ "so no run bounds this overlap",
+			_penetration_of(sunk) == 0.0
+				and not _first_pair(sunk).has("penetration_mm"),
+			"penetration = %s pair = %s" % [
+				str(_penetration_of(sunk)), str(_first_pair(sunk))])
 
 	# --- control 2: the spigot that cuts the hole ----------------------------
 	checks.build_solid(_spigot_boss(0.0, SPIGOT_CLEAR_RADIUS))

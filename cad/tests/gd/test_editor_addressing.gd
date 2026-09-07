@@ -329,8 +329,8 @@ func _test_a_panel_that_is_gone_is_not_a_known_editor() -> void:
 	var reply: Dictionary = PluginErrorsScript.editor_not_found(
 			"cad", doomed_title, known, dead)
 	var message: String = str(reply.get("error_message", ""))
-	check("dead: the reply says the panel failed to instantiate",
-			message.contains("panel failed to instantiate"),
+	check("dead: the reply says the scene root was freed without unregistering",
+			message.contains("scene root was freed"),
 			"message = %s" % message)
 	check("dead: the reply points at the Minerva log for the reason",
 			message.contains("see the Minerva log"),

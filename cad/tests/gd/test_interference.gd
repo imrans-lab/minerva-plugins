@@ -1680,7 +1680,7 @@ func _check_busy_refusal(gauge: Node, checks: RefCounted) -> void:
 			+ "never a clean report",
 			not bool(report.get("checked", true))
 				and bool(report.get("busy", false))
-				and str(report.get("reason", "")).contains("Retry"),
+				and str(report.get("reason", "")).contains("retry in a moment"),
 			"report = %s" % str(report))
 
 	# Past the deadline the holder is not merely late, it is gone: mesh_gauge's
