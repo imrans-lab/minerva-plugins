@@ -1,10 +1,9 @@
 extends RefCounted
 ## fastener_seat.gd — where the head bears, and what a bore is for.
 ##
-## Two questions the screw check asks over and over, split out of
-## fastener_checks.gd when that file crossed two thousand lines. Nothing about
-## either answer changed: this script is the check's base class, so one object
-## still carries the whole check exactly as the panel and panel_tools hold it.
+## Two questions the screw check asks over and over. This script is the first
+## link of the fastener chain, so the one object the panel and panel_tools hold
+## carries the whole check.
 ##
 ## WHERE THE HEAD BEARS. A ring of rays through the annulus between the shank
 ## and the head radius — never the axis, which falls down the clearance hole —
@@ -18,7 +17,8 @@ extends RefCounted
 ## go together.
 ##
 ## No class_name: off-tree plugin scripts cannot use class_name.
-## Consumers: fastener_checks.gd extends this script.
+## Consumers: fastener_probe.gd extends this script, and
+## fastener_checks.gd extends that.
 
 ## ISO 273:1979 medium series clearance holes, millimetres: screw diameter to
 ## hole diameter. Medium is the series graded against; fine and coarse exist
