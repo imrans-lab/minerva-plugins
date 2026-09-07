@@ -59,6 +59,16 @@ var _declared: Dictionary = {}
 ## Declaration indices something was measured against, so the reply can name
 ## the ones that matched nothing.
 var _declared_matched: Dictionary = {}
+## Crossings the rim rule PROVED to be a touch rather than an overlap, keyed
+## pair-key. They are not interference and never enter `count`, but they are
+## where the two bodies were found to meet, so they are reported and a
+## declaration can be graded against them.
+var _contacts: Dictionary = {}
+## Crossings the rim rule was asked about in the running check, against
+## MAX_RIM_TESTS, and the pairs it has already proved really do overlap — the
+## pairs it is no longer worth asking about.
+var _rim_tests: int = 0
+var _rim_crossing: Dictionary = {}
 ## Wall clock of the running check, microseconds.
 var _started_us: int = 0
 
@@ -105,6 +115,32 @@ func _absorb(pairs: Dictionary, crossing: Dictionary, node_scope: String) -> voi
 		_marker_points.append(point)
 	if crossing.has("containment"):
 		pair["note"] = str(crossing["containment"])
+
+
+## Record a crossing the rim rule proved to be a touch. It carries the same
+## fields a pair does so it can be reported through _pair_row, but it is a
+## different KIND of row: `count` is about overlap, and this is the proof
+## there is none here.
+func _absorb_contact(point: Vector3, reference_name: String,
+		node_path: String, node_scope: String) -> void:
+	if not _node_matches(node_path, node_scope):
+		return
+	var key := _pair_key(reference_name, node_path)
+	if not _contacts.has(key):
+		_contacts[key] = {
+			"reference": reference_name,
+			"node": node_path,
+			"points": [],
+			"point_count": 0,
+			"penetration_mm": 0.0,
+			"run_max": {},
+			"note": "",
+		}
+	var contact: Dictionary = _contacts[key]
+	contact["point_count"] = int(contact["point_count"]) + 1
+	var points: Array = contact["points"]
+	if points.size() < MAX_POINTS_PER_PAIR:
+		points.append(point)
 
 
 ## Which declaration covers a crossing at `point`, or -1 when none does.
@@ -271,6 +307,41 @@ func _report(pairs: Dictionary) -> Dictionary:
 				_marker_points.append(point as Vector3)
 		total += int(row["point_count"])
 		out.append(row)
+	# WHERE THE TWO BODIES WERE FOUND TO MEET. A rim touch is the answer "they
+	# touch and do not overlap", proven by finding no material shared between
+	# them; it is not an exclusion and it withholds nothing. It is reported so
+	# a reader can see the seat the design meant to make, and a declaration
+	# drawn round it is GRADED — touching, not crossing — rather than left in
+	# the reply as a declaration that matched nothing.
+	var contact_rows: Array = []
+	var contact_points := 0
+	for key in _contacts.keys():
+		var contact: Dictionary = _contacts[key]
+		contact_points += int(contact["point_count"])
+		var row := _pair_row(contact)
+		row["touching"] = true
+		row["note"] = "the bodies meet here and share no material: no point " \
+			+ "one contact tolerance clear of both surfaces is inside both"
+		var index: int = _Expected.index_for(_expected, str(contact["reference"]),
+			str(contact["node"]), contact["points"])
+		if index >= 0:
+			_declared_matched[index] = true
+			row["declared_intended"] = true
+			# NOT excluded: nothing was excused. The pair was never in `count`
+			# to begin with, and saying otherwise would put a seat on the
+			# audit list of overlaps a declaration let through.
+			var contact_row: Dictionary = _Expected.row(_expected[index],
+				str(contact["reference"]), str(contact["node"]), "touching",
+				0.0, false)
+			# CERTIFIED, unlike a depth exclusion: touching-not-crossing is a
+			# measurement of the geometry itself and not a chord that might be
+			# shorter than the overlap it stands for.
+			contact_row["certified"] = true
+			contact_row["touching"] = true
+			contact_row["points_mm"] = row["points_mm"]
+			contact_row["point_count"] = int(row["point_count"])
+			declared_rows.append(contact_row)
+		contact_rows.append(row)
 	var sampling := ("none: every one of the %d solid edges that reach a "
 		+ "reference was cast (of %d the solid has; the rest stand clear of "
 		+ "everything in scope, where no ray could cross anything), as was "
@@ -293,6 +364,18 @@ func _report(pairs: Dictionary) -> Dictionary:
 		# A node here was NOT cleared: its containment could not be decided.
 		# Reporting it beside the pairs is what keeps "no interference" an
 		# answer about geometry rather than about the probes that failed.
+		# NOT interference and not an exclusion: the places the rim rule
+		# PROVED the two bodies meet without sharing material. A design whose
+		# every post lands on a plate with a hole under it reports its seats
+		# here and passes.
+		"contacts": contact_rows,
+		"contact_count": contact_rows.size(),
+		"contact_point_count": contact_points,
+		"contacts_note": "a contact is a crossing whose two bodies were shown "
+			+ "to share no material: no point one contact tolerance clear of "
+			+ "both surfaces lies inside both. It is touching, not crossing, "
+			+ "and it is out of `count` on evidence rather than on a "
+			+ "declaration",
 		"undecidable": _undecided,
 		"undecidable_note": ("containment is decided from a probe verified "
 			+ "inside its own body; a node listed here offered none, so it is "
@@ -324,7 +407,11 @@ func _report(pairs: Dictionary) -> Dictionary:
 			+ "the pairs carrying declared_intended. The measured overlap is "\
 			+ "a chord along an edge and not an upper bound on the depth, so "\
 			+ "an exclusion is advisory (certified: false): pass stays false "\
-			+ "with the reason while any declaration is excluding a pair"
+			+ "with the reason while any declaration is excluding a pair. A "\
+			+ "declaration over a CONTACT is different in kind — the bodies "\
+			+ "were shown to share no material there, so it is graded "\
+			+ "touching (certified: true), excuses no overlap and withholds "\
+			+ "nothing"
 		if excluded > 0 and out.is_empty() and _undecided.is_empty():
 			report["advisory"] = true
 			report["pass_reason"] = ("%d declared contact(s) excused on a "

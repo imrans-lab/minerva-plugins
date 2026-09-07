@@ -21,10 +21,34 @@ extends "interference_world.gd"
 ## probe — and through the solid's own space, which is
 ## interference_world.gd's, for the solid.
 ##
+## THE RIM RULE'S PLUMBING IS HERE TOO, for the same reason: it is the only
+## layer that holds both spaces' probes. rim_contact.gd owns the rule — a
+## crossing where a wall of one body meets a face of the other is an overlap
+## only if the two share material near it — and what is here is the probes it
+## asks with, the budget it runs under, and what a verdict does. The walk that
+## calls it is geometry_checks.gd's, on both cast directions.
+##
 ## No class_name: off-tree plugin scripts cannot use class_name.
 ## Consumers: extended by scripts/geometry_checks.gd, whose walk calls
-## _containment() when it found no crossing at all, and whose per-crossing
-## tests use the same parity probes.
+## _containment() when it found no crossing at all, whose per-crossing tests
+## use the same parity probes, and whose two legs both ask the rim rule.
+
+
+## The rule that tells them apart when the edge crosses the RIM of a bore in a
+## landing face — the mouth the screw goes through, which every per-crossing
+## test and the contact-run rule call a penetration because the crossing is
+## square and the material behind it is real. It is not: the two bodies meet
+## on the plane and share no volume.
+const _RimContact: Script = preload("rim_contact.gd")
+
+
+## Crossings the rim rule is asked about in one check. It is only ever asked
+## about a crossing every cheaper test has already called a penetration, so a
+## clean design spends a handful; a body genuinely buried in another produces
+## thousands, and there the budget stops the walk from paying for a question
+## whose answer cannot change (the pair is interference either way). Past it
+## every crossing is KEPT and the report says it was truncated.
+const MAX_RIM_TESTS: int = 512
 
 
 ## Contacts within this distance of a surface are the same surface: a designed
@@ -386,6 +410,141 @@ func _mesh_vertices(mesh: Mesh, xform: Transform3D) -> PackedVector3Array:
 		for vertex in (arrays[Mesh.ARRAY_VERTEX] as PackedVector3Array):
 			out.append(xform * vertex)
 	return out
+
+
+# ---------------------------------------------------------------------------
+# The rim rule — the mouth of a bore in a landing face
+# ---------------------------------------------------------------------------
+
+## Is this crossing of a REFERENCE surface a rim touch rather than an overlap?
+## The rule is rim_contact.gd's; what is here is the two spaces it needs, the
+## budget, and what a verdict does — a proven touch is recorded as a contact,
+## and a proven overlap closes the gate for the rest of that pair, whose
+## crossings the rule can no longer change.
+func _rim_touching_reference(
+	gauge: Object,
+	state: PhysicsDirectSpaceState3D,
+	solid_state: PhysicsDirectSpaceState3D,
+	point: Vector3,
+	hit: Dictionary,
+	direction: Vector3,
+	node_scope: String
+) -> bool:
+	if solid_state == null:
+		return false
+	var reference_name := str(hit.get("reference", ""))
+	var node_path := str(hit.get("node", ""))
+	if not _rim_gate_open(reference_name, node_path):
+		return false
+	var verdict: int = _RimContact.classify(
+		point, hit.get("normal", Vector3.ZERO), direction,
+		_solid_probe.bind(solid_state),
+		_reference_inside.bind(gauge, state, reference_name, node_path),
+		_solid_inside.bind(solid_state),
+		_Expected.CONTACT_TOLERANCE_MM)
+	return _rim_verdict(verdict, point, reference_name, node_path, node_scope)
+
+
+## The same question with the roles swapped: the crossed surface is the
+## solid's and the body resting on it is one node of one reference.
+func _rim_touching_solid(
+	gauge: Object,
+	state: PhysicsDirectSpaceState3D,
+	solid_state: PhysicsDirectSpaceState3D,
+	point: Vector3,
+	hit: Dictionary,
+	direction: Vector3,
+	reference_name: String,
+	node_path: String,
+	node_scope: String
+) -> bool:
+	if not _rim_gate_open(reference_name, node_path):
+		return false
+	var verdict: int = _RimContact.classify(
+		point, hit.get("normal", Vector3.ZERO), direction,
+		_reference_probe.bind(gauge, state, reference_name, node_path),
+		_solid_inside.bind(solid_state),
+		_reference_inside.bind(gauge, state, reference_name, node_path),
+		_Expected.CONTACT_TOLERANCE_MM)
+	return _rim_verdict(verdict, point, reference_name, node_path, node_scope)
+
+
+## May the rule be asked about a crossing of this pair? Not once the pair is
+## known to overlap — every remaining crossing of it is interference whatever
+## the rule says — and not past the budget, which is announced as a limit so
+## the report reads TRUNCATED rather than clean.
+func _rim_gate_open(reference_name: String, node_path: String) -> bool:
+	if _rim_crossing.has(_pair_key(reference_name, node_path)):
+		return false
+	_rim_tests += 1
+	if _rim_tests > MAX_RIM_TESTS:
+		if _rim_tests == MAX_RIM_TESTS + 1:
+			_limits.append(("the rim rule was asked about the first %d "
+				+ "crossings; past that every crossing is reported without "
+				+ "being asked whether the bodies merely meet there")
+				% MAX_RIM_TESTS)
+		return false
+	return true
+
+
+## What a verdict does. TOUCHING drops the crossing and records the contact,
+## so a declaration can still grade it and a reader can still see where the
+## bodies met. CROSSING closes the gate for the pair. UNPROVEN keeps the
+## crossing and changes nothing: an answer the rule could not reach is not
+## evidence that a part is clear.
+func _rim_verdict(verdict: int, point: Vector3, reference_name: String,
+		node_path: String, node_scope: String) -> bool:
+	if verdict == _RimContact.Verdict.CROSSING:
+		_rim_crossing[_pair_key(reference_name, node_path)] = true
+		return false
+	if verdict != _RimContact.Verdict.TOUCHING:
+		return false
+	_absorb_contact(point, reference_name, node_path, node_scope)
+	return true
+
+
+## One ray into the solid, in the argument order the rim rule's probe takes.
+func _solid_probe(from: Vector3, to: Vector3,
+		solid_state: PhysicsDirectSpaceState3D) -> Dictionary:
+	return _solid_ray(solid_state, from, to)
+
+
+## The same against ONE node of one reference, so no neighbour can stand in
+## for the body this crossing is about. Empty when nothing was hit, so both
+## probes answer the rule in one shape.
+func _reference_probe(from: Vector3, to: Vector3, gauge: Object,
+		state: PhysicsDirectSpaceState3D, reference_name: String,
+		node_path: String) -> Dictionary:
+	_casts += 1
+	var hit: Dictionary = gauge.call("run_now", state, "raycast", {
+		"from": from,
+		"to": to,
+		"mask": int(gauge.call("mask_for", reference_name)),
+		"reference": reference_name,
+		"node": node_path,
+	})
+	return hit if bool(hit.get("hit", false)) else {}
+
+
+## Is this sample in the material of that one node? The contact-run rule's
+## argument order — the point first — around _inside_reference's tri-state.
+func _reference_inside(
+	point: Vector3,
+	gauge: Object,
+	state: PhysicsDirectSpaceState3D,
+	reference_name: String,
+	node_path: String
+) -> int:
+	return _inside_reference(gauge, state, point, reference_name, node_path)
+
+
+## Is this sample in the solid's material? The contact-run rule's argument
+## order around _parity_inside_solid's tri-state.
+func _solid_inside(
+	point: Vector3,
+	solid_state: PhysicsDirectSpaceState3D
+) -> int:
+	return _parity_inside_solid(solid_state, point)
 
 
 ## Is a surface of the solid within TOUCH_EPSILON_MM of `point`? Six rays, one

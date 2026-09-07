@@ -23,12 +23,17 @@ extends "interference_containment.gd"
 ## anything. (b) crosses no edge at all and is closed by ray parity — an odd
 ## number of surfaces between a point and infinity means the point is buried.
 ##
-## Contacts closer than a tenth of a micrometre are reported as TOUCHING, not
-## as interference: a shell resting on a board shares a plane, and a check that
-## calls a designed contact an error is a check the reader learns to ignore.
-## The seating face is usually bored for the screw it carries, so the shared
-## plane has a hole in it; contact_runs.gd holds the rule that keeps a chord
-## over that open mouth from reading as a penetration.
+## A DESIGNED CONTACT IS NOT INTERFERENCE, and telling them apart takes three
+## rules rather than one. A shell resting on a board shares a plane, and a
+## check that calls that an error is a check the reader learns to ignore. The
+## per-crossing tests below clear a hit within a tenth of a micrometre of a
+## surface it never straddled; contact_runs.gd clears an edge RUNNING ALONG a
+## face it never left; and rim_contact.gd clears the one neither can see — the
+## rim of the bore in the seating face, where a wall of one body meets a face
+## of the other squarely and the two still share no material. The last is
+## measured against expected_contacts.gd's CONTACT_TOLERANCE_MM rather than
+## the touch epsilon, because the touch epsilon is finer than the single
+## precision the hit positions themselves arrive in.
 ##
 ## THREE CONSTRAINTS, EACH ONE MEASURED BY ITS FAILURE
 ##
@@ -75,10 +80,11 @@ extends "interference_containment.gd"
 ## edges of every reference triangle that reaches the solid into the solid's
 ## own collider — with the per-crossing tests that tell a penetration from a
 ## designed contact. What it walks with is in the scripts it extends:
-## interference_containment.gd (the overlap no edge crossing can see, and the
-## parity probes these tests share) over interference_world.gd (the solid's
-## own physics world, the collider rebuilt each evaluation, the rays into it,
-## the reservation that keeps one check running at a time, and the markers).
+## interference_containment.gd (the overlap no edge crossing can see, the
+## parity probes these tests share, and the plumbing of the rim rule both legs
+## ask) over interference_world.gd (the solid's own physics world, the collider
+## rebuilt each evaluation, the rays into it, the reservation that keeps one
+## check running at a time, and the markers).
 ## Turning the crossings into the reply — the pairs, the penetration depths,
 ## the declared-contact accounting and the status line — is
 ## interference_report.gd, under both, whose state the walk writes.
@@ -371,6 +377,9 @@ func run_check(gauge: Object, state: PhysicsDirectSpaceState3D, args: Dictionary
 	_expected = args.get("expected", []) as Array
 	_declared = {}
 	_declared_matched = {}
+	_contacts = {}
+	_rim_tests = 0
+	_rim_crossing = {}
 	var mask := int(args.get("mask", ALL_LAYERS))
 	var reference_scope := str(args.get("reference", ""))
 	var node_scope := str(args.get("node", ""))
@@ -399,7 +408,8 @@ func run_check(gauge: Object, state: PhysicsDirectSpaceState3D, args: Dictionary
 		if _edges_cast >= max_solid_edge_casts:
 			continue
 		_edges_cast += 1
-		var crossings := _cross_into_references(gauge, state, a, b, mask, reference_scope)
+		var crossings := _cross_into_references(gauge, state, solid_state, a, b,
+			mask, reference_scope, node_scope)
 		for crossing in crossings:
 			_absorb(pairs, crossing as Dictionary, node_scope)
 		# The depth this one edge reached inside each node it crossed. Runs are
@@ -413,7 +423,8 @@ func run_check(gauge: Object, state: PhysicsDirectSpaceState3D, args: Dictionary
 	# Direction 2: the edges of every reference triangle that could reach the
 	# solid, against the solid's own collider.
 	if solid_state != null:
-		_reference_edges_into_solid(solid_state, pairs, reference_scope, node_scope)
+		_reference_edges_into_solid(gauge, state, solid_state, pairs,
+			reference_scope, node_scope)
 
 	# Containment: two bodies that overlap without a single edge crossing are
 	# one inside the other, and only parity sees that.
@@ -559,18 +570,6 @@ func _reference_inside_for(
 	return _reference_inside.bind(gauge, state, reference_name, node_path)
 
 
-## Is this sample in the material of that one node? The contact-run rule's
-## argument order — the point first — around _inside_reference's tri-state.
-func _reference_inside(
-	point: Vector3,
-	gauge: Object,
-	state: PhysicsDirectSpaceState3D,
-	reference_name: String,
-	node_path: String
-) -> int:
-	return _inside_reference(gauge, state, point, reference_name, node_path)
-
-
 ## One ray against ONE node of one reference, for the contact-run rule. The
 ## first hit's position, or null. Scoped to that node so a neighbouring body
 ## cannot vouch for a run.
@@ -608,15 +607,6 @@ func _drop_contact_runs(a: Vector3, b: Vector3, crossings: Array,
 			TOUCH_EPSILON_MM, ray_for, inside_for, PARITY_SPHERE_MM):
 		out.append(crossings[kept])
 	return out
-
-
-## Is this sample in the solid's material? The contact-run rule's argument
-## order around _parity_inside_solid's tri-state.
-func _solid_inside(
-	point: Vector3,
-	solid_state: PhysicsDirectSpaceState3D
-) -> int:
-	return _parity_inside_solid(solid_state, point)
 
 
 ## The same, against the solid's own collider.
@@ -669,10 +659,12 @@ func _solid_run_along(
 func _cross_into_references(
 	gauge: Object,
 	state: PhysicsDirectSpaceState3D,
+	solid_state: PhysicsDirectSpaceState3D,
 	a: Vector3,
 	b: Vector3,
 	mask: int,
-	reference_scope: String
+	reference_scope: String,
+	node_scope: String
 ) -> Array:
 	var out: Array = []
 	var length := a.distance_to(b)
@@ -701,6 +693,12 @@ func _cross_into_references(
 			and _straddles(a, b, point, hit) \
 			and _penetrates_reference(gauge, state, point, direction, mask,
 				str(hit.get("reference", "")), str(hit.get("node", "")))
+		# The rim of a bore in a landing face passes every test above: the
+		# crossing is square, and the material a probe step behind it is real.
+		# Only shared material tells it from an overlap.
+		if penetrating and _rim_touching_reference(gauge, state, solid_state,
+				point, hit, direction, node_scope):
+			penetrating = false
 		# Every hit is kept, the discarded ones marked: a hit this edge did
 		# not pass through is still the place it met the surface, and the
 		# contact-run rule measures its runs BETWEEN surfaces. Dropping it
@@ -733,6 +731,8 @@ func _cross_into_references(
 ## then each triangle's — because a board is a hundred thousand triangles and
 ## only a handful of them are ever near the shell.
 func _reference_edges_into_solid(
+	gauge: Object,
+	state: PhysicsDirectSpaceState3D,
 	solid_state: PhysicsDirectSpaceState3D,
 	pairs: Dictionary,
 	reference_scope: String,
@@ -794,7 +794,9 @@ func _reference_edges_into_solid(
 					for edge in [[a, b], [b, c], [c, a]]:
 						var start: Vector3 = edge[0]
 						var crossings: Array = []
-						for point in _cross_into_solid(solid_state, start, edge[1] as Vector3):
+						for point in _cross_into_solid(gauge, state, solid_state,
+								start, edge[1] as Vector3, reference_name,
+								node_path, node_scope):
 							crossings.append({
 								"point": point,
 								"node": node_path,
@@ -809,9 +811,14 @@ func _reference_edges_into_solid(
 
 ## Where the segment a→b crosses the solid's surface, in order.
 func _cross_into_solid(
+	gauge: Object,
+	state: PhysicsDirectSpaceState3D,
 	solid_state: PhysicsDirectSpaceState3D,
 	a: Vector3,
-	b: Vector3
+	b: Vector3,
+	reference_name: String,
+	node_path: String,
+	node_scope: String
 ) -> Array:
 	var out: Array = []
 	var length := a.distance_to(b)
@@ -829,13 +836,20 @@ func _cross_into_solid(
 		# As on the reference leg: the hits that fail these tests stay on as
 		# run boundaries, because the rim of a flush fit is usually crossed
 		# once as a penetration and once as a hit no test will vouch for.
+		var penetrating := travelled > TOUCH_EPSILON_MM \
+			and (length - travelled) > TOUCH_EPSILON_MM \
+			and _straddles(a, b, point, hit) \
+			and _penetrates_solid(solid_state, point, direction)
+		# The same rim rule as the reference leg, roles swapped: here the
+		# crossed surface is the solid's and the body resting on it is the
+		# reference node whose triangle this edge came from.
+		if penetrating and _rim_touching_solid(gauge, state, solid_state,
+				point, hit, direction, reference_name, node_path, node_scope):
+			penetrating = false
 		candidates.append({
 			"point": point,
 			"key": "",
-			"bound_only": not (travelled > TOUCH_EPSILON_MM
-				and (length - travelled) > TOUCH_EPSILON_MM
-				and _straddles(a, b, point, hit)
-				and _penetrates_solid(solid_state, point, direction)),
+			"bound_only": not penetrating,
 		})
 		var next := point + direction * CROSSING_ADVANCE_MM
 		if a.distance_to(next) >= length:

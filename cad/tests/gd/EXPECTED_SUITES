@@ -559,11 +559,32 @@ test_stl_reference.gd assertions=18
 # thickness) + 4 bored (1 the plate's edges really do cut the bore's rim too,
 # 2 the bored boss is a contact at both flush lifts, 1 the bored boss bitten
 # half a millimetre in is still interference) + 1 the tilted board is still a
-# contact + 6 swapped (1 the boss became the one reference collider, 2 the two
-# lifts inside the touch epsilon are contacts, 2 the lift past it and the
-# half-millimetre bite are interference on the boss's node, 1 the tilted plate
-# over an exactly coplanar boss is a contact on the reference-cast leg).
-test_flush_contact.gd assertions=19
+# contact + 7 swapped (1 the boss became the one reference collider, 2 the two
+# lifts inside the CONTACT TOLERANCE are contacts, 3 the two lifts past it and
+# the half-millimetre bite are interference on the boss's node, 1 the tilted
+# plate over an exactly coplanar boss is a contact on the reference-cast leg).
+# The swapped brackets moved from either side of the touch epsilon to either
+# side of expected_contacts.gd's CONTACT_TOLERANCE_MM (bug 01a079f9f8f4):
+# 2e-4 mm is the precision the hit positions arrive in and is now a contact,
+# and 0.02 mm was ADDED beside the 0.05 mm control so the tolerance cannot
+# drift across that gap unseen — one more assertion than before.
+test_flush_contact.gd assertions=20
+
+# The coaxial cousin of the case above: a clearance bore seated on a plate
+# that has a screw hole under it, where the two rims are concentric circles in
+# the shared plane and the bodies overlap nowhere (bug 01a079f9f8f4).
+# 16 = 3 fixture (the hole lies inside the bore, the underside edges cut both
+# rims, the plate became one collider) + 3 the seat is a contact exactly
+# coplanar, at the offset rev-4 measured, and is reported AS a contact + 2 the
+# same boss sunk 0.2 mm is interference and carries a measured run + 2 the
+# locating spigot clears the hole / cuts it + 1 a drafted boss (ten degrees of
+# draft, so the two surfaces meeting at the rim are oblique) is still a
+# contact + 1 a plate too thin to probe is still reported + 2 declarations (a region grades the seat touching and
+# certified; the same region over the sunk boss excuses nothing) + 2 swapped
+# (the seat is a contact and the sunk boss interference with the roles of
+# solid and reference exchanged). No loops around check(), one assertion a
+# call.
+test_rim_contact.gd assertions=16
 
 # Which panel a cad verb reaches, and how big its reply is. Two real CADPanel
 # scenes under two tab titles, addressed through the host's own panel-tool

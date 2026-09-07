@@ -84,11 +84,21 @@ extends SceneTree
 ## plain one, and its control is the same half-millimetre bite: a rule that
 ## cleared the mouth by clearing everything coplanar would clear that too.
 ##
-## THE SWAPPED LIFTS BRACKET THE EPSILON ITSELF. The gate clears a run whose
-## every sample has a face within TOUCH_EPSILON_MM (1e-4), so a boss top
-## 9e-5 mm inside the plate is still a contact and one 2e-4 mm inside is not.
-## That pair differs by a tenth of a micron and by nothing else, which is what
-## makes it a test of the gate's rule rather than of the fixture.
+## THE SWAPPED LIFTS BRACKET THE CONTACT TOLERANCE, NOT THE TOUCH EPSILON.
+## They used to bracket the epsilon — 9e-5 mm inside the plate was a contact
+## and 2e-4 mm inside was interference — and that pin was WRONG in the
+## direction that matters: 2e-4 mm is the precision the physics hit positions
+## themselves arrive in on a hundred-millimetre part, so the check was calling
+## its own arithmetic noise an overlap, and owner HITL measured exactly that
+## on enclosure-rev4 (a crossing at z = -0.0003 on a seat at z = 0). The line
+## between a designed fit and a part in the wrong place is
+## expected_contacts.gd's CONTACT_TOLERANCE_MM, a hundredth of a millimetre,
+## and rim_contact.gd now measures against it: a boss 2e-4 mm into the plate
+## is a contact, one 0.02 mm in is not, and one 0.05 mm in is not either. The
+## middle lift is what pins WHERE the threshold is — without it the tolerance
+## could drift anywhere across that hundred-and-fifty-fold gap unseen. See
+## test_rim_contact.gd, which is about that rule and this case's coaxial
+## cousin.
 ##
 ## Run:
 ##   scripts/run-gd-tests.sh --plugin cad <path-to-minerva-checkout>
@@ -137,10 +147,16 @@ const FLUSH_LIFT_MM := 1e-5
 ## How far the control boss is driven INTO the plate.
 const BITE_MM := 0.5
 
-## The swapped fixture's lifts, either side of TOUCH_EPSILON_MM: the last one
-## the contact-run gate still calls a contact, and the first one it does not.
-const INSIDE_EPSILON_LIFT_MM := 9e-5
-const OUTSIDE_EPSILON_LIFT_MM := 2e-4
+## The swapped fixture's lifts, either side of CONTACT_TOLERANCE_MM: the
+## precision a coplanar pair actually arrives with, which is a contact, and a
+## lift five times the tolerance, which is not.
+const PRECISION_LIFT_MM := 2e-4
+## Just past the contact tolerance, and five times past it. The pair brackets
+## WHERE the threshold is, not merely that there is one: without the near
+## case, CONTACT_TOLERANCE_MM could drift anywhere between 3e-4 and 0.05 and
+## every assertion here would stay green.
+const NEAR_TOLERANCE_LIFT_MM := 0.02
+const REPORTED_LIFT_MM := 0.05
 
 const REFERENCE_NAME := "board"
 const NODE_PATH := "Assembly/Plate"
@@ -358,25 +374,39 @@ func _swapped_roles(gauge: Node, checks: RefCounted) -> void:
 				and int(noisy.get("point_count", 0)) == 0,
 			"report = %s" % str(noisy))
 
-	_mount_boss(gauge, checks, INSIDE_EPSILON_LIFT_MM)
+	_mount_boss(gauge, checks, PRECISION_LIFT_MM)
 	var inside: Dictionary = await _submit(gauge, checks)
-	check("swapped: still a contact at the far edge of the touch epsilon",
+	check("swapped: still a contact two ten-thousandths of a millimetre in — "
+			+ "the precision the hit positions arrive in, and the offset "
+			+ "rev-4 was measured at",
 			bool(inside.get("checked", false))
 				and int(inside.get("count", 0)) == 0
 				and int(inside.get("point_count", 0)) == 0,
 			"report = %s" % str(inside))
 
-	# The control that says the gate has a threshold rather than a habit: a
-	# tenth of a micron deeper and the same chords are an overlap again.
-	_mount_boss(gauge, checks, OUTSIDE_EPSILON_LIFT_MM)
+	# The control that says the rule has a threshold rather than a habit: five
+	# hundredths of a millimetre — five times the contact tolerance, and two
+	# hundred times the lift above — and the same chords are an overlap again.
+	_mount_boss(gauge, checks, REPORTED_LIFT_MM)
 	var outside: Dictionary = await _submit(gauge, checks)
-	check("swapped: a boss a fifth of a micron PAST the touch epsilon is "
-			+ "interference, on the boss's own node",
+	check("swapped: a boss five hundredths of a millimetre in, past the "
+			+ "contact tolerance, is interference on the boss's own node",
 			bool(outside.get("checked", false))
 				and int(outside.get("count", 0)) == 1
 				and str(((outside.get("pairs", []) as Array)[0] as Dictionary)
 					.get("node", "")) == BOSS_NODE_PATH,
 			"report = %s" % str(outside))
+
+	_mount_boss(gauge, checks, NEAR_TOLERANCE_LIFT_MM)
+	var near: Dictionary = await _submit(gauge, checks)
+	check("swapped: and interference already at two hundredths of a "
+			+ "millimetre — twice the contact tolerance — so the threshold is "
+			+ "pinned where it is and not merely known to exist",
+			bool(near.get("checked", false))
+				and int(near.get("count", 0)) == 1
+				and str(((near.get("pairs", []) as Array)[0] as Dictionary)
+					.get("node", "")) == BOSS_NODE_PATH,
+			"report = %s" % str(near))
 
 	_mount_boss(gauge, checks, BITE_MM)
 	var bitten: Dictionary = await _submit(gauge, checks)

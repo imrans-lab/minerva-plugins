@@ -682,6 +682,7 @@
           "ui/scripts/reference_pairs.gd",
           "ui/scripts/reference_profile.gd",
           "ui/scripts/reference_verbs.gd",
+          "ui/scripts/rim_contact.gd",
           "ui/scripts/stl_reader.gd",
           "ui/tools/cad_edge_number_tool.gd"
         ],

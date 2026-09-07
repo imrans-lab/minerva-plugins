@@ -490,6 +490,20 @@ func _buried_pairs(document: Dictionary, source: String, records: Array,
 			(contacts[key] as Array).append_array(points)
 		else:
 			contacts[key] = points
+	# And neither is a pair the rim rule PROVED to be touching rather than
+	# crossing. It is not interference, so it names no depth here; but it is a
+	# place the two bodies were measured to meet, and a region drawn round a
+	# seat has to keep matching it or the declaration goes stale the moment
+	# the seat is graded correctly.
+	for entry in (interference.get("contacts", []) as Array):
+		var row: Dictionary = entry
+		var key := _pair_key(str(row.get("reference", "")),
+			str(row.get("node", "")))
+		var points: Array = _crossing_points(row)
+		if contacts.has(key):
+			(contacts[key] as Array).append_array(points)
+		else:
+			contacts[key] = points
 	var undecided: Dictionary = out["undecided"]
 	var references: Dictionary = out["undecided_references"]
 	for entry in (interference.get("undecidable", []) as Array):
