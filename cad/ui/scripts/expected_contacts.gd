@@ -44,7 +44,7 @@ extends RefCounted
 ##
 ## No class_name: off-tree plugin scripts cannot use class_name.
 ## Consumers: scripts/geometry_checks.gd (interference), scripts/
-## clearance_client.gd (clearance), ui/panel_tools.gd (the two verbs).
+## clearance_report.gd (clearance), ui/panel_tools.gd (the two verbs).
 
 ## Overlap excused by a bare declaration, in millimetres. A designed flush fit
 ## measured through a tessellated mesh reads a few thousandths of a millimetre

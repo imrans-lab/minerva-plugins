@@ -59,11 +59,13 @@ extends "interference_report.gd"
 ## queried inside one step.
 ##
 ## THE OTHER HALF. Clearance — "by how much do they miss" — is a worker round
-## trip and not a ray walk, and lives in clearance_client.gd, at the bottom of
-## the chain this script extends: one object carries both halves, so the
-## panel, panel_tools and fastener_checks each hold a single geometry-checks
-## instance as they always have. The frame helpers both halves read live down
-## there too.
+## trip and not a ray walk, and lives further down the chain this script
+## extends: clearance_client.gd (the verb and its jobs) over
+## clearance_report.gd (the report fold) over clearance_blobs.gd (the mesh
+## store the worker is handed). One object carries both halves, so the panel,
+## panel_tools and fastener_checks each hold a single geometry-checks instance
+## as they always have. The frame helpers both halves read live in
+## clearance_blobs.gd, at the bottom of it.
 ##
 ## WHAT THIS FILE HOLDS. The walk only: building the solid's collider, the
 ## reservation that keeps one check running at a time, the rays, and the

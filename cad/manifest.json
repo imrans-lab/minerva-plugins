@@ -598,6 +598,8 @@
           "ui/scripts/geometry_checks.gd",
           "ui/scripts/interference_report.gd",
           "ui/scripts/clearance_client.gd",
+          "ui/scripts/clearance_report.gd",
+          "ui/scripts/clearance_blobs.gd",
           "ui/scripts/fastener_checks.gd",
           "ui/scripts/fastener_seat.gd",
           "ui/scripts/worker_reply.gd",
