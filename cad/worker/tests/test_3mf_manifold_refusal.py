@@ -98,3 +98,37 @@ def test_a_manifold_solid_still_exports_to_3mf(tmp_path):
     reply = _export({"source": "block = cube(10, 20, 30)\n", "format": "3mf", "path": str(path)})
     assert reply["ok"] is True, reply
     assert path.stat().st_size > 0
+
+
+def test_an_evaluated_clean_part_is_not_told_to_evaluate_again():
+    """When the evaluation counted no defect and the writer still refuses,
+    the message says the two triangulations disagree — sending the user
+    round an evaluate/retry loop would never change the answer."""
+    from mcad.mesh_export import MeshNotSolid
+    from mcad_worker import methods
+
+    source = "block = cube(10, 20, 30)\n"
+    saved = methods._last_program
+    methods._last_program = (hash(source), {"mesh_defects": {}, "shape_name": "block",
+                                            "body_count": 1, "mesh_defect_sites": {}})
+    try:
+        reply = methods._mesh_invalid_error(
+            MeshNotSolid(RuntimeError("3mf mesh is invalid"), node_name="block"), source)
+    finally:
+        methods._last_program = saved
+    message = reply["error"]["message"]
+    assert "has not been evaluated" not in message
+    assert "counted no" in message and "block" in message
+    assert reply["error"]["details"]["counts_from"] == "last_evaluation_clean"
+
+
+def test_only_the_writer_s_own_refusal_becomes_mesh_invalid():
+    """A RuntimeError that is not the Mesher's validation message is passed
+    on as itself; a lib3mf output failure (an unwritable path) is not a
+    RuntimeError at all and never reads as a geometry verdict."""
+    from mcad.mesh_export import MeshNotSolid, write_3mf
+    from build123d import Box
+
+    with pytest.raises(BaseException) as failed:
+        write_3mf(Box(1, 2, 3), "/nonexistent-dir-for-3mf-test/x.3mf")
+    assert not isinstance(failed.value, MeshNotSolid)

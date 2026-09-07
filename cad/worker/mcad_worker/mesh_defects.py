@@ -3,8 +3,9 @@
 A count ("2 non-manifold edges") tells a reader that the part will not slice
 and nothing at all about which feature to edit. This module walks the same
 welded tessellation the counts come from and keeps the geometry of the
-offending elements: the world position of every non-manifold edge, and a
-capped, evenly-spread sample of degenerate faces.
+offending elements: the world position of non-manifold edges (up to a cap,
+spread evenly, with the total beside them) and a capped, evenly-spread sample
+of degenerate faces.
 
 Vertices arrive one per face corner (normals differ across an edge), so two
 faces sharing an edge index different vertices at the same point. Everything
@@ -27,7 +28,9 @@ DEGENERATE_SITE_CAP = 32
 
 _NON_MANIFOLD_NOTE = (
     "three or more faces meet on this edge; a slicer cannot interpret it. "
-    "Positions are model millimetres, the same frame as the bounding box."
+    "Positions are model millimetres, the same frame as the bounding box. "
+    "At most %d sites are listed, spread across the part in position order; "
+    "`total` is the whole count." % NON_MANIFOLD_SITE_CAP
 )
 _DEGENERATE_NOTE = (
     "degenerate counts include tessellation slivers on curved faces and are "

@@ -365,7 +365,7 @@ test_clearance.gd assertions=75
 # with no triangle vertex in it is still measured, per_node lists both nodes
 # tallest first, an empty footprint is found:false rather than an error, and a
 # call with no region_mm is.
-test_reference_measurement.gd assertions=21
+test_reference_measurement.gd assertions=26
 
 # Fasteners: a 60 x 60 x 1.6 board posed away from the origin AND TURNED (a
 # yaw and a lean, so the screw axis is nowhere near world z) with five 3.4 mm
@@ -470,7 +470,7 @@ test_reference_measurement.gd assertions=21
 # no feature and no solid_feature index; thirty-two features at three
 # diameters collapse to three rows, partial surfaces apart with their sweep
 # range and no index; detail="full" hands back the rows themselves).
-test_fasteners.gd assertions=80
+test_fasteners.gd assertions=81
 
 # Missing/malformed bounds, exact cache and pose identity, mesh replacement,
 # and a material-run ray that must exclude a nearer sibling node.
@@ -706,7 +706,7 @@ test_eval_banner.gd assertions=9
 # rather than pass + 1 a leg refused with `busy` is retried until it answers
 # + 2 a clearance still in the worker comes back as one ticket beside the rows
 # already in hand, and a crash still reads fail.
-test_check_design.gd assertions=13
+test_check_design.gd assertions=16
 
 # minerva_cad_snapshot_fit: a capture framed on the evaluated solid, a named
 # reference or a world box, rendered from a camera of its own so the pane the

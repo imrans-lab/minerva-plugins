@@ -61,10 +61,11 @@ const PAIR_ENTRY_BYTES: int = 16
 ##
 ## The reply:
 ##
-##   {checked, units, mode, pass, required_mm, scope,
-##    pairs: [{a: {reference, node}, b: {reference, node}, min_mm, pass,
-##             point_a_mm: {world, local}, point_b_mm: {world, local},
-##             overlap?, contact_points_mm?, penetration_mm?, expected?}],
+##   {checked, units, mode, pass, advisory, pass_reason?, required_mm, scope,
+##    pairs: [{a: {reference, node}, b: {reference, node}, min_mm, bound_mm,
+##             pass, point_a_mm: {world, local}, point_b_mm: {world, local},
+##             overlap?, containment?, contact_points_mm?, penetration_mm?,
+##             expected?}],
 ##    pairs_measured, pairs_considered, pairs_shown, pairs_hidden,
 ##    unmeasured_bound_mm?, quantization_mm, largest_coordinate_mm,
 ##    expected_contacts?, expected_contacts_unmatched?, excluded_count?,
@@ -78,10 +79,12 @@ const PAIR_ENTRY_BYTES: int = 16
 ## reference, so the verb reports a failure rather than a clean sheet.
 ##
 ## AN OVERLAP HERE IS NOT THE INTERFERENCE CHECK'S OVERLAP. A mesh-to-mesh
-## distance is unsigned: one part wholly inside another measures 0, exactly as
-## two parts resting against each other do. Such a pair is reported with
-## `overlap` and the contact points the worker found, and it fails any
-## required gap; nothing here decides containment, and the reply says so.
+## distance is unsigned: one part wholly inside another measures the air
+## between their surfaces, exactly as two parts side by side do. So the
+## worker probes containment wherever one node's box lies inside the other's
+## (the only place it is possible) and a contained pair is reported as
+## overlap, failing any required gap; a probe it could not settle — an open
+## mesh — withholds the pass instead of guessing.
 ## A contact point is located to the two meshes' shared BOUNDING BOX and no
 ## finer — a point in that box can still be in air — because the collision
 ## names a triangle corner, not a point of the intersection.
@@ -151,7 +154,7 @@ func check_reference_pairs(panel: Object, args: Dictionary = {}) -> Dictionary:
 
 	var report := _pairs_report(reply, records, required_mm,
 		declared["entries"] as Array, bool(args.get("overlapping_only", false)),
-		int(args.get("limit", 0)))
+		int(args.get("limit", 0)), quantization)
 	report["mode"] = "reference-vs-reference"
 	report["scope"] = scope["described"]
 	report["quantization_mm"] = quantization
@@ -165,6 +168,16 @@ func check_reference_pairs(panel: Object, args: Dictionary = {}) -> Dictionary:
 			+ "boxes — a true lower bound on the distance — so no unmeasured "
 			+ "pair is closer than %s mm; raise max_pairs or scope with node= "
 			+ "to measure the rest") % [measured.size(), unmeasured_bound]
+		# An unmeasured candidate whose box gap does not itself clear the
+		# requirement may be the closest pair in the assembly; the measured
+		# rows cannot certify a scope they did not cover.
+		if unmeasured_bound - quantization < required_mm:
+			report["pass"] = false
+			report["pass_reason"] = ("%d candidate pair(s) beyond max_pairs "
+				+ "were not measured and their bounding-box gap (%s mm) does "
+				+ "not clear required_mm on its own; raise max_pairs or scope "
+				+ "with node= before reading this as clear") % [
+					ordered.size() - measured.size(), unmeasured_bound]
 	report["references_moved"] = panel.has_method("get_reference_state") \
 		and not _same_poses(records, panel.get_reference_state() as Array)
 	if bool(report["references_moved"]):
@@ -389,11 +402,25 @@ func _batch_pairs(head: Dictionary, targets: Array, pairs: Array) -> Dictionary:
 ## Re-frame the worker's pairs: every point gains the coordinates of its own
 ## reference's frame beside the world ones, the declarations are applied, and
 ## the verdict is folded.
+##
+## THE VERDICT IS GRADED ON bound_mm — min_mm less the float32 quantization
+## the vertices travelled at — so a gap that meets required_mm only by less
+## than the grid it was written on does not pass. A pair the worker found
+## CONTAINED (one closed mesh inside the other, with air between their
+## surfaces) is an overlap that no declaration excuses; one whose containment
+## it could not decide is neither clean nor a crash and withholds the pass. A
+## declared overlap is excused by NOTHING unless its depth was measured, and
+## a measured depth is a sample of the contacts, not an upper bound, so the
+## exclusion it earns is advisory (certified: false) and withholds the pass
+## with the reason; a region declaration is ungraded outside its box.
 func _pairs_report(reply: Dictionary, records: Array, required_mm: float,
-		expected: Array, overlapping_only: bool, limit: int) -> Dictionary:
+		expected: Array, overlapping_only: bool, limit: int,
+		quantization: float) -> Dictionary:
 	var rows: Array = []
 	var matched: Dictionary = {}
 	var excluded := 0
+	var unproven := 0
+	var undecided := 0
 	var expected_rows: Array = []
 	var failed := 0
 	for entry in (reply.get("pairs", []) as Array):
@@ -401,14 +428,19 @@ func _pairs_report(reply: Dictionary, records: Array, required_mm: float,
 		var side_a: Dictionary = raw.get("a", {})
 		var side_b: Dictionary = raw.get("b", {})
 		var min_mm := float(raw.get("min_mm", 0.0))
-		var overlap := bool(raw.get("overlap", false)) or min_mm <= 0.0
+		var containment := str(raw.get("containment", ""))
+		var contained := containment == "a_inside_b" or containment == "b_inside_a"
+		var overlap := bool(raw.get("overlap", false)) or min_mm <= 0.0 or contained
+		var bound_mm := maxf(min_mm - quantization, 0.0)
 		var row := {
 			"a": {"reference": str(side_a.get("reference", "")),
 				"node": str(side_a.get("node", ""))},
 			"b": {"reference": str(side_b.get("reference", "")),
 				"node": str(side_b.get("node", ""))},
 			"min_mm": min_mm,
-			"pass": min_mm >= required_mm and not overlap,
+			"bound_mm": bound_mm,
+			"pass": bound_mm >= required_mm and not overlap
+				and containment != "undecidable",
 		}
 		var points: Array = []
 		if overlap:
@@ -424,7 +456,7 @@ func _pairs_report(reply: Dictionary, records: Array, required_mm: float,
 			if raw.has("penetration_mm"):
 				row["penetration_mm"] = float(raw["penetration_mm"])
 			row["note"] = str(raw.get("note", ""))
-		else:
+		if not overlap or contained:
 			var point_a := _vector(raw.get("point_a_mm", []))
 			var point_b := _vector(raw.get("point_b_mm", []))
 			points = [point_a, point_b]
@@ -432,6 +464,12 @@ func _pairs_report(reply: Dictionary, records: Array, required_mm: float,
 				str(side_a.get("reference", "")))
 			row["point_b_mm"] = _framed(point_b, records,
 				str(side_b.get("reference", "")))
+		if not containment.is_empty():
+			row["containment"] = containment
+			row["containment_note"] = str(raw.get("containment_note", ""))
+			if containment == "undecidable":
+				row["containment_undecidable"] = true
+				undecided += 1
 		# A declaration on either side excuses the pair: an intended contact is
 		# stated about the part that is meant to touch, and the author has no
 		# reason to know which of the two the check will call `a`.
@@ -446,33 +484,53 @@ func _pairs_report(reply: Dictionary, records: Array, required_mm: float,
 			var declaration: Dictionary = expected[index]
 			matched[index] = true
 			var allowed: float = _Expected.required_mm(declaration)
-			var excused: bool = min_mm >= allowed
-			if overlap and allowed <= 0.0:
-				# An unsigned zero cannot say how deep the overlap is, so a
-				# declaration of contact excuses contact and no more; the row
-				# says which it was measured as.
-				excused = not raw.has("penetration_mm") \
-					or float(raw["penetration_mm"]) \
+			var excused: bool = bound_mm >= allowed and not overlap \
+				and containment != "undecidable"
+			var certified := true
+			if overlap and allowed <= 0.0 and not contained:
+				# An unsigned zero cannot say how deep the overlap is. A depth
+				# the worker did measure is a sample of the contacts and not
+				# an upper bound, so it earns an advisory exclusion; no depth
+				# at all earns none.
+				excused = raw.has("penetration_mm") \
+					and float(raw["penetration_mm"]) \
 						<= _Expected.allowance_mm(declaration)
+				certified = false
+				if excused:
+					row["excused_uncertified"] = true
+					unproven += 1
+				else:
+					row["note"] = str(row.get("note", "")) + "; declared as a " \
+						+ "contact, but this overlap has no measured depth, " \
+						+ "so the declaration cannot excuse it"
 			row["expected"] = true
-			row["pass"] = excused
+			if declaration["region"] != null:
+				row["declared_region"] = true
+			row["pass"] = excused and certified
+			var declared_row: Dictionary = _Expected.row(declaration,
+				str(side_a.get("reference", "")), str(side_a.get("node", "")),
+				"min_mm", min_mm, excused)
 			if excused:
 				excluded += 1
-			expected_rows.append(_Expected.row(declaration,
-				str(side_a.get("reference", "")), str(side_a.get("node", "")),
-				"min_mm", min_mm, excused))
-		if not bool(row["pass"]):
+				if not certified:
+					declared_row["certified"] = false
+			expected_rows.append(declared_row)
+		if not bool(row["pass"]) and not bool(row.get("excused_uncertified", false)):
 			failed += 1
 		if overlapping_only and not overlap:
 			continue
 		rows.append(row)
+	var ungraded: int = _Expected.ungrade_regions(rows, expected_rows)
+	unproven += ungraded
+	excluded -= ungraded
 	var shown: Array = rows
 	if limit > 0 and rows.size() > limit:
 		shown = rows.slice(0, limit)
 	var report := {
 		"checked": true,
 		"units": "mm",
-		"pass": failed == 0,
+		"pass": failed == 0 and unproven == 0 and undecided == 0,
+		"advisory": unproven > 0 or undecided > 0,
 		"required_mm": required_mm,
 		"pairs": shown,
 		"pairs_measured": int(reply.get("pairs_measured",
@@ -485,9 +543,18 @@ func _pairs_report(reply: Dictionary, records: Array, required_mm: float,
 		"bound": str(reply.get("bound", "")),
 		"note": "distances are exact for the two meshes and UNSIGNED: a pair "
 			+ "reported as overlap may be resting against each other or one "
-			+ "inside the other, and nothing here decides which. `pass` is "
-			+ "graded over every measured pair, whatever the list shows.",
+			+ "inside the other; containment is probed only where one node's "
+			+ "box lies inside the other's, and a pair with air between its "
+			+ "surfaces whose containment could not be decided withholds the "
+			+ "pass. `pass` is graded over every measured pair on bound_mm, "
+			+ "the distance less quantization_mm, whatever the list shows.",
 	}
+	if unproven > 0 or undecided > 0:
+		report["pass_reason"] = ("%d declared contact(s) applied advisorily "
+			+ "(an overlap depth that is a sample, or a region that excuses "
+			+ "one witness point) and %d pair(s) whose containment could not "
+			+ "be decided; pass is withheld rather than certified")\
+			% [unproven, undecided]
 	if not expected.is_empty():
 		report["expected_contacts"] = expected_rows
 		report["expected_contacts_unmatched"] = _Expected.unmatched(expected,

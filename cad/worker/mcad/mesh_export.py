@@ -34,7 +34,9 @@ def write_3mf(shape: Any, path: str, *, node_name: str = "part") -> str:
     """Write *shape* to *path* as 3MF, or raise :class:`MeshNotSolid`.
 
     The Mesher validates inside ``add_shape``, not ``write``, so both calls
-    sit under the same guard.
+    sit under the same guard; the guard matches the refusal's own message,
+    so an unrelated RuntimeError never becomes a claim about the geometry
+    (lib3mf's own failures are not RuntimeErrors at all).
     """
     from build123d import Mesher
 
@@ -43,5 +45,9 @@ def write_3mf(shape: Any, path: str, *, node_name: str = "part") -> str:
         mesher.add_shape(shape)
         mesher.write(path)
     except RuntimeError as exc:
+        # Only the Mesher's own validation refusal is a geometry verdict;
+        # any other RuntimeError from the writer is passed on as itself.
+        if "mesh is invalid" not in str(exc):
+            raise
         raise MeshNotSolid(exc, node_name=node_name) from exc
     return path

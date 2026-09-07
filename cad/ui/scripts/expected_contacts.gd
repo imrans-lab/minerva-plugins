@@ -35,6 +35,13 @@ extends RefCounted
 ## it found by ray parity alone (one body wholly inside the other) has no depth
 ## to compare with an allowance, and unprovable is not clean.
 ##
+## AN EXCLUSION IS CERTIFIED ONLY WHEN THE EVIDENCE IS. The measured overlap
+## is a chord along an edge, not an upper bound on the depth, so a declaration
+## an overlap stays inside is applied advisorily (certified: false); and a
+## region matched by a pair's one witness point says nothing about the same
+## pair outside the box (ungraded_outside_region). Both withhold the top-level
+## pass with a reason rather than certify it.
+##
 ## No class_name: off-tree plugin scripts cannot use class_name.
 ## Consumers: scripts/geometry_checks.gd (interference), scripts/
 ## clearance_client.gd (clearance), ui/panel_tools.gd (the two verbs).
@@ -166,6 +173,39 @@ static func row(entry: Dictionary, reference: String, node: String,
 			"max_mm": [region.end.x, region.end.y, region.end.z],
 		}
 	return out
+
+
+## A REGION EXCUSES ONE WITNESS POINT, NOT THE PAIR. A distance measurement
+## matches a region because the pair's closest point lies in the box; how
+## close the same two bodies come OUTSIDE the box was not measured
+## separately, so a pair a region excused is UNGRADED there: its pass is
+## withdrawn, the row and its declaration say so, and the caller reports the
+## verdict advisory. Returns how many pairs were ungraded. Interference is
+## not affected: every crossing point is matched to a region on its own.
+static func ungrade_regions(pairs: Array, declared_rows: Array) -> int:
+	var ungraded := 0
+	for entry in pairs:
+		var pair: Dictionary = entry
+		if not bool(pair.get("pass", false)) \
+				or not bool(pair.get("declared_region", false)):
+			continue
+		pair["pass"] = false
+		pair["ungraded_outside_region"] = true
+		pair["note"] = str(pair.get("note", "")) + "; the region excuses the " \
+			+ "witness point inside it, and clearance outside the region was " \
+			+ "not measured separately, so this pair is ungraded there"
+		ungraded += 1
+		for row in declared_rows:
+			var declared_row: Dictionary = row
+			if declared_row.has("region_mm") \
+					and bool(declared_row.get("excluded", false)) \
+					and str(declared_row.get("node", "")) == str(pair.get("node", "")) \
+					and str(declared_row.get("reference", "")) \
+						== str(pair.get("reference", "")):
+				declared_row["excluded"] = false
+				declared_row["ungraded_outside_region"] = true
+				break
+	return ungraded
 
 
 ## The declarations nothing was measured against, so a stale exclusion — a

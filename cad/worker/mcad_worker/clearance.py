@@ -261,7 +261,11 @@ def _tree_for(key: str, path: Optional[str]) -> tuple[Any, int, bool]:
         raise KeyError(key)
     vertices, faces = read_blob(path, key)
     tree = _build_tree(vertices, faces)
-    _reference_trees.put(key, (tree, len(faces), _bounds_of(vertices)))
+    # The arrays ride along: a containment probe walks the triangles the
+    # BVH was built from, and re-reading the blob for them would undo the
+    # point of caching the tree.
+    _reference_trees.put(key, (tree, len(faces), _bounds_of(vertices),
+                               (vertices, faces)))
     return tree, len(faces), False
 
 
@@ -274,6 +278,14 @@ def _bounds_of(vertices) -> Optional[tuple[list, list]]:
     array = np.asarray(vertices, dtype=float)
     return ([float(v) for v in array.min(axis=0)],
             [float(v) for v in array.max(axis=0)])
+
+
+def arrays_for(key: str):
+    """The cached mesh's (vertices, faces), or None if it is not known."""
+    entry = _reference_trees.get(key)
+    if entry is None or len(entry) < 4:
+        return None
+    return entry[3]
 
 
 def bounds_for(key: str) -> Optional[tuple[list, list]]:
@@ -419,7 +431,17 @@ SAMPLED_CLAUSE = (", whose curvature was sampled across the face rather than "
                   "search's residual step; that correction is the width of "
                   "the search's own uncertainty rather than a proof, and "
                   "curvature inside a cell the grid steps over entirely is "
-                  "still unseen")
+                  "still unseen — so the tolerance is NOT guaranteed on this "
+                  "solid and the distances are advisory")
+
+#: Why the bar is not a bound, per source, in the words the panel quotes.
+UNBOUNDED_BECAUSE = {
+    "sampled": ("spline faces in the solid whose curvature was sampled on a "
+                "grid and not read: a curvature between two samples is unseen"),
+    "guessed": "unrecognised curved faces in the solid",
+    "stated": "an angular step the caller stated over curvature that was "
+              "not read",
+}
 
 
 def _prepare_solid(source: str, tolerance_mm: float,
@@ -441,14 +463,22 @@ def _prepare_solid(source: str, tolerance_mm: float,
     asked for — an error bar the mesh does not keep is worse than a coarse
     one, because a caller subtracts it and believes the result.
 
-    `bounded` is False only when a curved face could not be measured at all:
-    the angle is then chosen from the bounding box, which is a guess about the
-    curvature, and `effective_mm` is what that guess implies rather than
-    what the mesh is known to keep. A face with no analytic radius — the
-    B-spline flank of a loft — is measured by sampling its curvature, so it
-    bounds the answer like any other face and says so in the `how`.
+    `bounded` is True only when every curved face carries an ANALYTIC radius
+    (or there is none): a cylinder, sphere, cone or torus, whose sagitta at
+    the chosen angle is arithmetic. A face with no analytic radius — the
+    B-spline flank of a loft — has its curvature SAMPLED on a grid and
+    refined, which chooses a good angle but proves nothing about the cell
+    the grid stepped over; the mesh is cut at that angle and the reply is
+    NOT bounded, with `source` saying "sampled" so the caller can tell that
+    estimate from a bounding-box guess. A face that could not be measured at
+    all leaves the angle chosen from the bounding box, a guess about the
+    curvature; `effective_mm` is then what that guess implies.
+
+    The seventh value is where the bar came from: "stated", "analytic",
+    "none" (nothing curved binds), "sampled" or "guessed".
     """
     measured, known, sampled = _curvature(source, tolerance_mm)
+    certain = known and not sampled
 
     if angular_param is not None:
         vertices, faces = _solid_arrays(source, tolerance_mm, angular_param)
@@ -456,7 +486,7 @@ def _prepare_solid(source: str, tolerance_mm: float,
                                             _bbox_radius(vertices))
         effective = max(tolerance_mm, _sagitta_mm(angular_param, radius or 0.0))
         return (vertices, faces, angular_param, "stated by the caller",
-                effective, known)
+                effective, certain, "stated")
 
     if known and measured is not None:
         angular = _angular_for(tolerance_mm, measured)
@@ -467,7 +497,8 @@ def _prepare_solid(source: str, tolerance_mm: float,
             how += SAMPLED_CLAUSE
         if effective > tolerance_mm:
             how += _chord_clause(angular, effective, tolerance_mm)
-        return vertices, faces, angular, how, effective, True
+        return (vertices, faces, angular, how, effective, certain,
+                "sampled" if sampled else "analytic")
 
     if known:
         # Nothing curved enough to bind: either no curved face at all, or only
@@ -479,8 +510,9 @@ def _prepare_solid(source: str, tolerance_mm: float,
             how = ("the default: every curved face was measured, by sampling "
                    "where there was no analytic radius to read, and none is "
                    "curved enough across its own extent to deviate by the "
-                   "tolerance")
-        return (vertices, faces, DEFAULT_ANGULAR_RAD, how, tolerance_mm, True)
+                   "tolerance" + SAMPLED_CLAUSE)
+        return (vertices, faces, DEFAULT_ANGULAR_RAD, how, tolerance_mm,
+                certain, "sampled" if sampled else "none")
 
     # A curved face whose radius could not be read. Tessellate once at the
     # default and take the bounding box as the radius — wider than any face
@@ -496,7 +528,7 @@ def _prepare_solid(source: str, tolerance_mm: float,
     return (vertices, faces, guess,
             "guessed from the mesh's own bounding box (radius %.4f mm), "
             "because the B-Rep carries %s" % (radius, UNRECOGNISED_CURVATURE),
-            max(tolerance_mm, _sagitta_mm(guess, radius)), False)
+            max(tolerance_mm, _sagitta_mm(guess, radius)), False, "guessed")
 
 
 def _solid_arrays(source: str, tolerance: float, angular_tolerance: float):
@@ -652,7 +684,8 @@ def clearance(params: dict) -> dict:
             }
 
         (solid_vertices, solid_faces, angular_rad, angular_how,
-            effective_mm, bounded) = _prepare_solid(source, tolerance_mm, angular)
+            effective_mm, bounded, tolerance_source) = _prepare_solid(
+                source, tolerance_mm, angular)
         solid_tree = _build_tree(solid_vertices, solid_faces)
 
         pairs = []
@@ -711,6 +744,13 @@ def clearance(params: dict) -> dict:
             # is what a guess implies, and the text says so in the same words
             # the panel looks for before it trusts the row.
             "tolerance_bounded": bounded,
+            # Where the bar came from — analytic radii are arithmetic, a
+            # sampled radius is an estimate, a bounding box is a guess — so a
+            # reader can tell a loft from a face the kernel would not read.
+            "tolerance_source": tolerance_source,
+            "tolerance_unbounded_because": (
+                "" if bounded else UNBOUNDED_BECAUSE.get(
+                    tolerance_source, UNBOUNDED_BECAUSE["guessed"])),
             "bound": (("the solid is measured as a mesh tessellated to within "
                        "%g mm of its true surface (chords stepped by at most "
                        "%.3f degrees, %s), so the true clearance is at least "
@@ -721,12 +761,14 @@ def clearance(params: dict) -> dict:
                       ("the solid is measured as a mesh tessellated at a "
                        "requested %g mm; its chord error is ESTIMATED at %g mm "
                        "(chords stepped by at most %.3f degrees, %s) and that "
-                       "estimate is not guaranteed for unrecognised curved "
-                       "faces, so no error bar bounds min_mm here; each pair "
-                       "is graded on min_mm minus the estimate, which is the "
-                       "best available and still not a promise"
+                       "estimate is not guaranteed for %s, so no error bar "
+                       "bounds min_mm here; each pair is graded on min_mm "
+                       "minus the estimate, which is the best available and "
+                       "still not a promise"
                        % (tolerance_mm, effective_mm,
-                          math.degrees(angular_rad), angular_how))),
+                          math.degrees(angular_rad), angular_how,
+                          UNBOUNDED_BECAUSE.get(tolerance_source,
+                                                UNBOUNDED_BECAUSE["guessed"])))),
             "solid_triangles": int(len(solid_faces)),
             "cache": {
                 "hits": hits,

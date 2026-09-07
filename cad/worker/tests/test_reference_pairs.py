@@ -197,3 +197,73 @@ def test_a_request_with_nothing_to_pair_is_an_error_and_not_a_clean_bill():
                                              "key": "0" * 64}]})
     assert reply["ok"] is False
     assert "no pair" in reply["error"]["message"]
+
+
+class TestContainment:
+    """A positive surface distance is not air between the PARTS.
+
+    ORACLE: the fixture's own nesting. A is the cube [0,10]^3 and B the cube
+    [2,3]^3 — B lies wholly inside A with 2 mm of air between the surfaces —
+    so a pair that reports 2 mm and passes a 0.5 mm requirement has certified
+    a crash. The same B moved to [12,13]^3 is beside A, its box outside A's,
+    and passes on the same 2 mm. And A with one triangle removed is no longer
+    a closed mesh, so parity cannot answer: the pair says undecidable and
+    withholds the pass rather than guessing either way.
+    """
+
+    def test_a_part_inside_another_is_an_overlap_not_a_gap(self, tmp_path):
+        pytest.importorskip("fcl")
+        verts_a, faces_a = _box((0.0, 0.0, 0.0), (10.0, 10.0, 10.0))
+        verts_b, faces_b = _box((2.0, 2.0, 2.0), (3.0, 3.0, 3.0))
+        result = rp.reference_pairs({
+            "required_mm": 0.5,
+            "targets": [_target(tmp_path, "shell", "Shell/Body", verts_a, faces_a),
+                        _target(tmp_path, "cap", "Cap/Body", verts_b, faces_b)],
+        })["result"]
+        pair = result["pairs"][0]
+        assert pair["min_mm"] == pytest.approx(2.0, abs=1e-4)
+        assert pair["containment"] == "b_inside_a"
+        assert pair["overlap"] is True
+        assert pair["pass"] is False
+        assert result["pass"] is False
+
+    def test_a_part_beside_another_is_not_probed_and_passes(self, tmp_path):
+        pytest.importorskip("fcl")
+        verts_a, faces_a = _box((0.0, 0.0, 0.0), (10.0, 10.0, 10.0))
+        verts_b, faces_b = _box((12.0, 2.0, 2.0), (13.0, 3.0, 3.0))
+        result = rp.reference_pairs({
+            "required_mm": 0.5,
+            "targets": [_target(tmp_path, "shell", "Shell/Body", verts_a, faces_a),
+                        _target(tmp_path, "cap", "Cap/Body", verts_b, faces_b)],
+        })["result"]
+        pair = result["pairs"][0]
+        assert pair["min_mm"] == pytest.approx(2.0, abs=1e-4)
+        assert "containment" not in pair
+        assert pair["pass"] is True and result["pass"] is True
+
+    def test_an_open_outer_mesh_is_undecidable_and_withholds_the_pass(self, tmp_path):
+        pytest.importorskip("fcl")
+        verts_a, faces_a = _box((0.0, 0.0, 0.0), (10.0, 10.0, 10.0))
+        verts_b, faces_b = _box((2.0, 2.0, 2.0), (3.0, 3.0, 3.0))
+        result = rp.reference_pairs({
+            "required_mm": 0.5,
+            "targets": [_target(tmp_path, "shell", "Shell/Body", verts_a, faces_a[:-1]),
+                        _target(tmp_path, "cap", "Cap/Body", verts_b, faces_b)],
+        })["result"]
+        pair = result["pairs"][0]
+        assert pair["containment"] == "undecidable"
+        assert "not a closed mesh" in pair["containment_note"]
+        assert pair["pass"] is False and result["pass"] is False
+
+
+def test_containment_probe_needs_no_geometry_backend():
+    """The parity walk is numpy over the triangles: the cube's own vertex at
+    (2,2,2) is inside [0,10]^3 and a point at (12,2,2) is not."""
+    from mcad_worker import containment as ct
+    verts, faces = _box((0.0, 0.0, 0.0), (10.0, 10.0, 10.0))
+    assert ct.is_closed(verts, faces) is True
+    assert ct.is_closed(verts, faces[:-1]) is False
+    assert ct.point_inside((2.0, 2.0, 2.0), verts, faces) is True
+    assert ct.point_inside((12.0, 2.0, 2.0), verts, faces) is False
+    assert ct.nested(((2, 2, 2), (3, 3, 3)), ((0, 0, 0), (10, 10, 10))) == "a_in_b"
+    assert ct.nested(((0, 0, 0), (10, 10, 10)), ((12, 2, 2), (13, 3, 3))) is None

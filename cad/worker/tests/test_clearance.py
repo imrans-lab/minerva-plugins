@@ -407,8 +407,8 @@ def _max_chord_deviation(source: str, tolerance_mm: float,
 
     import numpy as np
 
-    vertices, faces, _angular, _how, _effective, _bounded = clr._prepare_solid(
-        source, tolerance_mm)
+    vertices, faces, _angular, _how, _effective, _bounded, _source = \
+        clr._prepare_solid(source, tolerance_mm)
     points = np.asarray(vertices, dtype=float)
     worst = 0.0
     for triangle in faces:
@@ -781,10 +781,13 @@ class TestClearanceVerb:
         remaining slack is the kernel's own spline fit of a scaled sphere, not
         the search.
 
-        The reply must then be BOUNDED at the tolerance asked for, with the
-        source text saying the curvature was sampled; a part whose every
-        curved face has an analytic radius, and a part with no curved face at
-        all, stay bounded and say neither.
+        The reply is then cut at the angle that radius calls for — but a
+        sampled radius is an estimate, not a proof (curvature between two
+        grid samples is unseen), so the reply says tolerance_bounded FALSE
+        with tolerance_source "sampled" and names spline sampling as the
+        reason, distinct from the bounding-box guess an unreadable face gets;
+        a part whose every curved face has an analytic radius, and a part
+        with no curved face at all, are bounded and say neither.
         """
         pytest.importorskip("fcl")
         pytest.importorskip("build123d")
@@ -829,39 +832,44 @@ class TestClearanceVerb:
 
         sampled = _reply(spheroid)
         assert sampled["checked"] is True
-        assert sampled["tolerance_bounded"] is True
+        assert sampled["tolerance_bounded"] is False
+        assert sampled["tolerance_source"] == "sampled"
+        assert "sampled" in sampled["tolerance_unbounded_because"]
+        assert "unrecognised" not in sampled["tolerance_unbounded_because"]
         assert sampled["requested_tolerance_mm"] == requested
         assert sampled["tessellation_tolerance_mm"] == pytest.approx(
             requested, rel=1.0e-6)
-        assert "not guaranteed" not in sampled["bound"]
+        assert "not guaranteed" in sampled["bound"]
         assert "sampled across the face" in sampled["angular_deflection_source"]
 
         measured = _reply(CURVED_SOLID_SOURCE)
         assert measured["tolerance_bounded"] is True
+        assert measured["tolerance_source"] == "analytic"
+        assert measured["tolerance_unbounded_because"] == ""
         assert "not guaranteed" not in measured["bound"]
         assert "sampled" not in measured["angular_deflection_source"]
         flat = _reply(SOLID_SOURCE)
         assert flat["tolerance_bounded"] is True
+        assert flat["tolerance_source"] == "none"
         assert "no curved face" in flat["angular_deflection_source"]
 
-    def test_a_lofted_solid_is_bounded_and_graded_on_its_real_gap(self, tmp_path):
-        """A shell with a loft in it must be certifiable, not merely advised.
+    def test_a_lofted_solid_is_measured_on_its_real_gap_and_says_sampled(self, tmp_path):
+        """A shell with a loft in it is measured, and told apart from a guess.
 
-        This is the whole point of the bound: `check_clearance` is the step
-        that says a design is clear, and a shell with any organic surface in
-        it — which is every shell worth lofting — could never say so while a
-        B-spline face counted as unmeasurable. The flanks of a loft between
-        two rectangles are RULED: they carry no curvature at all, so nothing
-        on this solid binds the angular step and the tolerance the caller
-        asked for is exactly the one the mesh keeps.
+        The flanks of a loft between two rectangles are RULED: sampling their
+        curvature finds nothing that binds, so the mesh is cut at the
+        tolerance the caller asked for. But a sampled reading is not a proof
+        — a curvature between two grid samples is unseen — so the reply may
+        not certify the bar: tolerance_bounded is False with
+        tolerance_source "sampled", which is a different fact from the
+        bounding-box guess an unreadable face gets, and the panel grades the
+        distances advisorily under accept_unbounded_tolerance.
 
         ORACLE: the gap the fixture is BUILT from. The loft's lowest section
         is placed a stated distance above bar A's top face, so at 0.9 mm the
-        reply must report that 0.9 (within its own stated tolerance) and fail
-        a 1.0 mm requirement, and at 1.2 mm it must pass the same
-        requirement — both while claiming the bound rather than an estimate.
-        A reader that still gave up on the flanks reports tolerance_bounded
-        False and cannot pass at any distance.
+        reply must report that 0.9 (within its stated tolerance) and the
+        worker's own grade fails a 1.0 mm requirement; at 1.2 mm the same
+        grade passes. A reader that skipped the flanks reports "guessed".
         """
         pytest.importorskip("fcl")
         pytest.importorskip("build123d")
@@ -887,10 +895,11 @@ class TestClearanceVerb:
         assert report["largest_radius_mm"] is None  # ruled: nothing binds
 
         short = _reply(0.9)
-        assert short["tolerance_bounded"] is True
+        assert short["tolerance_bounded"] is False
+        assert short["tolerance_source"] == "sampled"
         assert short["tessellation_tolerance_mm"] == pytest.approx(
             requested, rel=1.0e-6)
-        assert "not guaranteed" not in short["bound"]
+        assert "not guaranteed" in short["bound"]
         pair = short["pairs"][0]
         assert pair["min_mm"] == pytest.approx(
             0.9, abs=short["tessellation_tolerance_mm"])
@@ -898,7 +907,8 @@ class TestClearanceVerb:
         assert short["pass"] is False
 
         clear = _reply(1.2)
-        assert clear["tolerance_bounded"] is True
+        assert clear["tolerance_bounded"] is False
+        assert clear["tolerance_source"] == "sampled"
         assert clear["pairs"][0]["min_mm"] == pytest.approx(
             1.2, abs=clear["tessellation_tolerance_mm"])
         assert clear["pairs"][0]["pass"] is True

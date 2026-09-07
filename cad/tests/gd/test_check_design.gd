@@ -61,6 +61,8 @@ func _run() -> void:
 	await _check_an_undecidable_node_is_not_a_clean_answer()
 	await _check_a_busy_collider_is_retried_not_reported()
 	await _check_a_running_clearance_comes_back_as_a_ticket()
+	await _check_a_certified_failure_the_filter_hides_still_fails()
+	await _check_parts_each_carry_their_own_ticket()
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +267,75 @@ func _check_a_running_clearance_comes_back_as_a_ticket() -> void:
 	panel.free()
 
 
+## ORACLE: a 1.005 mm gap under a 1.0 mm requirement on a solid tessellated to
+## 0.01 mm is a CERTIFIED failure — bound_mm 0.995 < 1.0 — even though the raw
+## distance clears the bar, and the fold must say fail with that row. A leg
+## whose own verdict is false for a reason no row carries (a stale
+## interference join) must read advisory, never pass.
+func _check_a_certified_failure_the_filter_hides_still_fails() -> void:
+	var panel := _panel()
+	panel.interference = _interference_report([])
+	var pinch := _gap(REQUIRED_MM + 0.005)
+	pinch["bound_mm"] = REQUIRED_MM - 0.005
+	pinch["pass"] = false
+	panel.clearance = _clearance_report([pinch, _gap(2.5)])
+	panel.fasteners = _fastener_report([_good_screw()])
+	var reply: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_check_design",
+			{"required_mm": REQUIRED_MM, "screw": {"dia_mm": 3.0, "length_mm": 8.0}})
+	var rows: Array = reply["clearance"]
+	check("a pair that clears required_mm by less than the bounded tolerance "
+			+ "is a certified failure: it travels as the one clearance row "
+			+ "and the verdict is fail",
+			str(reply.get("verdict", "")) == "fail"
+				and rows.size() == 1
+				and absf(float((rows[0] as Dictionary)["min_mm"]) - (REQUIRED_MM + 0.005)) < 1e-6,
+			"reply = %s" % str(reply))
+
+	var stale := _clearance_report([_gap(2.5)])
+	stale["pass"] = false
+	stale["pass_reason"] = "interference evidence unavailable: no interference "\
+		+ "report describes this source"
+	panel.clearance = stale
+	var unproven: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_check_design",
+			{"required_mm": REQUIRED_MM, "screw": {"dia_mm": 3.0, "length_mm": 8.0}})
+	check("a clearance leg whose own pass is false for a reason no row "
+			+ "carries reads advisory with that reason, never pass",
+			str(unproven.get("verdict", "")) == "advisory"
+				and str(unproven.get("notes", [])).contains("interference evidence"),
+			"verdict = %s, notes = %s" % [str(unproven.get("verdict", "")),
+				str(unproven.get("notes", []))])
+	panel.free()
+
+
+## ORACLE: with parts=["bottom", "top"] the clearance leg runs once per part,
+## and when both outrun the window the reply must carry BOTH tickets, keyed by
+## part, so each measurement can be collected; a ticket that did not travel is
+## a measurement nobody can collect.
+func _check_parts_each_carry_their_own_ticket() -> void:
+	var panel := _panel()
+	panel.interference = _interference_report([])
+	panel.clearance = {"checked": false, "status": "running",
+		"ticket": "per-part", "pairs": [], "elapsed_ms": 2000,
+		"reason": "the measurement is still running in the worker"}
+	panel.fasteners = _fastener_report([_good_screw()])
+	var reply: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_check_design",
+			{"required_mm": REQUIRED_MM, "parts": ["bottom", "top"]})
+	var tickets: Dictionary = (reply.get("tickets", {}) as Dictionary) \
+		.get("clearance", {}) as Dictionary
+	check("two parts still measuring come back as two tickets under "
+			+ "tickets.clearance, one per part, with status running",
+			str(reply.get("status", "")) == "running"
+				and tickets.size() == 2
+				and str(tickets.get("bottom", "")) == "clearance-bottom"
+				and str(tickets.get("top", "")) == "clearance-top"
+				and str(reply.get("ticket_note", "")).contains("minerva_cad_check_clearance"),
+			"reply = %s" % str(reply))
+	panel.free()
+
+
 # ---------------------------------------------------------------------------
 # The reports the three checks would have measured
 # ---------------------------------------------------------------------------
@@ -428,7 +499,32 @@ class _DesignStandIn extends Node:
 
 	func check_clearance(args: Dictionary) -> Dictionary:
 		clearance_args = args.duplicate(true)
-		return clearance.duplicate(true)
+		var reply := clearance.duplicate(true)
+		# A part-scoped leg is asked with that part's source, which ends in
+		# the binding's name; its ticket is named after it so the fold can be
+		# seen to keep the two apart.
+		var source := str(args.get("source", "")).strip_edges()
+		if reply.has("ticket") and not source.is_empty():
+			reply["ticket"] = "clearance-" + source.get_slice("\n",
+				source.get_slice_count("\n") - 1)
+		return reply
+
+	## What part_scope asks a panel for when `parts` is given: the document's
+	## source and a worker that evaluates one binding of it. The mesh is a
+	## single triangle — enough to be "solid geometry" for the fold under test.
+	func get_document_state() -> Dictionary:
+		return {"source": "bottom = cube(10, 10, 10)\ntop = cube(10, 10, 2)\n",
+			"last_eval": {"shape_name": "top"}}
+
+	func call_backend(_channel: String, args: Dictionary,
+			_timeout_ms: int = 30000) -> Dictionary:
+		await (Engine.get_main_loop() as SceneTree).process_frame
+		var source := str(args.get("source", "")).strip_edges()
+		return {"success": true, "result": {"ok": true, "result": {
+			"shape_name": source.get_slice("\n", source.get_slice_count("\n") - 1),
+			"mesh": {"vertices": [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+				"faces": [[0, 1, 2]]},
+		}}}
 
 	func check_fasteners(args: Dictionary) -> Dictionary:
 		fastener_args = args.duplicate(true)

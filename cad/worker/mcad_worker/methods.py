@@ -155,8 +155,9 @@ def _mesh_invalid_error(exc: Exception, source: str) -> dict:
     thing to a body name the exporter has.
     """
     defects, shape_name, body_count = _defects_for_source(source)
+    evaluated = _last_program is not None and _last_program[0] == hash(source)
     sites: dict = {}
-    if _last_program is not None and _last_program[0] == hash(source):
+    if evaluated:
         sites = _last_program[1].get("mesh_defect_sites") or {}
     name = shape_name or getattr(exc, "node_name", "") or "part"
     where = f"body '{name}'" if body_count <= 1 else f"'{name}' ({body_count} bodies)"
@@ -165,12 +166,26 @@ def _mesh_invalid_error(exc: Exception, source: str) -> dict:
             f"{_phrase_defects(defects)} in {where}"
             " (counts from the last evaluation's mesh_defects)"
         )
+        counts_from = "last_evaluation"
+    elif evaluated:
+        # Evaluated, and clean by its own tessellation: the writer meshes the
+        # shape again, finer, and trips on something that triangulation has
+        # and the evaluation's did not. Re-evaluating will not change that.
+        detail = (
+            f"the last evaluation of {where} counted no open, non-manifold,"
+            " degenerate or duplicate faces in its own tessellation, so the"
+            " defect is in the writer's finer triangulation and is not located"
+            " here — export STL or STEP, or simplify the feature the writer"
+            " trips on"
+        )
+        counts_from = "last_evaluation_clean"
     else:
         detail = (
             f"{where} has not been evaluated here, so the defect counts are not"
             " known — evaluate the source (cad.evaluate summary=true) and read"
             " mesh_defects"
         )
+        counts_from = "unavailable"
     return {
         "ok": False,
         "error": {
@@ -188,7 +203,7 @@ def _mesh_invalid_error(exc: Exception, source: str) -> dict:
                 # Where they are, not only how many: the same located report
                 # last_eval carries, so a refusal is actionable on its own.
                 "mesh_defect_sites": sites,
-                "counts_from": "last_evaluation" if defects else "unavailable",
+                "counts_from": counts_from,
             },
         },
     }

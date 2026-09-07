@@ -1346,7 +1346,7 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 	if not defects.is_empty():
 		_last_eval_result["mesh_defects"] = defects
 	# WHERE they are. The worker located them on the same tessellation it sent
-	# here: every non-manifold edge by world position, degenerate faces as a
+	# here: non-manifold edges by world position (capped), degenerate faces as a
 	# capped spread sample with the note that slivers on curved faces are not
 	# defects. A count on its own names no feature to fix.
 	var defect_sites: Variant = eval_result.get("mesh_defect_sites", {})

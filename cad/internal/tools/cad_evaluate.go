@@ -27,7 +27,7 @@ var Evaluate = ToolSpec{
 		"type": "object",
 		"properties": {
 			"source": {"type": "string", "description": ".mcad DSL source code"},
-			"summary": {"type": "boolean", "description": "Return the evaluation without its mesh: shape_name, body_count, bbox, vertex/face/edge counts and mesh_defects (counts) plus mesh_defect_sites, which gives every non-manifold edge a world position and a capped sample of degenerate faces. Default false."}
+			"summary": {"type": "boolean", "description": "Return the evaluation without its mesh: shape_name, body_count, bbox, vertex/face/edge counts and mesh_defects (counts) plus mesh_defect_sites, which locates non-manifold edges (up to 64 sites spread across the part, with the total count beside them) and a capped sample of degenerate faces. Default false."}
 		},
 		"required": ["source"]
 	}`),

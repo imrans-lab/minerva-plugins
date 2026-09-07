@@ -1965,12 +1965,22 @@ func _check_expected_contacts(gauge: Node, checks: RefCounted) -> void:
 	var both: Dictionary = await _submit(gauge, checks, "", "", [
 		_declaration(BOSS_CENTRE_XY, -3.0),
 		_declaration(SECOND_BOSS_XY, -3.0)])
-	check("expected: with both contacts declared the check PASSES, and says "
-			+ "over what: two exclusions and no pair left",
-			bool(both.get("pass", false))
+	var both_rows: Array = both.get("expected_contacts", []) as Array
+	var uncertified := both_rows.size() == 2
+	for entry in both_rows:
+		if bool((entry as Dictionary).get("certified", true)):
+			uncertified = false
+	check("expected: with both contacts declared no pair is left and both are "
+			+ "excluded — ADVISORILY, because the measured overlap is a chord "
+			+ "and not an upper bound: pass is withheld with the reason, the "
+			+ "rows carry certified false",
+			not bool(both.get("pass", true))
+				and bool(both.get("advisory", false))
+				and str(both.get("pass_reason", "")).contains("lower-bound")
 				and int(both.get("count", 0)) == 0
 				and int(both.get("point_count", 0)) == 0
-				and int(both.get("excluded_count", 0)) == 2,
+				and int(both.get("excluded_count", 0)) == 2
+				and uncertified,
 			"report = %s" % str(both))
 
 	# THE FALSIFIER. The same two declarations, each allowing half a

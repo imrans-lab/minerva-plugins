@@ -21,6 +21,13 @@ swept-sphere BVH trees, and the missing-key protocol. Those live in
 clearance.py and are imported rather than copied, so a reference node measured
 against the solid and then against another reference builds its tree once.
 
+CONTAINMENT. A positive distance says only that the two SURFACES are apart;
+a part wholly inside another measures the same air. Wherever one node's box
+lies inside the other's — the only place containment is possible — the pair is
+probed by ray parity (mcad_worker.containment) and a contained pair is an
+overlap with no contact points; an outer mesh that is not closed leaves the
+question undecidable, which the pair reports rather than passes.
+
 CONTACT POINTS. A distance of zero says only that there is no air between the
 two meshes. FCL's mesh-mesh collision names the triangles that overlap and a
 point per contact, so an overlapping pair comes back with points — which is
@@ -38,7 +45,9 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from .clearance import ClearanceError, _require_fcl, _tree_for, bounds_for
+from .clearance import (ClearanceError, _require_fcl, _tree_for, arrays_for,
+                        bounds_for)
+from .containment import containment
 
 #: Contacts collected for one overlapping pair. Enough to show where a part
 #: has landed on another and short enough that a badly placed part does not
@@ -267,6 +276,24 @@ def reference_pairs(params: dict) -> dict:
             else:
                 pair["point_a_mm"] = point_a
                 pair["point_b_mm"] = point_b
+                # Air between the surfaces is not air between the PARTS:
+                # one may lie wholly inside the other. Asked only where one
+                # box lies inside the other's, which is the only place it
+                # can be true.
+                key_a = str(targets[first].get("key", ""))
+                key_b = str(targets[second].get("key", ""))
+                verdict = containment(arrays_for(key_a), arrays_for(key_b),
+                                      bounds_for(key_a), bounds_for(key_b))
+                if verdict is not None:
+                    pair["containment"] = verdict["containment"]
+                    pair["containment_note"] = verdict["note"]
+                    if verdict["containment"] != "none":
+                        pair["pass"] = False
+                    if verdict["containment"].endswith("_a") \
+                            or verdict["containment"].endswith("_b"):
+                        pair["overlap"] = True
+                        pair["contact_points_mm"] = []
+                        pair["contact_count"] = 0
             pairs.append(pair)
         pairs.sort(key=lambda p: (p["min_mm"], p["a"]["reference"],
                                   p["a"]["node"], p["b"]["reference"],

@@ -33,14 +33,15 @@ const ISO_273_MEDIUM: Dictionary = {
 ## numbers, so this only absorbs the float literal a caller wrote.
 const SIZE_EPSILON_MM: float = 0.001
 
-## A bore no wider than this multiple of the screw's own diameter is material
-## the thread bites: a pilot, a thread-forming boss, a tapped hole. Anything
-## wider is a hole the screw passes THROUGH. The threshold is the ISO 273
-## medium clearance hole for that screw where the table has one — 3.4 mm for an
-## M3, so a 3.0 mm pilot is thread and a 3.82 mm printed clearance bore is not
-## — and this multiple only where it does not. A clearance bore is never an
-## engagement, however deep it is, so which of two coaxial bores gets paired
-## with a hole is not a question a distance can answer.
+## A bore this multiple of the screw's own diameter or wider is a hole the
+## screw passes THROUGH, where no clearance hole is tabulated or stated for
+## it. Where ISO 273 has the screw, the table's medium hole is the threshold
+## instead (3.4 mm for an M3) — and either way a bore wider than the screw's
+## own major diameter is clearance, because the thread has nothing to cut:
+## a 3.0 mm pilot is thread, a 3.2 mm bore and a 3.82 mm printed clearance
+## bore are not. A clearance bore is never an engagement, however deep it is,
+## so which of two coaxial bores gets paired with a hole is not a question a
+## distance can answer.
 const CLEARANCE_FIT_D: float = 1.1
 ## A bore narrower than this multiple of the screw's diameter cannot take the
 ## screw at all: a vent, a moulding pin, a texture. It is paired last, behind
@@ -121,16 +122,21 @@ func _iso_273_allowance(screw_dia: float, verb_args: Dictionary) -> Dictionary:
 ## What one bore is for, from its diameter and the screw's.
 ##
 ##   thread     the screw bites here — a pilot, a moulded boss, a tapped hole.
-##              This is the only kind of bore an engagement can be measured in.
-##   clearance  the screw passes through: at or above the clearance hole its
-##              own diameter calls for.
+##              This is the only kind of bore an engagement can be measured in,
+##              and it has to be NARROWER than the screw's major diameter: a
+##              bore the major diameter already fits through has no material
+##              for the thread to cut, however far it is from the ISO 273
+##              clearance hole (a 3.2 mm bore takes an M3 with 0.1 mm to
+##              spare on either side and holds nothing).
+##   clearance  the screw passes through: wider than its major diameter, or at
+##              or above the clearance hole that diameter calls for.
 ##   undersize  narrower than the screw can enter at all.
 func _fit_of(bore_dia: float, screw_dia: float, clearance_dia: float) -> String:
 	if screw_dia <= 0.0:
 		return "thread"
 	if bore_dia < screw_dia * UNDERSIZE_FIT_D:
 		return "undersize"
-	if bore_dia >= clearance_dia:
+	if bore_dia >= clearance_dia or bore_dia > screw_dia + SIZE_EPSILON_MM:
 		return "clearance"
 	return "thread"
 

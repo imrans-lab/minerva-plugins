@@ -59,12 +59,12 @@ static func lean_reference(row: Dictionary) -> Dictionary:
 ##
 ## `pairs` arrive sorted by min_mm ascending, so `limit` keeps the CLOSEST n —
 ## the tightest gaps, which are the ones an edit is about. `failing_only`
-## drops the pairs that CLEARED, which is not the same question as the row's
-## `pass`: on a solid whose tessellation tolerance could not be bounded every
-## row is graded false whatever its gap, so a filter keyed on `pass` hides
-## nothing. It is keyed on the distance instead — see `pair_clears`. The
-## limit is applied to what survives the filter, so limit=5 with failing_only
-## is five FAILING rows and not five rows of which some failed.
+## drops the pairs that CLEARED: the row's own `pass` where the report's
+## tolerance is bounded, and the distance where it is not, because there
+## every row is graded false whatever its gap and a filter keyed on `pass`
+## would hide nothing — see `pair_clears`. The limit is applied to what
+## survives the filter, so limit=5 with failing_only is five FAILING rows and
+## not five rows of which some failed.
 ##
 ## The report's own `pass` is graded over every pair before this runs and is
 ## not touched: a filtered report still says whether the whole scope cleared,
@@ -73,10 +73,11 @@ static func filter_clearance(report: Dictionary, limit: int, failing_only: bool)
 	var pairs: Array = report.get("pairs", []) as Array
 	var required := float(report.get("required_mm", 0.0))
 	var quantization := float(report.get("quantization_mm", 0.0))
+	var bounded := bool(report.get("tolerance_bounded", false))
 	var kept: Array = []
 	for entry in pairs:
 		var pair: Dictionary = entry
-		if failing_only and pair_clears(pair, required, quantization):
+		if failing_only and pair_clears(pair, required, quantization, bounded):
 			continue
 		kept.append(pair)
 	var shown: Array = kept if limit <= 0 or kept.size() <= limit \
@@ -101,21 +102,26 @@ static func filter_clearance(report: Dictionary, limit: int, failing_only: bool)
 
 ## Did this pair clear the gap it had to keep?
 ##
-## The measured distance less the float32 quantization of the shipped
-## vertices, against the pair's own required_mm when it declared one and the
-## call's otherwise. `pass` is taken as clearing when it is true, but its
-## being false is not taken as failing: an unbounded tessellation tolerance
-## fails every row in the report without saying anything about any one gap.
-## The graded `pass` is read FIRST, before the shapes below: a declared
-## contact is a touching row the check itself graded as clearing, and a rule
-## of our own here would report it as a failure the row does not claim.
-## A pair the check could not reason about — material overlap, a flush
-## contact, a containment it could not decide — never clears otherwise,
-## because the distance is not the answer for it.
+## The graded `pass` is read FIRST: a row the check itself graded as clearing
+## clears, whatever its shape (a declared contact is a touching row graded
+## that way). On a report whose tessellation tolerance IS bounded, `pass`
+## false is the whole answer too — the row was graded on bound_mm, the
+## measured distance less the tolerance and the quantization, and a 0.505 mm
+## gap under a 0.01 mm bar does not clear 0.5 mm however its raw distance
+## reads; hiding it would hide a certified failure. Only on an UNBOUNDED
+## report, where every row is graded false without saying anything about any
+## one gap, is the distance read instead: min_mm less the float32
+## quantization of the shipped vertices, against the pair's own required_mm
+## when it declared one and the call's otherwise. A pair the check could not
+## reason about — material overlap, a flush contact, a containment it could
+## not decide — never clears on the distance, because the distance is not
+## the answer for it.
 static func pair_clears(pair: Dictionary, required_mm: float,
-		quantization_mm: float) -> bool:
+		quantization_mm: float, bounded: bool = false) -> bool:
 	if bool(pair.get("pass", false)):
 		return true
+	if bounded:
+		return false
 	if bool(pair.get("interference", false)) \
 			or bool(pair.get("touching", false)) \
 			or bool(pair.get("containment_undecidable", false)):

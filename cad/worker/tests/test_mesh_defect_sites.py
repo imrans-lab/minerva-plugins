@@ -131,3 +131,24 @@ def test_rev3_fixture_reports_both_edges_with_positions():
     if degenerate is not None:
         assert degenerate["total"] == degenerate_count
         assert len(degenerate["sites"]) <= mesh_defects.DEGENERATE_SITE_CAP
+
+
+def test_non_manifold_sites_are_capped_and_the_note_says_so():
+    """65 fins is one more than the cap: 64 sites travel, total says 65, and
+    the note discloses the cap rather than promising every edge."""
+    vertices: list = []
+    faces: list = []
+    count = mesh_defects.NON_MANIFOLD_SITE_CAP + 1
+    for i in range(count):
+        base = len(vertices)
+        z = float(i) * 3.0
+        vertices.extend([[0.0, 0.0, z], [10.0, 0.0, z], [0.0, 5.0, z],
+                         [0.0, -5.0, z], [0.0, 0.0, z + 1.0]])
+        for corner in (2, 3, 4):
+            faces.append([base, base + 1, base + corner])
+    report = mesh_defects.defect_report({"vertices": vertices, "faces": faces})
+    located = report["sites"]["non_manifold_edges"]
+    assert report["counts"]["non_manifold_edges"] == count
+    assert located["total"] == count
+    assert len(located["sites"]) == mesh_defects.NON_MANIFOLD_SITE_CAP
+    assert str(mesh_defects.NON_MANIFOLD_SITE_CAP) in located["note"]

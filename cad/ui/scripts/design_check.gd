@@ -68,6 +68,10 @@ static func run(panel, args: Dictionary, per_part: Callable,
 		"checks": {},
 		"counts": {},
 		"unknown": false,
+		# part -> ticket for every clearance leg still in the worker. A
+		# part-scoped call has one leg per part, and a ticket that did not
+		# travel is a measurement nobody can collect.
+		"tickets": {},
 	}
 
 	var solid_args := args.duplicate(true)
@@ -114,9 +118,21 @@ static func run(panel, args: Dictionary, per_part: Callable,
 	}
 	if not (state["notes"] as Array).is_empty():
 		out["notes"] = state["notes"]
-	var ticket := str(clearance_reply.get("ticket", ""))
-	if str(clearance_reply.get("status", "")) == "running" and not ticket.is_empty():
-		out["status"] = "running"
+	_attach_tickets(out, state["tickets"] as Dictionary)
+	return out
+
+
+## The clearance tickets a reply has to carry, whichever shape they came in.
+## One part (or none) is one ticket, collected by calling this verb again
+## with it; several parts are one ticket EACH, and each is collected on its
+## own through minerva_cad_check_clearance, because this verb's own ticket
+## argument names one measurement.
+static func _attach_tickets(out: Dictionary, tickets: Dictionary) -> void:
+	if tickets.is_empty():
+		return
+	out["status"] = "running"
+	if tickets.size() == 1:
+		var ticket := str(tickets.values()[0])
 		out["ticket"] = ticket
 		out["tickets"] = {"clearance": ticket}
 		out["ticket_note"] = ("the clearance leg is still in the worker; the "
@@ -124,7 +140,14 @@ static func run(panel, args: Dictionary, per_part: Callable,
 			+ "minerva_cad_check_design again with ticket=\"%s\" to collect "
 			+ "it — that call re-runs the other two legs, so its verdict is "
 			+ "over the geometry standing then.") % ticket
-	return out
+		return
+	out["tickets"] = {"clearance": tickets.duplicate()}
+	out["ticket_note"] = ("the clearance leg is still in the worker for %d "
+		+ "parts, one ticket each under tickets.clearance; the interference "
+		+ "and fastener rows above are complete. Collect each with "
+		+ "minerva_cad_check_clearance ticket=<ticket> (failing_only=true "
+		+ "for the rows this verb would show), or call this verb again "
+		+ "without parts= once they have had their window.") % tickets.size()
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +247,10 @@ static func _fold_interference(reply: Dictionary, state: Dictionary) -> Array:
 			_unknown(state, ("interference could not decide containment for "
 				+ "%d node(s)%s; minerva_cad_check_interference lists them")
 				% [undecidable.size(), _of(part)])
+		# A declared contact is held out of the pairs on a measured depth that
+		# is not an upper bound, so the exclusion is advisory and the check
+		# says so with pass false and a reason; that is never folded to pass.
+		_fold_unproven(report, "interference", part, state)
 		var unmatched: Array = report.get("expected_contacts_unmatched", []) as Array
 		if not unmatched.is_empty():
 			_unknown(state, ("%d expected contact(s)%s matched nothing that "
@@ -237,7 +264,9 @@ static func _fold_interference(reply: Dictionary, state: Dictionary) -> Array:
 
 ## The failing clearance rows. The verb layer has already dropped the pairs
 ## that cleared and kept the closest of what is left, and its own counts say
-## how many rows are behind the filter.
+## how many rows are behind the filter. The leg's own verdict is read as
+## well: a report that failed for a reason no row carries is folded as
+## unknown, never as clean.
 static func _fold_clearance(reply: Dictionary, state: Dictionary) -> Array:
 	var rows: Array = []
 	var total := 0
@@ -247,9 +276,13 @@ static func _fold_clearance(reply: Dictionary, state: Dictionary) -> Array:
 		var part := str(leg["part"])
 		var report: Dictionary = leg["report"]
 		if str(report.get("status", "")) == "running":
-			_unknown(state, "clearance is still measuring in the worker")
+			_unknown(state, "clearance is still measuring in the worker%s"
+				% _of(part))
 			(state["checks"] as Dictionary)["clearance"] = "still running — "\
 				+ "collect its ticket"
+			var ticket := str(report.get("ticket", ""))
+			if not ticket.is_empty():
+				(state["tickets"] as Dictionary)[part] = ticket
 			continue
 		if not _leg_ran(report, "clearance", part, state):
 			continue
@@ -261,14 +294,16 @@ static func _fold_clearance(reply: Dictionary, state: Dictionary) -> Array:
 			if not part.is_empty():
 				pair["part"] = part
 			rows.append(pair)
-		if bool(report.get("advisory", false)) \
-				or not bool(report.get("tolerance_bounded", true)):
-			_unknown(state, "clearance is advisory%s: %s" % [_of(part),
-				str(report.get("pass_reason", "its tessellation tolerance "
-					+ "could not be bounded, so no pair is certified"))])
+		if (bool(report.get("advisory", false)) \
+				or not bool(report.get("tolerance_bounded", true))) \
+				and str(report.get("pass_reason", "")).is_empty():
+			_unknown(state, "clearance is advisory%s: its tessellation "
+				+ "tolerance could not be bounded, so no pair is certified"
+				% _of(part))
 		if bool(report.get("references_moved", false)):
 			_unknown(state, "reference geometry moved while clearance was "
 				+ "measured%s; ask again" % _of(part))
+		_fold_unproven(report, "clearance", part, state)
 	_count(state, "clearance_pairs_total", total)
 	_count(state, "clearance_pairs_failing", failing)
 	_count(state, "clearance_pairs_hidden", hidden)
@@ -330,6 +365,20 @@ static func _leg_ran(report: Dictionary, leg: String, part: String,
 		return false
 	checks[leg] = "ran"
 	return true
+
+
+## A leg whose own verdict is false for a reason its rows do not show — a
+## stale interference join, a declaration that could only be applied
+## advisorily, a region the pair is ungraded outside of — is folded as
+## unknown, so the design verdict never reads pass off a leg that said no.
+static func _fold_unproven(report: Dictionary, leg: String, part: String,
+		state: Dictionary) -> void:
+	if bool(report.get("pass", false)):
+		return
+	var reason := str(report.get("pass_reason", ""))
+	if reason.is_empty():
+		return
+	_unknown(state, "%s%s did not pass: %s" % [leg, _of(part), reason])
 
 
 ## Record something the checks could not settle. The verdict can be no better

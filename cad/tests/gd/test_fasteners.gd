@@ -379,6 +379,7 @@ func _run() -> void:
 	_check_fit_agreement(report)
 	_check_status_line(module, report)
 	await _check_iso_273(module, panel)
+	_check_bore_fit(module)
 	await _check_seatless_hole(module, panel)
 	await _check_refusals(module, panel)
 	await _check_web_in_bore(module, panel)
@@ -939,6 +940,23 @@ func _check_iso_273(module: RefCounted, panel: Node) -> void:
 				and absf(float(stated_zone.get("allowed_mm", 0.0)) - 0.2) < 0.0001
 				and bool(stated_zone.get("pass", false)),
 			"zone = %s" % str(stated_zone))
+
+
+## What a bore is FOR, from its diameter alone. ORACLE: the screw's own major
+## diameter. A 3.2 mm bore takes an M3 with a tenth to spare on either side —
+## no thread can bite — so it is clearance however far it sits below the
+## 3.4 mm ISO 273 hole; a 3.0 mm pilot is thread; a 1.0 mm vent is undersize.
+func _check_bore_fit(module: RefCounted) -> void:
+	check("fit: a bore wider than the screw's major diameter is clearance "
+			+ "even below the ISO 273 hole, a pilot at or under it is thread, "
+			+ "and a vent is undersize",
+			str(module._fit_of(3.2, 3.0, 3.4)) == "clearance"
+				and str(module._fit_of(3.0, 3.0, 3.4)) == "thread"
+				and str(module._fit_of(2.5, 3.0, 3.4)) == "thread"
+				and str(module._fit_of(3.4, 3.0, 3.4)) == "clearance"
+				and str(module._fit_of(1.0, 3.0, 3.4)) == "undersize",
+			"3.2 -> %s, 3.0 -> %s" % [str(module._fit_of(3.2, 3.0, 3.4)),
+				str(module._fit_of(3.0, 3.0, 3.4))])
 
 
 # ---------------------------------------------------------------------------

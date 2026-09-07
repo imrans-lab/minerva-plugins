@@ -755,6 +755,11 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 	var declared_rows: Array = []
 	var matched: Dictionary = {}
 	var excluded := 0
+	# Declarations applied without a proof: an overlap held inside its
+	# allowance by a chord that is not an upper bound, and a region that
+	# excuses the one witness point while the rest of the pair goes ungraded.
+	# Either makes the verdict advisory, never a pass.
+	var unproven := 0
 	for entry in raw_pairs:
 		var raw: Dictionary = entry
 		var pair := {
@@ -779,6 +784,8 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 			pair["expected"] = true
 			pair["required_mm"] = _Expected.required_mm(rule)
 			pair["note"] = _Expected.describe(rule)
+			if rule["region"] != null:
+				pair["declared_region"] = true
 		if overlapping.has(_pair_key(pair["reference"], pair["node"])):
 			# The worker measured surface to surface and found air between two
 			# faces; the interference check found this node crossing the solid
@@ -800,18 +807,28 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 					_pair_key(pair["reference"], pair["node"])])
 				var allowed: float = _Expected.allowance_mm(rule)
 				var holds: bool = depth > 0.0 and depth <= allowed
-				pair["pass"] = holds
+				# The depth is a chord along an edge, not an upper bound on
+				# the overlap: a declaration it stays inside is applied
+				# ADVISORILY — the row does not pass, the report says why.
+				pair["pass"] = false
 				pair["overlap_mm"] = depth
 				var measured := "; the overlap measures %s mm" % depth
 				if depth <= 0.0:
 					measured = "; this overlap has no measured depth (the " \
 						+ "interference check found it by ray parity, not " \
 						+ "by a crossing), so the declaration cannot excuse it"
+				elif holds:
+					measured += ", a lower-bound chord and not a proven " \
+						+ "depth, so the declaration excuses it only advisorily"
+					pair["excused_uncertified"] = true
+					unproven += 1
 				pair["note"] = _Expected.describe(rule) + measured
-				declared_rows.append(_Expected.row(rule, str(pair["reference"]),
-					str(pair["node"]), "overlap", depth, holds))
+				var declared_row: Dictionary = _Expected.row(rule, str(pair["reference"]),
+					str(pair["node"]), "overlap", depth, holds)
 				if holds:
+					declared_row["certified"] = false
 					excluded += 1
+				declared_rows.append(declared_row)
 			pairs.append(pair)
 			continue
 		var doubt := ""
@@ -884,6 +901,10 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 		if not str(raw.get("note", "")).is_empty() and not pair.has("note"):
 			pair["note"] = str(raw["note"])
 		pairs.append(pair)
+	# A region excuses one witness point, not the pair; see _Expected.
+	var ungraded: int = _Expected.ungrade_regions(pairs, declared_rows)
+	unproven += ungraded
+	excluded -= ungraded
 	pairs.sort_custom(func(a, b): return float((a as Dictionary)["min_mm"]) \
 		< float((b as Dictionary)["min_mm"]))
 	# Only an explicit boolean true establishes a bound. An opt-in can expose
@@ -910,12 +931,22 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 		if not bool((entry as Dictionary)["pass"]):
 			verdict = false
 	var pass_reason := ""
+	if unproven > 0:
+		pass_reason = ("%d declared contact(s) could only be applied "
+			+ "advisorily — an overlap held by a lower-bound chord, or a "
+			+ "region that excuses one witness point while the pair is "
+			+ "ungraded outside it; pass is withheld rather than certified")\
+			% unproven
 	if not bounded and not accept_unbounded:
 		verdict = false
+		# The worker says which kind of face left the bar unproven: a spline
+		# whose curvature was sampled, or a face it could not read at all.
 		pass_reason = "the " + UNBOUNDED_TOLERANCE_REASON + " for " \
-			+ "unrecognised curved faces in the solid, so the measured " \
-			+ "distances carry no error bar; pass accept_unbounded_tolerance " \
-			+ "to request advisory grades on the distances alone; pass remains false"
+			+ str(envelope.get("tolerance_unbounded_because",
+				"unrecognised curved faces in the solid")) \
+			+ ", so the measured distances carry no error bar; pass " \
+			+ "accept_unbounded_tolerance to request advisory grades on the " \
+			+ "distances alone; pass remains false"
 	# THE JOIN IS EVIDENCE THE VERDICT NEEDS. A report that could not decide
 	# the containment question — measured against reference poses or
 	# colliders that have since changed — leaves "is any node buried"
@@ -966,13 +997,14 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 		"checked": true,
 		"units": "mm",
 		"pass": verdict,
-		"advisory": not bounded,
+		"advisory": not bounded or unproven > 0,
 		"required_mm": float(envelope.get("required_mm", 0.0)),
 		"tessellation_tolerance_mm":
 			float(envelope.get("tessellation_tolerance_mm", 0.0)),
 		"requested_tolerance_mm": float(envelope.get("requested_tolerance_mm",
 			envelope.get("tessellation_tolerance_mm", 0.0))),
 		"tolerance_bounded": bounded,
+		"tolerance_source": str(envelope.get("tolerance_source", "")),
 		"bound": str(envelope.get("bound", "")) + (("; the reference vertices "
 			+ "travel as float32 world millimetres, quantized to at most %s mm "
 			+ "at the largest coordinate (%s mm), and that quantization is "
@@ -996,7 +1028,9 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 			+ "gap IT declared instead of required_mm, and is listed above "\
 			+ "with the value measured for it; material overlap deeper than "\
 			+ "the declaration allows still fails, so an exclusion cannot "\
-			+ "hide a crash"
+			+ "hide a crash. An overlap inside its allowance (certified: "\
+			+ "false) and a region declaration (ungraded_outside_region) are "\
+			+ "applied advisorily: pass stays false with the reason"
 	
 	if not pass_reason.is_empty():
 		report["pass_reason"] = pass_reason

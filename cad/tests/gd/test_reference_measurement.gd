@@ -194,8 +194,131 @@ func _check_pairs() -> void:
 				and str(itself.get("error", "")).contains("same reference"),
 			"reply = %s" % str(itself))
 
+	await _check_pair_verdicts(panel)
+
 	panel.queue_free()
 	await process_frame
+
+
+## THE VERDICT, not the number. Every distance below is the stand-in's box
+## arithmetic over the bytes the panel wrote; what is pinned here is what the
+## panel makes of it.
+##
+## ORACLES, each a number the fixture chose:
+##   quantization — required_mm EQUAL to the 0.5 mm gap fails, because the
+##     vertices travelled as float32 and bound_mm is min_mm less that grid;
+##     required_mm a hair under it passes.
+##   max_pairs — a third part 12 mm away left unmeasured (max_pairs=1) is a
+##     bound the reply must grade: 12 clears 0.1 and the call passes, 12 does
+##     not clear 20 and the call fails with the reason, whatever the one
+##     measured pair did.
+##   containment — a nut posed INSIDE the stick's box comes back contained:
+##     an overlap, failing, and a declaration does not excuse it.
+##   no depth — a lid resting exactly on the devkit is an overlap with no
+##     penetration depth from the worker: declaring the contact excuses
+##     NOTHING, and the row says why.
+##   region — the 0.5 mm pair declared with a region round its witness point
+##     is ungraded outside that region: pass withheld, advisory, with a reason.
+func _check_pair_verdicts(panel: _StubPanel) -> void:
+	var exact: Dictionary = await PanelTools.handle(panel,
+		"minerva_cad_check_clearance",
+		{"reference": "stick", "against": "devkit", "required_mm": GAP_MM})
+	var under: Dictionary = await PanelTools.handle(panel,
+		"minerva_cad_check_clearance",
+		{"reference": "stick", "against": "devkit", "required_mm": GAP_MM - 0.001})
+	var row := _first(exact)
+	check("verdict: a required gap EQUAL to the measured one fails by the "
+			+ "float32 quantization — bound_mm is min_mm less that grid and "
+			+ "is what pass is graded on — and a hair under it passes",
+			row.has("bound_mm")
+				and float(row["bound_mm"]) < float(row.get("min_mm", 0.0))
+				and float(exact.get("quantization_mm", 0.0)) > 0.0
+				and not bool(row.get("pass", true))
+				and not bool(exact.get("pass", true))
+				and bool(_first(under).get("pass", false))
+				and bool(under.get("pass", false)),
+			"exact = %s, under = %s" % [str(row), str(_first(under))])
+
+	panel.records.append(_record("oled", STICK_POSE + Vector3(6.0 + 12.0, 1.0, 0.0),
+		[["Oled/Body", _box_mesh(Vector3.ZERO, BLOCK)]]))
+	var clear: Dictionary = await PanelTools.handle(panel,
+		"minerva_cad_check_clearance",
+		{"reference": "all-pairs", "required_mm": 0.1, "max_pairs": 1})
+	var truncated: Dictionary = await PanelTools.handle(panel,
+		"minerva_cad_check_clearance",
+		{"reference": "all-pairs", "required_mm": 20.0, "max_pairs": 1})
+	check("verdict: candidates left unmeasured beyond max_pairs are graded "
+			+ "on their box bound — 12 mm clears 0.1 and the call passes, "
+			+ "and does not clear 20, which fails the call with the reason",
+			int(clear.get("pairs_measured", 0)) == 1
+				and bool(clear.get("truncated", false))
+				and bool(clear.get("pass", false))
+				and bool(truncated.get("truncated", false))
+				and not bool(truncated.get("pass", true))
+				and str(truncated.get("pass_reason", "")).contains("max_pairs"),
+			"clear = %s, truncated = %s" % [str(clear.get("pass")),
+				str(truncated.get("pass_reason"))])
+
+	panel.records.append(_record("nut", STICK_POSE + Vector3(2.0, 2.0, 1.0),
+		[["Nut/Body", _box_mesh(Vector3.ZERO, Vector3.ONE)]]))
+	var buried: Dictionary = await PanelTools.handle(panel,
+		"minerva_cad_check_clearance",
+		{"reference": "stick", "against": "nut", "required_mm": 0.1,
+			"expected_contacts": [{"reference": "nut", "why": "it is captive"}]})
+	var inside := _first(buried)
+	check("verdict: a part inside another's box that the worker finds "
+			+ "CONTAINED is an overlap that fails, and a declaration does "
+			+ "not excuse it",
+			str(inside.get("containment", "")) == "b_inside_a"
+				and bool(inside.get("overlap", false))
+				and not bool(inside.get("pass", true))
+				and not bool(buried.get("pass", true))
+				and int(buried.get("excluded_count", 1)) == 0,
+			"pair = %s" % str(inside))
+
+	panel.records.append(_record("lid", STICK_POSE + DEVKIT_OFFSET + Vector3(BLOCK.x, 0.0, 0.0),
+		[["Lid/Body", _box_mesh(Vector3.ZERO, BLOCK)]]))
+	var resting: Dictionary = await PanelTools.handle(panel,
+		"minerva_cad_check_clearance",
+		{"reference": "devkit", "against": "lid", "required_mm": 0.0,
+			"expected_contacts": [{"reference": "lid", "why": "the lid rests here"}]})
+	var touch := _first(resting)
+	var declared_rows: Array = resting.get("expected_contacts", []) as Array
+	check("verdict: an overlap the worker measured NO depth for is never "
+			+ "excused by a declaration — the row fails, says so, and the "
+			+ "declaration is listed as not excluding it",
+			bool(touch.get("overlap", false))
+				and not touch.has("penetration_mm")
+				and not bool(touch.get("pass", true))
+				and not bool(touch.get("excused_uncertified", false))
+				and str(touch.get("note", "")).contains("no measured depth")
+				and not bool(resting.get("pass", true))
+				and declared_rows.size() == 1
+				and not bool((declared_rows[0] as Dictionary).get("excluded", true)),
+			"pair = %s, rows = %s" % [str(touch), str(declared_rows)])
+
+	var witness: Array = (_first(under).get("point_a_mm", {}) as Dictionary) \
+		.get("world", []) as Array
+	var at := _as_vector(witness)
+	var regional: Dictionary = await PanelTools.handle(panel,
+		"minerva_cad_check_clearance",
+		{"reference": "stick", "against": "devkit", "required_mm": 0.1,
+			"expected_contacts": [{"reference": "stick", "required_mm": 0.0,
+				"region_mm": {"min_mm": [at.x - 1.0, at.y - 1.0, at.z - 1.0],
+					"max_mm": [at.x + 1.0, at.y + 1.0, at.z + 1.0]}}]})
+	var scoped := _first(regional)
+	check("verdict: a region declaration excuses the witness point inside "
+			+ "it and leaves the pair UNGRADED outside — pass withheld, "
+			+ "advisory, with the reason",
+			bool(scoped.get("expected", false))
+				and bool(scoped.get("ungraded_outside_region", false))
+				and not bool(scoped.get("pass", true))
+				and not bool(regional.get("pass", true))
+				and bool(regional.get("advisory", false))
+				and str(regional.get("pass_reason", "")).contains("region")
+				and int(regional.get("excluded_count", 1)) == 0,
+			"pair = %s, reply pass_reason = %s" % [str(scoped),
+				str(regional.get("pass_reason", ""))])
 
 
 ## The stand-in worker: it decodes the blobs the module wrote and derives every
@@ -229,14 +352,29 @@ func _worker_answer(args: Dictionary) -> Dictionary:
 		var second: AABB = boxes[int(pair[1])]
 		var min_mm: float = maxf(0.0, maxf(first.position.x - second.end.x,
 			second.position.x - first.end.x))
+		# A box wholly inside the other: the real worker probes parity and
+		# reports containment beside a positive surface distance.
+		var nested := first.encloses(second)
+		if nested:
+			min_mm = minf(second.position.x - first.position.x,
+				first.end.x - second.end.x)
 		var row := {
 			"a": (targets[int(pair[0])] as Dictionary).duplicate(),
 			"b": (targets[int(pair[1])] as Dictionary).duplicate(),
 			"min_mm": min_mm,
-			"pass": min_mm > 0.0 and min_mm >= required,
+			"pass": min_mm > 0.0 and min_mm >= required and not nested,
 			"triangles": [12, 12],
 		}
-		if min_mm <= 0.0:
+		if nested:
+			row["containment"] = "b_inside_a"
+			row["containment_note"] = "stand-in: b's box lies inside a's"
+			row["overlap"] = true
+			row["contact_points_mm"] = []
+			row["contact_count"] = 0
+			row["point_a_mm"] = [first.position.x, first.position.y, first.position.z]
+			row["point_b_mm"] = [second.position.x, second.position.y,
+				second.position.z]
+		elif min_mm <= 0.0:
 			row["overlap"] = true
 			row["contact_points_mm"] = [[first.end.x, first.end.y, first.end.z]]
 			row["contact_count"] = 1

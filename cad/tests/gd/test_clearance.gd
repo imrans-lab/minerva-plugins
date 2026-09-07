@@ -945,12 +945,20 @@ func _check_expected_contacts(panel: Node, checks: RefCounted) -> void:
 		"required_mm": -1.0, "why": "the pin is a 1 mm interference fit"}]
 	var fitted: Dictionary = await checks.check_clearance(panel,
 		{"required_mm": 1.0, "expected_contacts": press})
-	check("expected: an interference fit declared a millimetre deep DOES "
-			+ "cover the same 0.5 mm overlap, so the allowance is graded "
-			+ "rather than assumed",
-			bool(fitted.get("pass", false))
-				and bool(_pair_for(fitted, NEAR_NODE).get("pass", false))
-				and int(fitted.get("excluded_count", 0)) == 1,
+	var fitted_row := _pair_for(fitted, NEAR_NODE)
+	check("expected: an interference fit declared a millimetre deep covers "
+			+ "the same 0.5 mm overlap — graded, not assumed — but the depth "
+			+ "is a chord and not an upper bound, so the exclusion is "
+			+ "ADVISORY: excused_uncertified on the row, certified false on "
+			+ "the declaration, pass withheld with the reason",
+			not bool(fitted.get("pass", true))
+				and bool(fitted.get("advisory", false))
+				and str(fitted.get("pass_reason", "")).contains("advisorily")
+				and not bool(fitted_row.get("pass", true))
+				and bool(fitted_row.get("excused_uncertified", false))
+				and int(fitted.get("excluded_count", 0)) == 1
+				and not bool(((fitted.get("expected_contacts", []) as Array)[0]
+					as Dictionary).get("certified", true)),
 			"report = %s" % str(fitted))
 
 	# The region picks a PLACE, not a name. One declaration, no node named, a
@@ -967,14 +975,19 @@ func _check_expected_contacts(panel: Node, checks: RefCounted) -> void:
 		{"required_mm": 20.0, "expected_contacts": located})
 	var near_row := _pair_for(placed, NEAR_NODE)
 	var far_row := _pair_for(placed, FAR_NODE)
-	check("expected: a declaration with a region excuses only the pair "
+	check("expected: a declaration with a region matches only the pair "
 			+ "measured INSIDE it — the other pair of the same reference is "
-			+ "still graded against required_mm and still fails",
+			+ "still graded against required_mm and still fails — and the "
+			+ "matched pair is UNGRADED outside the region rather than passed, "
+			+ "because clearance outside the box was not measured separately",
 			bool(far_row.get("expected", false))
-				and bool(far_row.get("pass", false))
+				and bool(far_row.get("ungraded_outside_region", false))
+				and not bool(far_row.get("pass", true))
 				and not bool(near_row.get("expected", false))
 				and not bool(near_row.get("pass", true))
-				and int(placed.get("excluded_count", 0)) == 1
+				and int(placed.get("excluded_count", 0)) == 0
+				and bool(placed.get("advisory", false))
+				and str(placed.get("pass_reason", "")).contains("region")
 				and not bool(placed.get("pass", true)),
 			"near = %s, far = %s" % [str(near_row), str(far_row)])
 

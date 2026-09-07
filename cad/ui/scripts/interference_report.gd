@@ -233,11 +233,17 @@ func _report(pairs: Dictionary) -> Dictionary:
 		var depth := float(bucket["penetration_mm"])
 		var allowed: float = _Expected.allowance_mm(entry)
 		# Depth is the only evidence a declaration can be checked against, and
-		# a pair found by parity alone has none: unprovable is not clean.
+		# a pair found by parity alone has none: unprovable is not clean. And
+		# the depth that IS measured is a chord along an edge, not an upper
+		# bound on the overlap, so a declaration it stays inside is applied
+		# ADVISORILY: the bucket leaves the pairs, the row says the exclusion
+		# is uncertified, and the report's pass is false with the reason.
 		var holds: bool = depth > 0.0 and depth <= allowed
-		declared_rows.append(_Expected.row(entry, str(bucket["reference"]),
-			str(bucket["node"]), "overlap", depth, holds))
+		var declared_row: Dictionary = _Expected.row(entry, str(bucket["reference"]),
+			str(bucket["node"]), "overlap", depth, holds)
+		declared_rows.append(declared_row)
 		if holds:
+			declared_row["certified"] = false
 			excluded += 1
 			continue
 		var row := _pair_row(bucket)
@@ -267,10 +273,12 @@ func _report(pairs: Dictionary) -> Dictionary:
 	var report := {
 		"checked": true,
 		"units": "mm",
-		# GRADED OVER THE PAIRS THAT REMAIN. A declaration whose overlap it
-		# excused is out of this count and listed under expected_contacts with
-		# what was measured for it; one it could not excuse is back in.
-		"pass": out.is_empty() and _undecided.is_empty(),
+		# GRADED OVER THE PAIRS THAT REMAIN, and only CERTIFIED over them. A
+		# declaration whose overlap it excused is out of `count` and listed
+		# under expected_contacts with what was measured for it — but that
+		# measure is not an upper bound, so an exclusion makes the verdict
+		# advisory; one it could not excuse is back in.
+		"pass": out.is_empty() and _undecided.is_empty() and excluded == 0,
 		"count": out.size(),
 		"point_count": total,
 		"pairs": out,
@@ -305,7 +313,16 @@ func _report(pairs: Dictionary) -> Dictionary:
 			+ "from `count` only while its MEASURED overlap stays inside the "\
 			+ "depth it declared; every declaration is listed above with the "\
 			+ "overlap measured for it, and one that ran deeper is back among "\
-			+ "the pairs carrying declared_intended"
+			+ "the pairs carrying declared_intended. The measured overlap is "\
+			+ "a chord along an edge and not an upper bound on the depth, so "\
+			+ "an exclusion is advisory (certified: false): pass stays false "\
+			+ "with the reason while any declaration is excluding a pair"
+		if excluded > 0 and out.is_empty() and _undecided.is_empty():
+			report["advisory"] = true
+			report["pass_reason"] = ("%d declared contact(s) excused on a "
+				+ "measured overlap that is a lower-bound chord, not a proven "
+				+ "depth; nothing else was found, and that is advisory rather "
+				+ "than a certified pass") % excluded
 	return report
 
 
