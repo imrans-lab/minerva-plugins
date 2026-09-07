@@ -658,7 +658,15 @@ test_rim_contact.gd assertions=16
 # and never passing, so the three counts partition the pairs and pairs_failing
 # cannot go negative; failing_only still drops the rows that cleared under
 # detail="full", where detail="full" alone returns every row.
-test_mcp_boundary.gd assertions=62
+# Plus 7 for minerva_cad_material (the material probe): the point form leaves
+# on cad.material carrying the document's own source and the world point; its
+# answer arrives whole (inside, the body, the nearest surface, the part); it is
+# stamped with the document version; the ray form keeps every run of material
+# with its thickness; a parts= run whose legs the worker refused folds to a
+# failure rather than a silent pass; a probe naming neither point nor ray is
+# refused before any round trip; and a document ahead of its evaluation
+# refuses the probe without reaching the worker at all.
+test_mcp_boundary.gd assertions=69
 
 # Each wide pane carries the SAME projection dropdown the one-pane layout has,
 # driving that pane's own camera. A SLOT ("top") is a place on screen and keeps

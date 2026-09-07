@@ -14,7 +14,10 @@ The remaining stub is `deviation`.
 
 `clearance` lives in its own module (``mcad_worker.clearance``) and is
 imported at call time: it pulls in numpy and python-fcl, and a worker that
-never measures a clearance should not pay for them.
+never measures a clearance should not pay for them. `material` (is the solid
+here, and how thick is it along this ray) lives in ``mcad_worker.material``
+and is imported the same way, for the same reason: it needs OCCT's
+classifier and nothing else does.
 """
 
 from __future__ import annotations
@@ -50,6 +53,25 @@ _last_shape: Optional[Tuple[str, str, Any]] = None
 
 def _digest(source: str) -> str:
     return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+def cached_shape(source: str):
+    """The B-Rep the last evaluation built, when it built it from THIS source.
+
+    Returns (shape_name, OCCT shape) or None. The digest is what keeps an
+    edited buffer off the cached shape. A method that only READS the shape —
+    the material probe — takes this rather than translating the document a
+    second time: on a lofted shell that translation is minutes, and a probe
+    that costs minutes is one nobody puts in a loop.
+    """
+    cached = _last_shape
+    if cached is None or cached[0] != _digest(source):
+        return None
+    shape = cached[2]
+    wrapped = getattr(shape, "wrapped", shape)
+    if wrapped is None:
+        return None
+    return str(cached[1]), wrapped
 
 
 def reset_caches() -> None:
@@ -791,6 +813,12 @@ def handle_request(req: dict) -> dict | None:
     if method == "reference_pairs":
         from .reference_pairs import reference_pairs
         result = reference_pairs(req.get("params") or {})
+        result["id"] = req_id
+        return result
+
+    if method == "material":
+        from .material import material
+        result = material(req.get("params") or {})
         result["id"] = req_id
         return result
 

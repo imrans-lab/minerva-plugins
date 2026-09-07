@@ -35,6 +35,7 @@ extends RefCounted
 ## has moved past. minerva_cad_await_eval is deliberately not among them: it is
 ## the way out of a stale panel.
 const MEASURING_VERBS: Array = [
+	"minerva_cad_material",
 	"minerva_cad_check_interference",
 	"minerva_cad_check_clearance",
 	"minerva_cad_check_fasteners",
@@ -44,6 +45,7 @@ const MEASURING_VERBS: Array = [
 ## The verbs whose replies carry the stamp: the measuring ones, and the await
 ## that exists to clear it.
 const STAMPED_VERBS: Array = [
+	"minerva_cad_material",
 	"minerva_cad_check_interference",
 	"minerva_cad_check_clearance",
 	"minerva_cad_check_fasteners",

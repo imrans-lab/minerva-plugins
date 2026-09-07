@@ -179,7 +179,7 @@ def _occt():
     }
 
 
-def _shape_for(source: str):
+def shape_for(source: str):
     """Translate the DSL and hand back (shape_name, shape).
 
     Deliberately not `evaluate_source`: that one returns a tessellation and
@@ -955,7 +955,7 @@ def curvature_report(source: str,
     Raises FeatureError for the same reasons every other reader here does.
     """
     occt = _occt()
-    _shape_name, wrapped = _shape_for(source)
+    _shape_name, wrapped = shape_for(source)
     largest = None
     unrecognised = 0
     sampled = 0
@@ -1046,7 +1046,7 @@ def cylindrical_features(params: dict) -> dict:
 
     try:
         occt = _occt()
-        shape_name, wrapped = _shape_for(source)
+        shape_name, wrapped = shape_for(source)
         raw: list = []
         explorer = occt["TopExp_Explorer"](wrapped, occt["TopAbs_FACE"])
         while explorer.More():

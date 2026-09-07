@@ -136,6 +136,7 @@ func _run() -> void:
 	_check_a_hole_census_becomes_dsl()
 	await _check_node_boxes_become_keep_out_envelopes()
 	await _check_await_eval_reports_what_the_panel_painted()
+	await _check_material_asks_the_worker_and_is_gated_like_a_check()
 	_check_a_kernel_failure_reaches_the_reader()
 	await _check_the_edge_listing_carries_no_drawing()
 
@@ -942,6 +943,98 @@ func _check_await_eval_reports_what_the_panel_painted() -> void:
 
 
 # ---------------------------------------------------------------------------
+# Is the solid actually there?
+# ---------------------------------------------------------------------------
+
+## minerva_cad_material at the verb layer: what leaves for the worker, what
+## comes back, and the gate in front of it.
+##
+## The containment itself is the worker's (OCCT's classifier over the B-Rep,
+## covered by worker/tests/test_material.py); this pins the wiring around it,
+## which is where a panel verb goes wrong: the wrong channel, a source nobody
+## filled in, a reply flattened on the way out, and a measuring verb that
+## answers while the document has moved past what was evaluated.
+func _check_material_asks_the_worker_and_is_gated_like_a_check() -> void:
+	var panel := _MaterialStandIn.new()
+	root.add_child(panel)
+
+	var point: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_material", {"at_mm": [45.0, -50.0, -9.0]})
+	check("the point form reaches the worker on cad.material, carrying the "
+			+ "document's own source and the world point",
+			panel.channel == "cad.material"
+				and str(panel.sent.get("source", "")).contains("tray")
+				and (panel.sent.get("at_mm", []) as Array) == [45.0, -50.0, -9.0],
+			"channel = %s, sent = %s" % [panel.channel, str(panel.sent)])
+	check("and the worker's answer arrives whole: inside, the body it landed "
+			+ "in, the nearest surface, and the part that was probed",
+			bool(point.get("checked", false))
+				and bool(point["inside"])
+				and str(point["body"]) == "tray"
+				and is_equal_approx(float(point["nearest_surface_mm"]), 1.0)
+				and str(point["part"]) == "tray",
+			"reply = %s" % str(point))
+	check("a measuring verb's reply says which document it is about",
+			int(point.get("source_version", -1)) == 7
+				and int(point.get("buffer_version", -1)) == 7
+				and not bool(point.get("stale", true)),
+			"reply = %s" % str(point))
+
+	var ray: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_material",
+			{"from_mm": [45.0, -50.0, 30.0], "direction_mm": [0.0, 0.0, -1.0]})
+	var segments: Array = ray.get("segments", []) as Array
+	check("the ray form keeps every run of material WITH ITS THICKNESS — the "
+			+ "skin, then the floor — rather than collapsing to a first hit",
+			segments.size() == 2
+				and is_equal_approx(float((segments[0] as Dictionary)["thickness_mm"]), 2.0)
+				and is_equal_approx(float((segments[1] as Dictionary)["thickness_mm"]), 2.0)
+				and is_equal_approx(float(ray.get("total_thickness_mm", 0.0)), 4.0),
+			"reply = %s" % str(ray))
+
+	panel.refuse = true
+	var per_part: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_material",
+			{"parts": ["tray"], "at_mm": [45.0, -50.0, -9.0]})
+	var rows: Array = per_part.get("parts", []) as Array
+	check("a parts= run whose legs the WORKER refused folds to a failure "
+			+ "rather than to a silent pass — a refused leg counts like a "
+			+ "freshness-gated one",
+			rows.size() == 1
+				and not bool((rows[0] as Dictionary).get("checked", true))
+				and int(per_part.get("failed", 0)) == 1
+				and not bool(per_part.get("pass", true)),
+			"reply = %s" % str(per_part))
+	panel.refuse = false
+
+	panel.channel = ""
+	var neither: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_material", {})
+	check("a probe that names no point and no ray is refused with what to "
+			+ "send instead, and never costs an evaluation",
+			not bool(neither.get("checked", true))
+				and str(neither.get("reason", "")).contains("at_mm")
+				and panel.channel.is_empty(),
+			"reply = %s, channel = %s" % [str(neither), panel.channel])
+
+	# The gate: the buffer has moved and the evaluation has not caught up.
+	panel.channel = ""
+	panel.stale = true
+	var refused: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_material", {"at_mm": [45.0, -50.0, -9.0]})
+	check("while the document is ahead of its evaluation the probe is "
+			+ "REFUSED and reaches no worker: an answer about geometry the "
+			+ "document has moved past is one a reader would act on",
+			not bool(refused.get("checked", true))
+				and bool(refused.get("stale", false))
+				and str(refused.get("reason", "")).contains("evaluat")
+				and panel.channel.is_empty(),
+			"reply = %s, channel = %s" % [str(refused), panel.channel])
+
+	panel.free()
+
+
+# ---------------------------------------------------------------------------
 # A kernel failure the reader can act on
 # ---------------------------------------------------------------------------
 
@@ -1226,6 +1319,73 @@ class _FastenerStandIn extends Node:
 			"engagement_min_d": 2.0,
 			"unpaired": {"solid_features": []},
 		}
+
+
+## Stands in for the worker behind cad.material: it records what was asked and
+## answers with a canned point or ray reply, so the case is about the wiring
+## and the gate rather than about OCCT.
+class _MaterialStandIn extends Node:
+	var channel: String = ""
+	var sent: Dictionary = {}
+	var stale: bool = false
+	## When set, the worker refuses the probe — the parts= fold's case.
+	var refuse: bool = false
+
+	func get_reference_digest() -> String:
+		return "boundary|v1"
+
+	func get_document_state() -> Dictionary:
+		return {"source": "tray = cube(40, 30, 20) - translate([2, 2, 2], "
+			+ "cube(36, 26, 16))\n", "last_eval": {"shape_name": "tray"}}
+
+	func evaluation_freshness() -> Dictionary:
+		return {
+			"known": true,
+			"stale": stale,
+			"stale_reason": "the document has been edited since the last "
+				+ "evaluation; call minerva_cad_await_eval first",
+			"source_version": 6 if stale else 7,
+			"buffer_version": 7,
+			"evaluated_at": 1757000000.0,
+		}
+
+	func call_backend(request_channel: String, args: Dictionary,
+			_timeout_ms: int) -> Dictionary:
+		channel = request_channel
+		sent = args.duplicate(true)
+		# The parts= path evaluates each binding before it probes anything; a
+		# tetrahedron is enough for the leg to be about something.
+		if request_channel == "cad.evaluate":
+			return {"success": true, "result": {"ok": true, "result": {
+				"shape_name": "tray",
+				"mesh": {
+					"vertices": [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]],
+					"faces": [[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]],
+				},
+			}}}
+		if refuse:
+			return {"success": true, "result": {"ok": false, "error":
+				{"message": "the document evaluated to no closed solid"}}}
+		var result: Dictionary = {"units": "mm", "shape_name": "tray",
+			"body_count": 1}
+		if args.has("at_mm"):
+			result.merge({"mode": "point", "at_mm": args["at_mm"],
+				"inside": true, "state": "inside", "body": "tray",
+				"body_index": 0, "nearest_surface_mm": 1.0,
+				"nearest_point_mm": [45.0, -50.0, -8.0]})
+		else:
+			result.merge({"mode": "ray", "count": 2, "total_thickness_mm": 4.0,
+				"started_inside": false, "surface_crossings": 4,
+				"unbounded": false, "segments": [
+					{"entry_mm": 17.0, "exit_mm": 19.0, "thickness_mm": 2.0,
+						"entry_point_mm": [45.0, -50.0, 13.0],
+						"exit_point_mm": [45.0, -50.0, 11.0],
+						"body": "tray", "body_index": 0},
+					{"entry_mm": 38.0, "exit_mm": 40.0, "thickness_mm": 2.0,
+						"entry_point_mm": [45.0, -50.0, -8.0],
+						"exit_point_mm": [45.0, -50.0, -10.0],
+						"body": "tray", "body_index": 0}]})
+		return {"success": true, "result": {"ok": true, "result": result}}
 
 
 ## A panel whose evaluation lands after a chosen delay.

@@ -64,7 +64,7 @@ class TestTrailingExpressionSelectsTheResult:
     def test_feature_queries_follow_the_selection(self):
         # The B-Rep consumers (clearance, cylindrical features) resolve the
         # shape themselves; they must land on the selected binding too.
-        from mcad_worker.features import _shape_for
+        from mcad_worker.features import shape_for
 
-        assert _shape_for(PROGRAM + "hump_in\n")[0] == "hump_in"
-        assert _shape_for(PROGRAM + "enclosure\n")[0] == "enclosure"
+        assert shape_for(PROGRAM + "hump_in\n")[0] == "hump_in"
+        assert shape_for(PROGRAM + "enclosure\n")[0] == "enclosure"

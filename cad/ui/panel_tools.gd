@@ -13,6 +13,8 @@ extends "panel_tools_measure.gd"
 ##   minerva_cad_gauge           put a pin or a block somewhere and ask whether
 ##                               it fits, and if not, where it touched.
 ##   minerva_cad_probe           what is under this pixel of this pane.
+##   minerva_cad_material        is the solid HERE — at this point, and how
+##                               thick along this ray. Air violates no check.
 ##   minerva_cad_snapshot_fit    the pane, rendered offscreen from a camera
 ##                               framed on the solid, a reference or a world
 ##                               box, so the geometry fills the pixels.
@@ -98,6 +100,8 @@ const _Freshness: Script = preload("scripts/eval_freshness.gd")
 const _FastenerScrews: Script = preload("scripts/fastener_screws.gd")
 ## The evaluated solid, mounted in front of a gauge for one call.
 const _GaugeSolid: Script = preload("scripts/gauge_solid.gd")
+## Is the solid here, answered in the worker off the B-Rep itself.
+const _MaterialProbe: Script = preload("scripts/material_probe.gd")
 
 ## How long minerva_cad_await_eval waits by default, and the most it will
 ## wait when asked. A heavy document is minutes of worker time, and the cap
@@ -157,6 +161,9 @@ static func _dispatch(panel, tool_name: String, args: Dictionary) -> Dictionary:
 			return await _fresh(panel, args, _gauge)
 		"minerva_cad_probe":
 			return await _fresh(panel, args, _probe)
+		"minerva_cad_material":
+			# Per part like the other measuring verbs.
+			return await _per_part(panel, args, _material)
 		"minerva_cad_snapshot_fit":
 			return await _FitCapture.snapshot(panel, args)
 		"minerva_cad_check_interference":
@@ -412,6 +419,11 @@ static func _references(panel, args: Dictionary) -> Dictionary:
 # ---------------------------------------------------------------------------
 # Direct physical questions
 # ---------------------------------------------------------------------------
+
+## minerva_cad_material — the worker classifies; see scripts/material_probe.gd.
+static func _material(panel, args: Dictionary) -> Dictionary:
+	return await _MaterialProbe.probe(panel, args)
+
 
 static func _gauge(panel, args: Dictionary) -> Dictionary:
 	var gauge: Node = panel.get_mesh_gauge()
