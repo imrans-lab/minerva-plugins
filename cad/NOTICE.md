@@ -8,9 +8,9 @@ Regenerate with:
 
 Licence and attribution inventory for the third-party content that ships inside the cad plugin's embedded Python runtime bundle. The full text of every licence below is in `cad/licenses/runtime/`, which is copied into the bundle (as `licenses/`) and into the release tarball beside the plugin binary — BSD and MIT terms require the notice, conditions and disclaimer to be provided with a binary distribution, so naming the licence here is not on its own enough.
 
-The inventory is checked against a census of the built bundle's site-packages (`cad/scripts/runtime-bundle.manifest`), not against the two pins in `cad/scripts/runtime-bundle.lock`: pip resolves the transitive tree, so the lock names 2 distributions and the bundle contains 48. Wheel metadata cannot see what a wheel vendors either — python-fcl's contains compiled FCL, libccd, OctoMap and Eigen while shipping only python-fcl's LICENSE, and cadquery-ocp's contains the whole of OCCT while shipping no licence text at all — so the inventory is maintained by hand in `cad/scripts/notice_inventory.py` and `gen_notice.py --check` is the gate that keeps it honest.
+The inventory is checked against a census of the built bundle's site-packages (`cad/scripts/runtime-bundle.manifest`), not against the two pins in `cad/scripts/runtime-bundle.lock`: pip resolves the transitive tree, so the lock names 3 distributions and the bundle contains 48. Wheel metadata cannot see what a wheel vendors either — python-fcl's contains compiled FCL, libccd, OctoMap and Eigen while shipping only python-fcl's LICENSE, and cadquery-ocp's contains the whole of OCCT while shipping no licence text at all — so the inventory is maintained by hand in `cad/scripts/notice_inventory.py` and `gen_notice.py --check` is the gate that keeps it honest.
 
-Lock pins: build123d, python-fcl
+Lock pins: build123d, ocp-gordon, python-fcl
 
 Census: 48 distributions in the built bundle's site-packages, 54 inventoried components (a distribution yields more than one entry when its wheel vendors other projects), 0 excluded.
 
