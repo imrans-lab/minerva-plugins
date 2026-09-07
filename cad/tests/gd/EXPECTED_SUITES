@@ -705,8 +705,12 @@ test_eval_banner.gd assertions=9
 # making the verdict advisory) + 1 an undecidable containment makes it advisory
 # rather than pass + 1 a leg refused with `busy` is retried until it answers
 # + 2 a clearance still in the worker comes back as one ticket beside the rows
-# already in hand, and a crash still reads fail.
-test_check_design.gd assertions=22
+# already in hand, and a crash still reads fail. Later additions: certified
+# failures behind the filter, per-part tickets and windows, uncertified rows
+# as advisory, and (2) a violation pushed out of the rows by ten uncertified
+# overlaps at the default limit still reads fail off the leg's own count,
+# with failing_rows_hidden saying so, and travels once the limit is raised.
+test_check_design.gd assertions=24
 
 # minerva_cad_snapshot_fit: a capture framed on the evaluated solid, a named
 # reference or a world box, rendered from a camera of its own so the pane the

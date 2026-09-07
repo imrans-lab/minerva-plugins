@@ -41,6 +41,14 @@ extends RefCounted
 ## `uncertified_rows`, never among the failing rows: it makes the verdict
 ## advisory, and a real violation beside it still fails.
 ##
+## THE VERDICT READS THE COUNTS, NOT THE ROWS. The clearance leg is trimmed
+## to its closest `limit` rows, and an uncertified row is closest of all (an
+## overlap is 0 mm), so ten declared overlaps can fill every slot and push a
+## real violation out of the reply. Each leg's report counts its failures
+## over EVERYTHING it measured; the verdict is folded from those counts, the
+## rows are what the reader is shown, and `hidden_counts.failing_rows_hidden`
+## says how many failures the rows did not carry.
+##
 ## No class_name: off-tree plugin scripts cannot use class_name.
 ## Consumers: ui/panel_tools.gd (the verb layer).
 
@@ -97,6 +105,8 @@ static func run(panel, args: Dictionary, per_part: Callable,
 		"tickets": {},
 		# Clearance rows excused on evidence the check could not certify.
 		"uncertified": [],
+		# Established failures the legs counted but the rows do not show.
+		"failing_hidden": 0,
 	}
 	var scoped := not (args.get("parts", []) as Array).is_empty()
 
@@ -129,11 +139,19 @@ static func run(panel, args: Dictionary, per_part: Callable,
 
 	var failing := interference_rows.size() + clearance_rows.size() \
 		+ fastener_rows.size()
+	var failing_hidden := int(state["failing_hidden"])
+	_count(state, "failing_rows_hidden", failing_hidden)
+	if failing_hidden > 0:
+		(state["notes"] as Array).append(("%d established failure(s) did "
+			+ "not travel: the rows shown are the closest `limit`, and "
+			+ "uncertified rows sit ahead of them — raise limit, or call "
+			+ "minerva_cad_check_clearance with failing_only=true for the "
+			+ "rest") % failing_hidden)
 	var uncertified: Array = state["uncertified"]
 	var out := {
 		"success": true,
 		"units": "mm",
-		"verdict": "fail" if failing > 0 else \
+		"verdict": "fail" if failing + failing_hidden > 0 else \
 			("advisory" if bool(state["unknown"]) else "pass"),
 		"required_mm": required_mm,
 		"interference": interference_rows,
@@ -144,8 +162,9 @@ static func run(panel, args: Dictionary, per_part: Callable,
 		"uncertified": uncertified.size(),
 		"hidden_counts": state["counts"],
 		"checks": state["checks"],
-		"verdict_note": "fail = a row below is wrong. advisory = nothing "
-			+ "failed but something could not be decided — read `checks`, "
+		"verdict_note": "fail = a row below is wrong, or one the reply did "
+			+ "not show is (hidden_counts.failing_rows_hidden). advisory = "
+			+ "nothing failed but something could not be decided — read `checks`, "
 			+ "`notes` and `uncertified_rows` (declared contacts excused on "
 			+ "evidence that could not be certified; not failures). pass = "
 			+ "every check ran and every row cleared, with the contacts in "
@@ -302,7 +321,9 @@ static func _fold_interference(reply: Dictionary, state: Dictionary) -> Array:
 			continue
 		pairs += int(report.get("count", 0))
 		points += int(report.get("point_count", 0))
+		var shown := 0
 		for entry in (report.get("pairs", []) as Array):
+			shown += 1
 			var pair: Dictionary = (entry as Dictionary).duplicate(true)
 			var crossings: Array = pair.get("points_mm", []) as Array
 			if crossings.size() > MAX_CROSSING_POINTS:
@@ -311,6 +332,7 @@ static func _fold_interference(reply: Dictionary, state: Dictionary) -> Array:
 			if not part.is_empty():
 				pair["part"] = part
 			rows.append(pair)
+		_hide_failing(state, int(report.get("count", 0)), shown)
 		var undecidable: Array = report.get("undecidable", []) as Array
 		if not undecidable.is_empty():
 			_unknown(state, ("interference could not decide containment for "
@@ -335,8 +357,10 @@ static func _fold_interference(reply: Dictionary, state: Dictionary) -> Array:
 ## that cleared and kept the closest of what is left, and its own counts say
 ## how many rows are behind the filter. A row the check excused without
 ## certifying it goes to `uncertified` instead — advisory, not failed. The
-## leg's own verdict is read as well: a report that failed for a reason no
-## row carries is folded as unknown, never as clean.
+## verdict is taken from the report's `pairs_failing`, graded over every
+## pair it measured, so a failure the limit pushed out of the rows still
+## fails; and a report whose own verdict is false for a reason no row
+## carries is folded as unknown, never as clean.
 static func _fold_clearance(reply: Dictionary, state: Dictionary) -> Array:
 	var rows: Array = []
 	var total := 0
@@ -357,8 +381,8 @@ static func _fold_clearance(reply: Dictionary, state: Dictionary) -> Array:
 		if not _leg_ran(report, "clearance", part, state):
 			continue
 		total += int(report.get("pairs_total", 0))
-		failing += int(report.get("pairs_failing", 0))
 		hidden += int(report.get("pairs_hidden", 0))
+		var shown := 0
 		for entry in (report.get("pairs", []) as Array):
 			var pair: Dictionary = (entry as Dictionary).duplicate(true)
 			if not part.is_empty():
@@ -371,11 +395,21 @@ static func _fold_clearance(reply: Dictionary, state: Dictionary) -> Array:
 					str(pair.get("reference", "")), str(pair.get("node", ""))])
 				continue
 			rows.append(pair)
+			shown += 1
+		# A report the verb layer did not filter carries no pairs_failing;
+		# then the rows ARE every failing pair and the count is theirs.
+		var established := maxi(int(report.get("pairs_failing", shown)), shown)
+		failing += established
+		_hide_failing(state, established, shown)
+		if established == 0 and not bool(report.get("pass", false)) \
+				and str(report.get("pass_reason", "")).is_empty():
+			_unknown(state, ("clearance did not pass%s and neither a row nor "
+				+ "a reason says why") % _of(part))
 		if (bool(report.get("advisory", false)) \
 				or not bool(report.get("tolerance_bounded", true))) \
 				and str(report.get("pass_reason", "")).is_empty():
-			_unknown(state, "clearance is advisory%s: its tessellation "
-				+ "tolerance could not be bounded, so no pair is certified"
+			_unknown(state, ("clearance is advisory%s: its tessellation "
+				+ "tolerance could not be bounded, so no pair is certified")
 				% _of(part))
 		if bool(report.get("references_moved", false)):
 			_unknown(state, "reference geometry moved while clearance was "
@@ -399,6 +433,7 @@ static func _fold_fasteners(reply: Dictionary, state: Dictionary) -> Array:
 		if not _leg_ran(report, "fasteners", part, state):
 			continue
 		screws += int(report.get("count", 0))
+		var shown := 0
 		for entry in (report.get("screws", []) as Array):
 			var screw: Dictionary = entry
 			var coaxiality: Dictionary = screw.get("coaxiality", {}) as Dictionary
@@ -414,6 +449,8 @@ static func _fold_fasteners(reply: Dictionary, state: Dictionary) -> Array:
 			if not part.is_empty():
 				row["part"] = part
 			rows.append(row)
+			shown += 1
+		_hide_failing(state, int(report.get("failed", shown)), shown)
 	_count(state, "fastener_screws", screws)
 	_count(state, "fastener_screws_failing", rows.size())
 	return rows
@@ -456,6 +493,15 @@ static func _fold_unproven(report: Dictionary, leg: String, part: String,
 	if reason.is_empty():
 		return
 	_unknown(state, "%s%s did not pass: %s" % [leg, _of(part), reason])
+
+
+## A leg counted more failures than its rows carry: the rest are established
+## all the same, and the verdict reads them. The report's count wins over
+## the rows only upward — a count the rows exceed is a report that did not
+## count, not a report with fewer failures.
+static func _hide_failing(state: Dictionary, counted: int, shown: int) -> void:
+	if counted > shown:
+		state["failing_hidden"] = int(state["failing_hidden"]) + counted - shown
 
 
 ## Record something the checks could not settle. The verdict can be no better

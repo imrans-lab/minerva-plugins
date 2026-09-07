@@ -64,6 +64,7 @@ func _run() -> void:
 	await _check_a_certified_failure_the_filter_hides_still_fails()
 	await _check_parts_each_carry_their_own_ticket()
 	await _check_an_uncertified_exclusion_is_advisory_not_a_failure()
+	await _check_a_violation_behind_the_limit_still_fails()
 	await _check_a_finished_part_failing_is_not_lost_behind_a_ticket()
 	await _check_parts_share_one_clearance_window()
 
@@ -399,6 +400,72 @@ func _check_an_uncertified_exclusion_is_advisory_not_a_failure() -> void:
 				and absf(float((rows[0] as Dictionary)["min_mm"]) - PINCH_MM) < 1e-6
 				and int(mixed.get("uncertified", 0)) == 2,
 			"mixed = %s" % str(mixed))
+	panel.free()
+
+
+## ORACLE: ten declared overlaps at 0 mm, each excused uncertifiably inside
+## its allowance, followed by an undeclared 0.2 mm gap under required_mm 0.5.
+## The default limit is ten and the overlaps are closest, so the ONLY row the
+## filter shows are the ten advisory ones — yet the violation is established
+## and counted by the leg (pairs_failing 1). The verdict must read that count:
+## fail, with failing_rows 0 (nothing shown failed) and
+## hidden_counts.failing_rows_hidden 1. Raising the limit shows the row and
+## the hidden count goes away, so the two numbers are one derivation.
+func _check_a_violation_behind_the_limit_still_fails() -> void:
+	var panel := _panel()
+	panel.interference = _interference_report([])
+	var pairs: Array = []
+	for index in range(10):
+		var seated := _gap(0.0)
+		seated["node"] = "board/Boss_%d" % index
+		seated["interference"] = true
+		seated["overlap_mm"] = 0.05
+		seated["expected"] = true
+		seated["required_mm"] = 0.0
+		seated["pass"] = false
+		seated["excused_uncertified"] = true
+		pairs.append(seated)
+	var violation := _gap(0.2)
+	violation["pass"] = false
+	pairs.append(violation)
+	var report := _clearance_report(pairs)
+	report["advisory"] = true
+	report["pass_reason"] = "10 declared contact(s) could only be applied "\
+		+ "advisorily; pass is withheld rather than certified"
+	panel.clearance = report
+	panel.fasteners = _fastener_report([_good_screw()])
+	var declared := [{"reference": "board", "node": "board/Boss_0",
+		"allowance_mm": 0.1, "why": "seats on the bosses"}]
+	var args := {"required_mm": 0.5, "screw": {"dia_mm": 3.0, "length_mm": 8.0},
+		"expected_contacts": declared}
+	var reply: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_check_design", args)
+	var hidden: Dictionary = reply.get("hidden_counts", {}) as Dictionary
+	check("ten uncertified overlaps fill the default limit and the 0.2 mm "
+			+ "violation behind them still reads fail: failing_rows 0, "
+			+ "failing_rows_hidden 1, ten uncertified rows, a note saying so",
+			str(reply.get("verdict", "")) == "fail"
+				and int(reply.get("failing_rows", -1)) == 0
+				and (reply["clearance"] as Array).is_empty()
+				and int(hidden.get("failing_rows_hidden", 0)) == 1
+				and int(hidden.get("clearance_pairs_failing", 0)) == 1
+				and int(reply.get("uncertified", 0)) == 10
+				and str(reply.get("notes", [])).contains("did not travel"),
+			"reply = %s" % str(reply))
+
+	args["limit"] = 20
+	var widened: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_check_design", args)
+	var rows: Array = widened["clearance"]
+	var widened_hidden: Dictionary = widened.get("hidden_counts", {}) as Dictionary
+	check("with limit raised the same violation travels as the one failing "
+			+ "row, failing_rows 1, and nothing is counted as hidden",
+			str(widened.get("verdict", "")) == "fail"
+				and int(widened.get("failing_rows", -1)) == 1
+				and rows.size() == 1
+				and absf(float((rows[0] as Dictionary)["min_mm"]) - 0.2) < 1e-6
+				and not widened_hidden.has("failing_rows_hidden"),
+			"widened = %s" % str(widened))
 	panel.free()
 
 
