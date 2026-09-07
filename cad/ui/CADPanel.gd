@@ -360,10 +360,13 @@ func _shared_buffer() -> Object:
 	var broker: Object = _ctx.get("broker", null) as Object
 	if broker == null or not broker.has_method("get_attached_buffer"):
 		return null
-	var panel_name: String = str(_ctx.get("panel_name", ""))
-	if panel_name.is_empty():
+	# panel_key addresses THIS panel; panel_name only names the manifest panel,
+	# which every open .mcad tab shares — asking by it would fetch whichever
+	# document's buffer the host resolved that name to.
+	var panel_key: String = str(_ctx.get("panel_key", _ctx.get("panel_name", "")))
+	if panel_key.is_empty():
 		return null
-	return broker.get_attached_buffer(plugin_id, panel_name)
+	return broker.get_attached_buffer(plugin_id, panel_key)
 
 
 # ── Save/load contract (overrides MinervaPluginPanel virtuals) ──────────────

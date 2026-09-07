@@ -20,3 +20,8 @@ src/Scripts/UI/Controls/responsive_container.gd
 # registry it falls back to.
 src/Scripts/Services/Plugins/PluginToolRegistry.gd
 src/Scripts/Services/Annotations/AnnotationHostRegistry.gd
+#
+# test_editor_addressing.gd drives the host's real panel registry: the broker
+# that keys it, and the error builder whose reply tells a caller which names
+# are reachable and which registration has no panel behind it.
+src/Scripts/Services/Plugins/PluginErrors.gd

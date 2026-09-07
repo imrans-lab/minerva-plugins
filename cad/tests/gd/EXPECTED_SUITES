@@ -723,6 +723,18 @@ test_ortho_speckles.gd assertions=19
 # the check runs again).
 test_eval_await.gd assertions=28
 
+# Two documents open on ONE real broker: each keeps its own registration, IPC
+# helper and evaluation, an edit to one reaches only its own worker, and
+# closing one leaves the other evaluating. Then addressing: the render tab's
+# "(N)" title, the bare file name and the absolute path all reach the same
+# panel and it answers a verb; a name that reaches two panels only through the
+# same alias tier is refused rather than guessed; and a registration whose
+# scene root is gone is kept out of the known editors, named apart, and still
+# unregisterable by its owner.
+# 31 assertions in the five cases plus the panel-instantiates check inside the
+# shared open helper, which runs once per document opened (9 documents).
+test_editor_addressing.gd assertions=40
+
 # Which evaluation is the report on screen about? 1 rig + 3 the stamped report
 # (an interfering evaluation says so; it names the evaluation it belongs to;
 # last_eval carries the same state an agent reads) + 1 the dismissal (closing
