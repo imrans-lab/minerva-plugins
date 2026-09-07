@@ -1,0 +1,675 @@
+extends RefCounted
+## panel_tools_measure.gd — the measuring layer under the CAD panel's tool
+## dispatcher: how a reference becomes measured cylinders, and the frames,
+## scopes and envelopes every panel verb answers in.
+##
+## THE SPLIT IS AN INHERITANCE, NOT A HANDLE. ui/panel_tools.gd extends this
+## script and holds the verb surface — the handle() match, the re-pose guard,
+## the per-part fan-out and the verb bodies that answer directly. Everything
+## here is static, so the leaf reaches it by name and every caller and test
+## that preloads ui/panel_tools.gd still resolves the whole surface through
+## one script. The dependency runs one way: the verb layer calls down into
+## this one, and nothing here names a verb.
+##
+## What lives here:
+##   * propose -> verify — minerva_cad_find_holes and minerva_cad_find_cylinders.
+##     The fitter proposes candidates from the segmentation; the physical
+##     gauge measures each one; only the gauge's numbers are reported.
+##   * the plumbing they and the verb layer share — which records are in
+##     scope, the segment-and-fit cache, the pose scaling that keeps world
+##     thresholds honest against local candidates, coaxial merging, the
+##     both-frames rendering of one measured cylinder, the collision masks
+##     the gauge queries under, and the {ok}/{error} envelope builders.
+##
+## EVERY NUMBER IS MILLIMETRES, IN BOTH FRAMES — see ui/panel_tools.gd's
+## header for what world and local mean here.
+##
+## Off-tree note: no class_name — extended by relative path from panel_tools.gd.
+
+const _MeshFeatures: Script = preload("scripts/mesh_features.gd")
+## How much of an answer travels: the lean/full choice, the clearance
+## filters, the obstruction collapse and the hole census as DSL.
+const _ReplyShape: Script = preload("scripts/reply_shape.gd")
+## Default hole diameters to look for, in millimetres. Wide enough for a via
+## and a mounting hole, narrow enough to leave the outline alone.
+const DEFAULT_MIN_DIA_MM: float = 0.3
+const DEFAULT_MAX_DIA_MM: float = 30.0
+## A wall has to go this far round for the fitter to call it a hole rather than
+## a fillet.
+const DEFAULT_MIN_COVERAGE: float = 0.6
+## Ray-grid fallback pitch, used only when the fitter proposes nothing at all.
+const FALLBACK_PITCH_MM: float = 1.0
+## When two fitted cylinders are the same physical hole seen in two nodes:
+## axes parallel to within this dot product, centres concentric and radii equal
+## to within the tolerances below. The floors matter for small drills, the
+## fractions for large bores.
+const COAXIAL_DOT: float = 0.999
+const CENTRE_TOLERANCE_MM: float = 0.05
+const CENTRE_TOLERANCE_FRACTION: float = 0.1
+const RADIUS_TOLERANCE_MM: float = 0.02
+const RADIUS_TOLERANCE_FRACTION: float = 0.05
+
+## Candidate and report keys that are LENGTHS, and so scale with the pose.
+const SCALED_LENGTH_KEYS: Array = [
+	"radius_mm", "dia_mm", "inscribed_dia_mm", "gauge_dia_mm",
+	"gauge_dia_at_least_mm",
+	"half_extent_mm", "extent_mm", "depth_mm", "residual_mm",
+]
+
+
+# ---------------------------------------------------------------------------
+# Propose -> verify
+# ---------------------------------------------------------------------------
+
+static func _find_holes(panel, args: Dictionary) -> Dictionary:
+	var scope := _scope(panel, args)
+	if scope.has("error"):
+		return _err(str(scope["error"]))
+	var min_dia := float(args.get("min_dia_mm", DEFAULT_MIN_DIA_MM))
+	var max_dia := float(args.get("max_dia_mm", DEFAULT_MAX_DIA_MM))
+	var gauge: Node = panel.get_mesh_gauge()
+	var features: RefCounted = panel.get_mesh_features()
+	if not _gauge_ready(gauge) or features == null:
+		return _err("the measurement modules are not available on this panel")
+	panel.ensure_gauge_built()
+
+	var holes: Array = []
+	var proposed := 0
+	var fell_back := false
+	# Segmentation time for the files that were segmented on THIS call. Zero
+	# means every reference was already analysed: the cost is per file, not per
+	# question, and this is the number that says so.
+	var segment_ms := 0
+	# A node= filter that misses THIS reference is only an error when it misses
+	# every reference in scope; the misses are collected and judged after.
+	var node_missing: Array = []
+	var node_matched := false
+	for entry in scope["records"]:
+		var record: Dictionary = entry
+		var pose: Transform3D = record.get("pose", Transform3D.IDENTITY)
+		var before := int(features.call("get_analysis_count"))
+		var analysis := await _analysis(panel, record, args)
+		if not is_instance_valid(panel) or not _gauge_ready(gauge):
+			return _err("the CAD panel closed while its reference mesh was being segmented")
+		if analysis.has("error"):
+			if bool(analysis.get("node_missing", false)):
+				node_missing.append(str(analysis["error"]))
+				continue
+			return _err(str(analysis["error"]))
+		node_matched = true
+		if int(features.call("get_analysis_count")) > before:
+			segment_ms += int(analysis.get("elapsed_ms", 0))
+		# The thresholds are world millimetres, like every reported length, and
+		# the candidates are still in the file's own frame: a scaled pose makes
+		# those two different numbers, so the limits come back to the local
+		# frame before they filter local candidates.
+		var scale := pose_scale(pose)
+		var candidates: Array = _MeshFeatures.concave_cylinders(
+			analysis.get("candidates", []),
+			min_dia / scale,
+			max_dia / scale,
+			float(args.get("min_coverage", DEFAULT_MIN_COVERAGE))
+		)
+		proposed += candidates.size()
+
+		var posed: Array = []
+		for candidate in candidates:
+			posed.append(_pose_candidate(candidate as Dictionary, pose))
+		if posed.is_empty() and bool(args.get("fallback", true)):
+			# True soup: no region fitted a cylinder. Seed with a ray grid and
+			# measure the seeds the same way — the numbers still come from the
+			# gauge, only the proposal changed.
+			fell_back = true
+			posed = await _seed_candidates(gauge, record, args)
+		posed = _merge_coaxial(posed)
+		if posed.is_empty():
+			continue
+
+		var measured: Dictionary = await gauge.call("submit", "measure_holes", {
+			"candidates": posed,
+			"mask": _scope_mask(gauge, args, record),
+			"reference": str(record.get("name", "")),
+		})
+		if measured.has("error"):
+			return _err(str(measured["error"]))
+		for hole in measured.get("holes", []):
+			var report := _report_cylinder(hole as Dictionary, record, pose)
+			if bool(args.get("verified_only", false)) and not bool(report["verified"]):
+				continue
+			holes.append(report)
+
+	if not node_matched and not node_missing.is_empty():
+		return _err("; ".join(node_missing))
+	var payload := {
+		"units": "mm",
+		"holes": holes,
+		"count": holes.size(),
+		"proposed": proposed,
+		"seeded_by_ray_grid": fell_back,
+		"segment_ms": segment_ms,
+		"collider_count": int(gauge.call("get_shape_count")),
+	}
+	# The census as DSL. Retyping four measured centres into the source is
+	# where a digit gets dropped, and the numbers are already here.
+	if bool(args.get("emit_dsl", false)):
+		var emitted: Dictionary = _ReplyShape.holes_as_dsl(
+			holes,
+			str(args.get("dsl_kind", "hole")),
+			float(args.get("dsl_clearance_mm", 0.0)),
+			float(args.get("dsl_depth_mm", 0.0)))
+		payload["dsl"] = str(emitted["dsl"])
+		payload["dsl_note"] = "world millimetres, one slug per radius and "\
+			+ "axis; paste it into the document and subtract (or add) the "\
+			+ "bound name. Only holes whose axis is square to a world axis "\
+			+ "are written."
+		var skipped: Array = emitted["skipped"] as Array
+		if not skipped.is_empty():
+			payload["dsl_skipped"] = skipped
+	return _ok(payload)
+
+
+static func _find_cylinders(panel, args: Dictionary) -> Dictionary:
+	var scope := _scope(panel, args)
+	if scope.has("error"):
+		return _err(str(scope["error"]))
+	var kind := str(args.get("kind", "any"))
+	var min_dia := float(args.get("min_dia_mm", 0.0))
+	var max_dia := float(args.get("max_dia_mm", 1.0e6))
+	var min_coverage := float(args.get("min_coverage", 0.0))
+	var gauge: Node = panel.get_mesh_gauge()
+	if not _gauge_ready(gauge):
+		return _err("measurement gauge is not available on this panel")
+	panel.ensure_gauge_built()
+
+	var found: Array = []
+	var node_missing: Array = []
+	var node_matched := false
+	for entry in scope["records"]:
+		var record: Dictionary = entry
+		var pose: Transform3D = record.get("pose", Transform3D.IDENTITY)
+		var analysis := await _analysis(panel, record, args)
+		if not is_instance_valid(panel) or not _gauge_ready(gauge):
+			return _err("the CAD panel closed while its reference mesh was being segmented")
+		if analysis.has("error"):
+			if bool(analysis.get("node_missing", false)):
+				node_missing.append(str(analysis["error"]))
+				continue
+			return _err(str(analysis["error"]))
+		node_matched = true
+		# World thresholds against local candidates: see _find_holes.
+		var scale := pose_scale(pose)
+		var local_min := min_dia / scale
+		var local_max := max_dia / scale
+		var concave: Array = []
+		var convex: Array = []
+		for candidate_entry in analysis.get("candidates", []):
+			var candidate: Dictionary = candidate_entry
+			if str(candidate.get("kind", "")) != "cylinder":
+				continue
+			var dia := float(candidate.get("dia_mm", 0.0))
+			if dia < local_min or dia > local_max:
+				continue
+			if float(candidate.get("coverage", 0.0)) < min_coverage:
+				continue
+			var form := str(candidate.get("form", ""))
+			if kind != "any" and form != kind:
+				continue
+			if form == "concave":
+				concave.append(_pose_candidate(candidate, pose))
+			else:
+				convex.append(_pose_candidate(candidate, pose))
+
+		# A gauge that could not run reports an error, not an empty list; a
+		# swallowed error would answer "no cylinders" for a part full of them.
+		if not concave.is_empty():
+			var mask := _scope_mask(gauge, args, record)
+			var holes: Dictionary = await gauge.call(
+				"submit", "measure_holes", {"candidates": concave, "mask": mask,
+				"reference": str(record.get("name", ""))})
+			if holes.has("error"):
+				return _err(str(holes["error"]))
+			for hole in holes.get("holes", []):
+				found.append(_report_cylinder(hole as Dictionary, record, pose))
+		if not convex.is_empty():
+			var convex_mask := _scope_mask(gauge, args, record)
+			var bosses: Dictionary = await gauge.call(
+				"submit", "measure_convex", {"candidates": convex, "mask": convex_mask,
+				"reference": str(record.get("name", ""))})
+			if bosses.has("error"):
+				return _err(str(bosses["error"]))
+			for boss in bosses.get("cylinders", []):
+				found.append(_report_cylinder(boss as Dictionary, record, pose))
+
+	if not node_matched and not node_missing.is_empty():
+		return _err("; ".join(node_missing))
+	return _ok({
+		"units": "mm",
+		"cylinders": found,
+		"count": found.size(),
+	})
+
+
+# ---------------------------------------------------------------------------
+# Shared plumbing
+# ---------------------------------------------------------------------------
+
+static func _records(panel) -> Array:
+	if panel == null or not panel.has_method("get_reference_state"):
+		return []
+	return panel.get_reference_state()
+
+
+## Every reference the document named, loaded or not. Only the reporting verb
+## wants these; a measurement runs on _records(), which holds geometry.
+static func _status_records(panel) -> Array:
+	if panel == null or not panel.has_method("get_reference_status"):
+		return _records(panel)
+	return panel.get_reference_status()
+
+
+## Records in scope, filtered by the optional `reference` name. A named
+## reference that is not mounted is an error rather than an empty result: the
+## caller misspelled something and should be told so.
+static func _scope(panel, args: Dictionary) -> Dictionary:
+	var records := _records(panel)
+	if records.is_empty():
+		return {"error": "no reference mesh is mounted in this editor"}
+	var wanted := str(args.get("reference", ""))
+	if wanted.is_empty():
+		return {"records": records}
+	var kept: Array = []
+	for entry in records:
+		if str((entry as Dictionary).get("name", "")) == wanted:
+			kept.append(entry)
+	if kept.is_empty():
+		return {"error": "no reference named '%s' is mounted" % wanted}
+	return {"records": kept}
+
+
+## Segment and fit one reference, once. The cache key carries the file's
+## content stamp and the node filter, so a pose edit never re-segments and a
+## file edit always does.
+##
+## A node= filter that matches nothing in ANY reference in scope is an ERROR
+## naming the filter and the nodes there are. A successful measurement of zero
+## holes is indistinguishable from a typo, and the typo is by far the likelier
+## of the two. Here the miss is only reported — `node_missing` marks it, and
+## the caller decides, because with several references in scope a node present
+## in one of them is a match and not a typo.
+static func _analysis(panel, record: Dictionary, args: Dictionary) -> Dictionary:
+	var features: RefCounted = panel.get_mesh_features()
+	if features == null:
+		return {"candidates": []}
+	var node_filter := str(args.get("node", ""))
+	var parts: Array = record.get("parts", [])
+	if not node_filter.is_empty():
+		var kept: Array = []
+		var available: Array = []
+		for entry in parts:
+			var part: Dictionary = entry
+			var path := str(part.get("node_path", part.get("node", "")))
+			if not (path in available):
+				available.append(path)
+			# A leaf name matches every node that carries it; a full path
+			# matches the one node it names.
+			if path == node_filter or str(part.get("node", "")) == node_filter:
+				kept.append(entry)
+		if kept.is_empty():
+			return {
+				"candidates": [],
+				"node_missing": true,
+				"error": "no node '%s' in reference '%s'; it has %s"
+					% [node_filter, str(record.get("name", "")), str(available)],
+			}
+		parts = kept
+	# The segmentation runs on the CONVERTED parts, so units and up belong in
+	# the key: without them a units= edit reuses candidates in the old frame.
+	var key := "%s|%s|%s|%s|%s" % [
+		str(record.get("resolved_path", "")),
+		str(record.get("stamp", "")),
+		str(record.get("units", "")),
+		str(record.get("up", "")),
+		node_filter,
+	]
+	return await features.call(
+		"features_for_async",
+		key,
+		parts,
+		float(args.get("region_angle_deg", _MeshFeatures.DEFAULT_REGION_ANGLE_DEG)),
+		panel.get_tree()
+	)
+
+
+## The uniform factor a pose scales lengths by. The DSL refuses a non-uniform
+## scale on a reference — an ellipse has no diameter to report — so the cube
+## root of the basis determinant is the whole of it, and its magnitude survives
+## a mirror.
+static func pose_scale(pose: Transform3D) -> float:
+	var determinant := absf(pose.basis.determinant())
+	return pow(determinant, 1.0 / 3.0) if determinant > 0.0 else 1.0
+
+
+## A candidate in the reference's local frame, moved into the posed world where
+## the gauge works. Lengths scale with the pose as well as positions: a
+## reference posed at scale 2 has a hole of twice the diameter in the world,
+## and a gauge searching for the fitted radius has to be told the world one.
+static func _pose_candidate(candidate: Dictionary, pose: Transform3D) -> Dictionary:
+	var posed := candidate.duplicate(true)
+	posed["center"] = pose * (candidate.get("center", Vector3.ZERO) as Vector3)
+	posed["axis"] = (pose.basis * (candidate.get("axis", Vector3.UP) as Vector3)).normalized()
+	var factor := pose_scale(pose)
+	if not is_equal_approx(factor, 1.0):
+		for key in SCALED_LENGTH_KEYS:
+			if candidate.get(key, null) != null:
+				posed[key] = float(candidate[key]) * factor
+	return posed
+
+
+## Ray-grid seeds as hole candidates. The seed only proposes a place to look;
+## the centre, the diameter and the through test all still come from the gauge.
+static func _seed_candidates(gauge: Node, record: Dictionary, args: Dictionary) -> Array:
+	var bounds: AABB = record.get("world_aabb", AABB())
+	var axis := _vector(args.get("axis", [0.0, 0.0, 1.0]))
+	var seeded: Dictionary = await gauge.call("submit", "seed_grid", {
+		"bounds": bounds,
+		"axis": axis,
+		"pitch_mm": float(args.get("pitch_mm", FALLBACK_PITCH_MM)),
+		"mask": _scope_mask(gauge, args, record),
+		"reference": str(record.get("name", "")),
+	})
+	var out: Array = []
+	var half_extent := _extent_along(bounds, axis) * 0.5
+	for entry in seeded.get("seeds", []):
+		var seed: Dictionary = entry
+		var hint := float(seed.get("radius_hint_mm", 0.5))
+		out.append({
+			"kind": "cylinder",
+			"form": "concave",
+			"node": "",
+			"center": seed.get("center", Vector3.ZERO),
+			"axis": axis,
+			"radius_mm": hint,
+			"dia_mm": hint * 2.0,
+			"inscribed_dia_mm": hint * 2.0,
+			"half_extent_mm": half_extent,
+			"extent_mm": half_extent * 2.0,
+			"residual_mm": null,
+			"facets": 0,
+			"coverage": 0.0,
+			"source": "ray-grid",
+		})
+	return out
+
+
+## A hole through a stack of nodes is fitted once per node whose wall it
+## crosses — a board GLB has substrate, copper and mask, and a 3.2 mm drill
+## comes back three times. Two candidates are the same hole when they are
+## coaxial, concentric and the same size; merging them before the gauge runs
+## also saves the duplicate measurements. The merged row keeps every node the
+## hole passes through, because "which layers does this drill cross" is a real
+## question and the node names are the only answer to it.
+static func _merge_coaxial(candidates: Array) -> Array:
+	# One pass merges each candidate into the first entry it matches, so with an
+	# unlucky node order a drill can end as two entries that would merge with
+	# each other. Repeat until a pass changes nothing.
+	var merged: Array = _merge_coaxial_pass(candidates)
+	while merged.size() < candidates.size():
+		candidates = merged
+		merged = _merge_coaxial_pass(candidates)
+	return merged
+
+
+static func _merge_coaxial_pass(candidates: Array) -> Array:
+	var merged: Array = []
+	for entry in candidates:
+		var candidate: Dictionary = entry
+		var axis: Vector3 = (candidate.get("axis", Vector3.UP) as Vector3).normalized()
+		var centre: Vector3 = candidate.get("center", Vector3.ZERO)
+		var radius := float(candidate.get("radius_mm", 0.0))
+		var half := float(candidate.get("half_extent_mm", 0.0))
+		var target: Dictionary = {}
+		for existing_entry in merged:
+			var existing: Dictionary = existing_entry
+			var other_axis: Vector3 = (existing.get("axis", Vector3.UP) as Vector3).normalized()
+			if absf(other_axis.dot(axis)) < COAXIAL_DOT:
+				continue
+			if absf(float(existing.get("radius_mm", 0.0)) - radius) \
+					> maxf(RADIUS_TOLERANCE_MM, radius * RADIUS_TOLERANCE_FRACTION):
+				continue
+			var offset: Vector3 = centre - (existing.get("center", Vector3.ZERO) as Vector3)
+			var perpendicular := (offset - other_axis * offset.dot(other_axis)).length()
+			if perpendicular > maxf(CENTRE_TOLERANCE_MM, radius * CENTRE_TOLERANCE_FRACTION):
+				continue
+			# Coaxial and same radius is not enough: two holes in plates that
+			# do not touch are two holes. Their axial runs must overlap or meet.
+			var axial_gap := absf(offset.dot(other_axis)) \
+				- float(existing.get("half_extent_mm", 0.0)) - half
+			if axial_gap > maxf(CENTRE_TOLERANCE_MM, radius * CENTRE_TOLERANCE_FRACTION):
+				continue
+			target = existing
+			break
+		if target.is_empty():
+			var fresh := candidate.duplicate(true)
+			fresh["axis"] = axis
+			fresh["nodes"] = _nodes_of(candidate)
+			merged.append(fresh)
+			continue
+		var nodes: Array = target["nodes"]
+		for node_name in _nodes_of(candidate):
+			if not nodes.has(node_name):
+				nodes.append(node_name)
+		# The merged hole spans the union of the axial runs: a drill through
+		# three plates is as deep as all three, not as deep as the thickest.
+		var target_axis: Vector3 = target["axis"]
+		var target_centre: Vector3 = target.get("center", Vector3.ZERO)
+		var base := target_centre.dot(target_axis)
+		var target_half := float(target.get("half_extent_mm", 0.0))
+		var here := centre.dot(target_axis)
+		var low := minf(base - target_half, here - half)
+		var high := maxf(base + target_half, here + half)
+		var new_half := (high - low) * 0.5
+		target["center"] = target_centre + target_axis * ((low + high) * 0.5 - base)
+		target["half_extent_mm"] = new_half
+		target["extent_mm"] = new_half * 2.0
+	return merged
+
+
+## One measured cylinder, in both frames, with the numbers that make it
+## falsifiable: the fitted (circumscribed) diameter the tessellation implies,
+## the gauge diameter that actually went in, the facet count that separates
+## them, and the fit residual.
+##
+## Every LENGTH here is a world millimetre, because that is where the gauge
+## measured it; `local` carries the same lengths in the reference file's own
+## frame, which is what an LLM comparing against the part's drawing wants. The
+## two differ exactly when the pose scales, and `scale` says by how much.
+static func _report_cylinder(
+	measured: Dictionary,
+	record: Dictionary,
+	pose: Transform3D
+) -> Dictionary:
+	var centre: Vector3 = measured.get("center", Vector3.ZERO)
+	var axis: Vector3 = measured.get("axis", Vector3.UP)
+	var factor := pose_scale(pose)
+	var local_lengths := {}
+	for key in SCALED_LENGTH_KEYS:
+		var value: Variant = measured.get(key, null)
+		if value != null:
+			local_lengths[key] = float(value) / factor
+	return {
+		"reference": str(record.get("name", "")),
+		"node": str(measured.get("node", "")),
+		"nodes": measured.get("nodes", [str(measured.get("node", ""))]),
+		"form": str(measured.get("form", "")),
+		"center_mm": _points(centre, pose),
+		"axis": _axes(axis, pose),
+		"dia_mm": float(measured.get("dia_mm", 0.0)),
+		"inscribed_dia_mm": float(measured.get("inscribed_dia_mm", 0.0)),
+		"gauge_dia_mm": float(measured.get("gauge_dia_mm", 0.0)),
+		# False when no wall was met inside the search bound: gauge_dia_mm is
+		# then 0 and gauge_dia_at_least_mm carries the floor the bound implies.
+		"gauge_bounded": bool(measured.get("gauge_bounded", true)),
+		"gauge_dia_at_least_mm": float(measured.get("gauge_dia_at_least_mm", 0.0)),
+		"facets": int(measured.get("facets", 0)),
+		"coverage": float(measured.get("coverage", 0.0)),
+		"residual_mm": measured.get("residual_mm", null),
+		"extent_mm": float(measured.get("extent_mm", 0.0)),
+		"through": bool(measured.get("through", false)),
+		"depth_mm": float(measured.get("depth_mm", 0.0)),
+		"verified": bool(measured.get("verified", false)),
+		"source": str(measured.get("source", "fit")),
+		"scale": factor,
+		"local": local_lengths,
+	}
+
+
+## The mask a measurement of `record` runs under.
+##
+## Scope is the caller's word, not a default. A caller that NAMED a reference
+## is asking about that part on its own, and a second part crossing the hole is
+## not part of the answer. A caller that named none is asking about the
+## ASSEMBLY, where a mating part obstructing a hole is exactly the thing worth
+## reporting — so an unscoped call queries every body.
+static func _scope_mask(gauge: Node, args: Dictionary, record: Dictionary) -> int:
+	if str(args.get("reference", "")).is_empty():
+		return _mask_for(gauge, "")
+	return _mask_for(gauge, str(record.get("name", "")))
+
+
+## Collision mask for one reference, or every layer for an empty name. The
+## mask IS the scope: the gauge reads the reference name that travels with
+## each job only under a narrowed mask, to tell overflow references sharing
+## Godot's final collision layer apart; under every layer it is ignored.
+static func _mask_for(gauge: Node, reference_name: String) -> int:
+	if gauge == null or not gauge.has_method("mask_for"):
+		# Every layer. A zero mask would report a fit everywhere.
+		return 0xFFFFFFFF
+	return int(gauge.call("mask_for", reference_name))
+
+
+## The gauge must be a live node inside the tree before anything is awaited on
+## it: a submit to a gauge that cannot step physics would never return.
+static func _gauge_ready(gauge: Node) -> bool:
+	return gauge != null and is_instance_valid(gauge) and gauge.is_inside_tree()
+
+
+## The pose of one NAMED reference. There is deliberately no "first reference"
+## fallback: an unnamed or unknown reference has no local frame, and a caller
+## that guessed one would report a local position measured off another part.
+static func _pose_for(panel, reference_name: String) -> Transform3D:
+	for entry in _records(panel):
+		var record: Dictionary = entry
+		if not reference_name.is_empty() and str(record.get("name", "")) == reference_name:
+			return record.get("pose", Transform3D.IDENTITY)
+	return Transform3D.IDENTITY
+
+
+## A raw candidate names one node; a merged entry carries the list.
+static func _nodes_of(candidate: Dictionary) -> Array:
+	if candidate.has("nodes"):
+		return (candidate["nodes"] as Array).duplicate()
+	return [str(candidate.get("node", ""))]
+
+
+static func _has_reference(panel, reference_name: String) -> bool:
+	if reference_name.is_empty():
+		return false
+	for entry in _records(panel):
+		if str((entry as Dictionary).get("name", "")) == reference_name:
+			return true
+	return false
+
+
+## A world point in both frames when the reference is known, and in world only
+## — with the reason — when it is not.
+static func _frames(panel, world: Vector3, reference_name: String) -> Dictionary:
+	if _has_reference(panel, reference_name):
+		return _points(world, _pose_for(panel, reference_name))
+	var reason := "no reference named the point, so it is reported in world only"
+	if not reference_name.is_empty():
+		reason = "no mounted reference is named '%s'; world only" % reference_name
+	return {"world": _vec(world), "local": null, "local_unavailable": reason}
+
+
+static func _points(world: Vector3, pose: Transform3D) -> Dictionary:
+	return {
+		"world": _vec(world),
+		"local": _vec(pose.affine_inverse() * world),
+	}
+
+
+static func _axes(world: Vector3, pose: Transform3D) -> Dictionary:
+	var local := pose.basis.inverse() * world
+	return {
+		"world": _vec(world.normalized()),
+		"local": _vec(local.normalized() if local.length_squared() > 0.0 else Vector3.UP),
+	}
+
+
+static func _boxes(local_box: AABB, pose: Transform3D) -> Dictionary:
+	var world_box := AABB()
+	var lo := local_box.position
+	var hi := local_box.position + local_box.size
+	var first := true
+	for i in range(8):
+		var corner := Vector3(
+			hi.x if (i & 1) != 0 else lo.x,
+			hi.y if (i & 2) != 0 else lo.y,
+			hi.z if (i & 4) != 0 else lo.z
+		)
+		var p := pose * corner
+		if first:
+			world_box = AABB(p, Vector3.ZERO)
+			first = false
+		else:
+			world_box = world_box.expand(p)
+	return {
+		"local": {"min": _vec(lo), "max": _vec(hi)},
+		"world": {
+			"min": _vec(world_box.position),
+			"max": _vec(world_box.position + world_box.size),
+		},
+	}
+
+
+## A Transform3D as the row-major 4x4 the DSL and the worker speak.
+static func _matrix(pose: Transform3D) -> Array:
+	var b := pose.basis
+	var o := pose.origin
+	return [
+		[b.x.x, b.y.x, b.z.x, o.x],
+		[b.x.y, b.y.y, b.z.y, o.y],
+		[b.x.z, b.y.z, b.z.z, o.z],
+		[0.0, 0.0, 0.0, 1.0],
+	]
+
+
+static func _vec(v: Vector3) -> Array:
+	return [v.x, v.y, v.z]
+
+
+static func _vector(raw: Variant) -> Vector3:
+	if raw is Vector3:
+		return raw
+	if raw is Array and (raw as Array).size() >= 3:
+		var values: Array = raw
+		return Vector3(float(values[0]), float(values[1]), float(values[2]))
+	return Vector3.ZERO
+
+
+static func _extent_along(bounds: AABB, direction: Vector3) -> float:
+	return absf(bounds.size.x * direction.x) \
+		+ absf(bounds.size.y * direction.y) \
+		+ absf(bounds.size.z * direction.z)
+
+
+# ── Envelope builders (self-contained, mirrors pcb/ui/panel_tools.gd) ────────
+
+static func _ok(data: Dictionary = {}) -> Dictionary:
+	var result := {"success": true}
+	result.merge(data)
+	return result
+
+
+static func _err(msg: String) -> Dictionary:
+	return {"error": msg, "success": false}

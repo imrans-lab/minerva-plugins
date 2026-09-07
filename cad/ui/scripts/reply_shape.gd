@@ -11,7 +11,8 @@ extends RefCounted
 ## away, and the reply says which.
 ##
 ## No class_name: off-tree plugin scripts cannot use class_name.
-## Consumers: panel_tools.gd (the verb layer) and fastener_checks.gd.
+## Consumers: ui/panel_tools_measure.gd (holds the preload; the verb layer in
+## panel_tools.gd reaches it by inheritance) and fastener_checks.gd.
 
 ## Axis directions a hole can be emitted as DSL along, and the rotate() that
 ## puts a +Z cylinder on each. A cylinder centred on its axis is the same

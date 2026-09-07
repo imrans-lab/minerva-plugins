@@ -616,6 +616,7 @@
           "ui/kinds/cad_edge_label_layout.gd",
           "ui/kinds/cad_edge_number_kind.gd",
           "ui/panel_tools.gd",
+          "ui/panel_tools_measure.gd",
           "ui/scripts/contact_runs.gd",
           "ui/scripts/design_check.gd",
           "ui/scripts/eval_banner.gd",
