@@ -58,54 +58,83 @@ static func lean_reference(row: Dictionary) -> Dictionary:
 
 ## Narrow a clearance report's pair list without changing its verdict.
 ##
+## LEAN IS THE DEFAULT. A fifty-pair report is forty kilobytes and forty-odd of
+## those rows say "this pair kept its gap", which is the one thing a reader
+## acts on nothing for. So unless `detail` is "full", a row that CLEARED is
+## counted in `pairs_passing` and left behind; what travels is what fails, what
+## the check could not certify, and every pair a declaration named — a declared
+## contact is kept even when it passes, because the number it was excused on is
+## the thing an author audits. `failing_only` is the same filter asked for
+## explicitly, and stays for callers that pass it.
+##
 ## `pairs` arrive sorted by min_mm ascending, so `limit` keeps the CLOSEST n —
-## the tightest gaps, which are the ones an edit is about. `failing_only`
-## drops the pairs that CLEARED: the row's own `pass` where the report's
-## tolerance is bounded, and the distance where it is not, because there
-## every row is graded false whatever its gap and a filter keyed on `pass`
+## the tightest gaps, which are the ones an edit is about. The filter cannot be
+## keyed on the row's `pass`: on a report whose tessellation tolerance is not
+## bounded every row is graded false whatever its gap, and a pass-keyed filter
 ## would hide nothing — see `pair_clears`. The limit is applied to what
-## survives the filter, so limit=5 with failing_only is five FAILING rows and
-## not five rows of which some failed.
+## survives the filter, so limit=5 is five rows that did not clear and not five
+## rows of which some did.
 ##
 ## The report's own `pass` is graded over every pair before this runs and is
 ## not touched: a filtered report still says whether the whole scope cleared,
 ## and it always says how many rows it did not show.
-static func filter_clearance(report: Dictionary, limit: int, failing_only: bool) -> Dictionary:
+static func filter_clearance(report: Dictionary, limit: int,
+		failing_only: bool, detail: String = "") -> Dictionary:
 	var pairs: Array = report.get("pairs", []) as Array
 	var required := float(report.get("required_mm", 0.0))
 	var quantization := float(report.get("quantization_mm", 0.0))
 	var bounded := bool(report.get("tolerance_bounded", false))
+	var full := detail == "full"
 	var kept: Array = []
+	# ONE PARTITION, three counts. An uncertified row is never counted as
+	# passing however its distance reads: an advisory exclusion establishes no
+	# violation and certifies no gap, and counting it in both buckets made
+	# pairs_failing — the remainder — go negative.
+	var passing := 0
+	var uncertified := 0
+	var failing := 0
 	for entry in pairs:
 		var pair: Dictionary = entry
-		if failing_only and pair_clears(pair, required, quantization, bounded):
+		var advisory := pair_uncertified(pair)
+		var clears := not advisory \
+			and pair_clears(pair, required, quantization, bounded)
+		if advisory:
+			uncertified += 1
+		elif clears:
+			passing += 1
+		else:
+			failing += 1
+		# A declared pair travels whatever it did: the reply is the only place
+		# the exclusion can be audited against the value it excused.
+		# failing_only hides the rows that cleared whatever `detail` says;
+		# detail="full" on its own is what returns every row.
+		if (failing_only or not full) and clears \
+				and not bool(pair.get("expected", false)):
 			continue
 		kept.append(pair)
 	var shown: Array = kept if limit <= 0 or kept.size() <= limit \
 		else kept.slice(0, limit)
 	# Shallow: only top-level keys are written here, and every pair that
-	# travels is one of the caller's own rows, unmodified.
+	# travels is one of the caller's own rows, unmodified — both point frames
+	# included, because those are the numbers that go back into the DSL.
 	var out := report.duplicate()
 	out["pairs"] = shown
 	out["pairs_total"] = pairs.size()
 	out["pairs_shown"] = shown.size()
 	var hidden := pairs.size() - shown.size()
 	out["pairs_hidden"] = hidden
-	if failing_only:
-		# An uncertified row is kept — it did not clear — but it is not a
-		# failure: no violation is established by it, and a count that folded
-		# the two together would turn a declared touch into a defect.
-		var uncertified := 0
-		for entry in kept:
-			if pair_uncertified(entry as Dictionary):
-				uncertified += 1
-		out["pairs_failing"] = kept.size() - uncertified
-		out["pairs_uncertified"] = uncertified
+	out["pairs_passing"] = passing
+	# An uncertified row is kept — it did not clear — but it is not a failure:
+	# no violation is established by it, and a count that folded the two
+	# together would turn a declared touch into a defect.
+	out["pairs_uncertified"] = uncertified
+	out["pairs_failing"] = failing
 	if hidden > 0:
 		out["pairs_filter"] = ("%d of %d pairs shown, closest first%s; "
-			+ "%d hidden; `pass` is graded over ALL of them — call again "
-			+ "without limit/failing_only for the rest") % [shown.size(),
-			pairs.size(), " (failing only)" if failing_only else "", hidden]
+			+ "%d hidden, of which %d cleared their gap; `pass` is graded "
+			+ "over ALL of them — pass detail=\"full\" for every row, or "
+			+ "raise limit") % [shown.size(), pairs.size(),
+			" (failing only)" if failing_only else "", hidden, passing]
 	return out
 
 

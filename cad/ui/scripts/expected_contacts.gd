@@ -100,16 +100,23 @@ static func parse(args: Dictionary) -> Dictionary:
 	return {"entries": entries, "errors": errors}
 
 
-## The index of the first declaration this measurement answers to, or -1.
+## EVERY declaration this measurement answers to, in declaration order.
 ##
 ## `points` are the world points the measurement was located at — the witness
-## points of a clearance pair, the crossing points of an interference pair. A
-## declaration carrying a region matches only when one of them lies in it, so a
-## measurement with no located point (a node the interference check found by
-## parity, which meets no surface anywhere in particular) can only be declared
-## by name.
-static func index_for(entries: Array, reference: String, node: String,
-		points: Array) -> int:
+## points of a clearance pair, the crossing points of an interference pair, and
+## for a clearance pair the crossings the interference report named for the
+## same two bodies. A declaration carrying a region matches when ANY of them
+## lies in its box, so four regions drawn one per boss all match the node whose
+## contacts were measured at all four; a measurement with no located point (a
+## node the interference check found by parity, which meets no surface
+## anywhere in particular) can only be declared by name.
+##
+## MATCHING IS NOT GRADING. Every index returned is a declaration nothing has
+## gone stale about, which is what `unmatched` reports on; the caller grades
+## the pair against the FIRST of them, because one pair carries one gap.
+static func indices_for(entries: Array, reference: String, node: String,
+		points: Array) -> Array:
+	var out: Array = []
 	for index in range(entries.size()):
 		var entry: Dictionary = entries[index]
 		if str(entry["reference"]) != reference:
@@ -118,11 +125,21 @@ static func index_for(entries: Array, reference: String, node: String,
 			continue
 		var region: Variant = entry["region"]
 		if region == null:
-			return index
+			out.append(index)
+			continue
 		for point in points:
 			if (region as AABB).has_point(point as Vector3):
-				return index
-	return -1
+				out.append(index)
+				break
+	return out
+
+
+## The declaration a measurement is GRADED against, or -1: the first of the
+## ones it answers to.
+static func index_for(entries: Array, reference: String, node: String,
+		points: Array) -> int:
+	var found: Array = indices_for(entries, reference, node, points)
+	return int(found[0]) if not found.is_empty() else -1
 
 
 ## The gap a declared pair must keep. A declaration of contact (0, the

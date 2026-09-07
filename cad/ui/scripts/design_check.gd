@@ -290,16 +290,19 @@ static func _idle(frames: int) -> void:
 		await tree.process_frame
 
 
-## The fastener leg, which only runs when a screw was named. A caller asking
+## The fastener leg, which only runs when a screw was named (one, or a list of
+## them under `screws`). A caller asking
 ## about clearance alone said so by leaving `screw` out; that is a scope, not
 ## something the check could not decide, so it does not make the verdict
 ## advisory.
 static func _run_fasteners(panel, args: Dictionary, per_part: Callable,
 		fasteners: Callable, state: Dictionary) -> Array:
 	var screw: Dictionary = args.get("screw", {}) as Dictionary
-	if float(screw.get("dia_mm", 0.0)) <= 0.0:
+	var listed: Array = args.get("screws", []) as Array
+	if float(screw.get("dia_mm", 0.0)) <= 0.0 and listed.is_empty():
 		(state["checks"] as Dictionary)["fasteners"] = "not asked for: pass "\
-			+ "screw: {dia_mm, length_mm} to check the joints too"
+			+ "screw: {dia_mm, length_mm}, or screws: [{dia_mm, length_mm, "\
+			+ "reference?}] for several sizes, to check the joints too"
 		return []
 	return _fold_fasteners(
 		await _unbusy(panel, args, per_part, fasteners), state)

@@ -40,6 +40,7 @@ const FastenerChecks := preload("res://../../minerva-plugins/cad/ui/scripts/fast
 const GeometryChecks := preload("res://../../minerva-plugins/cad/ui/scripts/geometry_checks.gd")
 const MeshGauge := preload("res://../../minerva-plugins/cad/ui/scripts/mesh_gauge.gd")
 const KeepoutDsl := preload("res://../../minerva-plugins/cad/ui/scripts/keepout_dsl.gd")
+const FastenerScrews := preload("res://../../minerva-plugins/cad/ui/scripts/fastener_screws.gd")
 
 ## Two anonymous editors, named as a user would name them.
 const FIRST_TITLE := "HITL enclosure"
@@ -63,6 +64,21 @@ const REPLY_BUDGET_BYTES := 2048
 ## report narrowed to the pairs it is about to act on.
 const REFERENCES_LEAN_BUDGET_BYTES := 768
 const CLEARANCE_LIMITED_BUDGET_BYTES := 3072
+## What a clearance reply that nobody narrowed may cost. The rev-4 HITL got
+## forty kilobytes back for a question whose answer was one row.
+const CLEARANCE_LEAN_BUDGET_BYTES := 3072
+## How many of the fixture's pairs miss the 1.0 mm bar: gaps run 0.1 .. 5.0 mm
+## in tenths, so 0.1 .. 0.9 fail and the rest clear.
+const BOARD_FAILING_PAIRS := 9
+## The two-size fastener fixture: a board on M3 through 3.2 mm holes and a
+## stick on M2.5 through 2.6 mm ones. An M3's default window is 2.4 - 7.5 mm,
+## so it reaches the stick's holes unless the screw is scoped to its own part.
+const FASTENER_HOLES := {
+	"board": [3.2, 3.2, 3.2, 3.2],
+	"stick": [2.6, 2.6, 2.6, 2.6],
+}
+const BOARD_SCREW_HOLES := 4
+const STICK_SCREW_HOLES := 4
 ## Pairs in the clearance fixture — the report shape measured on the real board.
 const BOARD_PAIRS := 50
 
@@ -114,6 +130,7 @@ func _run() -> void:
 	_check_interference_is_a_status_line()
 	await _check_references_are_lean_by_default()
 	await _check_clearance_can_be_narrowed()
+	await _check_screws_are_scoped_to_their_own_reference()
 	_check_obstructions_collapse()
 	_check_reference_holes_are_indexed_as_paired()
 	_check_a_hole_census_becomes_dsl()
@@ -472,21 +489,65 @@ func _check_references_are_lean_by_default() -> void:
 	panel.free()
 
 
-## Fifty pairs is twenty kilobytes, and an agent acting on the tightest gap
-## reads five rows. The filters must not touch the verdict.
+## Fifty pairs is forty kilobytes, and an agent acting on the tightest gap
+## reads one row. LEAN IS THE DEFAULT — a reply carries what failed, what could
+## not be certified and what a declaration named — and the filters must not
+## touch the verdict. The fixture's rows are graded 0.1 .. 5.0 mm against a
+## 1.0 mm bar, so nine of the fifty fail and forty-one clear.
 func _check_clearance_can_be_narrowed() -> void:
 	var panel := _ClearanceStandIn.new()
 	panel.report = _clearance_report(BOARD_PAIRS)
 	root.add_child(panel)
 
-	var full: Dictionary = await PanelTools.handle(
-			panel, "minerva_cad_check_clearance", {"required_mm": 1.0})
+	var full: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_check_clearance",
+			{"required_mm": 1.0, "detail": "full"})
 	var full_bytes := JSON.stringify(full).to_utf8_buffer().size()
-	check(("fixture: a %d-pair clearance report really is kilobytes")
+	check(("fixture: a %d-pair clearance report really is kilobytes, and "
+			+ "detail=\"full\" is how a caller gets every row of it")
 			% BOARD_PAIRS,
 			full_bytes > 8000 and (full["pairs"] as Array).size() == BOARD_PAIRS,
 			"report is %d bytes, %d pairs"
 				% [full_bytes, (full["pairs"] as Array).size()])
+
+	# THE DEFAULT, with no argument asking for it.
+	var lean: Dictionary = await PanelTools.handle(
+			panel, "minerva_cad_check_clearance", {"required_mm": 1.0})
+	var lean_bytes := JSON.stringify(lean).to_utf8_buffer().size()
+	var lean_rows: Array = lean["pairs"]
+	var all_fail := true
+	for entry in lean_rows:
+		if bool((entry as Dictionary)["pass"]):
+			all_fail = false
+	check(("lean by default: a caller that asks for nothing gets the %d rows "
+			+ "that failed and none of the %d that cleared, inside %d bytes "
+			+ "instead of %d") % [BOARD_FAILING_PAIRS,
+				BOARD_PAIRS - BOARD_FAILING_PAIRS, CLEARANCE_LEAN_BUDGET_BYTES,
+				full_bytes],
+			lean_rows.size() == BOARD_FAILING_PAIRS and all_fail
+				and lean_bytes < CLEARANCE_LEAN_BUDGET_BYTES,
+			"lean is %d rows, %d bytes" % [lean_rows.size(), lean_bytes])
+	check("lean by default: the rows that did NOT travel are COUNTED, not "
+			+ "lost — pairs_passing, pairs_failing and pairs_hidden add up to "
+			+ "the pairs measured, and the verdict is still graded over all "
+			+ "of them",
+			int(lean["pairs_passing"]) == BOARD_PAIRS - BOARD_FAILING_PAIRS
+				and int(lean["pairs_failing"]) == BOARD_FAILING_PAIRS
+				and int(lean["pairs_total"]) == BOARD_PAIRS
+				and int(lean["pairs_hidden"]) == BOARD_PAIRS - BOARD_FAILING_PAIRS
+				and bool(lean["pass"]) == bool(full["pass"])
+				and str(lean.get("pairs_filter", "")).contains("full"),
+			"lean = %s" % str(lean.get("pairs_filter", "")))
+	var first_row: Dictionary = lean_rows[0] if not lean_rows.is_empty() else {}
+	check("lean by default: a row that travels keeps BOTH point frames — the "
+			+ "world point to compare and the local one to write back into "
+			+ "the DSL",
+			(first_row.get("solid_point_mm", []) as Array).size() == 3
+				and ((first_row.get("reference_point_mm", {}) as Dictionary)
+					.get("world", []) as Array).size() == 3
+				and ((first_row.get("reference_point_mm", {}) as Dictionary)
+					.get("local", []) as Array).size() == 3,
+			"row = %s" % str(first_row))
 
 	var closest: Dictionary = await PanelTools.handle(panel,
 			"minerva_cad_check_clearance", {"required_mm": 1.0, "limit": 5})
@@ -521,7 +582,179 @@ func _check_clearance_can_be_narrowed() -> void:
 				and (failing["pairs"] as Array).size() < BOARD_PAIRS,
 			"failing = %d of %d"
 				% [(failing["pairs"] as Array).size(), BOARD_PAIRS])
+
+	# ONE PARTITION. A row a region declaration excused without certifying it
+	# is advisory, not a pass: counted in both buckets, the remainder that is
+	# pairs_failing went NEGATIVE. Its gap here clears the bar, which is the
+	# only shape in which the double count can happen.
+	var mixed: Dictionary = _clearance_report(2)
+	mixed["required_mm"] = 0.05
+	var advisory_row: Dictionary = (mixed["pairs"] as Array)[1]
+	advisory_row["expected"] = true
+	advisory_row["ungraded_outside_region"] = true
+	var counted: Dictionary = ReplyShape.filter_clearance(mixed, 0, false)
+	check("counts: a row excused without certification counts as uncertified "
+			+ "and NEVER as passing — the three counts partition the pairs, so "
+			+ "pairs_failing cannot go negative",
+			int(counted["pairs_uncertified"]) == 1
+				and int(counted["pairs_passing"]) == 1
+				and int(counted["pairs_failing"]) == 0
+				and int(counted["pairs_passing"]) + int(counted["pairs_uncertified"])
+					+ int(counted["pairs_failing"]) == int(counted["pairs_total"]),
+			"counted = %s" % str(counted))
+	var forced: Dictionary = ReplyShape.filter_clearance(mixed, 0, true, "full")
+	check("counts: failing_only still means something under detail=\"full\" — "
+			+ "it drops the row that cleared and keeps the one the check could "
+			+ "not certify, where detail=\"full\" alone returns both",
+			(forced["pairs"] as Array).size() == 1
+				and bool(((forced["pairs"] as Array)[0] as Dictionary)
+					.get("ungraded_outside_region", false))
+				and (ReplyShape.filter_clearance(mixed, 0, false, "full")
+					["pairs"] as Array).size() == 2,
+			"forced = %s" % str(forced["pairs"]))
+
+	# THE parts= PATH IS THE SAME PATH. A part-scoped call fans out one check
+	# per binding, and a filter that reached only the document's own leg would
+	# hand forty kilobytes back for the one half the author is editing.
+	var scoped: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_check_clearance", {"required_mm": 1.0,
+				"parts": ["top"], "failing_only": true, "limit": 6})
+	var legs: Array = scoped.get("parts", []) as Array
+	var leg: Dictionary = legs[0] if not legs.is_empty() else {}
+	var scoped_bytes := JSON.stringify(scoped).to_utf8_buffer().size()
+	check(("parts=: failing_only and limit are honoured on the part leg too — "
+			+ "six rows of the nine that failed, not fifty, and under %d bytes")
+			% CLEARANCE_LEAN_BUDGET_BYTES,
+			legs.size() == 1 and str(leg.get("part", "")) == "top"
+				and (leg.get("pairs", []) as Array).size() == 6
+				and int(leg.get("pairs_total", 0)) == BOARD_PAIRS
+				and int(leg.get("pairs_failing", 0)) == BOARD_FAILING_PAIRS
+				and scoped_bytes < CLEARANCE_LEAN_BUDGET_BYTES,
+			"leg = %d rows, reply %d bytes"
+				% [(leg.get("pairs", []) as Array).size(), scoped_bytes])
 	panel.free()
+
+
+# ---------------------------------------------------------------------------
+# TWO SIZES, ONE CALL, AND NEITHER GRADED AGAINST THE OTHER'S HOLES
+# ---------------------------------------------------------------------------
+
+## The board goes down on M3, the stick clips in on M2.5, and asked one screw
+## at a time that is three calls — one per size, plus the unscoped one that
+## taught the caller the scoping was needed. The unscoped call is not merely
+## slow: the diameter window round an M3 reaches the stick's 2.6 mm holes, so
+## it grades an M3 against holes no M3 will ever enter and answers with
+## failures that are not failures.
+##
+## The premise is asserted first, with a single screw, so a fixture whose
+## windows stopped overlapping could not pass this quietly.
+func _check_screws_are_scoped_to_their_own_reference() -> void:
+	var panel := _FastenerStandIn.new()
+	root.add_child(panel)
+	var find_holes := func(_p, args: Dictionary) -> Dictionary:
+		return _holes_in_window(args)
+	var has_reference := func(_p, name: String) -> bool:
+		return FASTENER_HOLES.has(name)
+
+	var loose: Dictionary = await FastenerScrews.run(panel,
+			{"screw": {"dia_mm": 3.0, "length_mm": 16.0, "seat": "solid"}},
+			find_holes, has_reference)
+	var loose_refs: Dictionary = {}
+	for entry in (loose.get("screws", []) as Array):
+		loose_refs[str((entry as Dictionary)["reference"])] = true
+	check("fixture: an UNSCOPED M3 really does reach the stick's 2.6 mm "
+			+ "holes — the noise a screw list exists to remove",
+			int(loose.get("count", 0)) == BOARD_SCREW_HOLES + STICK_SCREW_HOLES
+				and loose_refs.has("board") and loose_refs.has("stick"),
+			"unscoped = %s" % str(loose_refs.keys()))
+
+	var both: Dictionary = await FastenerScrews.run(panel, {"screws": [
+			{"dia_mm": 3.0, "length_mm": 16.0, "seat": "solid",
+				"reference": "board"},
+			{"dia_mm": 2.5, "length_mm": 8.0, "reference": "stick"},
+		]}, find_holes, has_reference)
+	var rows: Array = both.get("screws", []) as Array
+	var crossed := false
+	var graded := true
+	for entry in rows:
+		var row: Dictionary = entry
+		var screw: Dictionary = row.get("screw", {}) as Dictionary
+		if not row.has("pass"):
+			graded = false
+		# The one thing the scoping is for: a row whose screw and whose hole
+		# belong to different references.
+		if str(screw.get("reference", "")) != str(row.get("reference", "")):
+			crossed = true
+	check(("screws: two sizes in one call return %d graded rows — the %d "
+			+ "board holes for the M3 and the %d stick holes for the M2.5 — "
+			+ "and NO row grades a screw against another reference's holes")
+			% [BOARD_SCREW_HOLES + STICK_SCREW_HOLES, BOARD_SCREW_HOLES,
+				STICK_SCREW_HOLES],
+			rows.size() == BOARD_SCREW_HOLES + STICK_SCREW_HOLES
+				and graded and not crossed
+				and int(both["count"]) == rows.size()
+				and bool(both["checked"]),
+			"rows = %s" % str(rows))
+	var per: Array = both.get("per_screw", []) as Array
+	var first: Dictionary = per[0] if not per.is_empty() else {}
+	var second: Dictionary = per[1] if per.size() > 1 else {}
+	check("screws: each entry says what it was asked — its reference, its own "
+			+ "diameter window and how many holes that window considered — so "
+			+ "a reader can see why a size paired with what it did",
+			per.size() == 2
+				and str(first.get("reference", "")) == "board"
+				and str(second.get("reference", "")) == "stick"
+				and absf(float((first.get("dia_window_mm", {}) as Dictionary)
+					.get("max", 0.0)) - 7.5) < 1e-6
+				and int(first.get("count", 0)) == BOARD_SCREW_HOLES
+				and int(second.get("count", 0)) == STICK_SCREW_HOLES,
+			"per_screw = %s" % str(per))
+
+	var narrowed: Dictionary = await FastenerScrews.run(panel,
+			{"screw": {"dia_mm": 3.0, "length_mm": 16.0},
+				"min_dia_mm": 3.0, "max_dia_mm": 3.6},
+			find_holes, has_reference)
+	var narrowed_refs: Dictionary = {}
+	for entry in (narrowed.get("screws", []) as Array):
+		narrowed_refs[str((entry as Dictionary)["reference"])] = true
+	check("screws: the CALL's own min_dia_mm/max_dia_mm still narrows the "
+			+ "window — a caller who bounded an M3 to 3.0 - 3.6 mm meant it, "
+			+ "and the stick's 2.6 mm holes stay out of the answer",
+			int(narrowed.get("count", 0)) == BOARD_SCREW_HOLES
+				and not narrowed_refs.has("stick"),
+			"narrowed = %s" % str(narrowed_refs.keys()))
+
+	var sugar: Dictionary = await FastenerScrews.run(panel, {"screws": [
+			{"dia_mm": 3.0, "length_mm": 16.0, "reference": "board"}]},
+			find_holes, has_reference)
+	check("screws: ONE screw still comes back in the single-screw shape — no "
+			+ "per_screw, the screw described once at the top — so `screw` "
+			+ "stays sugar for a one-element list and every existing reader "
+			+ "of this reply is unchanged",
+			not sugar.has("per_screw")
+				and (sugar.get("screw", {}) as Dictionary).has("dia_mm")
+				and int(sugar.get("count", 0)) == BOARD_SCREW_HOLES,
+			"sugar = %s" % str(sugar))
+	panel.free()
+
+
+## The fixture's holes, filtered the way minerva_cad_find_holes filters them:
+## by reference, and by the diameter window the caller asked for.
+func _holes_in_window(args: Dictionary) -> Dictionary:
+	var scope := str(args.get("reference", ""))
+	var low := float(args.get("min_dia_mm", 0.0))
+	var high := float(args.get("max_dia_mm", 1e9))
+	var out: Array = []
+	for reference in FASTENER_HOLES.keys():
+		if not scope.is_empty() and reference != scope:
+			continue
+		for entry in (FASTENER_HOLES[reference] as Array):
+			var dia := float(entry)
+			if dia < low or dia > high:
+				continue
+			out.append({"reference": reference, "node": "%s/hole" % reference,
+				"dia_mm": dia, "through": true})
+	return {"holes": out, "count": out.size()}
 
 
 ## One rib across a bore is met by every ray of the fan. The reply used to
@@ -948,6 +1181,51 @@ class _ClearanceStandIn extends Node:
 
 	func check_clearance(_args: Dictionary) -> Dictionary:
 		return report.duplicate(true)
+
+	# The parts= path evaluates each named binding through the worker before
+	# it measures anything. A tetrahedron is enough: the fan-out only needs a
+	# mesh with faces in it to hand the check a part to be about.
+	func get_document_state() -> Dictionary:
+		return {"source": "top = cube(10, 10, 10)\n", "last_eval": {}}
+
+	func call_backend(_channel: String, _args: Dictionary,
+			_timeout_ms: int) -> Dictionary:
+		return {"success": true, "result": {"ok": true, "result": {
+			"shape_name": "top",
+			"mesh": {
+				"vertices": [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]],
+				"faces": [[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]],
+			},
+		}}}
+
+
+## A panel that grades one row per hole it is handed, so what a screws= call
+## is ABOUT — which holes reached which screw — is the whole of the answer.
+class _FastenerStandIn extends Node:
+	func check_fasteners(args: Dictionary) -> Dictionary:
+		var screw: Dictionary = args.get("screw", {}) as Dictionary
+		var rows: Array = []
+		for entry in (args.get("holes", []) as Array):
+			var hole: Dictionary = entry
+			rows.append({
+				"reference": str(hole.get("reference", "")),
+				"node": str(hole.get("node", "")),
+				"hole_dia_mm": float(hole.get("dia_mm", 0.0)),
+				"screw_dia_mm": float(screw.get("dia_mm", 0.0)),
+				"pass": true,
+			})
+		return {
+			"checked": true,
+			"units": "mm",
+			"count": rows.size(),
+			"failed": 0,
+			"pass": not rows.is_empty(),
+			"screw": screw,
+			"screws": rows,
+			"axis_source": "brep",
+			"engagement_min_d": 2.0,
+			"unpaired": {"solid_features": []},
+		}
 
 
 ## A panel whose evaluation lands after a chosen delay.

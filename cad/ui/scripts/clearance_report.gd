@@ -42,6 +42,10 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 		records: Array, buried: Dictionary, accept_unbounded: bool,
 		expected: Array = []) -> Dictionary:
 	var overlapping: Dictionary = buried.get("nodes", {})
+	# Where the joined interference report met these bodies, per pair key. A
+	# region declaration is matched against these as well as the worker's
+	# witness point; see below.
+	var contacts: Dictionary = buried.get("contacts", {})
 	var undecided: Dictionary = buried.get("undecided", {})
 	var undecided_references: Dictionary = buried.get("undecided_references", {})
 	var pairs: Array = []
@@ -66,15 +70,24 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 			"bound_mm": float(raw.get("bound_mm", raw.get("min_mm", 0.0))),
 			"pass": bool(raw.get("pass", false)),
 		}
-		# The declaration is matched on the points the WORKER measured, before
-		# anything below erases them: a region is a place in the world, and a
-		# pair with no located point can only be declared by name.
-		var declared: int = _Expected.index_for(expected,
-			str(pair["reference"]), str(pair["node"]),
-			_witness_points(raw))
+		# The declaration is matched on every point the check measured for
+		# these two bodies, before anything below erases them: the worker's
+		# own witness points, and the crossings the joined interference report
+		# named for the same pair. A region is a place in the world, and one
+		# pair carries one witness point — four regions round four bosses can
+		# only all match if the crossings at all four are matched too. A pair
+		# with no located point can only be declared by name.
+		var located: Array = _witness_points(raw)
+		located.append_array(contacts.get(
+			_pair_key(pair["reference"], pair["node"]), []) as Array)
+		var answered: Array = _Expected.indices_for(expected,
+			str(pair["reference"]), str(pair["node"]), located)
+		# GRADED against the first of them: one pair keeps one gap.
+		var declared: int = int(answered[0]) if not answered.is_empty() else -1
 		var rule: Dictionary = expected[declared] if declared >= 0 else {}
+		for index in answered:
+			matched[index] = true
 		if declared >= 0:
-			matched[declared] = true
 			pair["expected"] = true
 			pair["required_mm"] = _Expected.required_mm(rule)
 			pair["note"] = _Expected.describe(rule)
@@ -352,6 +365,21 @@ func _witness_points(raw: Dictionary) -> Array:
 	return out
 
 
+## The world crossing points an interference pair carries. They are the second
+## source of "where this pair was measured": a clearance pair has one witness
+## point and an overlapping pair has as many crossings as the walk found, and a
+## region declaration is matched against all of them.
+func _crossing_points(pair: Dictionary) -> Array:
+	var out: Array = []
+	for entry in (pair.get("points_mm", []) as Array):
+		var world: Variant = (entry as Dictionary).get("world", null)
+		if world is Array and (world as Array).size() >= 3:
+			var values: Array = world
+			out.append(Vector3(float(values[0]), float(values[1]),
+				float(values[2])))
+	return out
+
+
 ## The gap this pair is graded against: the one it declared, or the call's.
 func _required_for(pair: Dictionary, fallback: float) -> float:
 	return float(pair["required_mm"]) if pair.has("required_mm") else fallback
@@ -390,7 +418,7 @@ func _required_for(pair: Dictionary, fallback: float) -> float:
 ## says so.
 func _buried_pairs(document: Dictionary, source: String, records: Array,
 		panel: Object) -> Dictionary:
-	var out := {"fresh": false, "nodes": {}, "undecided": {},
+	var out := {"fresh": false, "nodes": {}, "contacts": {}, "undecided": {},
 		"undecided_references": {}}
 	var digest := _source_digest(source)
 	# A PART is measured against its own report, never the document's: the
@@ -443,10 +471,25 @@ func _buried_pairs(document: Dictionary, source: String, records: Array,
 		return out
 	out["fresh"] = true
 	var nodes: Dictionary = out["nodes"]
+	var contacts: Dictionary = out["contacts"]
 	for entry in (interference.get("pairs", []) as Array):
 		var pair: Dictionary = entry
-		nodes[_pair_key(str(pair.get("reference", "")),
-			str(pair.get("node", "")))] = float(pair.get("penetration_mm", 0.0))
+		var key := _pair_key(str(pair.get("reference", "")),
+			str(pair.get("node", "")))
+		nodes[key] = float(pair.get("penetration_mm", 0.0))
+		contacts[key] = _crossing_points(pair)
+	# A contact the declarations excused is not among the pairs — it is under
+	# expected_contacts with what was measured for it — and it is exactly the
+	# place a region was drawn round, so its crossings are carried too.
+	for entry in (interference.get("expected_contacts", []) as Array):
+		var row: Dictionary = entry
+		var key := _pair_key(str(row.get("reference", "")),
+			str(row.get("node", "")))
+		var points: Array = _crossing_points(row)
+		if contacts.has(key):
+			(contacts[key] as Array).append_array(points)
+		else:
+			contacts[key] = points
 	var undecided: Dictionary = out["undecided"]
 	var references: Dictionary = out["undecided_references"]
 	for entry in (interference.get("undecidable", []) as Array):

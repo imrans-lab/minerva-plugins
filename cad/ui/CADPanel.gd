@@ -86,6 +86,15 @@ var _import_notice: String = ""
 ## "timeout" = the panel gave up waiting; elapsed_ms says how long it waited.
 var _last_eval_result: Dictionary = {"status": "empty"}
 
+## The buffer version _last_eval_result describes: the document version that
+## was standing when that evaluation was DISPATCHED. Every measurement verb is
+## about the geometry this panel painted, and the buffer moves on ahead of it —
+## an edit bumps _buffer_version at once and the worker answers seconds later,
+## or never. Holding the two numbers apart is what lets a check say "the buffer
+## is newer than the evaluation" instead of measuring half-hour-old geometry
+## and reporting it as the document. -1 for a panel that has evaluated nothing.
+var _eval_buffer_version: int = -1
+
 ## Everything a note needs to know about the document this tab is showing:
 ## the DSL source, the file it came from, the last evaluation's verdict, the
 ## mesh the worker returned and the mesh() specs it named. One accessor because
@@ -227,6 +236,7 @@ func receive(channel: String, payload: Dictionary) -> void:
 				_eval_debounce_timer.stop()
 			_buffer_path = ""
 			_buffer_version = -1
+			_eval_buffer_version = -1
 			_pending_dsl_text = ""
 			_open_eval_text = ""
 
@@ -403,6 +413,7 @@ func _on_panel_apply_sync(document: Dictionary) -> Dictionary:
 		_annotation_host.set_document_source(_buffer_path, src)
 
 	if src.strip_edges().is_empty():
+		_eval_buffer_version = _buffer_version
 		_last_eval_result = {
 			"status": "empty",
 			"ts": Time.get_unix_time_from_system(),
@@ -476,6 +487,48 @@ func await_evaluation(timeout_ms: int) -> Dictionary:
 		"timed_out": timed_out,
 		"waited_ms": Time.get_ticks_msec() - started_ms,
 	}
+
+
+## Is the geometry this panel is showing the geometry the document describes?
+##
+## Two silent-stale episodes are what this exists for: an edit landed, the
+## panel saved it, and a check made straight afterwards measured an evaluation
+## half an hour old, with nothing in its reply to say so. The buffer's version
+## is bumped the instant the edit arrives; the evaluation carries the version
+## it was dispatched for and the wall-clock time it was stamped. When they
+## disagree — or when an evaluation is queued behind the debounce or still out
+## with the worker — what is on screen is not what the document says, and a
+## measurement of it is an answer about geometry that no longer exists.
+##
+## Returns {known, buffer_version, source_version, evaluated_at,
+## evaluation_status, stale, stale_reason}. `known` is always true here; a
+## caller reaching a panel that has no such method reads it as unknown and
+## refuses nothing.
+func evaluation_freshness() -> Dictionary:
+	var out := {
+		"known": true,
+		"buffer_version": _buffer_version,
+		"source_version": _eval_buffer_version,
+		"evaluated_at": float(_last_eval_result.get("ts", 0.0)),
+		"evaluation_status": str(_last_eval_result.get("status", "")),
+		"stale": false,
+		"stale_reason": "",
+	}
+	# Nothing has ever been dispatched, so there is no evaluation for the
+	# buffer to be ahead of; a check refuses such a panel on its own terms.
+	if _eval_buffer_version >= 0 and _buffer_version > _eval_buffer_version:
+		out["stale"] = true
+		out["stale_reason"] = ("buffer newer than evaluation: the document is "
+			+ "at version %d and the geometry on screen is the evaluation of "
+			+ "version %d. Call minerva_cad_await_eval, then ask again.") 			% [_buffer_version, _eval_buffer_version]
+		return out
+	if _evaluation_is_unsettled():
+		out["stale"] = true
+		out["stale_reason"] = ("the evaluation of version %d has not been "
+			+ "painted yet — it is queued behind the edit debounce or still "
+			+ "with the worker, and the geometry standing now is the previous "
+			+ "one. Call minerva_cad_await_eval, then ask again.") 			% _buffer_version
+	return out
 
 
 ## True while an evaluation is either queued behind the debounce or still out
@@ -612,7 +665,10 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 		args["request_id"] = request_id
 		_inflight_request_id = request_id
 	# Mark pending BEFORE the await so a same-tick doc_read sees pending, not
-	# stale prior result.
+	# stale prior result. The buffer version is taken here, at dispatch: this
+	# evaluation is of the text standing now, whatever the buffer becomes while
+	# the worker is out.
+	_eval_buffer_version = _buffer_version
 	_last_eval_result = {
 		"status": "pending",
 		"request_id": request_id,

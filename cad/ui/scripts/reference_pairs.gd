@@ -475,16 +475,21 @@ func _pairs_report(reply: Dictionary, records: Array, required_mm: float,
 		# A declaration on either side excuses the pair: an intended contact is
 		# stated about the part that is meant to touch, and the author has no
 		# reason to know which of the two the check will call `a`.
-		var index: int = _Expected.index_for(expected,
+		var answered: Array = _Expected.indices_for(expected,
 			str(side_a.get("reference", "")), str(side_a.get("node", "")),
 			points)
-		if index < 0:
-			index = _Expected.index_for(expected,
+		if answered.is_empty():
+			answered = _Expected.indices_for(expected,
 				str(side_b.get("reference", "")), str(side_b.get("node", "")),
 				points)
+		# Every declaration these two witness points answer to is matched, so a
+		# second region over the same node is not reported stale; the pair is
+		# GRADED against the first, because one pair keeps one gap.
+		var index: int = int(answered[0]) if not answered.is_empty() else -1
+		for answer in answered:
+			matched[answer] = true
 		if index >= 0:
 			var declaration: Dictionary = expected[index]
-			matched[index] = true
 			var allowed: float = _Expected.required_mm(declaration)
 			var excused: bool = bound_mm >= allowed and not overlap \
 				and containment != "undecidable"

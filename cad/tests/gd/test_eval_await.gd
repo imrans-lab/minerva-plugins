@@ -29,6 +29,8 @@ const PANEL_SCENE_PATH := "res://../../minerva-plugins/cad/ui/CADPanel.tscn"
 ## tests/gd/REQUIRED_HOST_FILES so a host refactor fails by name.
 const DocumentBufferScript := preload("res://Scripts/Services/Documents/DocumentBuffer.gd")
 const PanelBrokerScript := preload("res://Scripts/Services/Plugins/PluginScenePanelBroker.gd")
+## The panel's MCP verb surface, which is where the staleness guard sits.
+const PanelTools := preload("res://../../minerva-plugins/cad/ui/panel_tools.gd")
 
 const SOURCE := "part = cube(10, 10, 10)\n"
 const EDITED_SOURCE := "part = cube(20, 10, 10)\n"
@@ -78,6 +80,7 @@ func _run() -> void:
 	await _test_giving_up_is_said_out_loud()
 	await _test_a_newer_evaluation_still_preempts_an_older_one()
 	await _test_awaiting_covers_the_debounce_as_well_as_the_worker()
+	await _test_a_check_refuses_geometry_the_document_moved_past()
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +308,122 @@ func _test_awaiting_covers_the_debounce_as_well_as_the_worker() -> void:
 					as Dictionary).get("status", "")) == "ok"
 				and int((outcome["reply"] as Dictionary).get("waited_ms", 0)) >= 100,
 			"waited = %s" % str(outcome["reply"]))
+	_teardown(rig)
+
+
+# ---------------------------------------------------------------------------
+# A CHECK NEVER MEASURES GEOMETRY THE DOCUMENT HAS MOVED PAST
+# ---------------------------------------------------------------------------
+
+## Two of the rev-4 session's worst hours went on this: an edit landed, the
+## panel saved it, and the check made straight afterwards measured an
+## evaluation half an hour old. Nothing in the reply said so, and a number that
+## is right about geometry nobody has any more is worse than no number — it is
+## one the reader acts on.
+##
+## The buffer's version moves the instant the edit lands; the evaluation
+## carries the version it was DISPATCHED for. While those disagree a measuring
+## verb is refused, with the reason and both numbers, and minerva_cad_await_eval
+## — the way through — is never refused. This drives the real panel, the real
+## buffer and the real verb dispatcher; only the worker is stood in.
+func _test_a_check_refuses_geometry_the_document_moved_past() -> void:
+	var rig := _make_rig("cad_panel_stale_guard")
+	if rig.is_empty():
+		return
+	var panel: Node = rig["panel"]
+	panel._eval_await_chunk_ms = CHUNK_MS
+	panel._eval_give_up_ms = PATIENT_GIVE_UP_MS
+
+	_attach_document(rig, SOURCE)
+	var opened: Array = _evaluations(rig["dispatched"])
+	if opened.is_empty():
+		_teardown(rig)
+		return
+	_reply(rig, str((opened[0] as Dictionary)["reply_id"]), _worker_answer())
+	await create_timer(0.2).timeout
+
+	var settled: Dictionary = panel.evaluation_freshness()
+	check("stale: a panel that has PAINTED the document it was given is not "
+			+ "stale — the evaluation and the buffer name one version, and "
+			+ "the panel says when that evaluation was stamped",
+			not bool(settled["stale"])
+				and int(settled["source_version"]) == int(settled["buffer_version"])
+				and float(settled["evaluated_at"]) > 0.0,
+			"freshness = %s" % str(settled))
+
+	# The edit lands. The buffer's version has moved; the debounce is armed and
+	# nothing has been dispatched, so the geometry on screen is the old shape.
+	(rig["buffer"] as Object).apply_edit(EDITED_SOURCE)
+	var refused: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_check_interference", {})
+	check("stale: a check made inside the debounce is REFUSED, not answered — "
+			+ "checked false, the reason names the buffer as newer than the "
+			+ "evaluation, and both version numbers travel so the caller can "
+			+ "see by how much",
+			not bool(refused.get("checked", true))
+				and bool(refused.get("stale", false))
+				and str(refused.get("reason", "")).contains(
+					"buffer newer than evaluation")
+				and int(refused["buffer_version"]) > int(refused["source_version"])
+				and float(refused["evaluated_at"]) > 0.0,
+			"refused = %s" % str(refused))
+
+	var refused_gap: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_check_clearance", {"required_mm": 1.0})
+	check("stale: the clearance verb is refused the same way, and NOTHING was "
+			+ "measured — the reply carries no pairs to be mistaken for an "
+			+ "answer",
+			not bool(refused_gap.get("checked", true))
+				and bool(refused_gap.get("stale", false))
+				and not refused_gap.has("pairs"),
+			"refused = %s" % str(refused_gap))
+
+	# An against= key on a verb that has no pair branch is ignored by that
+	# verb's body: it still measures the evaluated solid, so it must not lift
+	# the gate the way a real reference-against-reference call does.
+	var pretend_pair: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_check_fasteners",
+			{"against": "lid", "screw": {"dia_mm": 3.0, "length_mm": 16.0}})
+	check("stale: an against= key on a verb with no pair branch does NOT lift "
+			+ "the guard — check_fasteners measures the solid whatever else "
+			+ "the call names, so it is refused with the same reason",
+			not bool(pretend_pair.get("checked", true))
+				and bool(pretend_pair.get("stale", false))
+				and str(pretend_pair.get("reason", "")).contains(
+					"buffer newer than evaluation"),
+			"reply = %s" % str(pretend_pair))
+
+	# minerva_cad_await_eval is the way through, so it is never refused.
+	var outcome: Dictionary = {"reply": {}}
+	var wait := func() -> void:
+		outcome["reply"] = await PanelTools.handle(panel,
+				"minerva_cad_await_eval", {"timeout_ms": 5000})
+	wait.call()
+	await create_timer(0.4).timeout
+	var dispatched: Array = _evaluations(rig["dispatched"])
+	if dispatched.size() >= 2:
+		_reply(rig, str((dispatched[1] as Dictionary)["reply_id"]), _worker_answer())
+	await create_timer(0.4).timeout
+	var waited: Dictionary = outcome["reply"]
+	check("stale: minerva_cad_await_eval is never refused — it is the way "
+			+ "through — and its reply carries the same four fields, now "
+			+ "agreeing on a newer evaluation",
+			not waited.is_empty()
+				and not bool(waited.get("stale", true))
+				and int(waited["source_version"]) == int(waited["buffer_version"])
+				and float(waited["evaluated_at"]) >= float(settled["evaluated_at"]),
+			"await = %s" % str(waited))
+
+	var measured: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_check_interference", {})
+	check("stale: once the panel has caught up the check RUNS — whatever it "
+			+ "finds, its answer is no longer the staleness refusal, and the "
+			+ "reply says the two versions agree",
+			not bool(measured.get("stale", true))
+				and not str(measured.get("reason", "")).contains(
+					"buffer newer than evaluation")
+				and int(measured["source_version"]) == int(measured["buffer_version"]),
+			"measured = %s" % str(measured))
 	_teardown(rig)
 
 

@@ -237,6 +237,7 @@ func _run() -> void:
 	await _check_pose_rewritten_in_place(panel, checks)
 	await _check_parts_changed_during_await(panel, checks)
 	await _check_unbounded_tolerance(panel, checks)
+	await _check_regions_match_every_contact(panel, checks)
 	await _check_lean_filter(panel, checks)
 	await _check_quantization(panel, checks)
 	await _check_more_nodes_than_the_worker_caches(panel, checks)
@@ -1148,7 +1149,7 @@ func _check_a_part_joins_its_own_report(panel: Node, checks: RefCounted) -> void
 ## one about where the references used to stand.
 func _interference_over(source: String, nodes: Array,
 		undecided: Array = [], whole_reference: String = "",
-		penetration_mm: float = 0.0) -> Dictionary:
+		penetration_mm: float = 0.0, crossings: Array = []) -> Dictionary:
 	var hasher := HashingContext.new()
 	hasher.start(HashingContext.HASH_SHA256)
 	hasher.update(source.to_utf8_buffer())
@@ -1156,8 +1157,19 @@ func _interference_over(source: String, nodes: Array,
 	for node in nodes:
 		# The depth travels with the pair: a declared contact is excused only
 		# up to the overlap it declared, and the unsigned distance has none.
-		pairs.append({"reference": REFERENCE_NAME, "node": str(node),
-			"penetration_mm": penetration_mm})
+		var pair := {"reference": REFERENCE_NAME, "node": str(node),
+			"penetration_mm": penetration_mm}
+		# WHERE the walk met this pair. A region declaration is matched
+		# against these as well as the worker's own witness point, which is
+		# the only way four regions on one node can all match.
+		if not crossings.is_empty():
+			var located: Array = []
+			for point in crossings:
+				var at: Vector3 = point
+				located.append({"world": [at.x, at.y, at.z]})
+			pair["points_mm"] = located
+			pair["point_count"] = located.size()
+		pairs.append(pair)
 	var open_questions: Array = []
 	for node in undecided:
 		open_questions.append({
@@ -1594,6 +1606,76 @@ func _check_unbounded_tolerance(panel: Node, checks: RefCounted) -> void:
 
 
 # ---------------------------------------------------------------------------
+# ONE NODE, FOUR REGIONS
+# ---------------------------------------------------------------------------
+
+## A board rests on four bosses and every one of them is a contact the design
+## MEANS to have, so the author declares four regions — one per boss — on the
+## one node the board is. A clearance pair carries ONE witness point, the
+## minimum-distance one, so a matcher that looked only at that could match only
+## the region the closest boss happened to fall in and reported the other three
+## as declarations that matched nothing: three lines of "this has gone stale"
+## about three contacts that are all there. The measured contacts of a pair are
+## every crossing the interference report named for it as well, and a region
+## matches when ANY of them lies inside it.
+##
+## The fifth region is drawn over empty air and must still be unmatched: a
+## matcher that stopped reporting stale declarations would pass the first half
+## of this and fail here.
+func _check_regions_match_every_contact(panel: Node, checks: RefCounted) -> void:
+	# Four contacts on ONE node, spaced along the bar, and a shallow overlap
+	# the declarations can excuse.
+	var bosses: Array = []
+	for index in range(4):
+		bosses.append(POSE_ORIGIN + Vector3(float(index) * 10.0, 0.0, 0.0))
+	panel.last_eval = _interference_over(SOURCE, [NEAR_NODE], [],
+		"", 0.005, bosses)
+
+	var declared: Array = []
+	for at in bosses:
+		declared.append({"reference": REFERENCE_NAME, "node": NEAR_NODE,
+			"required_mm": 0.0, "why": "the board rests on this boss",
+			"region_mm": _box_round(at as Vector3)})
+	declared.append({"reference": REFERENCE_NAME, "node": NEAR_NODE,
+		"required_mm": 0.0, "why": "a boss that is not there",
+		"region_mm": _box_round(POSE_ORIGIN + Vector3(500.0, 500.0, 500.0))})
+
+	var report: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 1.0, "expected_contacts": declared})
+	var unmatched: Array = report.get("expected_contacts_unmatched", []) as Array
+	var row := _pair_for(report, NEAR_NODE)
+	check("regions: four regions over the four contacts of ONE node all "
+			+ "match — the pair's crossings are matched to a region each, not "
+			+ "only its minimum-distance witness — and the fifth region, "
+			+ "drawn over air nothing was measured in, is the ONLY one "
+			+ "reported unmatched",
+			unmatched.size() == 1
+				and str((unmatched[0] as Dictionary).get("note", ""))
+					.contains("no measured contact")
+				and bool(row.get("expected", false))
+				and bool(row.get("interference", false)),
+			"unmatched = %s, row = %s" % [str(unmatched), str(row)])
+	check("regions: a declaration is still GRADED once — one pair keeps one "
+			+ "gap, so the four that matched produce one declared row and one "
+			+ "verdict, and the shallow overlap they excuse is uncertified "
+			+ "rather than passed",
+			(report.get("expected_contacts", []) as Array).size() == 1
+				and int(report.get("excluded_count", 0)) == 1
+				and not bool(report.get("pass", true))
+				and bool(report.get("advisory", false)),
+			"report = %s" % str(report))
+	panel.last_eval = _interference_over(SOURCE, [])
+
+
+## A 4 mm box centred on a world point, as a region_mm declaration takes it.
+func _box_round(at: Vector3) -> Dictionary:
+	return {
+		"min_mm": [at.x - 2.0, at.y - 2.0, at.z - 2.0],
+		"max_mm": [at.x + 2.0, at.y + 2.0, at.z + 2.0],
+	}
+
+
+# ---------------------------------------------------------------------------
 # What the caller reads: failing_only, and what it hides
 # ---------------------------------------------------------------------------
 
@@ -1635,17 +1717,23 @@ func _check_lean_filter(panel: Node, checks: RefCounted) -> void:
 				and str(only.get("node", "")) == NEAR_NODE
 				and absf(float(only.get("min_mm", 0.0)) - 0.9) < 1.0e-6,
 			"advisory = %s, shown = %s" % [str(advisory.get("pairs")), str(shown)])
-	check("lean: the reply says how many pairs the filter hid, and an "
-			+ "unfiltered one says none were",
+	check("lean: the reply says how many pairs the filter hid; LEAN IS THE "
+			+ "DEFAULT — a caller that asked for neither filter still gets "
+			+ "only the row that missed, with the one that cleared counted in "
+			+ "pairs_passing — and detail=\"full\" is what returns every row",
 			int(failing.get("pairs_total", 0)) == 2
 				and int(failing.get("pairs_shown", 0)) == 1
 				and int(failing.get("pairs_hidden", 0)) == 1
 				and int(failing.get("pairs_failing", 0)) == 1
 				and str(failing.get("pairs_filter", "")).contains("hidden")
-				and int(ReplyShape.filter_clearance(advisory, 0, false)
+				and int(ReplyShape.filter_clearance(advisory, 0, false, "full")
 					.get("pairs_hidden", -1)) == 0
+				and int(ReplyShape.filter_clearance(advisory, 0, false, "full")
+					.get("pairs_total", 0)) == 2
 				and int(ReplyShape.filter_clearance(advisory, 0, false)
-					.get("pairs_total", 0)) == 2,
+					.get("pairs_hidden", -1)) == 1
+				and int(ReplyShape.filter_clearance(advisory, 0, false)
+					.get("pairs_passing", -1)) == 1,
 			"failing = %s" % str(failing))
 
 	# The far node declares a 20 mm gap of its own, which its 10.9 mm does not

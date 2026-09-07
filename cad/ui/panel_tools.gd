@@ -91,6 +91,11 @@ const _ReferenceVerbs: Script = preload("scripts/reference_verbs.gd")
 const _KeepoutDsl: Script = preload("scripts/keepout_dsl.gd")
 ## The framed capture: fit resolution, the offscreen camera and the PNG.
 const _FitCapture: Script = preload("scripts/fit_capture.gd")
+## Whether the geometry a check is about to measure is the geometry the
+## document describes, and the refusal when it is not.
+const _Freshness: Script = preload("scripts/eval_freshness.gd")
+## Several screw sizes in one call, each graded against its own reference.
+const _FastenerScrews: Script = preload("scripts/fastener_screws.gd")
 
 ## How long minerva_cad_await_eval waits by default, and the most it will
 ## wait when asked. A heavy document is minutes of worker time, and the cap
@@ -99,7 +104,44 @@ const DEFAULT_AWAIT_TIMEOUT_MS: int = 30000
 const MAX_AWAIT_TIMEOUT_MS: int = 300000
 
 
+## Every verb goes through the freshness gate first.
+##
+## A measuring verb reaches colliders built from the evaluation the panel
+## PAINTED, and the document buffer runs ahead of that — an edit lands, the
+## debounce runs, the worker takes its time, and a check in between measures
+## the previous shape with nothing in its reply to say so. So the panel is
+## asked whether the two describe one document: a measuring verb is REFUSED
+## while they do not, and every check and await reply carries the version it
+## was about, the version the buffer is at, and when that evaluation was
+## stamped. See scripts/eval_freshness.gd.
+## The verbs whose dispatch has a reference-pair branch (see _dispatch).
+const PAIR_VERBS: Array[String] = [
+	"minerva_cad_check_interference",
+	"minerva_cad_check_clearance",
+]
+
+
 static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
+	var freshness: Dictionary = _Freshness.read(panel)
+	# A reference-against-reference call measures two mounted meshes and never
+	# the evaluated solid, so the document running ahead of its evaluation
+	# says nothing about its answer: it is STAMPED but not refused. Only the
+	# two verbs that actually route a pair call away from the solid earn that;
+	# an against= key on any other verb is ignored by its body and must not
+	# lift the gate.
+	var pair_call: bool = PAIR_VERBS.has(tool_name) and _ReferenceVerbs.is_pair_call(args)
+	if not pair_call and _Freshness.blocks(tool_name, freshness):
+		return _Freshness.refusal(freshness)
+	var reply: Dictionary = await _dispatch(panel, tool_name, args)
+	if not _Freshness.STAMPED_VERBS.has(tool_name):
+		return reply
+	# Read AGAIN: the document can change while a measurement runs, and a
+	# reply stamped with the state before it would say the geometry it
+	# describes is current when it no longer is.
+	return _Freshness.stamp(reply, _Freshness.read(panel))
+
+
+static func _dispatch(panel, tool_name: String, args: Dictionary) -> Dictionary:
 	match tool_name:
 		"minerva_cad_view_state":
 			return _view_state(panel, args)
@@ -204,6 +246,19 @@ static func _per_part(panel, args: Dictionary, verb: Callable) -> Dictionary:
 	var failed := 0
 	for entry in wanted:
 		var part := str(entry)
+		# RE-GATED PER LEG. A part evaluates in the worker and its check stands
+		# in the collider's wait line, and the document can be edited across
+		# either; the gate in handle() ran before the first leg only. A leg
+		# that has already measured cannot be un-measured, so the reply it
+		# produced keeps its stale stamp — this refuses the legs that have not
+		# started yet rather than adding one more answer about geometry the
+		# document has moved past.
+		var standing: Dictionary = _Freshness.read(panel)
+		if bool(standing.get("stale", false)) and bool(standing.get("known", false)):
+			rows.append({"part": part, "checked": false,
+				"reason": str(standing.get("stale_reason", "")), "stale": true})
+			failed += 1
+			continue
 		var resolved: Dictionary = await _PartScope.resolve(panel, part)
 		if resolved.has("error"):
 			rows.append({"part": part, "checked": false,
@@ -518,7 +573,8 @@ static func _check_clearance(panel, args: Dictionary) -> Dictionary:
 		if collected.has("error"):
 			return _err(str(collected["error"]))
 		return _ok(_ReplyShape.filter_clearance(collected,
-			int(args.get("limit", 0)), bool(args.get("failing_only", false))))
+			int(args.get("limit", 0)), bool(args.get("failing_only", false)),
+			str(args.get("detail", ""))))
 	var asked := str(args.get("reference", ""))
 	if not asked.is_empty() and not _has_reference(panel, asked):
 		return _err("no reference named '%s' is mounted" % asked)
@@ -547,7 +603,8 @@ static func _check_clearance(panel, args: Dictionary) -> Dictionary:
 	if report.has("error"):
 		return _err(str(report["error"]))
 	return _ok(_ReplyShape.filter_clearance(report,
-		int(args.get("limit", 0)), bool(args.get("failing_only", false))))
+		int(args.get("limit", 0)), bool(args.get("failing_only", false)),
+		str(args.get("detail", ""))))
 
 
 ## Make sure a PART has an interference report of its own before its
@@ -613,56 +670,20 @@ static func _pairs_interference(panel, args: Dictionary) -> Dictionary:
 ## against is the same measured hole minerva_cad_find_holes would report, with
 ## the same gauge behind it. The diameter window defaults to a band around the
 ## screw so a board full of vias does not become a hundred pairing candidates.
+##
+## SEVERAL SIZES IN ONE CALL. `screws: [{dia_mm, length_mm, reference?, ...}]`
+## grades each entry against the holes of its own reference only; `screw` is
+## sugar for a one-element list and keeps the single-screw reply shape. The
+## per-screw loop, the scoping and the merge live in scripts/fastener_screws.gd
+## — it is handed _find_holes and _has_reference as Callables because they are
+## members of this chain and preloading it back would be a cycle.
 static func _check_fasteners(panel, args: Dictionary) -> Dictionary:
 	if panel == null or not panel.has_method("check_fasteners"):
 		return _err("fastener checking is not available on this panel")
-	var asked := str(args.get("reference", ""))
-	if not asked.is_empty() and not _has_reference(panel, asked):
-		return _err("no reference named '%s' is mounted" % asked)
-	var screw: Dictionary = args.get("screw", {}) as Dictionary
-	var dia := float(screw.get("dia_mm", 0.0))
-	if dia <= 0.0:
-		return _err("check_fasteners needs screw: {dia_mm, length_mm} in millimetres")
-
-	var hole_args := args.duplicate(true)
-	hole_args["min_dia_mm"] = float(args.get("min_dia_mm", dia * 0.8))
-	hole_args["max_dia_mm"] = float(args.get("max_dia_mm", dia * 2.5))
-	var holes: Dictionary = await _find_holes(panel, hole_args)
-	if holes.has("error"):
-		return holes
-
-	var report: Dictionary = await panel.check_fasteners({
-		# A part-scoped call brings both: the mesh the rays are cast against
-		# and the source the B-Rep bores are read from. They must be the same
-		# part or the bores would be one shape's and the collider another's.
-		"mesh": args.get("mesh", {}),
-		"source": str(args.get("source", "")),
-		"screw": screw,
-		"holes": holes.get("holes", []),
-		"pairs": args.get("pairs", []),
-		"engagement_min_d": float(args.get("engagement_min_d",
-			_FastenerChecks.DEFAULT_ENGAGEMENT_D)),
-		"clearance_hole_dia_mm": args.get("clearance_hole_dia_mm", 0.0),
-		"compare_fit": bool(args.get("compare_fit", false)),
-		"reference": asked,
-		"node": str(args.get("node", "")),
-	})
+	var report: Dictionary = await _FastenerScrews.run(panel, args,
+		_find_holes, _has_reference)
 	if report.has("error"):
 		return _err(str(report["error"]))
-	report = _ReplyShape.collapse_report_obstructions(report)
-	# The unpaired features are the bulk of a shell's reply and are the same
-	# list on every call, so they travel as counts unless the caller asks for
-	# the rows.
-	report = _ReplyShape.lean_fastener_report(report, str(args.get("detail", "")))
-	report["holes_considered"] = int(holes.get("count", 0))
-	report["pairs_note"] = "reference_hole_index[].index is the number a "\
-		+ "pairs entry's `reference_hole` names — a hole with no usable axis "\
-		+ "is not in it, so the numbering is the check's own and not the "\
-		+ "order minerva_cad_find_holes reported. Obstruction rows are "\
-		+ "collapsed to one per (node, span), keeping the nearest crossing "\
-		+ "with a count and the axial range the rays met it over, and "\
-		+ "unpaired.solid_features to one row per diameter and fit — pass "\
-		+ "detail=\"full\" for the unpaired features themselves."
 	return _ok(report)
 
 

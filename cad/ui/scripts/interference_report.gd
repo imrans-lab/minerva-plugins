@@ -242,6 +242,13 @@ func _report(pairs: Dictionary) -> Dictionary:
 		var holds: bool = depth > 0.0 and depth <= allowed
 		var declared_row: Dictionary = _Expected.row(entry, str(bucket["reference"]),
 			str(bucket["node"]), "overlap", depth, holds)
+		# WHERE the declaration was met, in both frames. An exclusion a reader
+		# cannot locate is one they cannot check, and a clearance check joining
+		# this report matches its own region declarations against these points
+		# — a bucket's crossings are not among `pairs` to be found there.
+		var located: Dictionary = _pair_row(bucket)
+		declared_row["points_mm"] = located["points_mm"]
+		declared_row["point_count"] = int(located["point_count"])
 		declared_rows.append(declared_row)
 		if holds:
 			declared_row["certified"] = false
