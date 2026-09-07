@@ -82,7 +82,7 @@ test_mesh_measurement.gd assertions=72
 # millimetre under a scaled pose, and that a pose scaled by 2 reports twice
 # the diameter in world and the file's own in local. Also that a reference
 # set which keeps changing while a verb waits comes back marked stale with a
-# reason, and a settled one does not. Also — bug 01a07a19a9e8 — that the
+# reason, and a settled one does not. Also that the
 # gauge verb measures the EVALUATED SOLID and not only the references: a
 # sphere inside a solid plate mounted through the real interference_world
 # path does not fit and reports a WITNESS contact naming the solid (a witness
@@ -257,7 +257,12 @@ test_cad_note.gd assertions=40
 # legs that follow (builds vs generation), a verb arriving while a check
 # runs QUEUES and reports the wait instead of bouncing, two verbs fired
 # together both answer, and both bounds on that line still refuse.
-test_interference.gd assertions=81
+# + 1 the part cache holds only the UNDECLARED report: a report measured under
+# expected_contacts is not kept, because the slot is keyed by source digest
+# alone and a later call declaring nothing would be handed a report whose
+# declared pairs had already left it; the undeclared report of the same source
+# is kept.
+test_interference.gd assertions=82
 
 # Clearance between the evaluated solid and a reference: two bars crossing at
 # right angles with 0.8 mm of air between them, the reference YAWED 30 degrees
@@ -573,8 +578,8 @@ test_stl_reference.gd assertions=18
 # lifts inside the CONTACT TOLERANCE are contacts, 3 the two lifts past it and
 # the half-millimetre bite are interference on the boss's node, 1 the tilted
 # plate over an exactly coplanar boss is a contact on the reference-cast leg).
-# The swapped brackets moved from either side of the touch epsilon to either
-# side of expected_contacts.gd's CONTACT_TOLERANCE_MM (bug 01a079f9f8f4):
+# The swapped brackets sit either side of expected_contacts.gd's
+# CONTACT_TOLERANCE_MM rather than either side of the touch epsilon:
 # 2e-4 mm is the precision the hit positions arrive in and is now a contact,
 # and 0.02 mm was ADDED beside the 0.05 mm control so the tolerance cannot
 # drift across that gap unseen — one more assertion than before.
@@ -582,10 +587,11 @@ test_flush_contact.gd assertions=20
 
 # The coaxial cousin of the case above: a clearance bore seated on a plate
 # that has a screw hole under it, where the two rims are concentric circles in
-# the shared plane and the bodies overlap nowhere (bug 01a079f9f8f4).
+# the shared plane and the bodies overlap nowhere.
 # 16 = 3 fixture (the hole lies inside the bore, the underside edges cut both
 # rims, the plate became one collider) + 3 the seat is a contact exactly
-# coplanar, at the offset rev-4 measured, and is reported AS a contact + 2 the
+# coplanar, at three ten-thousandths of a millimetre out, and is reported
+# AS a contact + 2 the
 # same boss sunk 0.2 mm is interference and carries a measured run + 2 the
 # locating spigot clears the hole / cuts it + 1 a drafted boss (ten degrees of
 # draft, so the two surfaces meeting at the rim are oblique) is still a
@@ -644,16 +650,16 @@ test_rim_contact.gd assertions=16
 # 3 KB instead of forty; what did not travel is COUNTED — pairs_passing,
 # pairs_failing and pairs_hidden add up and the verdict is still graded over
 # every pair; a row that travels keeps BOTH point frames; and failing_only
-# with limit is honoured on the parts= leg too, which is where the rev-4
-# session got fifty rows back). The "fixture: fifty pairs really is
+# with limit is honoured on the parts= leg too, which is the leg that
+# otherwise returns every row). The "fixture: fifty pairs really is
 # kilobytes" assertion now asks for detail="full" — that is the deliberate
 # re-pin of the default reply shape.
-# Plus 4 the screw LIST (an unscoped M3's window really does reach the stick's
+# Plus 5 the screw LIST (an unscoped M3's window really does reach the stick's
 # 2.6 mm holes, which is the noise the list removes; two sizes in one call
 # return eight graded rows with no screw graded against another reference's
-# holes; per_screw says what each entry was asked; and a one-element list
-# still comes back in the single-screw shape, so `screw` stays sugar; and the
-# CALL's own min_dia_mm/max_dia_mm still narrows the window it is given).
+# holes; per_screw says what each entry was asked; a one-element list still
+# comes back in the single-screw shape, so `screw` stays sugar; and the CALL's
+# own min_dia_mm/max_dia_mm still narrows the window it is given).
 # Plus 2 count assertions: a row excused without certification is uncertified
 # and never passing, so the three counts partition the pairs and pairs_failing
 # cannot go negative; failing_only still drops the rows that cleared under
@@ -705,7 +711,7 @@ test_pane_projection.gd assertions=17
 # pane is pointed at Top, and Perspective is then the refused one)
 # + 3 the panes showing a direction, which draw the mesh outline and so are the
 # only ones a capture costs anything extra (1 fixture: three panes hold a
-# rev-3-scale shell and draw an outline of it while the iso pane, drawing no
+# full-size shell and draw an outline of it while the iso pane, drawing no
 # outline, has walked no edge of it; 1 repro: four consecutive captures of each,
 # plus the mesh arriving, all inside one budget; 1 the wait named: the outline
 # is walked once and kept, so three further rounds cost less between them than
@@ -757,10 +763,15 @@ test_ortho_speckles.gd assertions=19
 # made inside the debounce after an edit is REFUSED with checked:false, the
 # reason naming the buffer as newer than the evaluation, and both version
 # numbers; the clearance verb is refused the same way and carries no pairs;
-# minerva_cad_await_eval is never refused and its reply carries the same four
+# minerva_cad_await_eval is never refused and its reply carries the same
 # fields agreeing on the newer evaluation; and once the panel has caught up
-# the check runs again).
-test_eval_await.gd assertions=28
+# the check runs again)
+# + 2 the evaluation that FAILED (it painted nothing, so source_version stays
+# on the version the colliders are of rather than the version that was
+# dispatched, the check is refused with a reason naming the failed evaluation,
+# and evaluation_status on every stamped reply tells a version that was
+# painted from one that was only reached for).
+test_eval_await.gd assertions=30
 
 # Two documents open on ONE real broker: each keeps its own registration, IPC
 # helper and evaluation, an edit to one reaches only its own worker, and
@@ -806,10 +817,17 @@ test_eval_banner.gd assertions=9
 # Also the evaluate-once oracle: four parts across three legs cost FOUR
 # worker evaluations and not twelve, an unchanged document costs none, and
 # the next evaluation of the document invalidates every binding.
-# + 1 (bug 01a079fa07a4) a part-scoped leg that only handed back a ticket,
+# + 1 a part-scoped leg that only handed back a ticket,
 # having measured nothing, never aggregates to pass:true — the shared
 # per-part fold names the ticket in pass_reason instead.
-test_check_design.gd assertions=30
+# + 3 verdicts that must not be folded clean: a leg that MEASURED and is
+# stamped stale folds as advisory with the reason and the design reply carries
+# `stale` for the verb layer to stamp; a part leg that grades nothing (the
+# shape a material row has) yields pass null with a note rather than the true
+# a missing key was read as; and a worker TIMEOUT on a part is not cached, so
+# the next call reaches the worker again instead of replaying "did not
+# evaluate" for the life of the document.
+test_check_design.gd assertions=33
 
 # minerva_cad_snapshot_fit: a capture framed on the evaluated solid, a named
 # reference or a world box, rendered from a camera of its own so the pane the
@@ -848,5 +866,11 @@ test_snapshot_fit.gd assertions=11
 # + 4 the section argument (axis, offset_mm, keep validated; the resolved plane
 # pointing at the half that is kept) + 4 the cut itself (it changes the
 # picture, it exposes the sealed cavity, it only ever REMOVES material, and
-# keep='+' is the complementary half).
-test_snapshot_posed.gd assertions=20
+# keep='+' is the complementary half)
+# + 2 the private world (the section overrides the SOLID's material, so the
+# feature-edge overlay is left out of the mirror while a section is active
+# rather than drawing the discarded half's silhouette over the cut; and a
+# render target that was allocated and never drawn reads back as one flat
+# colour, which the forced path tells from a real frame and refuses with
+# drawn:false).
+test_snapshot_posed.gd assertions=22

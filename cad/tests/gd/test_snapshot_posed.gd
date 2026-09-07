@@ -24,9 +24,9 @@ extends SceneTree
 ## pose that does not turn the camera, or a plane resolved to the wrong side,
 ## moves these pixels.
 ##
-## WHAT THE ACCEPTANCE ASKED FOR AND WHY IT IS NOT ASSERTED. "A pixel that is
-## background without the section becomes solid-coloured with it" cannot happen
-## and must not be asserted: a clip plane only REMOVES material, so a ray that
+## WHAT A SECTION CANNOT DO, AND SO IS NOT ASSERTED. "A pixel that is
+## background without the section becomes solid-coloured with it" cannot
+## happen: a clip plane only REMOVES material, so a ray that
 ## met nothing still meets nothing. What a section really exposes is a
 ## different SURFACE at a pixel that was already solid — the enclosed cavity in
 ## this fixture, which no unsectioned view of an opaque solid can show at all.
@@ -267,6 +267,56 @@ func _run() -> void:
 	check("keep='+' is the complementary half, not the same picture",
 			_differs(cut, opposite) > 0.2,
 			"%.3f of pixels differ" % _differs(cut, opposite))
+
+	# ── What a section does to the OUTLINE, and what a forced frame is worth ──
+	# Both are about the private world rather than about the pixels the
+	# rasteriser above stands in for, so they are asked of the two production
+	# helpers that decide them.
+	var source := Node3D.new()
+	root.add_child(source)
+	var solid := MeshInstance3D.new()
+	solid.mesh = BoxMesh.new()
+	source.add_child(solid)
+	var outline := MeshInstance3D.new()
+	outline.name = "FeatureEdges"
+	outline.mesh = BoxMesh.new()
+	source.add_child(outline)
+	await process_frame
+
+	var whole_mirror := Node3D.new()
+	root.add_child(whole_mirror)
+	var mirrored_whole: int = _PosedCapture._mirror_into(source, whole_mirror,
+		solid, {})
+	var cut_mirror := Node3D.new()
+	root.add_child(cut_mirror)
+	var mirrored_cut: int = _PosedCapture._mirror_into(source, cut_mirror, solid,
+		_PosedCapture.resolve_section({"axis": "z", "offset_mm": 0.0,
+			"keep": "-"}) as Dictionary)
+	check("the section is a fragment discard on the SOLID's material, so the "
+			+ "feature-edge overlay — a separate line mesh the override never "
+			+ "reaches — is left out of the mirrored world while a section is "
+			+ "active, instead of drawing the discarded half's silhouette "
+			+ "over the cut",
+			mirrored_whole == 2 and mirrored_cut == 1,
+			"whole = %d, cut = %d" % [mirrored_whole, mirrored_cut])
+	whole_mirror.free()
+	cut_mirror.free()
+	source.free()
+
+	var blank := Image.create_empty(64, 48, false, Image.FORMAT_RGBA8)
+	blank.fill(Color(0.1, 0.1, 0.12, 1.0))
+	var drawn_image := Image.create_empty(64, 48, false, Image.FORMAT_RGBA8)
+	drawn_image.fill(Color(0.1, 0.1, 0.12, 1.0))
+	drawn_image.set_pixel(32, 24, Color(1.0, 0.0, 0.0, 1.0))
+	check("a render target that was allocated and never drawn into reads back "
+			+ "as one flat colour, and is told from a real frame — the forced "
+			+ "path replies drawn:false on the first rather than calling a "
+			+ "picture of nothing a success",
+			_PosedCapture._is_one_colour(blank)
+				and not _PosedCapture._is_one_colour(drawn_image),
+			"blank = %s, drawn = %s" % [
+				str(_PosedCapture._is_one_colour(blank)),
+				str(_PosedCapture._is_one_colour(drawn_image))])
 
 	_free_rig(rig)
 	await process_frame

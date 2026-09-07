@@ -93,13 +93,12 @@ static func render_target(panel: Object) -> String:
 ## render — so a collider built from it is the part, not an approximation of
 ## it.
 ##
-## EVALUATED ONCE PER DOCUMENT. Every check leg asks for the same bindings —
-## minerva_cad_check_design asks three times over — and a binding of a source
-## that has not changed is the same shape every time, so the answer is kept in
-## part_cache.gd against the document's source digest and only the first
-## asking reaches the worker. The moment the document evaluates to something
-## else the digest moves and the whole slot goes with it, so no leg can ever
-## be handed the previous document's part.
+## EVALUATED ONCE PER DOCUMENT. Every leg of every check asks for the same
+## bindings, and a binding of a source that has not changed is the same shape
+## every time, so the answer is kept in part_cache.gd against the document's
+## source digest and only the first asking reaches the worker. The moment the
+## document evaluates to something else the digest moves and the whole slot
+## goes with it, so no leg can ever be handed the previous document's part.
 static func resolve(panel: Object, part: String) -> Dictionary:
 	if panel == null or not is_instance_valid(panel) \
 			or not panel.has_method("get_document_state") \
@@ -121,14 +120,18 @@ static func resolve(panel: Object, part: String) -> Dictionary:
 	var envelope: Variant = await panel.call_backend(EVALUATE_CHANNEL,
 		{"source": scoped}, EVALUATE_TIMEOUT_MS)
 	var result: Dictionary = _WorkerReply.unwrap(envelope, "part '%s'" % part)
-	# A binding that will not evaluate is kept too: it is the same refusal for
-	# every leg of the same document, and re-asking the worker three times to
-	# be told the same thing is what this cache exists to stop.
+	# A binding the worker REFUSED is kept: that is the same refusal for every
+	# leg of the same document, and re-asking three times to be told the same
+	# thing is what this cache exists to stop. A TRANSIENT failure is not —
+	# a timeout, a cancellation or a request that never reached the worker
+	# says nothing about the binding, and caching it makes one slow evaluation
+	# read as "part did not evaluate" for the life of the document.
 	if result.has("error"):
 		var refused := {"error": ("part '%s' did not evaluate: %s — a `parts` "
 			+ "entry must name a binding the document assigns a 3D shape to")
 			% [part, str(result["error"])]}
-		_PartCache.put_part(panel, part, refused)
+		if not bool(result.get("transient", false)):
+			_PartCache.put_part(panel, part, refused)
 		return refused
 	var mesh: Dictionary = result.get("mesh", {}) as Dictionary
 	if (mesh.get("faces", []) as Array).is_empty():
@@ -151,9 +154,8 @@ static func resolve(panel: Object, part: String) -> Dictionary:
 ## would be a cycle.
 ##
 ## With no `parts` the check runs once, against the shape the document
-## evaluates to, and the reply NAMES that shape — the answer to "which half did
-## you just check" that a two-shell document could not get before. With
-## `parts`, each named binding is evaluated on its own (part_scope appends it
+## evaluates to, and the reply NAMES that shape, which is the answer to "which
+## half did you just check". With `parts`, each named binding is evaluated on its own (part_scope appends it
 ## as the trailing expression, the DSL's own render-target rule) and checked
 ## against its own mesh, and the replies come back together under `parts` with
 ## `pass` true only when every one of them passed. The parts run one after
@@ -172,6 +174,11 @@ static func per_part(panel, args: Dictionary, verb: Callable,
 	var failed := 0
 	# The legs that answered without measuring anything, named for pass_reason.
 	var unmeasured: Array[String] = []
+	# The legs that measured but carry no verdict of their own. A material row
+	# reports what is there and grades nothing, so there is no pass to fold —
+	# and reading the missing key as true made every parts= material call
+	# answer pass:true whatever it found.
+	var ungraded: Array[String] = []
 	for entry in wanted:
 		var part := str(entry)
 		# RE-GATED PER LEG. A part evaluates in the worker and its check stands
@@ -215,19 +222,33 @@ static func per_part(panel, args: Dictionary, verb: Callable,
 		if not bool(one.get("checked", true)):
 			unmeasured.append(_unmeasured_leg(part, one))
 			failed += 1
-		elif not bool(one.get("success", true)) or not bool(one.get("pass", true)):
+		elif not bool(one.get("success", true)):
 			failed += 1
+		elif not one.has("pass"):
+			ungraded.append(part)
+		elif not bool(one.get("pass", true)):
+			failed += 1
+	# NO VERDICT IS NOT A PASS. A verb whose legs grade nothing aggregates to
+	# null rather than true: absent evidence and cleared evidence are
+	# different answers, and only one of them may be acted on.
+	var verdict: Variant = null
+	if ungraded.is_empty():
+		verdict = failed == 0 and not rows.is_empty()
 	var reply := {
 		"parts": rows,
 		"count": rows.size(),
 		"failed": failed,
-		"pass": failed == 0 and not rows.is_empty(),
+		"pass": verdict,
 		"parts_note": "each part is the document evaluated with that binding "
 			+ "as its trailing expression, which is the DSL\'s own "
 			+ "render-target rule; a part that does not evaluate is reported "
 			+ "as checked:false with the reason and does not silently drop "
 			+ "out of the count",
 	}
+	if not ungraded.is_empty():
+		reply["pass_reason"] = ("%s report what was measured and grade "
+			% ", ".join(ungraded)) + "nothing, so there is no verdict to "\
+			+ "aggregate — read the rows"
 	if not unmeasured.is_empty():
 		reply["pass_reason"] = "nothing was measured for %s — this verdict is "\
 			% ", ".join(unmeasured) \

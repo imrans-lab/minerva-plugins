@@ -89,8 +89,8 @@ extends SceneTree
 ## and 2e-4 mm inside was interference — and that pin was WRONG in the
 ## direction that matters: 2e-4 mm is the precision the physics hit positions
 ## themselves arrive in on a hundred-millimetre part, so the check was calling
-## its own arithmetic noise an overlap, and owner HITL measured exactly that
-## on enclosure-rev4 (a crossing at z = -0.0003 on a seat at z = 0). The line
+## its own arithmetic noise an overlap — a seat at z = 0 reported crossing at
+## z = -0.0003. The line
 ## between a designed fit and a part in the wrong place is
 ## expected_contacts.gd's CONTACT_TOLERANCE_MM, a hundredth of a millimetre,
 ## and rim_contact.gd now measures against it: a boss 2e-4 mm into the plate
@@ -377,8 +377,8 @@ func _swapped_roles(gauge: Node, checks: RefCounted) -> void:
 	_mount_boss(gauge, checks, PRECISION_LIFT_MM)
 	var inside: Dictionary = await _submit(gauge, checks)
 	check("swapped: still a contact two ten-thousandths of a millimetre in — "
-			+ "the precision the hit positions arrive in, and the offset "
-			+ "rev-4 was measured at",
+			+ "which is the precision the hit positions arrive in on a "
+			+ "hundred-millimetre part",
 			bool(inside.get("checked", false))
 				and int(inside.get("count", 0)) == 0
 				and int(inside.get("point_count", 0)) == 0,

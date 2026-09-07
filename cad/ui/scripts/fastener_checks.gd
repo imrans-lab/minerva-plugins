@@ -88,7 +88,9 @@ extends "fastener_probe.gd"
 ## of that chain, so one object still carries the whole check.
 ##
 ## No class_name: off-tree plugin scripts cannot use class_name.
-## Consumers: preload("scripts/fastener_checks.gd") from CADPanel.gd.
+## Consumers: ui/cad_panel_scene.gd (the panel's own instance),
+## ui/panel_tools.gd (minerva_cad_check_fasteners) and
+## scripts/fastener_screws.gd (one graded run per screw size).
 
 ## Tessellation deviation quoted with every fitted number. The fallback fit
 ## works on the DISPLAY mesh, whose deviation is the evaluation's own, so this

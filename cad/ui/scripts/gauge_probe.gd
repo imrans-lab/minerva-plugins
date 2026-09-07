@@ -1,12 +1,10 @@
 extends RefCounted
 ## gauge_probe.gd — the rays ONE gauge is measured with.
 ##
-## Split out of mesh_gauge.gd, which was over its size budget and had to grow
-## to consult a second space. The physics is a single question — "what does
-## this segment hit" — handed in as a Callable, exactly as gauge_seed.gd takes
-## its own, so the patterns below are the same whichever space (or spaces) the
-## caller casts into, and mesh_gauge.gd stays about building colliders and
-## running jobs.
+## The physics is a single question — "what does this segment hit" — handed
+## in as a Callable, exactly as gauge_seed.gd takes its own. So the patterns
+## below are the same whichever space, or pair of spaces, the caller casts
+## into, and mesh_gauge.gd is left holding the colliders and the job queue.
 ##
 ## `cast` is called as cast.call(from: Vector3, to: Vector3) and must return a
 ## physics hit dictionary — {} for a miss, otherwise at least "position". The

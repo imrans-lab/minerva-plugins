@@ -74,7 +74,8 @@ extends "panel_tools_view.gd"
 ## helpers every verb here shares. Inheritance rather than a handle, so one
 ## preload of this file still resolves the whole panel-verb surface.
 ##
-## Off-tree note: no class_name — preloaded by relative path from CADPanel.gd.
+## Off-tree note: no class_name — preloaded by relative path from
+## ui/cad_panel_scene.gd, the base CADPanel.gd extends.
 
 const _ReferenceMeshes: Script = preload("scripts/reference_meshes.gd")
 const _GeometryChecks: Script = preload("scripts/geometry_checks.gd")
@@ -629,10 +630,11 @@ static func _check_clearance(panel, args: Dictionary) -> Dictionary:
 ##
 ## The collider for this part is already built by then (the check that built
 ## it is keyed on the same source digest), so this costs the ray walk and no
-## rebuild. A report already in the cache for the colliders standing now — the
-## interference leg of minerva_cad_check_design, one leg earlier — is left
-## alone; whether it is really fresh enough to join is still decided by the
-## joiner, against the poses and the generation it recorded.
+## rebuild. A report already in the cache for the colliders standing now is
+## left alone; whether it is really fresh enough to join is still decided by
+## the joiner, against the poses and the generation it recorded. Only an
+## UNDECLARED report is ever in there — see _keep_part_report — so an
+## interference leg that carried expected_contacts leaves this one to run.
 static func _ensure_part_interference(panel, args: Dictionary) -> void:
 	var source := str(args.get("source", ""))
 	if source.strip_edges().is_empty():
@@ -640,10 +642,16 @@ static func _ensure_part_interference(panel, args: Dictionary) -> void:
 	var kept: Dictionary = _PartCache.interference(panel, _PartCache.digest(source))
 	if not kept.is_empty() and int(kept.get("gauge_generation", -1)) == _gauge_generation(panel):
 		return
+	# UNDECLARED ON PURPOSE. A declared pair leaves the report's `pairs` for
+	# the declarations table, and the cache slot is keyed by source digest
+	# alone: a report measured under one call's expected_contacts would be
+	# handed to the next call, which may declare nothing, and a contained pair
+	# missing from `pairs` reads there as "nothing crossing". The join wants
+	# what is true of this shape whatever was declared; the declarations are
+	# applied by the leg that stated them.
 	await _check_interference(panel, {
 		"mesh": args.get("mesh", {}),
 		"source": source,
-		"expected_contacts": args.get("expected_contacts", []),
 	})
 
 

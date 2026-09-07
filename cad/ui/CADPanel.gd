@@ -95,6 +95,15 @@ var _last_eval_result: Dictionary = {"status": "empty"}
 ## and reporting it as the document. -1 for a panel that has evaluated nothing.
 var _eval_buffer_version: int = -1
 
+## The buffer version of the evaluation that PRODUCED the geometry standing in
+## the panel's colliders. Only a run that painted a mesh writes it, so a failed
+## or abandoned evaluation leaves it on the last shape a measurement verb can
+## actually reach. _eval_buffer_version is the version that was DISPATCHED and
+## moves whether or not an answer ever came back; measuring against that one
+## would report a refused evaluation's version over the previous evaluation's
+## colliders. -1 for a panel that has painted nothing.
+var _painted_buffer_version: int = -1
+
 ## Everything a note needs to know about the document this tab is showing:
 ## the DSL source, the file it came from, the last evaluation's verdict, the
 ## mesh the worker returned and the mesh() specs it named. One accessor because
@@ -237,6 +246,7 @@ func receive(channel: String, payload: Dictionary) -> void:
 			_buffer_path = ""
 			_buffer_version = -1
 			_eval_buffer_version = -1
+			_painted_buffer_version = -1
 			_pending_dsl_text = ""
 			_open_eval_text = ""
 
@@ -494,36 +504,54 @@ func await_evaluation(timeout_ms: int) -> Dictionary:
 
 ## Is the geometry this panel is showing the geometry the document describes?
 ##
-## Two silent-stale episodes are what this exists for: an edit landed, the
-## panel saved it, and a check made straight afterwards measured an evaluation
-## half an hour old, with nothing in its reply to say so. The buffer's version
-## is bumped the instant the edit arrives; the evaluation carries the version
-## it was dispatched for and the wall-clock time it was stamped. When they
-## disagree — or when an evaluation is queued behind the debounce or still out
-## with the worker — what is on screen is not what the document says, and a
-## measurement of it is an answer about geometry that no longer exists.
+## `source_version` is the version of the evaluation that PRODUCED the geometry
+## a measurement verb reaches, which is the last one that painted — not the
+## last one dispatched. The two part whenever an evaluation fails: the buffer
+## and the dispatch both stand at the new version while the colliders are still
+## the previous shape's, and a check reading the dispatch would answer about
+## v5's geometry over v6's number with nothing saying so.
+##
+## Three ways the two can disagree, each with its own reason: the standing
+## evaluation FAILED, so the geometry is older than the document by at least
+## that failure; the buffer has moved past the painted geometry; or an
+## evaluation is queued behind the debounce or still out with the worker.
 ##
 ## Returns {known, buffer_version, source_version, evaluated_at,
 ## evaluation_status, stale, stale_reason}. `known` is always true here; a
 ## caller reaching a panel that has no such method reads it as unknown and
 ## refuses nothing.
 func evaluation_freshness() -> Dictionary:
+	var status: String = str(_last_eval_result.get("status", ""))
 	var out := {
 		"known": true,
 		"buffer_version": _buffer_version,
-		"source_version": _eval_buffer_version,
+		"source_version": _painted_buffer_version,
 		"evaluated_at": float(_last_eval_result.get("ts", 0.0)),
-		"evaluation_status": str(_last_eval_result.get("status", "")),
+		"evaluation_status": status,
 		"stale": false,
 		"stale_reason": "",
 	}
-	# Nothing has ever been dispatched, so there is no evaluation for the
+	# A REFUSED EVALUATION IS A STALE PANEL. It painted nothing, so the
+	# colliders are still the previous evaluation's while every version number
+	# in the document has moved past them.
+	if (status == "error" or status == "timeout") \
+			and _eval_buffer_version > _painted_buffer_version:
+		out["stale"] = true
+		out["stale_reason"] = ("the evaluation of version %d %s (%s), so it "
+			+ "painted nothing: the geometry standing now is the evaluation "
+			+ "of version %d. Fix the document, then call "
+			+ "minerva_cad_await_eval and ask again.") % [_eval_buffer_version,
+			"failed" if status == "error" else "was given up on",
+			str(_last_eval_result.get("error_kind", status)),
+			_painted_buffer_version]
+		return out
+	# Nothing has ever been painted, so there is no evaluation for the
 	# buffer to be ahead of; a check refuses such a panel on its own terms.
-	if _eval_buffer_version >= 0 and _buffer_version > _eval_buffer_version:
+	if _painted_buffer_version >= 0 and _buffer_version > _painted_buffer_version:
 		out["stale"] = true
 		out["stale_reason"] = ("buffer newer than evaluation: the document is "
 			+ "at version %d and the geometry on screen is the evaluation of "
-			+ "version %d. Call minerva_cad_await_eval, then ask again.") 			% [_buffer_version, _eval_buffer_version]
+			+ "version %d. Call minerva_cad_await_eval, then ask again.") 			% [_buffer_version, _painted_buffer_version]
 		return out
 	if _evaluation_is_unsettled():
 		out["stale"] = true
@@ -672,6 +700,10 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 	# evaluation is of the text standing now, whatever the buffer becomes while
 	# the worker is out.
 	_eval_buffer_version = _buffer_version
+	# Held apart from the member: the member moves again the moment a newer
+	# evaluate dispatches, and the paint below must stamp the version THIS run
+	# was of.
+	var dispatched_version: int = _buffer_version
 	_last_eval_result = {
 		"status": "pending",
 		"request_id": request_id,
@@ -805,6 +837,9 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 
 	# Update panel state and re-push edge overlays + sidebar tree.
 	_last_mesh_data = mesh_data
+	# The geometry every measurement verb reaches is now this run's, so the
+	# freshness stamp moves here and nowhere else.
+	_painted_buffer_version = dispatched_version
 	_edge_registry = edges
 	# Mirror into host so MCP introspection tools can read without reaching into the panel.
 	if _annotation_host != null:

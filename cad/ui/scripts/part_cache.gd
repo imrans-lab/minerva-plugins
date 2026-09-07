@@ -4,12 +4,11 @@ extends RefCounted
 ## A part-scoped check (`parts: ["bottom", "top"]`) reaches its binding by
 ## evaluating the document with that binding as the trailing expression — see
 ## part_scope.gd. That evaluation is a full worker translate, minutes on a
-## lofted shell, and it used to happen once per LEG: minerva_cad_check_design
-## over four parts asked the worker for the same four shapes three times over,
-## and the caller's window closed before the twelfth answer came back.
+## lofted shell, and a verb with three legs over four parts would otherwise
+## pay for twelve of them inside one caller's window.
 ##
 ## Nothing about a binding changes between the legs of one call, so this is a
-## cache and not a scheduler. It holds three things per document:
+## cache and not a scheduler. It holds two things per document:
 ##
 ##   the resolved PART — the scoped source, the worker's tessellation of it
 ##   and the shape name — keyed by binding name, so every leg of every verb

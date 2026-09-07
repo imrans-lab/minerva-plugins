@@ -11,8 +11,8 @@ The fixture is built to defeat the two lazy implementations by construction:
 * BOUNDING-BOX CONTAINMENT. The floorless variant is the same tray with the
   pocket cut through the bottom face. Its bounding box is IDENTICAL to the
   tray's — same eight corners — so a box test says "material" at the floor
-  point in both. This is the rev-4 failure exactly: three floorless STLs were
-  exported because every check passed on a shape whose box was full.
+  point in both. That is how a floorless tray passes every reference check:
+  the references it is measured against are all outside the missing floor.
 * TESSELLATION PARITY. The seam fixture unions two boxes that share a face at
   z = 2. A crossing-parity count over a triangulation meets both coincident
   faces, flips twice and reads 4 mm of solid PLA as air. The walk here is
@@ -219,7 +219,7 @@ def test_a_coincident_face_seam_between_two_bodies_is_not_a_gap() -> None:
     assert len(bodies) == 2
 
     answer = mat._walk(occt, compound, bodies, (PROBE_X, PROBE_Y, RAY_Z),
-                       (0.0, 0.0, -1.0), 100.0, mat.CLASSIFY_TOLERANCE_MM)
+                       (0.0, 0.0, -1.0), 100.0)
     # Three places, not four: the two coincident faces at z = 2 are one.
     assert answer["surface_crossings"] == 3
     assert answer["count"] == 2
@@ -295,3 +295,113 @@ def test_a_document_with_no_solid_is_refused_rather_than_called_empty() -> None:
     assert reply["ok"] is False
     assert "no 3D part" in reply["error"]["message"] \
         or "no closed solid" in reply["error"]["message"]
+
+
+# --- the classifier's own soundness -----------------------------------------
+
+
+def _reversed_box():
+    """A 10 mm box with every face normal pointing inward.
+
+    BRepClass3d_SolidClassifier reads the face orientations, so on this shape
+    it reports [5, 5, 5] as OUTSIDE and [50, 50, 50] as INSIDE — the answer
+    inverted, with nothing in the numbers to say so.
+    """
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
+    from OCP.gp import gp_Pnt
+
+    return BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 10.0, 10.0, 10.0).Shape().Reversed()
+
+
+def _open_shell_solid():
+    """A solid made from five of the box's six faces: it bounds no volume.
+
+    The classifier reports IN for points far outside it, so "is there material
+    at [50, 50, 50]" answers yes on a shape that has no inside.
+    """
+    from OCP.BRep import BRep_Builder
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeSolid
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
+    from OCP.TopAbs import TopAbs_FACE
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopoDS import TopoDS_Shell
+    from OCP.gp import gp_Pnt
+
+    box = BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 10.0, 10.0, 10.0).Shape()
+    builder = BRep_Builder()
+    shell = TopoDS_Shell()
+    builder.MakeShell(shell)
+    kept = 0
+    explorer = TopExp_Explorer(box, TopAbs_FACE)
+    while explorer.More():
+        if kept < 5:
+            builder.Add(shell, explorer.Current())
+        kept += 1
+        explorer.Next()
+    return BRepBuilderAPI_MakeSolid(shell).Solid()
+
+
+@pytest.mark.parametrize("shape_of, orientation_ok, closed", [
+    (_reversed_box, False, True),
+    (_open_shell_solid, True, False),
+])
+def test_a_body_the_classifier_cannot_be_trusted_on_answers_null(
+        shape_of, orientation_ok: bool, closed: bool) -> None:
+    """inside is None with a reason, never the inverted True/False.
+
+    THE ORACLE. Without the guard the reversed box answers inside=False at
+    [5, 5, 5] (a point 5 mm deep in solid material) and inside=True at
+    [50, 50, 50] (a point 40 mm outside it), and the open shell answers
+    inside=True at [50, 50, 50]. Each of those is a confident wrong answer to
+    the one question this verb exists to answer, so the verdict is withheld
+    and the flags say which fault withheld it.
+    """
+    occt = mat._occt()
+    shape = shape_of()
+    bodies = mat._bodies(occt, shape)
+    assert len(bodies) == 1
+    assert bodies[0]["orientation_ok"] is orientation_ok
+    assert bodies[0]["closed"] is closed
+
+    for at in [(5.0, 5.0, 5.0), (50.0, 50.0, 50.0)]:
+        answer = mat._point_answer(occt, shape, bodies, at,
+                                   mat.CLASSIFY_TOLERANCE_MM)
+        assert answer["inside"] is None
+        assert answer["state"] == "unknown"
+        assert answer["reason"]
+
+
+def test_a_sound_box_reports_both_flags_true_and_still_answers() -> None:
+    """The control: the guard must not withhold anything on a good solid."""
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
+    from OCP.gp import gp_Pnt
+
+    occt = mat._occt()
+    box = BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 10.0, 10.0, 10.0).Shape()
+    bodies = mat._bodies(occt, box)
+    assert (bodies[0]["orientation_ok"], bodies[0]["closed"]) == (True, True)
+    assert mat._point_answer(occt, box, bodies, (5.0, 5.0, 5.0),
+                             mat.CLASSIFY_TOLERANCE_MM)["inside"] is True
+    assert mat._point_answer(occt, box, bodies, (50.0, 50.0, 50.0),
+                             mat.CLASSIFY_TOLERANCE_MM)["inside"] is False
+
+
+def test_a_thin_wall_survives_a_coarse_tolerance() -> None:
+    """A 0.3 mm wall asked with tolerance_mm=1.0 is still 0.3 mm of material.
+
+    THE ORACLE. tolerance_mm is the band in which a point counts as ON a face.
+    Applied to the walk's interval midpoints it swallows the interval: the
+    midpoint of a 0.3 mm wall is 0.15 mm from both faces, classifies ON at a
+    tolerance of 1.0, the run is dropped, and the reply reads count 0,
+    total_thickness_mm 0 — a missing wall, reported by the verb that exists to
+    find missing walls. The walk classifies at CLASSIFY_TOLERANCE_MM instead,
+    and the caller's tolerance governs the point form alone.
+    """
+    answer = _ok(material({
+        "source": "wall = cube(10, 10, 0.3)",
+        "from_mm": [5.0, 5.0, -5.0],
+        "direction_mm": [0, 0, 1],
+        "tolerance_mm": 1.0,
+    }))
+    assert answer["count"] == 1
+    assert answer["total_thickness_mm"] == pytest.approx(0.3, abs=1.0e-6)

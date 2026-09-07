@@ -81,10 +81,12 @@ def _occt() -> dict:
     try:
         from OCP.BRep import BRep_Builder
         from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeVertex
+        from OCP.BRepCheck import BRepCheck_NoError, BRepCheck_Shell
         from OCP.BRepClass3d import BRepClass3d_SolidClassifier
         from OCP.BRepExtrema import BRepExtrema_DistShapeShape
         from OCP.BRepIntCurveSurface import BRepIntCurveSurface_Inter
-        from OCP.TopAbs import TopAbs_FACE, TopAbs_IN, TopAbs_ON, TopAbs_SOLID
+        from OCP.TopAbs import (TopAbs_FACE, TopAbs_IN, TopAbs_ON, TopAbs_OUT,
+                                TopAbs_SHELL, TopAbs_SOLID)
         from OCP.TopExp import TopExp_Explorer
         from OCP.TopoDS import TopoDS, TopoDS_Compound
         from OCP.gp import gp_Dir, gp_Lin, gp_Pnt
@@ -95,6 +97,8 @@ def _occt() -> dict:
         ) from exc
     return {
         "BRep_Builder": BRep_Builder,
+        "BRepCheck_NoError": BRepCheck_NoError,
+        "BRepCheck_Shell": BRepCheck_Shell,
         "BRepBuilderAPI_MakeVertex": BRepBuilderAPI_MakeVertex,
         "BRepClass3d_SolidClassifier": BRepClass3d_SolidClassifier,
         "BRepExtrema_DistShapeShape": BRepExtrema_DistShapeShape,
@@ -102,6 +106,8 @@ def _occt() -> dict:
         "TopAbs_FACE": TopAbs_FACE,
         "TopAbs_IN": TopAbs_IN,
         "TopAbs_ON": TopAbs_ON,
+        "TopAbs_OUT": TopAbs_OUT,
+        "TopAbs_SHELL": TopAbs_SHELL,
         "TopAbs_SOLID": TopAbs_SOLID,
         "TopExp_Explorer": TopExp_Explorer,
         "TopoDS": TopoDS,
@@ -134,22 +140,81 @@ def _shape(source: str) -> tuple:
 
 
 def _bodies(occt: dict, shape) -> list:
-    """Every solid of the evaluated shape, in exploration order.
+    """Every solid of the evaluated shape as {classifier, orientation_ok, closed}.
 
     A document that unions a tray, a lid and four keycaps evaluates to a
     compound of loose solids, and "which body am I in" is the difference
     between a wall and a part sitting next to it. One classifier is built per
     body and kept: building one costs a face walk, and a ray of forty hits
     would otherwise pay for that walk forty times over.
+
+    THE CLASSIFIER ANSWERS ABOUT THE SOLID IT IS GIVEN, NOT ABOUT MATERIAL.
+    Its verdict is the face orientations' verdict, so two flaws invert it in
+    silence and are measured here rather than trusted:
+
+      * a REVERSED solid has every face normal pointing inward, and the
+        classifier then reports the outside as IN and the inside as OUT —
+        measured with OCP: a reversed 10 mm box says [5, 5, 5] is outside and
+        [50, 50, 50] is inside. PerformInfinitePoint is the test: a point at
+        infinity is OUT of any sound solid, and IN of a reversed one.
+      * an OPEN SHELL bounds no volume, and the classifier reports IN for
+        points far outside it — the same box missing one face says [50, 50,
+        50] is inside. BRepCheck_Shell reports the shell unclosed.
+
+    Both are exactly the answer this verb exists to catch being wrong about,
+    so an unsound body is reported and its verdict withheld.
     """
     out: list = []
     explorer = occt["TopExp_Explorer"](shape, occt["TopAbs_SOLID"])
     while explorer.More():
         solid = occt["TopoDS"].Solid_s(explorer.Current())
         classifier = occt["BRepClass3d_SolidClassifier"](solid)
-        out.append(classifier)
+        classifier.PerformInfinitePoint(CLASSIFY_TOLERANCE_MM)
+        out.append({
+            "classifier": classifier,
+            "orientation_ok": classifier.State() == occt["TopAbs_OUT"],
+            "closed": _shells_closed(occt, solid),
+        })
         explorer.Next()
     return out
+
+
+def _shells_closed(occt: dict, solid) -> bool:
+    """Is every shell of this solid closed? An open one bounds no volume."""
+    explorer = occt["TopExp_Explorer"](solid, occt["TopAbs_SHELL"])
+    shells = 0
+    while explorer.More():
+        shells += 1
+        shell = occt["TopoDS"].Shell_s(explorer.Current())
+        if occt["BRepCheck_Shell"](shell).Closed() != occt["BRepCheck_NoError"]:
+            return False
+        explorer.Next()
+    return shells > 0
+
+
+def _unsound(bodies: list) -> list:
+    """The indices of the bodies whose containment verdict cannot be trusted."""
+    return [index for index, body in enumerate(bodies)
+            if not body["orientation_ok"] or not body["closed"]]
+
+
+def _unsound_reason(bodies: list, unsound: list) -> str:
+    """Why those bodies are unsound, named one by one."""
+    parts = []
+    for index in unsound:
+        body = bodies[index]
+        faults = []
+        if not body["orientation_ok"]:
+            faults.append("its faces are oriented inward (a point at infinity "
+                          "classifies as inside it)")
+        if not body["closed"]:
+            faults.append("its shell is not closed, so it bounds no volume")
+        parts.append("body %d: %s" % (index, " and ".join(faults)))
+    return ("containment cannot be decided on this shape — "
+            + "; ".join(parts)
+            + ". BRepClass3d_SolidClassifier answers from the face "
+            "orientations, so on such a body it reports the outside as inside; "
+            "no inside/outside verdict is given rather than an inverted one")
 
 
 def _skin(occt: dict, shape):
@@ -183,7 +248,8 @@ def _classify(occt: dict, bodies: list, point, tolerance: float) -> tuple:
     make a zero-thickness floor read as a floor.
     """
     on_index = -1
-    for index, classifier in enumerate(bodies):
+    for index, body in enumerate(bodies):
+        classifier = body["classifier"]
         classifier.Perform(point, tolerance)
         state = classifier.State()
         if state == occt["TopAbs_IN"]:
@@ -202,9 +268,18 @@ def _classify(occt: dict, bodies: list, point, tolerance: float) -> tuple:
 
 def _point_answer(occt: dict, shape, bodies: list, at: tuple,
                   tolerance: float) -> dict:
-    """Is the material here, and where is the nearest surface to here."""
+    """Is the material here, and where is the nearest surface to here.
+
+    `inside` is None — never False — when the bodies cannot be classified. A
+    False there would read as "this point is air", which is the exact answer
+    an inward-oriented or open body gives wrongly.
+    """
     point = occt["gp_Pnt"](*at)
-    state, body_index = _classify(occt, bodies, point, tolerance)
+    unsound = _unsound(bodies)
+    if unsound:
+        state, body_index = "unknown", -1
+    else:
+        state, body_index = _classify(occt, bodies, point, tolerance)
 
     vertex = occt["BRepBuilderAPI_MakeVertex"](point).Vertex()
     distance = occt["BRepExtrema_DistShapeShape"](vertex, _skin(occt, shape))
@@ -215,15 +290,18 @@ def _point_answer(occt: dict, shape, bodies: list, at: tuple,
             "not be computed"
         )
     nearest = distance.PointOnShape2(1)
-    return {
+    out = {
         "mode": "point",
         "at_mm": list(at),
-        "inside": state == "inside",
+        "inside": None if unsound else state == "inside",
         "state": state,
         "body_index": body_index,
         "nearest_surface_mm": float(distance.Value()),
         "nearest_point_mm": [nearest.X(), nearest.Y(), nearest.Z()],
     }
+    if unsound:
+        out["reason"] = _unsound_reason(bodies, unsound)
+    return out
 
 
 def _hits(occt: dict, shape, origin: tuple, direction: tuple,
@@ -253,13 +331,21 @@ def _hits(occt: dict, shape, origin: tuple, direction: tuple,
 
 
 def _walk(occt: dict, shape, bodies: list, origin: tuple, direction: tuple,
-          max_distance: float, tolerance: float) -> dict:
+          max_distance: float) -> dict:
     """Every run of material along the ray, as entry/exit pairs with thickness.
 
     The hits are candidate boundaries; the midpoint of each interval between
     them decides whether that interval is material. Adjacent material intervals
     are then merged, so a body split into two faces at a seam reports the ONE
     slab it is rather than two touching ones.
+
+    THE MIDPOINTS ARE CLASSIFIED AT CLASSIFY_TOLERANCE_MM, NOT THE CALLER'S.
+    The caller's tolerance_mm says how close to a face counts as ON it, which
+    is a question about the point form. Applied here it swallows the interval
+    itself: the midpoint of a 0.3 mm wall is 0.15 mm from both faces, so a
+    tolerance of 1.0 classifies it ON, the run is dropped, and the reply says
+    thickness 0 with no flag — the wall reported as air by the verb that
+    exists to find missing material.
     """
     def at(w: float) -> tuple:
         return (origin[0] + direction[0] * w,
@@ -274,7 +360,8 @@ def _walk(occt: dict, shape, bodies: list, origin: tuple, direction: tuple,
         if high - low <= 0.0:
             continue
         state, body = _classify(
-            occt, bodies, occt["gp_Pnt"](*at((low + high) * 0.5)), tolerance)
+            occt, bodies, occt["gp_Pnt"](*at((low + high) * 0.5)),
+            CLASSIFY_TOLERANCE_MM)
         if state != "inside":
             continue
         if runs and abs(runs[-1]["exit"] - low) <= HIT_MERGE_MM \
@@ -355,7 +442,10 @@ def material(params: dict) -> dict:
       from_mm         [x, y, z] with direction_mm — the ray form.
       direction_mm    [dx, dy, dz], normalised here; need not be a unit vector.
       max_distance_mm how far along the ray to walk. Default 10000.
-      tolerance_mm    how close to a face counts as ON it. Default 1e-7.
+      tolerance_mm    how close to a face counts as ON it, for the POINT
+                      form. The ray walk classifies its interval midpoints at
+                      CLASSIFY_TOLERANCE_MM whatever this says, or a coarse
+                      tolerance would erase the thin wall it is measuring.
 
     Exactly one of at_mm and from_mm is expected; both together is a request
     with two answers and is refused rather than half-answered.
@@ -405,18 +495,33 @@ def material(params: dict) -> dict:
             payload = _point_answer(occt, wrapped, bodies, at, tolerance)
         else:
             payload = _walk(occt, wrapped, bodies, origin, _unit(direction_raw),
-                            max_distance, tolerance)
+                            max_distance)
     except (MaterialError, FeatureError) as exc:
         return _error(str(exc))
 
     payload["units"] = "mm"
     payload["shape_name"] = shape_name
     payload["body_count"] = len(bodies)
+    # What each body's containment verdict is worth. A reader that only sees
+    # `inside` cannot tell a sound answer from an inverted one; these two
+    # flags are the evidence behind every verdict in this reply.
+    payload["bodies"] = [{"index": index,
+                          "orientation_ok": bool(body["orientation_ok"]),
+                          "closed": bool(body["closed"])}
+                         for index, body in enumerate(bodies)]
+    unsound = _unsound(bodies)
+    if unsound:
+        payload["unsound_bodies"] = unsound
+        payload.setdefault("reason", _unsound_reason(bodies, unsound))
     # The body a run or a point is IN, named. It is deliberately not called
     # `part`: the panel's verb layer calls the binding it probed `part` (which
     # shape the question was about), and this says which solid of it the answer
     # landed in — "" for a probe that landed in air. A compound's solids have
     # no names of their own, so they are numbered under the binding's.
+    if unsound and payload["mode"] == "ray":
+        # The runs are still reported: they are where the ray met faces. What
+        # is withheld is any claim that being between two of them is material.
+        payload["segments_certified"] = False
     if payload["mode"] == "point":
         payload["body"] = _body_name(shape_name, int(payload["body_index"]),
                                      len(bodies))

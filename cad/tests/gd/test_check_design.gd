@@ -72,6 +72,9 @@ func _run() -> void:
 	await _check_parts_share_one_clearance_window()
 	await _check_every_binding_is_evaluated_once()
 	await _check_a_ticket_start_leg_never_aggregates_to_pass()
+	await _check_a_stale_leg_never_folds_to_pass()
+	await _check_a_leg_with_no_verdict_never_aggregates_to_pass()
+	await _check_a_transient_worker_failure_is_not_remembered()
 
 
 # ---------------------------------------------------------------------------
@@ -653,8 +656,8 @@ func _good_screw() -> Dictionary:
 ## ORACLE: COUNT THE EVALUATIONS. minerva_cad_check_design over four parts
 ## runs three legs, and every leg used to reach a binding by evaluating the
 ## whole document with that binding as its trailing expression — twelve worker
-## translates for four shapes, at seventeen seconds each on the rev-4
-## enclosure, so the caller's MCP window closed with nothing in it.
+## translates for four shapes, at tens of seconds each on a lofted enclosure,
+## which spends the caller's whole MCP window and returns nothing.
 ##
 ## The stand-in counts every evaluate it is asked for. Four parts, three legs,
 ## one call: the count must be FOUR. Twelve is the shipped behaviour and one
@@ -727,7 +730,7 @@ func _check_every_binding_is_evaluated_once() -> void:
 	PartCache.clear()
 
 
-## ORACLE (bug 01a079fa07a4): parts=["top"] with wait_ms=0, and the leg comes
+## ORACLE: parts=["top"] with wait_ms=0, and the leg comes
 ## straight back with a ticket having measured nothing. The per-part fold is
 ## shared by every check verb, so the verdict it prints is the one the reader
 ## acts on — and a leg that carries no `pass` at all must never be read as one.
@@ -747,6 +750,102 @@ func _check_a_ticket_start_leg_never_aggregates_to_pass() -> void:
 				and str(reply.get("pass_reason", "")).contains("clearance-top"),
 			"reply = %s" % str(reply))
 	panel.free()
+
+
+## ORACLE: a leg that MEASURED, passed, and is stamped stale.
+##
+## The freshness gate refuses a check before it starts, so a stale reply can
+## only come from a leg that was already measuring when the document moved
+## under it — the reply is a true answer about geometry the document has left
+## behind, and the only thing saying so is its `stale` stamp. The fold read the
+## rows and the counts and never that stamp, so a clean-but-stale leg folded
+## to verdict "pass" and the design reply carried no stale for the verb layer's
+## own stamp to OR into. Both are asserted here: not-pass with the reason, and
+## the stamp travelling.
+func _check_a_stale_leg_never_folds_to_pass() -> void:
+	var panel := _panel()
+	var stale := _interference_report([])
+	stale["stale"] = true
+	stale["stale_reason"] = "the references were re-posed while this check ran"
+	panel.interference = stale
+	panel.clearance = _clearance_report([_gap(2.0)])
+
+	var reply: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_check_design", {"required_mm": REQUIRED_MM})
+	check("a leg that measured geometry the document has moved past is never "
+			+ "folded to pass: the verdict is advisory, the reason names the "
+			+ "leg and the stamp, and the design reply carries `stale` so the "
+			+ "verb layer's own stamp cannot report a settled document",
+			str(reply.get("verdict", "")) != "pass"
+				and bool(reply.get("stale", false))
+				and str(reply.get("stale_reason", "")).contains("re-posed")
+				and str((reply.get("checks", {}) as Dictionary)
+					.get("interference", "")).begins_with("ran, but stale"),
+			"reply = %s" % str(reply))
+	panel.free()
+
+
+## ORACLE: a per-part leg that measured and graded NOTHING.
+##
+## minerva_cad_material reports what is there and carries no `pass` at all, and
+## the per-part fold read a missing key as true — so `parts` on any such verb
+## answered pass:true whatever the rows said. A clearance report with its
+## verdict removed stands in for that shape here; what is asserted is the fold,
+## which is shared by every verb that takes `parts`.
+func _check_a_leg_with_no_verdict_never_aggregates_to_pass() -> void:
+	var panel := _panel()
+	panel.interference = _interference_report([])
+	var ungraded := _clearance_report([_gap(2.0)])
+	ungraded.erase("pass")
+	panel.clearance = ungraded
+
+	var reply: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_check_clearance",
+			{"required_mm": REQUIRED_MM, "parts": ["top"]})
+	check("a part leg that grades nothing yields NO aggregate verdict — pass "
+			+ "is null and a note says why — rather than the true a missing "
+			+ "key used to be read as",
+			reply.get("pass", true) == null
+				and int(reply.get("failed", -1)) == 0
+				and str(reply.get("pass_reason", "")).contains("no verdict"),
+			"reply = %s" % str(reply))
+	panel.free()
+
+
+## ORACLE: one timeout must not answer for the document's whole life.
+##
+## A binding the worker REFUSED is the same refusal every time it is asked, so
+## it is cached. A request that timed out, was cancelled or never reached the
+## worker says nothing about the binding — and caching it made a single slow
+## evaluation reply "part did not evaluate" to every later call until the
+## source changed. The stand-in fails once transiently, then answers.
+func _check_a_transient_worker_failure_is_not_remembered() -> void:
+	var panel := _panel()
+	panel.interference = _interference_report([])
+	panel.clearance = _clearance_report([_gap(2.0)])
+	PartCache.clear()
+	panel.backend_failures = 1
+
+	var refused: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_check_clearance",
+			{"required_mm": REQUIRED_MM, "parts": ["top"]})
+	var evaluations_after_timeout := panel.evaluate_calls
+	var again: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_check_clearance",
+			{"required_mm": REQUIRED_MM, "parts": ["top"]})
+	check("a timeout is not cached: the first call reports the part as "
+			+ "unevaluated, and the SECOND reaches the worker again and "
+			+ "measures — a cached transient would answer 'did not evaluate' "
+			+ "for the life of the document without asking",
+			not bool(((refused["parts"] as Array)[0] as Dictionary)
+					.get("checked", true))
+				and panel.evaluate_calls > evaluations_after_timeout
+				and bool(((again["parts"] as Array)[0] as Dictionary)
+					.get("checked", false)),
+			"refused = %s / again = %s / evaluations = %d" % [str(refused),
+				str(again), panel.evaluate_calls])
+	panel.free()
+	PartCache.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -789,6 +888,9 @@ class _DesignStandIn extends Node:
 	## asked about. The count is the oracle for evaluate-once: three legs over
 	## four parts must cost four evaluations and not twelve.
 	var evaluate_calls: int = 0
+	## Evaluations to fail TRANSIENTLY before answering — the shape a worker
+	## timeout arrives in, which says nothing about the binding asked for.
+	var backend_failures: int = 0
 	var document_source: String = "bottom = cube(10, 10, 10)\ntop = cube(10, 10, 2)\n"
 
 	var _gauge: _GaugeStandIn = null
@@ -858,6 +960,10 @@ class _DesignStandIn extends Node:
 			_timeout_ms: int = 30000) -> Dictionary:
 		evaluate_calls += 1
 		await (Engine.get_main_loop() as SceneTree).process_frame
+		if backend_failures > 0:
+			backend_failures -= 1
+			return {"success": false, "error_code": "timeout",
+				"error_message": "the worker did not answer in time"}
 		var source := str(args.get("source", "")).strip_edges()
 		return {"success": true, "result": {"ok": true, "result": {
 			"shape_name": source.get_slice("\n", source.get_slice_count("\n") - 1),

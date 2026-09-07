@@ -107,6 +107,12 @@ static func run(panel, args: Dictionary, per_part: Callable,
 		"uncertified": [],
 		# Established failures the legs counted but the rows do not show.
 		"failing_hidden": 0,
+		# A leg that measured geometry the document has moved past. The gate
+		# refuses a check BEFORE it starts, but a leg already measuring when
+		# the references are re-posed under it answers with its reply stamped
+		# stale, and that stamp is the only thing saying so.
+		"stale": false,
+		"stale_reason": "",
 	}
 	var scoped := not (args.get("parts", []) as Array).is_empty()
 
@@ -170,6 +176,12 @@ static func run(panel, args: Dictionary, per_part: Callable,
 			+ "every check ran and every row cleared, with the contacts in "
 			+ "expected_contacts held out by name.",
 	}
+	if bool(state["stale"]):
+		# The stamp on the way out ORs this in; a fold that dropped it would
+		# hand a settled document's freshness to a reply built from legs that
+		# measured an older one.
+		out["stale"] = true
+		out["stale_reason"] = str(state["stale_reason"])
 	if not (state["notes"] as Array).is_empty():
 		out["notes"] = state["notes"]
 	_attach_tickets(out, state["tickets"] as Dictionary, scoped)
@@ -495,6 +507,20 @@ static func _leg_ran(report: Dictionary, leg: String, part: String,
 			% [leg, _of(part), str(report.get("reason", "no reason given"))])
 		checks[leg] = "could not run: %s" % str(report.get("reason", ""))
 		return false
+	# A LEG THAT MEASURED STALE GEOMETRY IS NOT A PASS. Its rows are real
+	# numbers about the shape that was standing, so they travel; what may not
+	# travel is a clean verdict folded from them.
+	if bool(report.get("stale", false)):
+		var why := str(report.get("stale_reason",
+			"the geometry it measured is not the geometry the document "
+			+ "describes"))
+		state["stale"] = true
+		if str(state["stale_reason"]).is_empty():
+			state["stale_reason"] = why
+		_unknown(state, "%s%s measured geometry the document has moved past: %s"
+			% [leg, _of(part), why])
+		checks[leg] = "ran, but stale: %s" % why
+		return true
 	checks[leg] = "ran"
 	return true
 

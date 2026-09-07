@@ -14,12 +14,15 @@ import (
 // skips that audit, so a script added to CADPanel.tscn and not to the manifest
 // ships as a bundle whose panel never appears. This test is the gate.
 //
-// THE SCENE IS NOT THE WHOLE GRAPH. Most of the panel's code is reached by
-// preload() from another script and never appears in the .tscn at all —
-// rim_contact.gd shipped unwhitelisted that way and was caught by hand. So the
-// walk starts at the scene's scripts AND the whitelist, and follows every
-// preload()/load() string literal transitively; each plugin-local .gd it
-// reaches has to be whitelisted too.
+// THE SCENE IS NOT THE WHOLE GRAPH. Most of the panel's code is reached from
+// another script and never appears in the .tscn at all. So the walk starts at
+// the scene's scripts AND the whitelist, and follows every plugin-local
+// reference transitively; each .gd it reaches has to be whitelisted too.
+//
+// A SCRIPT REACHES ITS BASE AS WELL AS ITS PRELOADS. Off-tree plugin scripts
+// cannot use class_name, so every chain in this plugin is written
+// `extends "sibling.gd"` — a load-time reference exactly like a preload, and
+// a base missing from the whitelist is the same dead panel.
 func TestPanelSceneScriptsAreWhitelisted(t *testing.T) {
 	raw, err := os.ReadFile("manifest.json")
 	if err != nil {
@@ -82,6 +85,7 @@ func TestPanelSceneScriptsAreWhitelisted(t *testing.T) {
 var (
 	extResScript = regexp.MustCompile(`\[ext_resource type="Script" path="([^"]+)"`)
 	loadLiteral  = regexp.MustCompile(`(?:^|[^A-Za-z0-9_])(?:pre)?load\("([^"]+)"\)`)
+	extendsPath  = regexp.MustCompile(`(?m)^extends\s+"([^"]+)"`)
 )
 
 // The plugin-local scripts a .tscn references, plugin-root relative.
@@ -101,7 +105,8 @@ func sceneScripts(t *testing.T, scene string) []string {
 }
 
 // What *from* pulls in at load time, plugin-root relative: the preload()/load()
-// string literals of a script, or the script references of a scene. A file
+// string literals and the `extends "..."` base of a script, or the script
+// references of a scene. A file
 // that cannot be read is a dangling reference and fails the test — a preload
 // of a path that is not there is a panel that never instantiates.
 func referencesFrom(t *testing.T, from string) []string {
@@ -115,9 +120,12 @@ func referencesFrom(t *testing.T, from string) []string {
 		return sceneScripts(t, from)
 	}
 	out := []string{}
-	for _, mm := range loadLiteral.FindAllStringSubmatch(code(string(body)), -1) {
-		if ref, ok := local(from, mm[1]); ok {
-			out = append(out, ref)
+	source := code(string(body))
+	for _, re := range []*regexp.Regexp{loadLiteral, extendsPath} {
+		for _, mm := range re.FindAllStringSubmatch(source, -1) {
+			if ref, ok := local(from, mm[1]); ok {
+				out = append(out, ref)
+			}
 		}
 	}
 	return out

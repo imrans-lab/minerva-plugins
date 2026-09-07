@@ -90,7 +90,9 @@ extends "interference_containment.gd"
 ## interference_report.gd, under both, whose state the walk writes.
 ##
 ## No class_name: off-tree plugin scripts cannot use class_name.
-## Consumers: preload("scripts/geometry_checks.gd") from CADPanel.gd.
+## Consumers: ui/cad_panel_scene.gd (the instance every evaluation runs)
+## and ui/panel_tools.gd (minerva_cad_check_interference and the
+## clearance verb the same object carries).
 
 
 ## The rule that tells a designed contact from a penetration when an edge runs
@@ -211,15 +213,23 @@ func check(panel: Object, args: Dictionary = {}) -> Dictionary:
 ## under the digest of the source that produced it and the joiner asks for
 ## that digest.
 ##
-## ONLY AN UNSCOPED REPORT IS KEPT. A joiner reads a pair the report does not
-## name as "no crossing there", so a report narrowed by reference= or node=
-## would excuse every node it never looked at.
+## ONLY AN UNSCOPED, UNDECLARED REPORT IS KEPT. A joiner reads a pair the
+## report does not name as "no crossing there", so a report narrowed by
+## reference= or node= would excuse every node it never looked at — and so
+## would one carrying expected_contacts, whose declared pairs leave `pairs`
+## for the declarations table. The slot is keyed by source digest alone, so a
+## later call with different declarations, or none, would be handed that
+## report and read a contained pair as clear. Declarations are per call; the
+## cache holds only what is true of the shape whatever was declared.
 func _keep_part_report(panel: Object, args: Dictionary,
 		report: Dictionary) -> void:
 	if str(args.get("source", "")).strip_edges().is_empty():
 		return
 	if not str(args.get("reference", "")).is_empty() \
 			or not str(args.get("node", "")).is_empty():
+		return
+	var declared: Variant = args.get("expected_contacts", [])
+	if declared is Array and not (declared as Array).is_empty():
 		return
 	if not bool(report.get("checked", false)):
 		return

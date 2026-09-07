@@ -5,17 +5,20 @@ extends RefCounted
 ## A measurement verb reaches the panel's colliders, and those are built from
 ## the last evaluation the panel PAINTED. The document buffer moves ahead of
 ## that on its own: an edit bumps the buffer's version the instant it lands,
-## the panel debounces, the worker takes seconds or minutes, and every call in
-## between measures the previous shape. Nothing in the reply used to say so,
-## and an answer that is right about geometry nobody has any more is worse than
-## no answer — it is one a reader acts on.
+## the panel debounces, the worker takes seconds or minutes, and an evaluation
+## that fails paints nothing at all. A number that is right about geometry the
+## document no longer describes is worse than no number: it is one a reader
+## acts on.
 ##
-## So every check reply and every await reply carries the same four fields:
+## So every check reply and every await reply carries the same five fields:
 ##
-##   source_version   the buffer version the standing evaluation was of
-##   buffer_version   the version the document is at now
-##   evaluated_at     when that evaluation was stamped, unix seconds
-##   stale            whether those two describe one document
+##   source_version     the buffer version of the evaluation that PRODUCED
+##                      the geometry being measured — the last one that
+##                      painted, never merely the last one dispatched
+##   buffer_version     the version the document is at now
+##   evaluated_at       when the standing evaluation was stamped, unix seconds
+##   evaluation_status  what that evaluation did: ok, error, timeout, pending
+##   stale              whether the first two describe one document
 ##
 ## and a check verb asked while they disagree is REFUSED rather than answered:
 ## checked false with the reason, nothing measured, and minerva_cad_await_eval
@@ -94,7 +97,7 @@ static func refusal(freshness: Dictionary) -> Dictionary:
 	return stamp(reply, freshness)
 
 
-## The four fields on a reply that is going out. A reply from a panel that
+## The five fields on a reply that is going out. A reply from a panel that
 ## could not report its freshness is returned untouched: an absent stamp is
 ## honest where an invented one would not be.
 static func stamp(reply: Dictionary, freshness: Dictionary) -> Dictionary:
@@ -103,6 +106,10 @@ static func stamp(reply: Dictionary, freshness: Dictionary) -> Dictionary:
 	reply["source_version"] = int(freshness.get("source_version", -1))
 	reply["buffer_version"] = int(freshness.get("buffer_version", -1))
 	reply["evaluated_at"] = float(freshness.get("evaluated_at", 0.0))
+	# What the standing evaluation DID. Two replies can name the same
+	# source_version for opposite reasons — one painted it, one failed on the
+	# way to it — and only this field tells them apart.
+	reply["evaluation_status"] = str(freshness.get("evaluation_status", ""))
 	# Never DOWNGRADES: the verb layer marks a reply stale for its own reason
 	# (the references re-posed under a measurement), and a document that is
 	# settled says nothing about that.

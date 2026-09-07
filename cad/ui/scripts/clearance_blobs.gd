@@ -18,7 +18,9 @@ extends RefCounted
 ##
 ## No class_name: off-tree plugin scripts cannot use class_name.
 ## Consumers: extended by scripts/clearance_report.gd, and through it by
-## scripts/clearance_client.gd, reference_pairs.gd and geometry_checks.gd.
+## every link above it in the one chain: clearance_client.gd,
+## reference_pairs.gd, interference_report.gd, interference_world.gd,
+## interference_containment.gd and geometry_checks.gd at the top.
 
 
 const _WorkerReply: Script = preload("worker_reply.gd")
@@ -44,8 +46,8 @@ func _node_matches(node_path: String, filter: String) -> bool:
 	return node_path == filter or node_path.get_file() == filter
 
 
-## The pose a named reference carries in `records`. Split out so the clearance
-## path can work from its own snapshot rather than the module's.
+## The pose a named reference carries in `records`; the clearance path reads
+## its own snapshot of the records rather than the module's live pose.
 func _pose_in(records: Array, reference_name: String) -> Transform3D:
 	for entry in records:
 		var record: Dictionary = entry

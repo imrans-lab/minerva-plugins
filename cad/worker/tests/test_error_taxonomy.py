@@ -94,13 +94,13 @@ UNKNOWN_FUNCTION_SOURCE = "base = cube(10, 10, 10)\n\nlid = boxx(4, 4, 4)\n"
 
 
 def test_a_translate_error_names_its_binding_and_its_source_line() -> None:
-    """Bug 01a079fa0cc3: "where do I edit" for a DSL-level failure.
+    """"Where do I edit" for a DSL-level failure.
 
     A kernel failure carries a Python traceback and the panel shows its
     innermost frame. A translate error never reaches code the reader owns, so
-    it had a message and nothing else — `error_frame` came back empty and the
-    banner named no line. Both classes must now answer the same question: the
-    binding being produced, the line it is on, and that line as written.
+    a message is all it has to offer unless the frame is built here. Both
+    classes answer the same question: the binding being produced, the line it
+    is on, and that line as written.
     """
     operator = _error(OPERATOR_SOURCE)
     assert operator["kind"] == "translate", operator

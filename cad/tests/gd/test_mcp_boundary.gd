@@ -18,7 +18,7 @@ extends SceneTree
 ## kilobytes on every doc_write. So the wire carries a hash of it.
 ##
 ## ORACLE for the size half: the reply's own bytes, measured against a
-## reference set the size of the board the HITL session used (45 nodes). The
+## reference set the size of a real board's import (45 nodes). The
 ## suite asserts the premise first — that the full digest really is thousands
 ## of characters — so a fixture that quietly shrank could not pass it.
 ##
@@ -54,7 +54,7 @@ const REGISTRY_EDGES := 700
 const REGISTRY_POLYLINE_POINTS := 24
 
 ## Nodes in the reference the size assertion is made against — the board the
-## HITL session mounted.
+## a real board import mounts.
 const BOARD_NODES := 45
 ## What a doc_write reply may cost, in bytes. Roughly the DSL source it is
 ## answering about; anything larger is the reply talking about itself.
@@ -64,8 +64,8 @@ const REPLY_BUDGET_BYTES := 2048
 ## report narrowed to the pairs it is about to act on.
 const REFERENCES_LEAN_BUDGET_BYTES := 768
 const CLEARANCE_LIMITED_BUDGET_BYTES := 3072
-## What a clearance reply that nobody narrowed may cost. The rev-4 HITL got
-## forty kilobytes back for a question whose answer was one row.
+## What a clearance reply that nobody narrowed may cost. Unfiltered, the same
+## question returns forty kilobytes for an answer that is one row.
 const CLEARANCE_LEAN_BUDGET_BYTES := 3072
 ## How many of the fixture's pairs miss the 1.0 mm bar: gaps run 0.1 .. 5.0 mm
 ## in tenths, so 0.1 .. 0.9 fail and the rest clear.

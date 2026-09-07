@@ -34,7 +34,11 @@ extends RefCounted
 ## keep} overrides the mirrored solid's material with a shader that discards
 ## every fragment on the unwanted side of the world plane, with backfaces drawn
 ## and their normals flipped so the inside of a wall is lit like a surface
-## rather than a black hole. REFERENCES ARE LEFT WHOLE: a reference is the part
+## rather than a black hole. The override reaches the solid's own instance and
+## nothing else, so the FEATURE-EDGE OVERLAY — a separate line mesh — is left
+## out of the mirror while a section is active rather than drawing the
+## discarded half's silhouette over the cut; the reply says so.
+## REFERENCES ARE LEFT WHOLE: a reference is the part
 ## the solid is being checked against — the board inside the bay, the screw in
 ## the boss — and cutting it away would delete the very thing a section is
 ## opened to look at. The reply says so in section_plane.applies_to.
@@ -58,6 +62,15 @@ const DEFAULT_FOV_DEG: float = 45.0
 ## pane to take a size from.
 const DEFAULT_MAX_EDGE: int = 1024
 const RENDER_ASPECT: float = 4.0 / 3.0
+## Samples per axis when asking whether a forced frame drew anything. A part
+## framed to fill 90% of the frame cannot hide between lines this far apart.
+const BLANK_PROBE_STEPS: int = 64
+## The MeshRoot children that draw the solid's OUTLINE rather than the solid.
+## They are line meshes in their own instances, so the section shader — which
+## overrides the solid's own material — never reaches them: with a section
+## active they would stand in front of the cut, drawing the silhouette of the
+## half that was discarded. They are left out of the mirror instead.
+const _OUTLINE_INSTANCE_NAMES: Array[String] = ["FeatureEdges", "EdgeLeaders"]
 ## Frames waited before the draw is forced. Two is what an offscreen viewport
 ## needs when the main loop is drawing normally; past that it is not drawing.
 const DRAWN_FRAMES_NEEDED: int = 2
@@ -130,6 +143,8 @@ static func snapshot(panel, args: Dictionary) -> Dictionary:
 	if render.has("error"):
 		var refusal := _err(str(render["error"]))
 		refusal["pose"] = echo
+		if render.has("drawn"):
+			refusal["drawn"] = bool(render["drawn"])
 		return refusal
 	var image: Image = _FitCapture.downscale(render["image"], max_edge)
 
@@ -155,9 +170,15 @@ static func snapshot(panel, args: Dictionary) -> Dictionary:
 			"offset_mm": float(section["offset_mm"]),
 			"keep": str(section["keep"]),
 			"applies_to": "solid",
+			"edge_overlay": "hidden",
 			"note": "References are rendered whole: a section is opened to see "
 				+ "the solid AROUND a reference, and cutting the reference "
-				+ "away would remove what the cut is for.",
+				+ "away would remove what the cut is for. The solid's own "
+				+ "feature-edge overlay is HIDDEN while a section is active: "
+				+ "the cut is a fragment discard on the solid's material and "
+				+ "the outline is a separate line mesh, so it would draw the "
+				+ "silhouette of the half that was cut away, floating over "
+				+ "the cut face.",
 		}
 	payload.merge(path_reply)
 	if bool(args.get("return_base64", false)):
@@ -486,7 +507,42 @@ static func _render(panel, box: AABB, pose: Dictionary, section: Dictionary,
 		return {"error": "the posed render produced no pixels: this build is "
 			+ "drawing nothing at all (a headless run has no rendering driver). "
 			+ "The pose itself is in this reply.", "camera": placed}
+	# AN IMAGE OF THE RIGHT SIZE IS NOT AN IMAGE OF ANYTHING. The forced path
+	# reads the render target whether or not the driver put anything in it, and
+	# a target that was allocated and never drawn reads back as one flat
+	# colour — which travels as a PNG, and a caller cannot tell it from a
+	# picture of a part that is out of frame. Only the forced path is asked:
+	# a frame the main loop drew has been drawn by definition.
+	if not drawn and _is_one_colour(image):
+		return {"error": "the posed render was forced (nothing is drawing "
+			+ "through the main loop — an occluded window, or a build with no "
+			+ "rendering driver) and the render target came back a single "
+			+ "flat colour, so nothing was drawn into it. The pose itself is "
+			+ "in this reply.", "camera": placed, "drawn": false}
 	return {"image": image, "camera": placed, "mirrored": mirrored}
+
+
+## Is every pixel of this image the same colour? That is what an untouched
+## render target reads back as. Sampled on a grid rather than walked: a 1024 x
+## 768 target is 786,432 get_pixel calls, and a picture that differs anywhere
+## differs at one of these long before the walk would finish.
+static func _is_one_colour(image: Image) -> bool:
+	var width := image.get_width()
+	var height := image.get_height()
+	if width <= 0 or height <= 0:
+		return true
+	var first := image.get_pixel(0, 0)
+	var step_x := maxi(width / BLANK_PROBE_STEPS, 1)
+	var step_y := maxi(height / BLANK_PROBE_STEPS, 1)
+	var y := 0
+	while y < height:
+		var x := 0
+		while x < width:
+			if not image.get_pixel(x, y).is_equal_approx(first):
+				return false
+			x += step_x
+		y += step_y
+	return true
 
 
 ## The MeshRoot to mirror: the first one holding a visible solid, so an ortho
@@ -522,6 +578,9 @@ static func _mirror_into(source: Node3D, into: Node3D, solid: MeshInstance3D,
 		section: Dictionary) -> int:
 	var count := 0
 	for node in _visual_instances(source):
+		if not section.is_empty() \
+				and _OUTLINE_INSTANCE_NAMES.has(str(node.name)):
+			continue
 		var copy := MeshInstance3D.new()
 		copy.mesh = node.mesh
 		copy.material_override = node.material_override

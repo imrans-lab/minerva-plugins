@@ -56,6 +56,8 @@ extends SceneTree
 const MeshGauge := preload("res://../../minerva-plugins/cad/ui/scripts/mesh_gauge.gd")
 const GeometryChecks := preload("res://../../minerva-plugins/cad/ui/scripts/geometry_checks.gd")
 const ExpectedContacts := preload("res://../../minerva-plugins/cad/ui/scripts/expected_contacts.gd")
+## The store a part-scoped interference report lands in, and the joiner reads.
+const PartCache := preload("res://../../minerva-plugins/cad/ui/scripts/part_cache.gd")
 
 ## Board: 80 x 60 in X and Y, 1.6 thick in Z, centred on its own origin, so its
 ## faces are at z = -0.8 and z = +0.8.
@@ -2126,6 +2128,33 @@ func _check_expected_contacts(gauge: Node, checks: RefCounted) -> void:
 					== "no-such-node"
 				and int(stale.get("excluded_count", 0)) == 1,
 			"unmatched = %s" % str(unmatched))
+
+	# THE PART CACHE MUST NOT HOLD A DECLARED REPORT. A part's report is
+	# filed under the digest of the source that produced it and nothing else,
+	# and a declared pair leaves `pairs` for the declarations table — so a
+	# report measured under one call's expected_contacts, handed to a later
+	# call that declares nothing, would read a contained pair as "nothing
+	# crossing there" and pass. The report kept is the one that is true of
+	# the shape whatever was declared.
+	var part_source := "top = cube(10, 10, 10)\ntop\n"
+	var part_digest := PartCache.digest(part_source)
+	PartCache.clear()
+	checks._keep_part_report(self, {"source": part_source,
+		"expected_contacts": [_declaration(BOSS_CENTRE_XY, -3.0)]},
+		{"checked": true, "source_digest": part_digest, "pairs": []})
+	var after_declared: Dictionary = PartCache.interference(self, part_digest)
+	checks._keep_part_report(self, {"source": part_source},
+		{"checked": true, "source_digest": part_digest, "pairs": []})
+	var after_undeclared: Dictionary = PartCache.interference(self, part_digest)
+	check("a part report measured under expected_contacts is NOT cached — the "
+			+ "slot is keyed by source digest alone, so a later call "
+			+ "declaring nothing would be handed a report whose declared "
+			+ "pairs had already left it — while the undeclared report of the "
+			+ "same source is kept",
+			after_declared.is_empty() and not after_undeclared.is_empty(),
+			"declared = %s / undeclared = %s" % [str(after_declared),
+				str(after_undeclared)])
+	PartCache.clear()
 
 
 ## A parsed declaration round one boss: the world box the crossings of that

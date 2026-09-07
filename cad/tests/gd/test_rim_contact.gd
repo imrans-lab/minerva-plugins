@@ -18,10 +18,10 @@ extends SceneTree
 ## question the rim answers the wrong way, and the seat is reported as
 ## interference on a design that is exactly right.
 ##
-## THE MEASUREMENT THAT NAMES THE BUG. Owner HITL on enclosure-rev4.mcad
-## (cad 0.3.7) reported a crossing at z = -0.0003 mm on a boss whose seat is
-## at z = 0 — three ten-thousandths of a millimetre through a plane the two
-## bodies share. That is not a design error, it is the precision the numbers
+## THE MEASUREMENT THAT NAMES THE FAULT. A boss whose seat is at z = 0 is
+## reported crossing at z = -0.0003 mm — three ten-thousandths of a millimetre
+## through a plane the two bodies share. That is not a design error, it is the
+## precision the numbers
 ## arrive in: physics hit positions are single precision, so on a
 ## hundred-millimetre part they are already good to about a ten-thousandth of
 ## a millimetre, which is the check's whole touch epsilon. NOISE_LIFT_MM is
@@ -84,11 +84,12 @@ const BOSS_HEIGHT := 5.0
 const BOSS_FACETS := 48
 ## The M3 clearance bore of the real tray boss, WIDER than the hole's corners:
 ## the whole seating annulus lands on plate material and the plate's hole rim
-## hangs over the open mouth. This is the rev-4 geometry.
+## hangs over the open mouth.
 const CLEAR_BORE_RADIUS := 1.91
 
-## The measured offset from rev-4: three ten-thousandths of a millimetre, three
-## times the check's touch epsilon and a hundredth of a screw thread.
+## Three ten-thousandths of a millimetre: three times the check's touch
+## epsilon, a hundredth of a screw thread, and the precision a hit position
+## carries.
 const NOISE_LIFT_MM := 3e-4
 ## How far the control boss is driven INTO the plate.
 const SINK_MM := 0.2
@@ -184,14 +185,14 @@ func _run() -> void:
 				and int(flush.get("point_count", 0)) == 0,
 			"report = %s" % str(flush))
 
-	# THE REPRO. The same seat at the offset rev-4 actually reported: three
-	# ten-thousandths of a millimetre, which is the precision the hit
-	# positions arrive in and not a design error.
+	# THE REPRO. The same seat three ten-thousandths of a millimetre out,
+	# which is the precision the hit positions arrive in and not a design
+	# error.
 	checks.build_solid(_bored_boss(NOISE_LIFT_MM, CLEAR_BORE_RADIUS))
 	var noisy: Dictionary = await _submit(gauge, checks)
-	check("the same seat at the offset rev-4 measured — three ten-thousandths "
-			+ "of a millimetre, past the touch epsilon and inside the "
-			+ "precision the positions carry — is still a contact",
+	check("the same seat three ten-thousandths of a millimetre out — past "
+			+ "the touch epsilon and inside the precision the positions "
+			+ "carry — is still a contact",
 			bool(noisy.get("checked", false))
 				and int(noisy.get("count", 0)) == 0
 				and int(noisy.get("point_count", 0)) == 0

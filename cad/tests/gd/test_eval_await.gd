@@ -34,6 +34,10 @@ const PanelTools := preload("res://../../minerva-plugins/cad/ui/panel_tools.gd")
 
 const SOURCE := "part = cube(10, 10, 10)\n"
 const EDITED_SOURCE := "part = cube(20, 10, 10)\n"
+## An edit the worker refuses: the evaluation is dispatched for the new buffer
+## version and paints nothing, which is the case version numbers alone cannot
+## see.
+const BROKEN_SOURCE := "part = cube(20, 10,\n"
 
 ## The pane whose MeshInstance is read as "the answer is on screen". The iso
 ## view is the one that shows the shaded solid in every width class.
@@ -315,11 +319,10 @@ func _test_awaiting_covers_the_debounce_as_well_as_the_worker() -> void:
 # A CHECK NEVER MEASURES GEOMETRY THE DOCUMENT HAS MOVED PAST
 # ---------------------------------------------------------------------------
 
-## Two of the rev-4 session's worst hours went on this: an edit landed, the
-## panel saved it, and the check made straight afterwards measured an
-## evaluation half an hour old. Nothing in the reply said so, and a number that
-## is right about geometry nobody has any more is worse than no number — it is
-## one the reader acts on.
+## An edit lands, the panel saves it, and the check made straight afterwards
+## measures the evaluation before it — geometry the document has moved past,
+## with nothing in the reply saying so. A number that is right about geometry
+## nobody has any more is worse than no number: it is one the reader acts on.
 ##
 ## The buffer's version moves the instant the edit lands; the evaluation
 ## carries the version it was DISPATCHED for. While those disagree a measuring
@@ -424,6 +427,44 @@ func _test_a_check_refuses_geometry_the_document_moved_past() -> void:
 					"buffer newer than evaluation")
 				and int(measured["source_version"]) == int(measured["buffer_version"]),
 			"measured = %s" % str(measured))
+
+	# ── AND AN EVALUATION THAT FAILED IS A STALE PANEL ────────────────────
+	# The version numbers alone cannot see this one. A failed evaluation was
+	# DISPATCHED for the new version, so the buffer and the dispatch agree —
+	# and it painted nothing, so the colliders a check reaches are still the
+	# previous evaluation's. Reading the dispatch as `source_version` reported
+	# the new version over the old geometry, settled, with a check measuring
+	# it and saying nothing.
+	(rig["buffer"] as Object).apply_edit(BROKEN_SOURCE)
+	await create_timer(0.4).timeout
+	var after_edit: Array = _evaluations(rig["dispatched"])
+	if not after_edit.is_empty():
+		_reply(rig, str((after_edit[after_edit.size() - 1] as Dictionary)["reply_id"]),
+				_worker_error())
+	await create_timer(0.3).timeout
+	var painted: int = int(measured["source_version"])
+	var broken: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_check_interference", {})
+	check("stale: an evaluation that FAILED painted nothing, so the geometry "
+			+ "a check would measure is still the previous evaluation's — the "
+			+ "check is refused, source_version stays on the version that was "
+			+ "PAINTED rather than the one that was dispatched, and the "
+			+ "reason names the failed evaluation",
+			not bool(broken.get("checked", true))
+				and bool(broken.get("stale", false))
+				and int(broken["source_version"]) == painted
+				and int(broken["buffer_version"]) > painted
+				and str(broken.get("reason", "")).contains("painted nothing"),
+			"refused = %s (painted %d)" % [str(broken), painted])
+	check("stale: and every stamped reply says what the standing evaluation "
+			+ "DID — two replies can name the same source_version because one "
+			+ "painted it and the other failed on the way to it, and only "
+			+ "evaluation_status tells them apart",
+			str(broken.get("evaluation_status", "")) == "error"
+				and str(measured.get("evaluation_status", "")) == "ok",
+			"broken = %s / measured = %s" % [
+				str(broken.get("evaluation_status", "<absent>")),
+				str(measured.get("evaluation_status", "<absent>"))])
 	_teardown(rig)
 
 
@@ -509,6 +550,18 @@ func _worker_answer() -> Dictionary:
 			"body_count": 1,
 			"mesh": {"vertices": vertices, "faces": faces},
 			"edges": [],
+		},
+	}
+
+
+## A worker refusal, in the shape a DSL-level failure arrives in.
+func _worker_error() -> Dictionary:
+	return {
+		"ok": false,
+		"error": {
+			"kind": "translate",
+			"message": "unexpected end of input",
+			"frame": "part = cube(20, 10,",
 		},
 	}
 

@@ -11,7 +11,7 @@ extends MinervaPluginPanel
 ## way: the document half reads the panes, the modules and the mesh push that
 ## live here, and nothing here reaches back up.
 ##
-## Layout — Round 2 platform widgets:
+## Layout — platform widgets:
 ##   * ResponsiveContainer wraps the panel content. width_class drives a
 ##     stack-style swap between WideLayout (4-view + sidebar HSplit) and
 ##     NarrowLayout (single-view + projection dropdown + tools).
@@ -31,7 +31,7 @@ extends MinervaPluginPanel
 ## Ownership marker for the panel-executed tool dispatcher: fallback-resolved
 ## panels (AnnotationHostRegistry path) aren't broker-keyed by editor name, so
 ## the dispatcher reads this duck-typed property to verify the calling tool's
-## plugin owns this panel (fail-safe deny otherwise). HITL-caught 2026-07-16.
+## plugin owns this panel (fail-safe deny otherwise).
 var plugin_id: String = "cad"
 
 const _CadAnnotationHostScript: Script = preload("CadAnnotationHost.gd")
@@ -39,7 +39,7 @@ const _ResponsiveContainerScript: Script = preload("res://Scripts/UI/Controls/re
 const _BuiltinKindsScript: Script = preload("res://Scripts/Services/Annotations/BuiltinKinds.gd")
 const _CadEdgeNumberKindScript: Script = preload("kinds/cad_edge_number_kind.gd")
 
-## Panel-executed MCP tool surface (executor: "panel", DCR 019f6c3d0e3d C6 —
+## Panel-executed MCP tool surface (executor: "panel" —
 ## see handle_tool() below and panel_tools.gd's doc comment for the contract).
 const _PanelToolsScript: Script = preload("panel_tools.gd")
 ## Foreign mesh files named by mesh() in the source: loading, unit/up-axis
@@ -670,13 +670,13 @@ func _register_host_viewports(is_narrow: bool) -> void:
 		_annotation_host.set_viewport_for("top", top_vp)
 		_annotation_host.set_viewport_for("front", front_vp)
 		_annotation_host.set_viewport_for("right", right_vp)
-		# Register per-pane cameras for multi-pane annotation projection (Round 2a-Unit2).
+		# Register per-pane cameras for multi-pane annotation projection .
 		if _annotation_host.has_method("set_camera_for"):
 			_annotation_host.set_camera_for("iso", iso_cam)
 			_annotation_host.set_camera_for("top", top_cam)
 			_annotation_host.set_camera_for("front", front_cam)
 			_annotation_host.set_camera_for("right", right_cam)
-		# Register per-pane containers for viewport_rect computation (Round 2b-α Unit 1).
+		# Register per-pane containers for viewport_rect computation .
 		if _annotation_host.has_method("set_container_for"):
 			_annotation_host.set_container_for("iso",   _iso_view_container)
 			_annotation_host.set_container_for("top",   _top_view_container)
@@ -693,7 +693,7 @@ func _register_host_viewports(is_narrow: bool) -> void:
 
 ## Update the active viewport id when the layout changes.
 ##
-## Round 2b-α Unit 1: the canvas is permanently parented to _canvas_overlay
+## The canvas is permanently parented to _canvas_overlay
 ## (a full-rect Control above ALL SubViewportContainers), so we no longer
 ## reparent it on wide↔narrow transitions. We only update the host's active
 ## viewport id so MCP queries and render_content_to_image target the right pane.
