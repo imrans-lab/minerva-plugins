@@ -5,19 +5,20 @@ extends "reference_pairs.gd"
 ## distance along the edge it was found on. Everything between that and the
 ## reply the panel and the MCP verbs read — folding crossings into pairs,
 ## measuring how deep each run went, deciding whether a declared contact still
-## holds, and the one status line the banner shows — is here. It was split out
-## of geometry_checks.gd when that file crossed two thousand lines; nothing
-## about the check changed, and one object still carries both halves because
-## this script is the walk's base class, exactly as clearance_client.gd and
-## reference_pairs.gd are.
+## holds, and the one status line the banner shows — is here. One object
+## carries the walk and its report because this script is the base of the
+## walk's own chain — interference_world.gd over this,
+## interference_containment.gd over that, geometry_checks.gd on top — exactly
+## as clearance_client.gd and reference_pairs.gd are below.
 ##
 ## The state below lives here rather than with the walk because both halves
 ## write it: the walk fills the counters and the declaration buckets, and the
 ## report reads them. A running check owns all of it — the module answers one
-## check at a time, which the reservation in geometry_checks.gd enforces.
+## check at a time, which the reservation in interference_world.gd enforces.
 ##
 ## No class_name: off-tree plugin scripts cannot use class_name.
-## Consumers: geometry_checks.gd extends this script.
+## Consumers: extended by scripts/interference_world.gd, and through it by
+## interference_containment.gd and geometry_checks.gd.
 
 ## Markers drawn at most. A shell buried in a board can produce thousands of
 ## crossings and drawing them all says nothing more than drawing two hundred.

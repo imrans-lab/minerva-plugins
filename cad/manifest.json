@@ -598,6 +598,8 @@
           "ui/scripts/reply_shape.gd",
           "ui/scripts/geometry_checks.gd",
           "ui/scripts/interference_report.gd",
+          "ui/scripts/interference_world.gd",
+          "ui/scripts/interference_containment.gd",
           "ui/scripts/clearance_client.gd",
           "ui/scripts/clearance_report.gd",
           "ui/scripts/clearance_blobs.gd",

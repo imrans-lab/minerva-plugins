@@ -18,8 +18,9 @@ extends "clearance_client.gd"
 ## WHY IT IS IN THE INHERITANCE CHAIN rather than holding a handle: the blob
 ## store, the pins and the blob directory are per module instance, and a
 ## second object would have re-extracted every reference's triangles and
-## written a second copy of them. geometry_checks.gd extends THIS script,
-## which extends the clearance client, so the panel still holds one object.
+## written a second copy of them. The interference chain geometry_checks.gd
+## tops extends THIS script, which extends the clearance client, so the panel
+## still holds one object.
 ##
 ## WHICH PAIRS ARE MEASURED. Node against node, never file against file: a
 ## board is forty-five nodes and "the board is 2 mm from the shell" is not an
@@ -30,7 +31,8 @@ extends "clearance_client.gd"
 ## number below that is provably the closest pair in the assembly.
 ##
 ## No class_name: off-tree plugin scripts cannot use class_name.
-## Consumers: extended by scripts/geometry_checks.gd; driven by
+## Consumers: extended by scripts/interference_report.gd, under the chain
+## scripts/geometry_checks.gd tops; driven by
 ## ui/panel_tools.gd for minerva_cad_check_clearance / _check_interference
 ## with two references named.
 

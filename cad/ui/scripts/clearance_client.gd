@@ -10,8 +10,9 @@ extends "clearance_report.gd"
 ##
 ## THE SPLIT IS AN INHERITANCE, NOT A HANDLE. This script extends the report
 ## fold (scripts/clearance_report.gd), which extends the blob store
-## (scripts/clearance_blobs.gd), and geometry_checks.gd extends this one — so a
-## single object still carries every layer's public surface: the panel,
+## (scripts/clearance_blobs.gd), and the interference chain geometry_checks.gd
+## tops extends this one through reference_pairs.gd — so a single object
+## still carries every layer's public surface: the panel,
 ## panel_tools and fastener_checks all hold one geometry-checks instance, and
 ## the blob directory is named after that instance. Separate objects would have
 ## renamed the directory and given every caller several things to hold.
@@ -22,8 +23,8 @@ extends "clearance_report.gd"
 ## turns out not to have.
 ##
 ## No class_name: off-tree plugin scripts cannot use class_name.
-## Consumers: extended by scripts/geometry_checks.gd and
-## scripts/reference_pairs.gd.
+## Consumers: extended by scripts/reference_pairs.gd, and through it by the
+## interference chain scripts/geometry_checks.gd tops.
 
 
 # ---------------------------------------------------------------------------
