@@ -297,6 +297,28 @@ func _check_pair_verdicts(panel: _StubPanel) -> void:
 				and not bool((declared_rows[0] as Dictionary).get("excluded", true)),
 			"pair = %s, rows = %s" % [str(touch), str(declared_rows)])
 
+	var both_sides: Dictionary = await PanelTools.handle(panel,
+		"minerva_cad_check_clearance",
+		{"reference": "stick", "against": "devkit", "required_mm": 0.05,
+			"expected_contacts": [
+				{"reference": "stick", "required_mm": 0.1},
+				{"reference": "devkit", "required_mm": 1.0}]})
+	var strictest := _first(both_sides)
+	var both_rows: Array = both_sides.get("expected_contacts", []) as Array
+	check("verdict: declarations on BOTH sides of a pair are collected and "
+			+ "the strictest grades it — the 0.5 mm pair fails devkit's "
+			+ "1.0 mm even though stick's 0.1 mm matched first, the declared "
+			+ "row names devkit, and neither declaration is reported unmatched",
+			not bool(strictest.get("pass", true))
+				and not bool(both_sides.get("pass", true))
+				and both_rows.size() == 1
+				and str((both_rows[0] as Dictionary).get("reference", "")) == "devkit"
+				and float((both_rows[0] as Dictionary).get("declared_required_mm", 0.0)) == 1.0
+				and not bool((both_rows[0] as Dictionary).get("excluded", true))
+				and (both_sides.get("expected_contacts_unmatched", []) as Array).is_empty(),
+			"pair = %s, rows = %s, unmatched = %s" % [str(strictest), str(both_rows),
+				str(both_sides.get("expected_contacts_unmatched", []))])
+
 	var witness: Array = (_first(under).get("point_a_mm", {}) as Dictionary) \
 		.get("world", []) as Array
 	var at := _as_vector(witness)

@@ -398,7 +398,7 @@ test_clearance.gd assertions=85
 # with no triangle vertex in it is still measured, per_node lists both nodes
 # tallest first, an empty footprint is found:false rather than an error, and a
 # call with no region_mm is.
-test_reference_measurement.gd assertions=26
+test_reference_measurement.gd assertions=27
 
 # Fasteners: a 60 x 60 x 1.6 board posed away from the origin AND TURNED (a
 # yaw and a lean, so the screw axis is nowhere near world z) with five 3.4 mm
@@ -606,7 +606,7 @@ test_flush_contact.gd assertions=20
 # (the seat is a contact and the sunk boss interference with the roles of
 # solid and reference exchanged). No loops around check(), one assertion a
 # call.
-test_rim_contact.gd assertions=18
+test_rim_contact.gd assertions=19
 
 # Which panel a cad verb reaches, and how big its reply is. Two real CADPanel
 # scenes under two tab titles, addressed through the host's own panel-tool

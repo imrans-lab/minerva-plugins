@@ -472,16 +472,21 @@ func _pairs_report(reply: Dictionary, records: Array, required_mm: float,
 			if containment == "undecidable":
 				row["containment_undecidable"] = true
 				undecided += 1
-		# A declaration on either side excuses the pair: an intended contact is
-		# stated about the part that is meant to touch, and the author has no
-		# reason to know which of the two the check will call `a`.
-		var answered: Array = _Expected.indices_for(expected,
+		# A declaration on EITHER side is about this pair: an intended contact
+		# is stated about the part that is meant to touch, and the author has
+		# no reason to know which of the two the check will call `a`. Both
+		# sides' declarations are collected — a match on `a` does not stop the
+		# search on `b` — so the strictest of ALL of them grades the pair.
+		var answered_a: Array = _Expected.indices_for(expected,
 			str(side_a.get("reference", "")), str(side_a.get("node", "")),
 			points)
-		if answered.is_empty():
-			answered = _Expected.indices_for(expected,
-				str(side_b.get("reference", "")), str(side_b.get("node", "")),
-				points)
+		var answered_b: Array = _Expected.indices_for(expected,
+			str(side_b.get("reference", "")), str(side_b.get("node", "")),
+			points)
+		var answered: Array = answered_a.duplicate()
+		for extra in answered_b:
+			if not answered.has(extra):
+				answered.append(extra)
 		# Every declaration these two witness points answer to is matched, so a
 		# second region over the same node is not reported stale; the pair is
 		# GRADED against the strictest, because every one of them has to hold.
@@ -490,6 +495,9 @@ func _pairs_report(reply: Dictionary, records: Array, required_mm: float,
 			matched[answer] = true
 		if index >= 0:
 			var declaration: Dictionary = expected[index]
+			# The declared row names the side the grading declaration is about.
+			var declared_side: Dictionary = side_b \
+				if answered_b.has(index) and not answered_a.has(index) else side_a
 			var allowed: float = _Expected.required_mm(declaration)
 			var excused: bool = bound_mm >= allowed and not overlap \
 				and containment != "undecidable"
@@ -515,8 +523,8 @@ func _pairs_report(reply: Dictionary, records: Array, required_mm: float,
 				row["declared_region"] = true
 			row["pass"] = excused and certified
 			var declared_row: Dictionary = _Expected.row(declaration,
-				str(side_a.get("reference", "")), str(side_a.get("node", "")),
-				"min_mm", min_mm, excused)
+				str(declared_side.get("reference", "")),
+				str(declared_side.get("node", "")), "min_mm", min_mm, excused)
 			if excused:
 				excluded += 1
 				if not certified:

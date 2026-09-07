@@ -321,7 +321,6 @@ func _report(pairs: Dictionary) -> Dictionary:
 	var contact_points := 0
 	for key in _contacts.keys():
 		var contact: Dictionary = _contacts[key]
-		contact_points += int(contact["point_count"])
 		var row := _pair_row(contact)
 		row["touching"] = true
 		row["note"] = "the bodies meet here and share no material: no point " \
@@ -332,11 +331,18 @@ func _report(pairs: Dictionary) -> Dictionary:
 			_declared_matched[int(matched)] = true
 		var index: int = _Expected.strictest(_expected, covering)
 		if index >= 0:
+			var entry: Dictionary = _expected[index]
+			# THE TOUCH IS GRADED AGAINST WHAT WAS DECLARED. A declaration of
+			# contact (required_mm 0, the default) is met by a touch; one
+			# demanding air (required_mm > 0) is violated by it — the gap
+			# here is 0 — and the pair fails the verdict like any other.
+			var demanded: float = _Expected.required_mm(entry)
+			var held: bool = demanded <= 0.0
 			row["declared_intended"] = true
 			# NOT excluded: nothing was excused. The pair was never in `count`
 			# to begin with, and saying otherwise would put a seat on the
 			# audit list of overlaps a declaration let through.
-			var contact_row: Dictionary = _Expected.row(_expected[index],
+			var contact_row: Dictionary = _Expected.row(entry,
 				str(contact["reference"]), str(contact["node"]), "touching",
 				0.0, false)
 			# CERTIFIED, unlike a depth exclusion: touching-not-crossing is a
@@ -344,9 +350,21 @@ func _report(pairs: Dictionary) -> Dictionary:
 			# shorter than the overlap it stands for.
 			contact_row["certified"] = true
 			contact_row["touching"] = true
+			contact_row["held"] = held
 			contact_row["points_mm"] = row["points_mm"]
 			contact_row["point_count"] = int(row["point_count"])
 			declared_rows.append(contact_row)
+			if not held:
+				row["note"] = str(row["note"]) + ("; declared to keep %s mm "
+					+ "of air, but the bodies touch here: gap 0 < required")\
+					% demanded
+				for point in (contact["points"] as Array):
+					if _marker_points.size() < MAX_MARKERS:
+						_marker_points.append(point as Vector3)
+				total += int(row["point_count"])
+				out.append(row)
+				continue
+		contact_points += int(contact["point_count"])
 		contact_rows.append(row)
 	var sampling := ("none: every one of the %d solid edges that reach a "
 		+ "reference was cast (of %d the solid has; the rest stand clear of "
@@ -417,7 +435,8 @@ func _report(pairs: Dictionary) -> Dictionary:
 			+ "declaration over a CONTACT is different in kind — the bodies "\
 			+ "were shown to share no material there, so it is graded "\
 			+ "touching (certified: true), excuses no overlap and withholds "\
-			+ "nothing"
+			+ "nothing — unless it demanded air (required_mm > 0), which a "\
+			+ "touch violates: that pair is back among the pairs and fails"
 		if excluded > 0 and out.is_empty() and _undecided.is_empty():
 			report["advisory"] = true
 			report["pass_reason"] = ("%d declared contact(s) excused on a "

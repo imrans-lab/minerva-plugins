@@ -467,6 +467,30 @@ func _declarations(gauge: Node, checks: RefCounted, plate: ArrayMesh) -> void:
 				and (seat.get("expected_contacts_unmatched", []) as Array).is_empty(),
 			"report = %s" % str(seat))
 
+	# A TOUCH IS GRADED AGAINST THE GAP THE DECLARATION DEMANDS. The same
+	# seat, the same region, but the declaration asks for 1.0 mm of air: the
+	# bodies touch, the gap is 0, and the check fails with that reason —
+	# where the required_mm 0 declaration above let the same touch pass.
+	var airless: Dictionary = await _submit(gauge, checks, [_declaration(1.0)])
+	var airless_rows: Array = airless.get("expected_contacts", []) as Array
+	var violated: Dictionary = (airless_rows[0] as Dictionary) \
+		if not airless_rows.is_empty() else {}
+	check("the same seat declared with required_mm 1.0 is a VIOLATION: the "
+			+ "touch is graded against the air it demanded, the pair is "
+			+ "reported with gap 0 < required, and the check fails — while "
+			+ "the required_mm 0 declaration passed the same touch",
+			bool(seat.get("pass", false))
+				and not bool(airless.get("pass", true))
+				and int(airless.get("count", 0)) == 1
+				and bool(_first_pair(airless).get("declared_intended", false))
+				and str(_first_pair(airless).get("note", "")).contains("gap 0 < required")
+				and airless_rows.size() == 1
+				and bool(violated.get("touching", false))
+				and not bool(violated.get("held", true))
+				and int(airless.get("excluded_count", 0)) == 0
+				and (airless.get("expected_contacts_unmatched", []) as Array).is_empty(),
+			"report = %s" % str(airless))
+
 	# THE FALSIFIER FOR THE DECLARATION. The same region, the same node, the
 	# same reference — over a boss that is 0.2 mm into the plate.
 	checks.build_solid(_bored_boss(SINK_MM, CLEAR_BORE_RADIUS))
@@ -575,12 +599,14 @@ func _submit(gauge: Node, checks: RefCounted,
 	})
 
 
-## A declaration of the seat: the plate's node, in a box round the boss.
-func _declaration() -> Dictionary:
+## A declaration of the seat: the plate's node, in a box round the boss,
+## demanding `required_mm` of air (0, the default, lets the surfaces touch).
+func _declaration(required_mm: float = 0.0) -> Dictionary:
 	var reach := BOSS_RADIUS + 1.0
 	var parsed: Dictionary = ExpectedContacts.parse({"expected_contacts": [{
 		"reference": REFERENCE_NAME,
 		"node": NODE_PATH,
+		"required_mm": required_mm,
 		"region_mm": {
 			"min_mm": [-reach, -reach, -1.0],
 			"max_mm": [reach, reach, 1.0],
