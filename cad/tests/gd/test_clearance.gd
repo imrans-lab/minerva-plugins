@@ -1188,6 +1188,31 @@ func _check_a_part_joins_its_own_report(panel: Node, checks: RefCounted) -> void
 				and str(floors.get("pass_reason", "")).contains("ray budget"),
 			"floors pass = %s, join = '%s'" % [str(floors.get("pass")),
 				str(floors.get("interference_join", ""))])
+	# (That report carries no `truncated_coverage` at all — the shape an
+	# older cached report has — and is read as the unsafe kind.)
+
+	# A WALK THAT ONLY RAN OUT OF RIM TESTS EXAMINED EVERYTHING. Past that
+	# budget a crossing is still cast and reported as interference, so a
+	# report with count 0 left no pair unexamined: the join is whole and the
+	# part passes on its measured gaps.
+	var rim_only: Dictionary = (_interference_over(PART_SOURCE, []) \
+		as Dictionary)["interference"]
+	rim_only["sampling"] = "TRUNCATED — the rim rule was asked about the "\
+		+ "first 512 crossings; past that every crossing is reported without "\
+		+ "being asked whether the bodies merely meet there; every crossing "\
+		+ "past the budget is reported as interference"
+	rim_only["truncated_coverage"] = false
+	PartCache.put_interference(panel, PartCache.digest(PART_SOURCE), rim_only)
+	var labelled: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5, "source": PART_SOURCE})
+	check("parts: a report that only ran out of RIM tests still joins — "
+			+ "every crossing past that budget was cast and kept, so count 0 "
+			+ "examined every pair and the part passes on its measured gaps",
+			bool(labelled.get("pass", false))
+				and not str(labelled.get("interference_join", ""))
+					.begins_with("STALE"),
+			"labelled pass = %s, join = '%s'" % [str(labelled.get("pass")),
+				str(labelled.get("interference_join", ""))])
 
 	PartCache.clear()
 	var orphaned: Dictionary = await checks.check_clearance(panel,

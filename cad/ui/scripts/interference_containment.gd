@@ -49,6 +49,8 @@ const _RimContact: Script = preload("rim_contact.gd")
 ## whose answer cannot change (the pair is interference either way). Past it
 ## every crossing is KEPT and the report says it was truncated.
 const MAX_RIM_TESTS: int = 512
+## The budget in force; a test lowers it to reach the truncated path.
+var max_rim_tests: int = MAX_RIM_TESTS
 
 
 ## Contacts within this distance of a surface are the same surface: a designed
@@ -479,12 +481,12 @@ func _rim_gate_open(reference_name: String, node_path: String) -> bool:
 	if _rim_crossing.has(_pair_key(reference_name, node_path)):
 		return false
 	_rim_tests += 1
-	if _rim_tests > MAX_RIM_TESTS:
-		if _rim_tests == MAX_RIM_TESTS + 1:
-			_limits.append(("the rim rule was asked about the first %d "
+	if _rim_tests > max_rim_tests:
+		if _rim_tests == max_rim_tests + 1:
+			_limit(("the rim rule was asked about the first %d "
 				+ "crossings; past that every crossing is reported without "
 				+ "being asked whether the bodies merely meet there")
-				% MAX_RIM_TESTS)
+				% max_rim_tests, false)
 		return false
 	return true
 

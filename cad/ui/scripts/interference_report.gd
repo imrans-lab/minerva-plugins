@@ -39,6 +39,12 @@ var _marker_points: PackedVector3Array = PackedVector3Array()
 var _casts: int = 0
 ## Ceilings the running check hit, in prose.
 var _limits: PackedStringArray = PackedStringArray()
+## Whether one of those ceilings left geometry UNEXAMINED. The edge and
+## triangle budgets do: past them nothing is cast, so a pair the report does
+## not name may still cross. The rim budget does not: past it every crossing
+## is still cast and KEPT as interference, only the "merely touching" label
+## is withheld — so a rim-only truncation over-counts, never under-counts.
+var _coverage_limited: bool = false
 ## The solid's edges as the running check treated them: how many it holds,
 ## how many of those could reach a reference at all, and how many of THOSE it
 ## actually cast a ray from. The three are what the report says it did.
@@ -372,7 +378,10 @@ func _report(pairs: Dictionary) -> Dictionary:
 		+ "every edge of every reference triangle overlapping the solid") \
 		% [_edges_cast, _edges_total]
 	if not _limits.is_empty():
-		sampling = "TRUNCATED — %s; the counts are floors" % ", ".join(_limits)
+		sampling = "TRUNCATED — %s; %s" % [", ".join(_limits),
+			"the counts are floors" if _coverage_limited
+			else "every crossing past the budget is reported as interference, "
+				+ "so `count` is a ceiling and the contact counts are floors"]
 	var report := {
 		"checked": true,
 		"units": "mm",
@@ -405,6 +414,10 @@ func _report(pairs: Dictionary) -> Dictionary:
 			+ "inside its own body; a node listed here offered none, so it is "
 			+ "neither clean nor reported as interfering"),
 		"sampling": sampling,
+		# A TRUNCATED walk that left edges uncast, as opposed to one that only
+		# stopped labelling touches: the clearance join reads this to decide
+		# whether the pairs the report does not name were examined.
+		"truncated_coverage": _coverage_limited,
 		# What the walk actually covered: every edge the solid has, the ones
 		# whose box reaches a reference, and the ones a ray was cast from.
 		"solid_edges": _edges_total,
@@ -547,3 +560,11 @@ func _undecided_name(one: Dictionary) -> String:
 func _undecided_others(undecided: Array) -> String:
 	return " (and %d other)" % (undecided.size() - 1) \
 		if undecided.size() > 1 else ""
+
+
+## Record a ceiling the running check hit. `coverage` says whether crossings
+## past it went uncast (true) or were cast and kept unlabelled (false).
+func _limit(prose: String, coverage: bool) -> void:
+	_limits.append(prose)
+	if coverage:
+		_coverage_limited = true

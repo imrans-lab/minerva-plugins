@@ -458,7 +458,12 @@ func _buried_pairs(document: Dictionary, source: String, records: Array,
 	# part-scoped check, whose report is the only one it has, would pass on
 	# them. Its counts are floors and it is treated as stale: the rows keep
 	# their unsigned distances and the check cannot pass on any of them.
-	if str(interference.get("sampling", "")).begins_with("TRUNCATED"):
+	# The exception is a walk that only ran out of RIM tests: past that budget
+	# every crossing is still cast and reported as interference, so nothing
+	# is unexamined and `count` can only be too high. A report that does not
+	# say which kind it was (an older cached one) is read as the unsafe kind.
+	if str(interference.get("sampling", "")).begins_with("TRUNCATED") \
+			and bool(interference.get("truncated_coverage", true)):
 		out["stale"] = true
 		out["reason"] = ("the interference report for this source spent its "
 			+ "ray budget before the walk finished, so the pairs it does NOT "

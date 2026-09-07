@@ -383,6 +383,7 @@ func run_check(gauge: Object, state: PhysicsDirectSpaceState3D, args: Dictionary
 	_started_us = Time.get_ticks_usec()
 	_casts = 0
 	_limits = PackedStringArray()
+	_coverage_limited = false
 	_undecided = []
 	_expected = args.get("expected", []) as Array
 	_declared = {}
@@ -426,9 +427,9 @@ func run_check(gauge: Object, state: PhysicsDirectSpaceState3D, args: Dictionary
 		# measured per EDGE: two crossings on different edges bound nothing.
 		_absorb_runs(pairs, crossings, node_scope, "solid_edge")
 	if _edges_reaching > _edges_cast:
-		_limits.append(("%d of the %d solid edges that reach a reference were "
+		_limit(("%d of the %d solid edges that reach a reference were "
 			+ "not cast; the first %d spent the ray budget")
-			% [_edges_reaching - _edges_cast, _edges_reaching, _edges_cast])
+			% [_edges_reaching - _edges_cast, _edges_reaching, _edges_cast], true)
 
 	# Direction 2: the edges of every reference triangle that could reach the
 	# solid, against the solid's own collider.
@@ -782,8 +783,8 @@ func _reference_edges_into_solid(
 				var triangle := 0
 				while triangle * 3 + 2 < corners:
 					if examined >= MAX_REFERENCE_TRIANGLES:
-						_limits.append("only the first %d reference triangles were examined"
-							% MAX_REFERENCE_TRIANGLES)
+						_limit("only the first %d reference triangles were examined"
+							% MAX_REFERENCE_TRIANGLES, true)
 						return
 					examined += 1
 					var a: Vector3

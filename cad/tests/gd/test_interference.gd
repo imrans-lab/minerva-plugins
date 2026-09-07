@@ -308,6 +308,7 @@ func _run() -> void:
 	await _check_clear(gauge, checks)
 	await _check_sliver(gauge, checks)
 	await _check_cast_budget(gauge, checks)
+	await _check_rim_budget(gauge, checks)
 	await _check_buried(gauge, checks)
 	await _check_enclosed(gauge, checks)
 	await _check_flush(gauge, checks)
@@ -522,6 +523,33 @@ func _check_sliver(gauge: Node, checks: RefCounted) -> void:
 ## stray triangles parked far from the board, AHEAD of the crossing bar in the
 ## mesh's own face order, so a budget spent on the walk is gone before the bar
 ## is ever reached while a budget spent on rays does not touch it at all.
+## ORACLE: the rim budget is the one ceiling that leaves nothing uncast. A
+## walk that spends it must still report the crossing it was asking about
+## (count > 0) and say its coverage is whole; a lazy version that dropped
+## the unlabelled crossing, or flagged it as a coverage limit, fails here.
+func _check_rim_budget(gauge: Node, checks: RefCounted) -> void:
+	var bar: Dictionary = await _bar_mesh()
+	checks.build_solid(_strays_then(bar))
+	var ceiling: int = int(checks.max_rim_tests)
+	checks.max_rim_tests = 0
+	var report: Dictionary = await _submit(gauge, checks, "", "")
+	var sampling := str(report.get("sampling", ""))
+	check("rim budget: a walk that ran out of rim tests still reports the "
+			+ "crossing — past the budget a crossing is kept as interference, "
+			+ "never dropped",
+			int(report.get("count", 0)) > 0
+				and sampling.contains("TRUNCATED") and sampling.contains("rim rule"),
+			"count = %d, sampling = %s" % [int(report.get("count", 0)), sampling])
+	check("rim budget: and it says its coverage is whole — truncated_coverage "
+			+ "false, the crossing count a ceiling and not a floor",
+			report.has("truncated_coverage")
+				and not bool(report.get("truncated_coverage", true))
+				and sampling.contains("ceiling"),
+			"truncated_coverage = %s, sampling = %s" % [
+				str(report.get("truncated_coverage", "absent")), sampling])
+	checks.max_rim_tests = ceiling
+
+
 func _check_cast_budget(gauge: Node, checks: RefCounted) -> void:
 	var bar: Dictionary = await _bar_mesh()
 	checks.build_solid(_strays_then(bar))
