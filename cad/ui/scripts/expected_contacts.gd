@@ -113,7 +113,8 @@ static func parse(args: Dictionary) -> Dictionary:
 ##
 ## MATCHING IS NOT GRADING. Every index returned is a declaration nothing has
 ## gone stale about, which is what `unmatched` reports on; the caller grades
-## the pair against the FIRST of them, because one pair carries one gap.
+## the pair against the STRICTEST of them (see `strictest`), because one pair
+## carries one gap and every declaration on it has to hold.
 static func indices_for(entries: Array, reference: String, node: String,
 		points: Array) -> Array:
 	var out: Array = []
@@ -134,12 +135,28 @@ static func indices_for(entries: Array, reference: String, node: String,
 	return out
 
 
-## The declaration a measurement is GRADED against, or -1: the first of the
-## ones it answers to.
+## The declaration a measurement is GRADED against, or -1: the strictest of
+## the ones it answers to.
 static func index_for(entries: Array, reference: String, node: String,
 		points: Array) -> int:
-	var found: Array = indices_for(entries, reference, node, points)
-	return int(found[0]) if not found.is_empty() else -1
+	return strictest(entries, indices_for(entries, reference, node, points))
+
+
+## Of several declarations one pair answers to, the one it is graded against:
+## the greatest raw required_mm — the widest gap demanded, or among fits the
+## shallowest overlap allowed — first on ties. Two declarations on one pair
+## are two requirements, and a pair that fails either fails; grading the
+## first and marking the rest matched let the stricter one vanish. -1 when
+## `indices` is empty.
+static func strictest(entries: Array, indices: Array) -> int:
+	var found := -1
+	var demanded := -INF
+	for index in indices:
+		var required := float((entries[int(index)] as Dictionary)["required_mm"])
+		if required > demanded:
+			demanded = required
+			found = int(index)
+	return found
 
 
 ## The gap a declared pair must keep. A declaration of contact (0, the

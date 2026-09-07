@@ -20,6 +20,10 @@ extends RefCounted
 ##   evaluation_status  what that evaluation did: ok, error, timeout, pending
 ##   stale              whether the first two describe one document
 ##
+## and a reply whose evaluation moved under it (or under the ticket it was
+## collected by) also carries `started_source_version`, the version it was
+## measured against, beside the current `buffer_version`;
+##
 ## and a check verb asked while they disagree is REFUSED rather than answered:
 ## checked false with the reason, nothing measured, and minerva_cad_await_eval
 ## as the named way through. A refusal a caller can act on beats a number it
@@ -123,16 +127,42 @@ static func outrun(tool_name: String, before: Dictionary,
 ## stamped with the state it STARTED against, stale, and the reason naming
 ## both versions. The numbers were measured against the earlier evaluation
 ## (or an unknowable mix of the two), and neither is what the document shows.
+## `started_source_version` is that earlier version on its own field, and
+## `buffer_version` is the document's CURRENT version — a reply carrying the
+## start's buffer version would say the document had not moved.
+## `during` says over which stretch the evaluation moved.
 static func stamp_moved(reply: Dictionary, before: Dictionary,
-		after: Dictionary) -> Dictionary:
+		after: Dictionary, during: String = "while this call ran") -> Dictionary:
+	# A reply already stamped by the layer that measured (a collected ticket)
+	# keeps that as its start; the stamp below never overwrites it.
+	var started := int(reply.get("source_version",
+		int(before.get("source_version", -1))))
 	reply["stale"] = true
-	reply["stale_reason"] = ("the evaluation changed while this call ran: it "
+	reply["stale_reason"] = ("the evaluation changed %s: it "
 		+ "started against the evaluation of version %d and version %d was "
 		+ "painted before it returned, so the numbers describe geometry the "
 		+ "document no longer shows — call again now that it is settled") \
-		% [int(before.get("source_version", -1)),
-			int(after.get("source_version", -1))]
-	return stamp(reply, before)
+		% [during, started, int(after.get("source_version", -1))]
+	reply["started_source_version"] = started
+	stamp(reply, before)
+	reply["buffer_version"] = int(after.get("buffer_version", -1))
+	return reply
+
+
+## The stamp for a report collected by ticket: `started` is the freshness
+## snapshot filed with the ticket when the measurement began, `now` the
+## panel's freshness at collection. The numbers are about the evaluation
+## that stood at the start, whatever painted since; a painted evaluation
+## that moved in between makes the report stale, naming both versions.
+static func stamp_ticket(reply: Dictionary, started: Dictionary,
+		now: Dictionary) -> Dictionary:
+	if outrun("", started, now):
+		return stamp_moved(reply, started, now,
+			"between this measurement starting and its ticket being collected")
+	stamp(reply, started)
+	if bool(now.get("known", false)):
+		reply["buffer_version"] = int(now.get("buffer_version", -1))
+	return reply
 
 
 ## The five fields on a reply that is going out. A reply from a panel that
@@ -141,13 +171,19 @@ static func stamp_moved(reply: Dictionary, before: Dictionary,
 static func stamp(reply: Dictionary, freshness: Dictionary) -> Dictionary:
 	if not bool(freshness.get("known", false)):
 		return reply
-	reply["source_version"] = int(freshness.get("source_version", -1))
+	# The SOURCE fields name the evaluation the numbers are about, and the
+	# layer that measured knows that best: a report collected by ticket
+	# arrives already naming the evaluation it started against, and the
+	# outer stamp must not rename it after the evaluation that stands now.
+	# The buffer version is always the document's now.
+	if not reply.has("source_version"):
+		reply["source_version"] = int(freshness.get("source_version", -1))
+		reply["evaluated_at"] = float(freshness.get("evaluated_at", 0.0))
+		# What the standing evaluation DID. Two replies can name the same
+		# source_version for opposite reasons — one painted it, one failed on
+		# the way to it — and only this field tells them apart.
+		reply["evaluation_status"] = str(freshness.get("evaluation_status", ""))
 	reply["buffer_version"] = int(freshness.get("buffer_version", -1))
-	reply["evaluated_at"] = float(freshness.get("evaluated_at", 0.0))
-	# What the standing evaluation DID. Two replies can name the same
-	# source_version for opposite reasons — one painted it, one failed on the
-	# way to it — and only this field tells them apart.
-	reply["evaluation_status"] = str(freshness.get("evaluation_status", ""))
 	# Never DOWNGRADES: the verb layer marks a reply stale for its own reason
 	# (the references re-posed under a measurement), and a document that is
 	# settled says nothing about that.

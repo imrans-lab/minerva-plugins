@@ -484,8 +484,8 @@ func _pairs_report(reply: Dictionary, records: Array, required_mm: float,
 				points)
 		# Every declaration these two witness points answer to is matched, so a
 		# second region over the same node is not reported stale; the pair is
-		# GRADED against the first, because one pair keeps one gap.
-		var index: int = int(answered[0]) if not answered.is_empty() else -1
+		# GRADED against the strictest, because every one of them has to hold.
+		var index: int = _Expected.strictest(expected, answered)
 		for answer in answered:
 			matched[answer] = true
 		if index >= 0:

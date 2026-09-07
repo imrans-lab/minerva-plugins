@@ -29,14 +29,16 @@ extends SceneTree
 ## control that shows the lift is what does it.
 ##
 ## THE RULE UNDER TEST is rim_contact.gd: overlap is SHARED MATERIAL, and four
-## samples can only bound it where the two bodies LAND on each other — a face
-## of each, antiparallel within five degrees, found by rays around the
-## crossing. Then the samples one CONTACT_TOLERANCE_MM either side of that
-## plane bound the slab the bodies could share. A crossing with no landing is
-## unproven and stays reported: two faces meeting at any other angle share a
-## wedge, and a wedge thin at the crossing can be deep a little further on.
-## The wedge itself is driven through the rule directly, as half-spaces,
-## before the fixtures.
+## samples can only bound it where the two bodies LAND on each other — a
+## face of each, antiparallel within half a degree, both passing through the
+## crossing within CONTACT_TOLERANCE_MM, found by rays around the crossing
+## and held at the samples. Then the samples one CONTACT_TOLERANCE_MM either
+## side of that plane bound the slab the bodies could share. A crossing with
+## no landing is unproven and stays reported: two faces meeting at any other
+## angle share a wedge, and a wedge thin at the crossing can be deep a little
+## further on; a pair of faces off the crossing bounds a slab the crossing is
+## not in. The wedges and the ledge are driven through the rule directly, as
+## half-spaces, before the fixtures.
 ##
 ## THREE CONTROLS, EACH DEFEATING A DIFFERENT CHEAP FIX.
 ##
@@ -120,6 +122,11 @@ const BOSS_DRAFT_DEG := 10.0
 ## The wedge two half-spaces share when their faces are this far from
 ## antiparallel: thin at the crossing, unbounded beyond it.
 const WEDGE_DEG := 10.0
+## The same wedge inside the five degrees the landing test once allowed: a
+## tolerance deep thirty tolerances along, and no quadrant sample in both.
+const NARROW_WEDGE_DEG := 2.0
+## How far, in tolerances, the ledge's end face sits inside the crossed body.
+const LEDGE_TOLERANCES := 3.0
 
 ## The plate no probe fits inside, and the bite taken out of it. Both are
 ## smaller than the contact tolerance the rim rule measures with, which is the
@@ -332,6 +339,53 @@ func _wedge_rule() -> void:
 			"wedge = %d slab = %d (crossing 0, touching 1, unproven 2)"
 				% [wedge, slab])
 
+	# THE NARROW WEDGE. Two degrees is inside the window the landing test once
+	# allowed, and every quadrant sample a tolerance out lies in at most one
+	# body — yet the wedge is a tolerance deep thirty tolerances along.
+	var narrow_normal := Vector3(-cos(deg_to_rad(NARROW_WEDGE_DEG)),
+		-sin(deg_to_rad(NARROW_WEDGE_DEG)), 0.0)
+	var narrow: int = RimContact.classify(Vector3.ZERO, crossed_normal,
+		wedge_edge,
+		_half_space_ray(crossed_normal, 0.0), _half_space_ray(narrow_normal, 0.0),
+		_half_space_inside(crossed_normal, 0.0),
+		_half_space_inside(narrow_normal, 0.0), tolerance)
+	# THE LEDGE. The other body is a block y > 0 pushed three tolerances into
+	# the crossed one: its end face at x = -3t is antiparallel to the crossed
+	# face and within the rays' reach, and an edge along x in its face y = 0
+	# crosses the crossed face at the origin. The end face supplies the pair;
+	# nothing supplies a landing, because that pair bounds a slab three
+	# tolerances from the crossing.
+	var ledge_depth: float = LEDGE_TOLERANCES * tolerance
+	var block: Array = [[Vector3.LEFT, ledge_depth], [Vector3.DOWN, 0.0]]
+	var ledge: int = RimContact.classify(Vector3.ZERO, crossed_normal,
+		Vector3.RIGHT,
+		_half_space_ray(crossed_normal, 0.0), _convex_ray(block),
+		_half_space_inside(crossed_normal, 0.0), _convex_inside(block),
+		tolerance)
+	# And the landing asked directly: the crossed face through the origin
+	# paired with the ledge's end face is no landing; paired with a face hit
+	# anywhere on the crossing's own plane, it is.
+	var through: Array[Dictionary] = [{"normal": Vector3.RIGHT,
+		"distance": 0.0, "point": Vector3.ZERO}]
+	var off_plane: Array[Dictionary] = [{"normal": Vector3.LEFT,
+		"distance": ledge_depth, "point": Vector3(-ledge_depth, 0.0, 0.0)}]
+	var on_plane: Array[Dictionary] = [{"normal": Vector3.LEFT,
+		"distance": 2.0 * tolerance, "point": Vector3(0.0, 2.0 * tolerance, 0.0)}]
+	var ledge_landing: Variant = RimContact.landing_normal(through, off_plane,
+		Vector3.ZERO, tolerance)
+	var seat_landing: Variant = RimContact.landing_normal(through, on_plane,
+		Vector3.ZERO, tolerance)
+	check("rule: a two-degree wedge is unproven; the ledge's end face three "
+			+ "tolerances off the crossing is no landing, while the same pair "
+			+ "on the crossing's own plane is; and the block the ledge belongs "
+			+ "to is not a touch",
+			narrow == RimContact.Verdict.UNPROVEN
+				and ledge_landing == null
+				and seat_landing is Vector3
+				and ledge != RimContact.Verdict.TOUCHING,
+			"narrow = %d ledge = %d ledge_landing = %s seat_landing = %s"
+				% [narrow, ledge, str(ledge_landing), str(seat_landing)])
+
 
 ## The ray into the half-space {p . normal < offset} — so a positive offset
 ## moves its face INTO the body whose face has the opposite normal: the
@@ -351,6 +405,46 @@ func _half_space_ray(normal: Vector3, offset: float) -> Callable:
 func _half_space_inside(normal: Vector3, offset: float) -> Callable:
 	return func(point: Vector3) -> int:
 		return 1 if point.dot(normal) - offset < 0.0 else 0
+
+
+## The ray into a convex body: the intersection of half-spaces given as
+## [normal, offset] pairs. The segment enters where the last of the planes it
+## crosses inward is crossed, and only if it is still inside every other one
+## there; a segment that starts inside, or never gets in, hits nothing.
+func _convex_ray(planes: Array) -> Callable:
+	return func(from: Vector3, to: Vector3) -> Dictionary:
+		var enter := 0.0
+		var leave := 1.0
+		var entered: Variant = null
+		for entry in planes:
+			var normal: Vector3 = (entry as Array)[0]
+			var offset: float = (entry as Array)[1]
+			var start := from.dot(normal) - offset
+			var finish := to.dot(normal) - offset
+			if start >= 0.0 and finish >= 0.0:
+				return {}
+			if start < 0.0 and finish < 0.0:
+				continue
+			var at := start / (start - finish)
+			if start > 0.0:
+				if at > enter:
+					enter = at
+					entered = normal
+			else:
+				leave = minf(leave, at)
+		if entered == null or enter > leave:
+			return {}
+		return {"position": from.lerp(to, enter), "normal": entered}
+
+
+## The parity probe of the same convex body.
+func _convex_inside(planes: Array) -> Callable:
+	return func(point: Vector3) -> int:
+		for entry in planes:
+			var normal: Vector3 = (entry as Array)[0]
+			if point.dot(normal) - float((entry as Array)[1]) >= 0.0:
+				return 0
+		return 1
 
 
 ## What a region drawn round the seat is worth, and what it is not.

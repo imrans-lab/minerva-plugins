@@ -51,6 +51,10 @@ extends "clearance_report.gd"
 # worker has already seen is named and not re-sent — which is what makes the
 # per-evaluation cost a hash lookup rather than a megabyte.
 
+## The panel's evaluation freshness, filed with each ticket when its
+## measurement starts and compared at collection.
+const _Freshness: Script = preload("eval_freshness.gd")
+
 ## Tessellation deviation the measurement asks for, in millimetres. The
 ## display mesh is tessellated for looking at; a clearance is quoted with this
 ## number as its error bar, so the check asks for its own, tighter one.
@@ -76,8 +80,11 @@ const IPC_PAYLOAD_LIMIT_BYTES: int = 65536
 const IPC_PAYLOAD_MARGIN_BYTES: int = 2048
 
 ## Measurements that outlived the verb that started them, by ticket:
-## {status, started_ms, settled_ms, report}. A job is erased when its report
-## is handed back, so a ticket names one answer exactly once.
+## {status, started_ms, settled_ms, report, freshness}. `freshness` is the
+## panel's evaluation freshness when the measurement started — the evaluation
+## its numbers are about, whatever paints before the ticket is collected. A
+## job is erased when its report is handed back, so a ticket names one answer
+## exactly once.
 var _jobs: Dictionary = {}
 var _next_ticket: int = 0
 ## How long the verb waits before handing back a ticket when the call does
@@ -199,7 +206,7 @@ func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
 		return _no_clearance("the CAD panel is gone")
 	var handle := str(args.get("ticket", ""))
 	if not handle.is_empty():
-		return await _collect(handle, maxi(int(args.get("wait_ms", 0)), 0))
+		return await _collect(handle, maxi(int(args.get("wait_ms", 0)), 0), panel)
 	_sweep_jobs()
 	var required_mm := float(args.get("required_mm", 0.0))
 	if required_mm <= 0.0:
@@ -303,6 +310,7 @@ func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
 		"started_ms": Time.get_ticks_msec(),
 		"settled_ms": 0,
 		"report": {},
+		"freshness": _Freshness.read(panel),
 	}
 	var issued := "clearance-%d" % _next_ticket
 	_next_ticket += 1
@@ -321,7 +329,7 @@ func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
 	if str(job["status"]) == "running":
 		return _running(issued, job)
 	_jobs.erase(issued)
-	return _settled(issued, job)
+	return _settled(issued, job, panel)
 
 
 ## Wait up to `budget_ms` for a job to settle, giving the rest of the frame
@@ -367,7 +375,7 @@ func _measure_into(job: Dictionary, panel: Object, head: Dictionary,
 ## first. A ticket is spent when its report is handed back: the answer
 ## describes geometry that is already ageing, and a reader asking twice must
 ## measure again rather than be handed a second copy of the old one.
-func _collect(handle: String, wait_ms: int = 0) -> Dictionary:
+func _collect(handle: String, wait_ms: int, panel: Object) -> Dictionary:
 	_sweep_jobs()
 	if not _jobs.has(handle):
 		return _no_clearance(("no clearance measurement is filed under ticket "
@@ -380,7 +388,7 @@ func _collect(handle: String, wait_ms: int = 0) -> Dictionary:
 	if str(job["status"]) == "running":
 		return _running(handle, job)
 	_jobs.erase(handle)
-	return _settled(handle, job)
+	return _settled(handle, job, panel)
 
 
 ## What a measurement that has not finished yet answers with. It is `checked`
@@ -404,15 +412,19 @@ func _running(handle: String, job: Dictionary) -> Dictionary:
 	}
 
 
-## A settled job's report, stamped with what it cost and which ticket carried
-## it. The stamp is on every reply, including the ones that came back inside
-## the first wait and were never handed a ticket to poll.
-func _settled(handle: String, job: Dictionary) -> Dictionary:
+## A settled job's report, stamped with what it cost, which ticket carried
+## it, and which evaluation it measured: the freshness filed when the job
+## started, against the panel's freshness now, so a report collected after a
+## newer evaluation painted says so rather than reading as current. The stamp
+## is on every reply, including the ones that came back inside the first wait
+## and were never handed a ticket to poll.
+func _settled(handle: String, job: Dictionary, panel: Object) -> Dictionary:
 	var report: Dictionary = job["report"]
 	report["status"] = "complete"
 	report["ticket"] = handle
 	report["measured_ms"] = int(job["settled_ms"]) - int(job["started_ms"])
-	return report
+	return _Freshness.stamp_ticket(report,
+		job.get("freshness", {}) as Dictionary, _Freshness.read(panel))
 
 
 ## Drop jobs nobody collected. A report is geometry-dated and a table that

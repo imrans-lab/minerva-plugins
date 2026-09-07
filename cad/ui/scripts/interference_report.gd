@@ -143,16 +143,20 @@ func _absorb_contact(point: Vector3, reference_name: String,
 		points.append(point)
 
 
-## Which declaration covers a crossing at `point`, or -1 when none does.
+## Which declaration a crossing at `point` is graded under, or -1 when none
+## covers it: the strictest of every declaration that does. All of them are
+## marked matched — each is a declaration about this very crossing — and the
+## crossing is bucketed under the one allowing the least overlap, so a looser
+## declaration listed first cannot excuse what a stricter one forbids.
 func _declared_index(reference_name: String, node_path: String,
 		point: Vector3) -> int:
 	if _expected.is_empty():
 		return -1
-	var index: int = _Expected.index_for(_expected, reference_name, node_path,
-		[point])
-	if index >= 0:
-		_declared_matched[index] = true
-	return index
+	var covering: Array = _Expected.indices_for(_expected, reference_name,
+		node_path, [point])
+	for index in covering:
+		_declared_matched[int(index)] = true
+	return _Expected.strictest(_expected, covering)
 
 
 ## One bucket per (pair, declaration): a node can carry an intended contact
@@ -322,10 +326,12 @@ func _report(pairs: Dictionary) -> Dictionary:
 		row["touching"] = true
 		row["note"] = "the bodies meet here and share no material: no point " \
 			+ "one contact tolerance clear of both surfaces is inside both"
-		var index: int = _Expected.index_for(_expected, str(contact["reference"]),
-			str(contact["node"]), contact["points"])
+		var covering: Array = _Expected.indices_for(_expected,
+			str(contact["reference"]), str(contact["node"]), contact["points"])
+		for matched in covering:
+			_declared_matched[int(matched)] = true
+		var index: int = _Expected.strictest(_expected, covering)
 		if index >= 0:
-			_declared_matched[index] = true
 			row["declared_intended"] = true
 			# NOT excluded: nothing was excused. The pair was never in `count`
 			# to begin with, and saying otherwise would put a seat on the

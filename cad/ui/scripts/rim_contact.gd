@@ -35,14 +35,35 @@ extends RefCounted
 ## and a part in the wrong place — a hundredth of a millimetre, two orders of
 ## magnitude above the noise that produced the false report.
 ##
-## WHY ONLY A LANDING. Two faces meeting at any other angle share a WEDGE, not
-## a slab, and a wedge thin enough at the crossing to slip between four
-## samples can be as deep as it likes a little further along. Bodies locally
-## occupying x < 0 and cos10°·x + sin10°·y > 0 overlap in a wedge ten degrees
-## wide: every quadrant sample a tolerance from the crossing lies in at most
-## one of them, yet (−0.1t, 2t) is inside both and the wedge only widens from
-## there. Separate inside-witnesses do not prove absence of shared material,
-## so a crossing with no landing is UNPROVEN and stays reported.
+## WHAT A LANDING HAS TO BE. Three things, and TOUCHING needs all of them:
+##
+##   (a) STRICT. The two faces are antiparallel within half a degree
+##       (LANDING_COS). Two faces meeting at any wider angle share a WEDGE,
+##       not a slab, and a wedge two degrees wide is already a tolerance deep
+##       thirty tolerances along — well inside a boss — while every quadrant
+##       sample at the crossing lies in at most one body.
+##   (b) INCIDENT. Both faces pass through the crossing point within the
+##       tolerance. A face is found by a ray anywhere within REACH_TOLERANCES
+##       of the crossing, so an antiparallel pair can be a ledge or a seat
+##       three tolerances off the crossing: that pair bounds a slab the
+##       crossing is not in, and says nothing about the material at it.
+##   (c) HELD AT THE SAMPLES. On each across line the quadrant samples
+##       straddle, the ray between the two samples meets each body either
+##       nowhere or at a face lying in the landing plane within the
+##       tolerance. A body absent along that line hides nothing; a body whose
+##       boundary there is the landing plane is bounded by it. Both bodies so
+##       bounded on both lines is the slab the four samples were placed for.
+##
+## Together the three bound any wedge inside the probe disc below the
+## tolerance: two planes coincident at the crossing within a tolerance and
+## antiparallel within half a degree are a tolerance apart at most a root two
+## tolerances out, which is where the samples sit. A wedge wide enough to be
+## deeper than that a little further along is deeper than the tolerance
+## SOMEWHERE on the same pair of bodies, and there the edges of one cross the
+## faces of the other in a crossing of their own, which this rule sees
+## separately; the gate in interference_containment.gd is per PAIR, and one
+## CROSSING verdict closes it for every crossing of that pair. A crossing with
+## no landing is UNPROVEN and stays reported.
 ##
 ## WHY IT CANNOT CLEAR A REAL CRASH. Three answers, not two. A crossing whose
 ## samples hold shared material is CROSSING; one whose landing samples are
@@ -100,10 +121,10 @@ const _QUADRANTS: Array[Vector2] = [
 const REACH_TOLERANCES: float = 4.0
 
 ## Two faces are a landing when their normals are antiparallel within this:
-## cos 5°. A seat read through two tessellations arrives a fraction of a
-## degree out of true; a drafted wall meeting a plate is ten degrees or more
-## from it and is a wedge, not a landing.
-const LANDING_COS: float = 0.9962
+## cos 0.5°. Two flat faces read through physics arrive parallel to within
+## float noise; anything wider is a wedge, and a two-degree wedge is a
+## tolerance deep thirty tolerances from the crossing.
+const LANDING_COS: float = 0.99996
 
 ## How far behind a found face the second round of rays starts, in
 ## tolerances — inside the body that face bounds, so a neighbouring face the
@@ -146,7 +167,8 @@ static func classify(
 		reach, tolerance_mm * INSET_TOLERANCES)
 	var other_faces: Array[Dictionary] = faces_near(point, other_ray,
 		reach, tolerance_mm * INSET_TOLERANCES)
-	var landing: Variant = landing_normal(crossed_faces, other_faces)
+	var landing: Variant = landing_normal(crossed_faces, other_faces, point,
+		tolerance_mm)
 	if not (landing is Vector3):
 		# No pair of antiparallel faces meets here: the bodies are not
 		# resting on each other at this crossing, so no sample set bounds
@@ -164,8 +186,14 @@ static func classify(
 		[crossed_normal], crossed_faces + other_faces, edge_direction))
 	if not (across is Vector3):
 		return Verdict.UNPROVEN
-	return _sampled(point, normal, across, inside_crossed, inside_other,
+	var verdict := _sampled(point, normal, across, inside_crossed, inside_other,
 		tolerance_mm)
+	if verdict != Verdict.TOUCHING:
+		return verdict
+	if not _planes_held(point, normal, across, crossed_ray, other_ray,
+			tolerance_mm):
+		return Verdict.UNPROVEN
+	return Verdict.TOUCHING
 
 
 ## The four quadrant samples, read. CROSSING on the first sample inside both
@@ -195,23 +223,73 @@ static func _sampled(point: Vector3, normal: Vector3, across: Vector3,
 
 
 ## The landing normal — the crossed body's face of the nearest antiparallel
-## pair, pointing out of it and into the other body — or null when no face
-## of one body is antiparallel to a face of the other.
+## pair whose two planes both pass through `point` within `tolerance_mm`,
+## pointing out of it and into the other body — or null when no such pair
+## exists. A pair that is antiparallel but off the crossing is a ledge or a
+## seat elsewhere, and bounds a slab the crossing is not in.
 static func landing_normal(crossed_faces: Array[Dictionary],
-		other_faces: Array[Dictionary]) -> Variant:
+		other_faces: Array[Dictionary], point: Vector3,
+		tolerance_mm: float) -> Variant:
 	var nearest := INF
 	var found: Variant = null
 	for here in crossed_faces:
 		var here_normal: Vector3 = here["normal"]
+		if plane_offset(here, point) > tolerance_mm:
+			continue
 		for there in other_faces:
 			var there_normal: Vector3 = there["normal"]
 			if here_normal.dot(there_normal) > -LANDING_COS:
+				continue
+			if plane_offset(there, point) > tolerance_mm:
 				continue
 			var away: float = float(here["distance"]) + float(there["distance"])
 			if away < nearest:
 				nearest = away
 				found = here_normal
 	return found
+
+
+## How far `point` lies off the plane of a face, along its normal.
+static func plane_offset(face: Dictionary, point: Vector3) -> float:
+	return absf((point - (face["point"] as Vector3)).dot(face["normal"] as Vector3))
+
+
+## Is the landing plane each body's boundary at the samples? Along each of the
+## two across lines the samples straddle, the ray from the crossed side to
+## the other side is cast into the other body, and the ray back is cast into
+## the crossed body: each meets nothing — that body is absent there — or a
+## face lying in the landing plane within the tolerance. A hit off the plane,
+## or on a face at another angle, is a boundary the slab argument does not
+## cover; a hit with no readable normal is a ray that could not be read.
+static func _planes_held(point: Vector3, normal: Vector3, across: Vector3,
+		crossed_ray: Callable, other_ray: Callable, tolerance_mm: float) -> bool:
+	for side: float in [1.0, -1.0]:
+		var crossed_side := point - normal * tolerance_mm \
+			+ across * (side * tolerance_mm)
+		var other_side := point + normal * tolerance_mm \
+			+ across * (side * tolerance_mm)
+		if not _in_landing_plane(other_ray.call(crossed_side, other_side),
+				point, normal, tolerance_mm):
+			return false
+		if not _in_landing_plane(crossed_ray.call(other_side, crossed_side),
+				point, normal, tolerance_mm):
+			return false
+	return true
+
+
+## Does a hit lie in the landing plane? No hit is the body being absent along
+## the ray, which the plane bounds trivially.
+static func _in_landing_plane(hit: Dictionary, point: Vector3, normal: Vector3,
+		tolerance_mm: float) -> bool:
+	if hit.is_empty():
+		return true
+	var hit_normal: Vector3 = hit.get("normal", Vector3.ZERO)
+	if hit_normal.length_squared() <= 0.0:
+		return false
+	if absf(hit_normal.normalized().dot(normal)) < LANDING_COS:
+		return false
+	var position: Vector3 = hit.get("position", point)
+	return absf((position - point).dot(normal)) <= tolerance_mm
 
 
 ## The second sampling axis: the first of `directions` with a component
@@ -237,7 +315,9 @@ static func _across_candidates(normals: Array[Vector3], faces: Array,
 	return out
 
 
-## Every face of one body within `reach` of `point`, as {normal, distance}.
+## Every face of one body within `reach` of `point`, as {normal, distance,
+## point}: the hit's own position rides along so the face's PLANE, not only
+## its direction, can be tested against the crossing.
 ## Rays straddle the point along each axis rather than starting on it — a
 ## ray fired from a point already on the surface it is looking for reports
 ## whatever it meets next — and a second round is fired from `inset` behind
@@ -271,14 +351,19 @@ static func _faces_from(origin: Vector3, point: Vector3, ray: Callable,
 		var away := point.distance_to(hit.get("position", point) as Vector3)
 		if away > reach:
 			continue
-		var face := {"normal": normal.normalized(), "distance": away}
+		var face := {
+			"normal": normal.normalized(),
+			"distance": away,
+			"point": hit.get("position", point) as Vector3,
+		}
 		if not _has_face(out, face):
 			out.append(face)
 	return out
 
 
 ## Is a face of this normal already listed? Two hits on one plane from two
-## rays are one face; a distance is kept from whichever ray found it first.
+## rays are one face; the distance and the point are kept from whichever ray
+## found it first — the plane is the same from either.
 static func _has_face(faces: Array[Dictionary], face: Dictionary) -> bool:
 	for held in faces:
 		if (held["normal"] as Vector3).dot(face["normal"] as Vector3) > LANDING_COS:

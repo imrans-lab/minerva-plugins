@@ -637,7 +637,26 @@ func _test_the_gauge_measures_the_evaluated_solid_and_not_only_references() -> v
 					.get("solid", true)),
 			"reply=%s" % str(withheld))
 
+	# THE SOLID WITH NO MODULE TO MOUNT IT IN IS UNMEASURED, NOT ABSENT. The
+	# document has painted a solid; the panel has no geometry module to put it
+	# in front of the pin. That used to read as "no solid" and the gauge went
+	# on against the references alone, answering fits:true for the same
+	# buried sphere.
 	_panel.checks = null
+	var unmounted: Dictionary = await PanelTools.handle(_panel, "minerva_cad_gauge", {
+		"shape": "sphere", "dia_mm": 1.0, "at_mm": [0.0, 0.0, 0.0]})
+	check("gauge verb: a painted solid with no geometry module to mount it "
+			+ "withholds the verdict — fits null, checked false, the module "
+			+ "named — rather than reading the solid as absent",
+			bool(unmounted.get("success", false))
+				and unmounted.has("fits") and unmounted["fits"] == null
+				and not bool(unmounted.get("checked", true))
+				and str(unmounted.get("reason", ""))
+					== "solid not measured: geometry module unavailable"
+				and not bool((unmounted.get("measured_against", {}) as Dictionary)
+					.get("solid", true)),
+			"reply=%s" % str(unmounted))
+
 	_panel.solid_mesh = {}
 
 

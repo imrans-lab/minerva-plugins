@@ -31,22 +31,22 @@ extends RefCounted
 ## `unmeasured` tells the two apart: a document with no solid geometry has
 ## nothing a gauge could miss, and the references alone are the whole answer;
 ## a solid that IS there but could not be put in front of the pin — the
-## module held by another check, its collider unbuildable — is one the
-## caller's verdict has to withhold, because a pin buried in it would read
-## as fitting.
+## module held by another check, absent from the panel, its collider
+## unbuildable — is one the caller's verdict has to withhold, because a pin
+## buried in it would read as fitting. So the mesh is read BEFORE the module:
+## a painted solid with no module to mount it in is unmeasured, not absent.
 static func mount(panel: Object) -> Dictionary:
-	if panel == null or not is_instance_valid(panel) \
-			or not panel.has_method("get_geometry_checks"):
+	if panel == null or not is_instance_valid(panel):
 		return _absent("this panel has no evaluated solid to gauge against")
-	var checks: Object = panel.get_geometry_checks()
-	if checks == null or not is_instance_valid(checks):
-		return _absent("the solid's collider world is not available on this panel")
-
 	var mesh_data: Dictionary = {}
 	if panel.has_method("get_document_state"):
 		mesh_data = (panel.get_document_state() as Dictionary).get("mesh", {}) as Dictionary
 	if (mesh_data.get("faces", []) as Array).is_empty():
 		return _absent("the document has not evaluated to any solid geometry")
+	var checks: Object = panel.get_geometry_checks() \
+		if panel.has_method("get_geometry_checks") else null
+	if checks == null or not is_instance_valid(checks):
+		return _absent("geometry module unavailable", true)
 
 	var reservation: Dictionary = await checks.call("reserve", false)
 	var ticket := int(reservation.get("ticket", 0))

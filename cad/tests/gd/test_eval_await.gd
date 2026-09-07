@@ -561,6 +561,18 @@ func _test_a_measurement_outrun_by_an_evaluation_is_stamped_stale() -> void:
 					"version %d" % int(after["source_version"])),
 			"before = %s after = %s reply = %s" % [str(before), str(after),
 				str(reply)])
+	# The stamp names the document's CURRENT buffer version — the start's
+	# would say the document had not moved — and the version it started
+	# against travels on its own field.
+	check("outrun: the stale stamp carries the buffer version standing at "
+			+ "the return and the version it started against on its own field",
+			probes.size() == 1
+				and int(after["buffer_version"]) > int(before["buffer_version"])
+				and int(reply.get("buffer_version", -1)) == int(after["buffer_version"])
+				and int(reply.get("started_source_version", -1))
+					== int(before["source_version"]),
+			"before = %s after = %s reply = %s" % [str(before), str(after),
+				str(reply)])
 	_teardown(rig)
 
 

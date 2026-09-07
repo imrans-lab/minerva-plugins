@@ -325,6 +325,44 @@ func _check_ticket(panel: Node, checks: RefCounted) -> void:
 				and str(waited.get("ticket", "")) == str(quick.get("ticket", "")),
 			"quick = %s, waited = %s" % [str(quick), str(waited)])
 
+	# THE TICKET NAMES THE EVALUATION IT MEASURED. A report that settled
+	# against one evaluation and was collected after the next painted is about
+	# the first: the freshness filed when the job started is compared with the
+	# panel's at collection, and the report is stamped stale naming both, with
+	# source_version the one measured and buffer_version the one standing now.
+	# The control beside it collects under an unmoved evaluation and is fresh.
+	panel.freshness = _freshness_at(7, 100.0)
+	var steady: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5, "wait_ms": 0})
+	for _frame in range(3):
+		await process_frame
+	var steady_collected: Dictionary = await checks.check_clearance(panel,
+		{"ticket": str(steady.get("ticket", "")), "wait_ms": 2000})
+	var opened: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5, "wait_ms": 0})
+	for _frame in range(3):
+		await process_frame
+	panel.freshness = _freshness_at(8, 101.0)
+	var overtaken: Dictionary = await checks.check_clearance(panel,
+		{"ticket": str(opened.get("ticket", "")), "wait_ms": 2000})
+	panel.freshness = {}
+	check("ticket: a report collected after a newer evaluation painted is "
+			+ "STALE — stamped with the version it measured (7), the current "
+			+ "buffer version (8), the start on its own field, and a reason "
+			+ "naming both — while one collected under an unmoved evaluation "
+			+ "is fresh",
+			bool(steady_collected.get("checked", false))
+				and not bool(steady_collected.get("stale", true))
+				and int(steady_collected.get("source_version", -1)) == 7
+				and bool(overtaken.get("checked", false))
+				and bool(overtaken.get("stale", false))
+				and int(overtaken.get("source_version", -1)) == 7
+				and int(overtaken.get("started_source_version", -1)) == 7
+				and int(overtaken.get("buffer_version", -1)) == 8
+				and str(overtaken.get("stale_reason", "")).contains("version 7")
+				and str(overtaken.get("stale_reason", "")).contains("version 8"),
+			"steady = %s overtaken = %s" % [str(steady_collected), str(overtaken)])
+
 	var again: Dictionary = await checks.check_clearance(panel,
 		{"ticket": handle})
 	check("ticket: a ticket is spent once its report is handed back — asking "
@@ -943,6 +981,34 @@ func _check_expected_contacts(panel: Node, checks: RefCounted) -> void:
 				and bool((((declared.get("expected_contacts", []) as Array)[0])
 					as Dictionary).get("excluded", false)),
 			"report = %s" % str(declared))
+
+	# TWO DECLARATIONS ON ONE PAIR ARE TWO REQUIREMENTS. A 2 mm gap declared
+	# once at 1 mm and once at 3 mm answers to both; graded against the first
+	# alone, the 3 mm requirement vanished and the pair passed. It is graded
+	# against the strictest — one pair, one row, one verdict — and the looser
+	# declaration is matched rather than reported stale.
+	_gap_mm = 2.0
+	var twice: Array = [
+		{"reference": REFERENCE_NAME, "node": NEAR_NODE, "required_mm": 1.0},
+		{"reference": REFERENCE_NAME, "node": NEAR_NODE, "required_mm": 3.0},
+	]
+	var doubly: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 1.0, "expected_contacts": twice})
+	var doubly_near := _pair_for(doubly, NEAR_NODE)
+	var doubly_rows: Array = doubly.get("expected_contacts", []) as Array
+	check("expected: a 2 mm gap declared at 1 mm AND at 3 mm on the same pair "
+			+ "FAILS — graded against the strictest, listed once against the "
+			+ "3 mm declaration, neither declaration reported unmatched",
+			not bool(doubly.get("pass", true))
+				and not bool(doubly_near.get("pass", true))
+				and absf(float(doubly_near.get("required_mm", 0.0)) - 3.0) < 1e-9
+				and doubly_rows.size() == 1
+				and absf(float((doubly_rows[0] as Dictionary).get(
+					"declared_required_mm", 0.0)) - 3.0) < 1e-9
+				and not bool((doubly_rows[0] as Dictionary).get("excluded", true))
+				and (doubly.get("expected_contacts_unmatched", []) as Array).is_empty(),
+			"report = %s" % str(doubly))
+	_gap_mm = 0.2
 
 	# THE FALSIFIER. The same declaration, with the cap half a millimetre INSIDE
 	# the switch: the interference report names the node and measures the depth.
@@ -1829,6 +1895,19 @@ func _records_moved(records: Array, shift: Vector3) -> Array:
 	return out
 
 
+## A settled panel at one buffer version: painted and stamped then.
+func _freshness_at(version: int, evaluated_at: float) -> Dictionary:
+	return {
+		"known": true,
+		"buffer_version": version,
+		"source_version": version,
+		"evaluated_at": evaluated_at,
+		"evaluation_status": "ok",
+		"stale": false,
+		"stale_reason": "",
+	}
+
+
 # ---------------------------------------------------------------------------
 # The stand-in backend
 # ---------------------------------------------------------------------------
@@ -1954,6 +2033,12 @@ class _StubPanel extends Node:
 	var last_eval: Dictionary = {}
 	var answer: Callable
 	var gauge: Node = null
+	## The panel's evaluation freshness, when a check gives it one; empty is
+	## a panel that cannot say, which stamps nothing.
+	var freshness: Dictionary = {}
+
+	func evaluation_freshness() -> Dictionary:
+		return freshness
 
 	func get_document_state() -> Dictionary:
 		return {"source": source, "path": "", "mesh": {},

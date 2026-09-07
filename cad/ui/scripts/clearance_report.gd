@@ -82,15 +82,19 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 			_pair_key(pair["reference"], pair["node"]), []) as Array)
 		var answered: Array = _Expected.indices_for(expected,
 			str(pair["reference"]), str(pair["node"]), located)
-		# GRADED against the first of them: one pair keeps one gap.
-		var declared: int = int(answered[0]) if not answered.is_empty() else -1
+		# GRADED against the STRICTEST of them: one pair keeps one gap, and
+		# every declaration on it has to hold, so the widest gap demanded is
+		# the one graded and the one row this pair gets. The others are
+		# matched — they are declarations about this very pair — and the row
+		# says how many there were.
+		var declared: int = _Expected.strictest(expected, answered)
 		var rule: Dictionary = expected[declared] if declared >= 0 else {}
 		for index in answered:
 			matched[index] = true
 		if declared >= 0:
 			pair["expected"] = true
 			pair["required_mm"] = _Expected.required_mm(rule)
-			pair["note"] = _Expected.describe(rule)
+			pair["note"] = _Expected.describe(rule) + _several(answered.size())
 			if rule["region"] != null:
 				pair["declared_region"] = true
 		if overlapping.has(_pair_key(pair["reference"], pair["node"])):
@@ -350,6 +354,15 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 			+ "is graded on min_mm against required_mm alone, with no " \
 			+ "deduction for chord error"
 	return report
+
+
+## The note suffix for a pair several declarations name: it is graded, and
+## listed, against the strictest of them.
+func _several(count: int) -> String:
+	if count <= 1:
+		return ""
+	return " (the strictest of %d declarations on this pair; the rest are " \
+		% count + "matched, not listed)"
 
 
 ## Where in the world a worker pair was realised: the two witness points, when

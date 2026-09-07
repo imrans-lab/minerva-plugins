@@ -95,7 +95,7 @@ test_mesh_measurement.gd assertions=72
 # the search bound as a floor, and an unscoped gauge whose solid could not be
 # mounted (the module held, its wait line full) withholds its verdict rather
 # than answering fits from the references alone.
-test_measurement_verbs.gd assertions=41
+test_measurement_verbs.gd assertions=42
 
 # Failure and size handling for references: a truncated GLB, a text file
 # wearing a .glb extension, a missing file, an unreadable format and an
@@ -379,7 +379,7 @@ test_interference.gd assertions=82
 # binding — not the document's, whose solid is the union — and refuses to
 # pass when that part has no report, or when the walk that made it spent its
 # ray budget, rather than falling back or certifying what nobody examined.
-test_clearance.gd assertions=83
+test_clearance.gd assertions=85
 
 # Reference against reference, and how tall the references are over a
 # footprint. Two 6 x 8 x 4 blocks posed 0.5 mm apart (their faces overlapping,
@@ -606,7 +606,7 @@ test_flush_contact.gd assertions=20
 # (the seat is a contact and the sunk boss interference with the roles of
 # solid and reference exchanged). No loops around check(), one assertion a
 # call.
-test_rim_contact.gd assertions=17
+test_rim_contact.gd assertions=18
 
 # Which panel a cad verb reaches, and how big its reply is. Two real CADPanel
 # scenes under two tab titles, addressed through the host's own panel-tool
@@ -782,7 +782,7 @@ test_ortho_speckles.gd assertions=19
 # + 1 a probe that started against one evaluation and returned after the next
 # was painted is stamped stale, with the version it started against and a
 # reason naming both versions.
-test_eval_await.gd assertions=33
+test_eval_await.gd assertions=34
 
 # Two documents open on ONE real broker: each keeps its own registration, IPC
 # helper and evaluation, an edit to one reaches only its own worker, and
