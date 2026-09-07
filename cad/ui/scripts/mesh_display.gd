@@ -568,6 +568,13 @@ func is_wireframe_only() -> bool:
 	return _wireframe_only
 
 
+## The instance the shaded solid is drawn from. A posed capture mirrors it into
+## a private world, where it can be sectioned without touching what the panes
+## draw; every other reader wants the stats above instead.
+func get_solid_instance() -> MeshInstance3D:
+	return _mesh_instance
+
+
 func is_mesh_visible() -> bool:
 	return _mesh_instance != null and _mesh_instance.visible and _mesh_instance.mesh != null
 

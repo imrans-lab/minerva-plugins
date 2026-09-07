@@ -94,9 +94,10 @@ static func snapshot(panel, args: Dictionary) -> Dictionary:
 	var max_edge := int(args.get("max_edge", DEFAULT_MAX_EDGE))
 	if max_edge <= 0:
 		max_edge = DEFAULT_MAX_EDGE
-	image = _downscale(image, max_edge)
+	image = downscale(image, max_edge)
 
-	var path_reply := _write_png(image, str(args.get("output_path", "")), view)
+	var path_reply := write_png(image, str(args.get("output_path", "")),
+		"fit_%s" % view)
 	if path_reply.has("error"):
 		return _err(str(path_reply["error"]))
 
@@ -408,7 +409,9 @@ static func _render(panel, source: Camera3D, box: AABB, margin: float) -> Dictio
 	return {"image": image}
 
 
-static func _downscale(image: Image, max_edge: int) -> Image:
+## Shrink an image to a long edge of `max_edge`, or hand it back untouched.
+## Public: the posed capture returns pictures by the same rules.
+static func downscale(image: Image, max_edge: int) -> Image:
 	var long_edge := maxi(image.get_width(), image.get_height())
 	if long_edge <= max_edge:
 		return image
@@ -420,15 +423,18 @@ static func _downscale(image: Image, max_edge: int) -> Image:
 
 
 ## Write the PNG where minerva_cad_snapshot writes its own, and by the same
-## rules: res:// refused, ~ expanded, parent directory created.
-static func _write_png(image: Image, requested: String, view: String) -> Dictionary:
+## rules: res:// refused, ~ expanded, parent directory created. `label` names
+## the file when the caller named no path. Public: the posed capture writes its
+## pictures the same way, and a second copy of these rules would be a second
+## answer to "where did my snapshot go".
+static func write_png(image: Image, requested: String, label: String) -> Dictionary:
 	var path := requested.strip_edges()
 	if path.begins_with("res://"):
 		return {"error": "output_path under res:// is rejected (read-only on "
 			+ "exported builds). Use an absolute path, ~-prefixed, or user://."}
 	if path.is_empty():
 		var stamp := Time.get_datetime_string_from_system().replace(":", "-").replace("T", "_")
-		path = "%s/fit_%s_%s.%s.png" % [DEFAULT_DIR, view, stamp,
+		path = "%s/%s_%s.%s.png" % [DEFAULT_DIR, label, stamp,
 			str(Time.get_ticks_msec() % 1000).pad_zeros(3)]
 	elif path == "~" or path.begins_with("~/"):
 		var home := OS.get_environment("HOME")

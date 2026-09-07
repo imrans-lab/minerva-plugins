@@ -509,6 +509,26 @@
       }
     },
     {
+      "name": "minerva_cad_snapshot_posed",
+      "description": "A picture FROM A PLACE YOU CHOOSE, and optionally CUT OPEN. Every other image verb reads the panes as the owner left them: minerva_cad_snapshot returns a fixed pane's last frame and minerva_cad_snapshot_fit reframes a pane without turning it, so nothing could look UNDER a part (three floorless STLs shipped because a missing floor is only visible from below). This renders the evaluated solid offscreen in a private world from the pose you state, framed on `fit` with the same meaning minerva_cad_snapshot_fit gives it, and writes a PNG. NO PANE IS INVOLVED: it needs no pane on Perspective, moves no camera the owner is using, and is NOT refused while the window is occluded or minimised (the frame is forced). Pose convention is the panes' own — yaw rotates about world +Z with yaw=0 on the +X side, pitch is degrees above the XY plane, and the pose is where the camera STANDS, so pitch=-90 is under the part looking up. section_plane={axis, offset_mm, keep} cuts the SOLID with a fragment discard so the interior is visible; mounted references are rendered whole, because a section is opened to see the solid around a reference. Returns {path, absolute_path, width, height, fit_box_mm, margin, pose{yaw_deg, pitch_deg, camera_position_mm, look_direction, target_mm, fov_deg}} — the pose is echoed even on a refusal — plus section_plane when one was asked for, and the eval freshness stamp (a render is stamped, never gated). return_base64=true adds image_base64 for direct vision consumption.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the CAD editor tab (as returned by minerva_list_editors)."},
+          "view": {"type": "string", "enum": ["+x", "-x", "+y", "-y", "+z", "-z", "iso", "iso-under", "top", "bottom", "under", "front", "back", "left", "right"], "description": "Which DIRECTION to stand in — not which pane. '-z' is under the part looking up, '+z' is straight down, 'iso' is the iso pane's own three-quarter angle and 'iso-under' the same from below. Give this, or pose, or both (pose wins where they overlap)."},
+          "pose": {"type": "object", "description": "The camera pose. {yaw_deg, pitch_deg} place it on the sphere around the target: yaw about world +Z with 0 on the +X side, pitch degrees above the XY plane (-90 = directly underneath). distance_mm (optional) overrides how far back the fit would have put it; target_mm (optional) [x,y,z] is the point it aims at, default the centre of the fit box.", "properties": {"yaw_deg": {"type": "number"}, "pitch_deg": {"type": "number"}, "distance_mm": {"type": "number"}, "target_mm": {"type": "array", "items": {"type": "number"}}}},
+          "fit": {"description": "What to frame on: 'solid' (default), 'reference:<name>', or [[x0,y0,z0], [x1,y1,z1]] — two opposite corners of a world box in millimetres, either order. Same meaning as in minerva_cad_snapshot_fit."},
+          "section_plane": {"type": "object", "description": "Cut the solid open so the inside is visible. {axis: 'x'|'y'|'z', offset_mm: <where along that axis the cut is>, keep: '+' keeps the side above offset_mm, '-' the side below}. The cut is a fragment discard on the solid only; mounted references are rendered whole.", "properties": {"axis": {"type": "string", "enum": ["x", "y", "z"]}, "offset_mm": {"type": "number"}, "keep": {"type": "string", "enum": ["+", "-"]}}, "required": ["axis", "offset_mm"]},
+          "margin": {"type": "number", "description": "Air left around the box on the binding axis, as a fraction of it. Default 0.05; capped at 0.5."},
+          "max_edge": {"type": "integer", "description": "Long edge of the PNG in pixels (default 1024); the render is 4:3."},
+          "output_path": {"type": "string", "description": "Where to write the PNG. Default: user://cad_snapshots/posed_<timestamp>.png. Absolute, ~-prefixed or user:// accepted; res:// is rejected."},
+          "return_base64": {"type": "boolean", "description": "If true, also include image_base64 (raw base64 PNG, no data: prefix)."}
+        },
+        "required": ["editor_name"]
+      }
+    },
+    {
       "name": "minerva_cad_view_overlay",
       "description": "Draw a millimetre grid on the CAD floor and/or the three world axes through the origin, in every pane, and report each pane's scale: {px_per_mm, origin_px, width_px, height_px, projection, view_preset}. px_per_mm is a real number for a pane under an orthographic projection and null for one under perspective, which has no single scale. view_preset is the direction the pane is currently looking from (perspective/top/bottom/front/back/left/right): the pane ids are SLOTS on screen and keep their names, but the owner can point any pane anywhere from its own dropdown, so read view_preset rather than assuming 'top' looks down. The overlay is scene geometry, so the picture is still taken with minerva_cad_snapshot — call this first and the snapshot comes back with a ruler in it. overlay='none' clears it. In narrow layout the four named panes do not exist, so 'views' holds the one pane that renders and 'views_unavailable' says why the others are missing.",
       "executor": "panel",
@@ -689,6 +709,7 @@
           "ui/kinds/cad_edge_number_kind.gd",
           "ui/panel_tools.gd",
           "ui/panel_tools_measure.gd",
+          "ui/panel_tools_view.gd",
           "ui/scripts/contact_runs.gd",
           "ui/scripts/design_check.gd",
           "ui/scripts/eval_banner.gd",
@@ -701,6 +722,7 @@
           "ui/scripts/ortho_silhouette.gd",
           "ui/scripts/part_cache.gd",
           "ui/scripts/part_scope.gd",
+          "ui/scripts/posed_capture.gd",
           "ui/scripts/reference_pairs.gd",
           "ui/scripts/reference_profile.gd",
           "ui/scripts/reference_verbs.gd",

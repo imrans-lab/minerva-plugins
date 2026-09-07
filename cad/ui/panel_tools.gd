@@ -1,4 +1,4 @@
-extends "panel_tools_measure.gd"
+extends "panel_tools_view.gd"
 ## CAD panel-executed MCP tool surface.
 ##
 ## Two families live here:
@@ -18,6 +18,10 @@ extends "panel_tools_measure.gd"
 ##   minerva_cad_snapshot_fit    the pane, rendered offscreen from a camera
 ##                               framed on the solid, a reference or a world
 ##                               box, so the geometry fills the pixels.
+##   minerva_cad_snapshot_posed  the same picture from a pose the CALLER states
+##                               — a direction or a yaw/pitch — in a world of
+##                               its own, so it can look under a part no pane
+##                               points at, and cut it open on a section plane.
 ##   minerva_cad_check_interference
 ##                               where the evaluated solid runs INTO a
 ##                               reference — the same report every evaluation
@@ -63,8 +67,9 @@ extends "panel_tools_measure.gd"
 ## local (the hole is at (4, 4) on the board no matter where the board is
 ## posed); an LLM placing new geometry thinks in world.
 ##
-## THE FITTING AND PLUMBING LIVE UNDER THIS SCRIPT. ui/panel_tools_measure.gd
-## is the base it extends: propose -> verify (minerva_cad_find_holes,
+## THE FITTING AND PLUMBING LIVE UNDER THIS SCRIPT. ui/panel_tools_view.gd
+## holds the two view verbs (minerva_cad_view_state, minerva_cad_view_overlay)
+## and ui/panel_tools_measure.gd is the base under it: propose -> verify (minerva_cad_find_holes,
 ## minerva_cad_find_cylinders) and the scope, pose, frame and envelope
 ## helpers every verb here shares. Inheritance rather than a handle, so one
 ## preload of this file still resolves the whole panel-verb surface.
@@ -93,6 +98,8 @@ const _ReferenceVerbs: Script = preload("scripts/reference_verbs.gd")
 const _KeepoutDsl: Script = preload("scripts/keepout_dsl.gd")
 ## The framed capture: fit resolution, the offscreen camera and the PNG.
 const _FitCapture: Script = preload("scripts/fit_capture.gd")
+## The same picture from a stated pose, in a mirrored world of its own.
+const _PosedCapture: Script = preload("scripts/posed_capture.gd")
 ## Whether the geometry a check is about to measure is the geometry the
 ## document describes, and the refusal when it is not.
 const _Freshness: Script = preload("scripts/eval_freshness.gd")
@@ -166,6 +173,8 @@ static func _dispatch(panel, tool_name: String, args: Dictionary) -> Dictionary:
 			return await _per_part(panel, args, _material)
 		"minerva_cad_snapshot_fit":
 			return await _FitCapture.snapshot(panel, args)
+		"minerva_cad_snapshot_posed":
+			return await _PosedCapture.snapshot(panel, args)
 		"minerva_cad_check_interference":
 			# against= (or reference="all-pairs") asks about two REFERENCES
 			# and not about the solid, so it never scopes to a DSL part.
@@ -306,13 +315,6 @@ static func _reference_digest(panel) -> String:
 			or not panel.has_method("get_reference_digest"):
 		return ""
 	return str(panel.get_reference_digest())
-
-
-## minerva_cad_view_state — delegates to CADPanel.get_view_state().
-static func _view_state(panel, _args: Dictionary) -> Dictionary:
-	if panel == null or not panel.has_method("get_view_state"):
-		return _err("CAD view state not available on this panel")
-	return _ok(panel.get_view_state())
 
 
 # ---------------------------------------------------------------------------
@@ -961,39 +963,3 @@ static func _reference_names(panel) -> Array:
 	for entry in _records(panel):
 		names.append(str((entry as Dictionary).get("name", "")))
 	return names
-
-
-static func _view_overlay(panel, args: Dictionary) -> Dictionary:
-	var mode := str(args.get("overlay", "grid"))
-	if mode not in ["none", "grid", "axes", "grid+axes"]:
-		return _err("overlay must be none, grid, axes or grid+axes")
-	var drawn: Dictionary = panel.set_measurement_overlay(
-		mode, float(args.get("grid_mm", 10.0)))
-	# In narrow layout the four named panes do not exist; reporting the single
-	# pane four times under four names would be four lies. Ask the panel and
-	# say which pane there actually is.
-	var views: Array = []
-	var refusal := ""
-	if panel.has_method("view_unavailable_reason"):
-		refusal = str(panel.view_unavailable_reason("top"))
-	if refusal.is_empty():
-		for view in ["top", "front", "right", "iso"]:
-			var metrics: Dictionary = panel.get_view_metrics(view)
-			if not metrics.has("error"):
-				views.append(metrics)
-	else:
-		var single: Dictionary = panel.get_view_metrics("active")
-		if not single.has("error"):
-			views.append(single)
-	var payload := {
-		"units": "mm",
-		"overlay": str(drawn.get("mode", mode)),
-		"grid_mm": float(drawn.get("grid_mm", 0.0)),
-		"lines": int(drawn.get("lines", 0)),
-		"views": views,
-		"note": "Take the picture with minerva_cad_snapshot; the overlay is "
-			+ "scene geometry and is captured with everything else.",
-	}
-	if not refusal.is_empty():
-		payload["views_unavailable"] = refusal
-	return _ok(payload)

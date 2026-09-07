@@ -42,9 +42,13 @@ const MEASURING_VERBS: Array = [
 	"minerva_cad_check_design",
 ]
 
-## The verbs whose replies carry the stamp: the measuring ones, and the await
-## that exists to clear it.
+## The verbs whose replies carry the stamp: the measuring ones, the await that
+## exists to clear it, and the posed capture. The capture is STAMPED BUT NOT
+## GATED on purpose — it renders, it does not measure, and a picture of the
+## previous evaluation is still a picture worth having as long as the reply
+## says which evaluation it is of.
 const STAMPED_VERBS: Array = [
+	"minerva_cad_snapshot_posed",
 	"minerva_cad_material",
 	"minerva_cad_check_interference",
 	"minerva_cad_check_clearance",

@@ -824,3 +824,26 @@ test_check_design.gd assertions=29
 # + 2 the pane camera identical field by field after a fitted capture, and the
 # capture saying no frame was drawn instead of waiting for one that never comes.
 test_snapshot_fit.gd assertions=11
+
+# minerva_cad_snapshot_posed: a capture from a pose the CALLER states —
+# view='-z' or {yaw_deg, pitch_deg} — rendered in a private world of mirrored
+# geometry, optionally cut by a section plane. Headless draws no frames, so the
+# picture is rasterised on the CPU: production code places the camera
+# (place_camera) and resolves the plane (resolve_section), and the suite casts
+# one ray per pixel of a 48 x 36 frame, dropping hits on the discarded side
+# exactly as the shader's `discard` does. The fixture is a 40 mm block with a
+# sealed cavity (the interior feature) on a 24 mm foot (the underside feature
+# a floorless export hides).
+# 20 assertions = 1 the fixture + 6 the pose argument (no pose refused by name
+# rather than defaulted, an unknown direction refused with the ones there are,
+# '-z' resolving to pitch -90 = standing underneath, yaw pinned to the sphere
+# it turns on, 'front' pinned to the Front pane's own direction, and view+pose
+# combining with the explicit angle winning) + 3 the pictures differ ('-z' from '+z', both
+# from iso, and yaw 210/pitch -30 from ALL FOUR fixed panes — the assertion a
+# fifth fixed pane fails) + 2 the reply (the pose echoed even on a refusal;
+# the refusal is about pixels and not about a pane having drawn no frame)
+# + 4 the section argument (axis, offset_mm, keep validated; the resolved plane
+# pointing at the half that is kept) + 4 the cut itself (it changes the
+# picture, it exposes the sealed cavity, it only ever REMOVES material, and
+# keep='+' is the complementary half).
+test_snapshot_posed.gd assertions=20
