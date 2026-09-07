@@ -580,6 +580,7 @@
         "entry_scene": "ui/CADPanel.tscn",
         "scripts": [
           "ui/CADPanel.gd",
+          "ui/cad_panel_scene.gd",
           "ui/CadAnnotationHost.gd",
           "ui/scripts/reference_meshes.gd",
           "ui/scripts/reference_reader.gd",
