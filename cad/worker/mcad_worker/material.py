@@ -46,10 +46,17 @@ reply lists them and marks segments_certified false — and the raw hits travel
 beside the merged ones so a reader can see what was collapsed.
 
 AN UNSOUND BODY WITHHOLDS THE WALK. A reversed or open body inverts the
-classifier, so a ray that meets one has no segments: they, the total and
+classifier, so a ray that can reach one has no segments: they, the total and
 started_inside are null with the reason, and only the raw face hits are
-reported. A ray that meets no face of an unsound body is walked against the
-sound bodies alone and says which bodies it left out.
+reported. "Can reach" is decided by bounding boxes, not by face hits: a ray
+that starts inside a reversed box and stops short of its walls meets no face
+and is still inside it. Only a body whose bounding box is disjoint from the
+ray segment's is provably clear; the walk then runs against the sound bodies
+alone and says which bodies it left out.
+
+A MIDPOINT THAT CLASSIFIES ON DECIDES NOTHING. It is within tolerance of a
+face, so the interval around it is neither certified material nor certified
+air: it is listed in uncertain_boundaries and segments_certified is false.
 
 EVERY LENGTH IS A MILLIMETRE, in the solid's own frame — which is also the
 panel's world frame, because the evaluated solid is never posed.
@@ -98,7 +105,9 @@ def _occt() -> dict:
     says what is broken instead of raising a bare ImportError three frames down.
     """
     try:
+        from OCP.Bnd import Bnd_Box
         from OCP.BRep import BRep_Builder
+        from OCP.BRepBndLib import BRepBndLib
         from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeVertex
         from OCP.BRepCheck import BRepCheck_NoError, BRepCheck_Shell
         from OCP.BRepClass3d import BRepClass3d_SolidClassifier
@@ -115,6 +124,8 @@ def _occt() -> dict:
             "runtime bundle could not load: %s" % exc
         ) from exc
     return {
+        "Bnd_Box": Bnd_Box,
+        "BRepBndLib": BRepBndLib,
         "BRep_Builder": BRep_Builder,
         "BRepCheck_NoError": BRepCheck_NoError,
         "BRepCheck_Shell": BRepCheck_Shell,
@@ -370,10 +381,26 @@ def _hits(raw: list) -> tuple:
 
 def _touched(occt: dict, bodies: list, indices: list, origin: tuple,
              direction: tuple, max_distance: float) -> list:
-    """Which of the bodies at `indices` the ray meets a face of."""
-    return [index for index in indices
-            if _raw_hits(occt, bodies[index]["solid"], origin, direction,
-                         max_distance)]
+    """Which of the bodies at `indices` the ray segment can reach.
+
+    A face hit is not the test: a ray that starts inside a reversed box and
+    stops before its walls meets no face and is still inside it. A body is
+    left out only when its bounding box is disjoint from the segment's — the
+    one cheap proof that no point of the segment lies in or on it.
+    """
+    segment = occt["Bnd_Box"]()
+    segment.Add(occt["gp_Pnt"](*origin))
+    segment.Add(occt["gp_Pnt"](origin[0] + direction[0] * max_distance,
+                               origin[1] + direction[1] * max_distance,
+                               origin[2] + direction[2] * max_distance))
+    segment.Enlarge(CLASSIFY_TOLERANCE_MM)
+    reachable: list = []
+    for index in indices:
+        box = occt["Bnd_Box"]()
+        occt["BRepBndLib"].Add_s(bodies[index]["solid"], box, True)
+        if not box.IsOut(segment):
+            reachable.append(index)
+    return reachable
 
 
 def _walk(occt: dict, shape, bodies: list, origin: tuple, direction: tuple,
@@ -410,9 +437,9 @@ def _walk(occt: dict, shape, bodies: list, origin: tuple, direction: tuple,
         "raw_hits": [{"at_mm": w, "point_mm": list(at(w))} for w in raw],
     }
 
-    # A ray that meets an unsound body has no walk: the classifier it would
-    # be decided by is inverted there, and the sound bodies alone cannot say
-    # what lies between the hits it left.
+    # A ray that can reach an unsound body has no walk: the classifier it
+    # would be decided by is inverted there, and the sound bodies alone cannot
+    # say what lies along it.
     unsound = _unsound(bodies)
     touched = _touched(occt, bodies, unsound, origin, direction, max_distance)
     if touched:
@@ -423,7 +450,8 @@ def _walk(occt: dict, shape, bodies: list, origin: tuple, direction: tuple,
             "started_inside": None,
             "unbounded": None,
             "segments_certified": False,
-            "reason": ("this ray meets %s, so no segment is certified: "
+            "reason": ("this ray can reach %s (bounding boxes overlap), so no "
+                       "segment is certified: "
                        % ", ".join("body %d" % index for index in touched))
                       + _unsound_reason(bodies, touched),
         })
@@ -431,13 +459,19 @@ def _walk(occt: dict, shape, bodies: list, origin: tuple, direction: tuple,
 
     cuts = [0.0] + [w for w in hits if w > 0.0] + [max_distance]
     runs: list = []
+    # Interval midpoints that classified ON: within tolerance of a face, so
+    # the interval is neither material nor air and is reported as uncertain.
+    undecided: list = []
     for index in range(len(cuts) - 1):
         low, high = cuts[index], cuts[index + 1]
         if high - low <= 0.0:
             continue
+        midpoint = (low + high) * 0.5
         state, body = _classify(
-            occt, bodies, occt["gp_Pnt"](*at((low + high) * 0.5)),
-            CLASSIFY_TOLERANCE_MM)
+            occt, bodies, occt["gp_Pnt"](*at(midpoint)), CLASSIFY_TOLERANCE_MM)
+        if state == "on":
+            undecided.append(midpoint)
+            continue
         if state != "inside":
             continue
         if runs and abs(runs[-1]["exit"] - low) <= HIT_MERGE_MM \
@@ -475,22 +509,32 @@ def _walk(occt: dict, shape, bodies: list, origin: tuple, direction: tuple,
         "started_inside": started_inside,
         "unbounded": unbounded,
         "uncertain_boundaries": {
-            "count": len(uncertain),
-            "parameters_mm": list(uncertain),
-            "points_mm": [list(at(w)) for w in uncertain],
+            "count": len(uncertain) + len(undecided),
+            "parameters_mm": list(uncertain) + list(undecided),
+            "points_mm": [list(at(w)) for w in uncertain + undecided],
         },
-        "segments_certified": not uncertain,
+        "segments_certified": not uncertain and not undecided,
     })
+    reasons: list = []
     if uncertain:
-        payload["reason"] = (
+        reasons.append(
             "%d boundar%s merged face hits that were distinct but closer than "
             "%g mm: material thinner than that may lie there and is not in "
-            "the segments — see uncertain_boundaries and raw_hits"
+            "the segments"
             % (len(uncertain), "y" if len(uncertain) == 1 else "ies",
                HIT_MERGE_MM))
+    if undecided:
+        reasons.append(
+            "%d interval%s ha%s a midpoint within %g mm of a face, which "
+            "classifies ON and decides neither material nor air"
+            % (len(undecided), "" if len(undecided) == 1 else "s",
+               "s" if len(undecided) == 1 else "ve", CLASSIFY_TOLERANCE_MM))
+    if reasons:
+        payload["reason"] = ("; ".join(reasons)
+                             + " — see uncertain_boundaries and raw_hits")
     if unsound:
         payload["note"] = ("%s unsound and left out of this walk; the ray "
-                           "meets no face of %s"
+                           "segment's bounding box is disjoint from that of %s"
                            % (", ".join("body %d is" % i for i in unsound),
                               "it" if len(unsound) == 1 else "them"))
     return payload
@@ -625,9 +669,9 @@ def material(params: dict) -> dict:
         "parity that is never counted; two bodies sharing a face are two "
         "segments with contiguous_with_previous set and their thicknesses "
         "already summed into total_thickness_mm; segments_certified is false "
-        "when a merge swallowed distinct hits (uncertain_boundaries) or the "
-        "ray met an unsound body, and raw_hits are the face hits before any "
-        "merge"
+        "when a merge swallowed distinct hits or a midpoint classified ON "
+        "(uncertain_boundaries) or the ray could reach an unsound body, and "
+        "raw_hits are the face hits before any merge"
     )
     return {"ok": True, "result": payload}
 

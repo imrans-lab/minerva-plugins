@@ -477,3 +477,45 @@ def test_a_ray_through_an_unsound_body_withholds_its_segments() -> None:
     assert missed["raw_hits"] == []
     assert "left out" in missed["note"]
 
+
+def test_a_short_ray_inside_an_unsound_body_is_withheld_without_a_face_hit() -> None:
+    """A ray that starts inside a reversed box and stops before its walls
+    meets no face, yet it is inside the body the whole way.
+
+    THE ORACLE. Reachability used to be "the ray hit a face of it": this ray
+    hits none, the box was left out, and the walk certified zero thickness on
+    a segment that lies entirely inside the body. Exclusion now needs a proof
+    — the body's bounding box disjoint from the segment's — and this segment
+    has none, so the walk is withheld.
+    """
+    occt = mat._occt()
+    shape = _reversed_box()
+    bodies = mat._bodies(occt, shape)
+    answer = mat._walk(occt, shape, bodies, (5.0, 5.0, 5.0), (0.0, 0.0, 1.0), 1.0)
+    assert answer["raw_hits"] == []
+    assert (answer["segments"], answer["total_thickness_mm"],
+            answer["started_inside"]) == (None, None, None)
+    assert "body 0" in answer["reason"]
+
+
+def test_a_midpoint_on_a_face_is_uncertain_not_certified_air() -> None:
+    """A ray starting 5e-8 mm inside the exit face has one interval before
+    the hit whose midpoint is within CLASSIFY_TOLERANCE_MM of that face.
+
+    THE ORACLE. The classifier says ON there, and ON used to be treated as
+    "not inside": the interval was dropped and the reply certified zero
+    thickness. ON decides nothing, so the interval is an uncertain boundary
+    and the segments are not certified.
+    """
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
+    from OCP.gp import gp_Pnt
+
+    occt = mat._occt()
+    box = BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 10.0, 10.0, 10.0).Shape()
+    bodies = mat._bodies(occt, box)
+    answer = mat._walk(occt, box, bodies, (5.0, 5.0, 10.0 - 5.0e-8),
+                       (0.0, 0.0, 1.0), 100.0)
+    assert answer["segments_certified"] is False
+    assert answer["uncertain_boundaries"]["count"] == 1
+    assert "ON" in answer["reason"]
+
