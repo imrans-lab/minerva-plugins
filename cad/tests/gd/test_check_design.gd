@@ -30,6 +30,7 @@ const PartCache := preload("res://../../minerva-plugins/cad/ui/scripts/part_cach
 ## The resolver the cache is filled through, driven directly for the case
 ## where the document moves while the worker is evaluating a binding.
 const PartScope := preload("res://../../minerva-plugins/cad/ui/scripts/part_scope.gd")
+const DesignCheck := preload("res://../../minerva-plugins/cad/ui/scripts/design_check.gd")
 
 ## The gap this design has to keep, in millimetres, and the pinch that fails it.
 const REQUIRED_MM := 1.0
@@ -79,6 +80,7 @@ func _run() -> void:
 	await _check_a_stale_leg_never_folds_to_pass()
 	await _check_a_leg_with_no_verdict_never_aggregates_to_pass()
 	await _check_a_transient_worker_failure_is_not_remembered()
+	await _check_a_run_past_the_window_is_a_ticket_and_the_panel_is_busy()
 
 
 # ---------------------------------------------------------------------------
@@ -563,6 +565,79 @@ func _check_parts_share_one_clearance_window() -> void:
 # The reports the three checks would have measured
 # ---------------------------------------------------------------------------
 
+## ORACLE: a run the window does not hold must (1) answer with a design
+## ticket and no verdict, (2) keep running so a collect returns the fold that
+## was in flight — the crash row, verdict fail — and (3) make a second fresh
+## call on the same panel start NOTHING: one interference call in total. A
+## lazy version that merely times out would either start a second run on the
+## collider (two calls) or return the reply as if it were a verdict.
+func _check_a_run_past_the_window_is_a_ticket_and_the_panel_is_busy() -> void:
+	var panel := _panel()
+	panel.slow_frames = 40
+	panel.interference = _interference_report([_crash()])
+	panel.clearance = _clearance_report([_gap(2.0)])
+	panel.fasteners = _fastener_report([_good_screw()])
+	var window: int = DesignCheck.design_window_ms
+	DesignCheck.design_window_ms = 1
+	var asked := {"required_mm": REQUIRED_MM,
+		"screw": {"dia_mm": 3.0, "length_mm": 8.0}}
+
+	var first: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_check_design", asked)
+	check("a run the window does not hold answers with a design ticket and "
+			+ "no verdict — status running, verdict advisory, nothing checked",
+			str(first.get("status", "")) == "running"
+				and str(first.get("ticket", "")).begins_with("design-")
+				and str(first.get("verdict", "")) == "advisory"
+				and not bool(first.get("checked", true)),
+			"first = %s" % str(first))
+
+	var second: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_check_design", asked)
+	check("a fresh call on the panel whose run is still going is BUSY with "
+			+ "the same ticket and starts nothing: the collider sees one "
+			+ "interference call, not two",
+			bool(second.get("busy", false))
+				and str(second.get("ticket", "")) == str(first.get("ticket", ""))
+				and panel.interference_calls == 1,
+			"second = %s, interference calls = %d" % [str(second),
+				panel.interference_calls])
+
+	var collected: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_check_design", {"required_mm": REQUIRED_MM,
+			"ticket": str(first.get("ticket", "")), "wait_ms": 10000})
+	check("collecting the ticket returns the fold that was in flight: the "
+			+ "crash row and verdict fail, with no running status left on it",
+			str(collected.get("verdict", "")) == "fail"
+				and (collected.get("interference", []) as Array).size() == 1
+				and not collected.has("status")
+				and panel.interference_calls == 1,
+			"collected = %s" % str(collected))
+
+	var again: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_check_design", {"required_mm": REQUIRED_MM,
+			"ticket": str(first.get("ticket", ""))})
+	check("a collected run is forgotten — the ticket answers exactly once",
+			not bool(again.get("success", true))
+				and str(again.get("error", "")).contains("forgotten"),
+			"again = %s" % str(again))
+
+	var fresh: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_check_design", asked)
+	check("and the panel is free again: a fresh call after the collect "
+			+ "starts a new run with its own ticket",
+			str(fresh.get("ticket", "")) != str(first.get("ticket", ""))
+				and panel.interference_calls == 2,
+			"fresh = %s" % str(fresh))
+	DesignCheck.design_window_ms = window
+	# Let the second run finish before the panel goes, so its detached legs
+	# do not outlive the stand-in they measure.
+	await PanelTools.handle(panel, "minerva_cad_check_design",
+		{"required_mm": REQUIRED_MM, "ticket": str(fresh.get("ticket", "")),
+		"wait_ms": 10000})
+	panel.free()
+
+
 func _interference_report(pairs: Array) -> Dictionary:
 	return {
 		"checked": true, "units": "mm",
@@ -913,6 +988,9 @@ class _DesignStandIn extends Node:
 	## the panel's own per-evaluation check does while it holds the collider.
 	var busy_replies: int = 0
 	var interference_calls: int = 0
+	## Idle frames the interference leg takes before it answers — a leg slow
+	## enough to outrun a shrunken window.
+	var slow_frames: int = 0
 	## The args each leg was actually handed. The verb builds these from the
 	## caller's, and a stand-in that ignored them would make the pass-through
 	## unfalsifiable: the same canned reports come back whatever is asked.
@@ -963,6 +1041,8 @@ class _DesignStandIn extends Node:
 	func check_interference(args: Dictionary) -> Dictionary:
 		interference_calls += 1
 		interference_args = args.duplicate(true)
+		for frame in range(slow_frames):
+			await (Engine.get_main_loop() as SceneTree).process_frame
 		if busy_replies > 0:
 			busy_replies -= 1
 			return {"checked": false, "busy": true, "holder_ticket": 7,

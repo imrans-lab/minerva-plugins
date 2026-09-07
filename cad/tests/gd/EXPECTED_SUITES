@@ -264,7 +264,7 @@ test_cad_note.gd assertions=40
 # alone and a later call declaring nothing would be handed a report whose
 # declared pairs had already left it; the undeclared report of the same source
 # is kept.
-test_interference.gd assertions=82
+test_interference.gd assertions=84
 
 # Clearance between the evaluated solid and a reference: two bars crossing at
 # right angles with 0.8 mm of air between them, the reference YAWED 30 degrees
@@ -379,7 +379,7 @@ test_interference.gd assertions=82
 # binding — not the document's, whose solid is the union — and refuses to
 # pass when that part has no report, or when the walk that made it spent its
 # ray budget, rather than falling back or certifying what nobody examined.
-test_clearance.gd assertions=85
+test_clearance.gd assertions=86
 
 # Reference against reference, and how tall the references are over a
 # footprint. Two 6 x 8 x 4 blocks posed 0.5 mm apart (their faces overlapping,
@@ -841,7 +841,7 @@ test_eval_banner.gd assertions=9
 # a missing key was read as; and a worker TIMEOUT on a part is not cached, so
 # the next call reaches the worker again instead of replaying "did not
 # evaluate" for the life of the document.
-test_check_design.gd assertions=34
+test_check_design.gd assertions=39
 
 # minerva_cad_snapshot_fit: a capture framed on the evaluated solid, a named
 # reference or a world box, rendered from a camera of its own so the pane the

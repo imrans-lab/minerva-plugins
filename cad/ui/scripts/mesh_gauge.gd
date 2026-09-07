@@ -267,10 +267,15 @@ func mask_for(reference: String) -> int:
 
 func clear() -> void:
 	for entry in _bodies:
+		# Validated before it is bound to a typed local: in the release
+		# template a freed instance bound to StaticBody3D is a dangling pointer.
+		if not (entry is StaticBody3D and is_instance_valid(entry)):
+			continue
 		var collider: StaticBody3D = entry
-		if is_instance_valid(collider):
-			collider.get_parent().remove_child(collider)
-			collider.queue_free()
+		var parent: Node = collider.get_parent()
+		if parent != null:
+			parent.remove_child(collider)
+		collider.queue_free()
 	_bodies.clear()
 	_layers.clear()
 	_body_nodes.clear()

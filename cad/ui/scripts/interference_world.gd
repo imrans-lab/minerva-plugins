@@ -363,8 +363,11 @@ func _cached_body(key: String, body: StaticBody3D) -> bool:
 func _kept_solid_is_live(key: String) -> bool:
 	if not _solid_cache.has(key):
 		return false
-	var body: StaticBody3D = (_solid_cache[key] as Dictionary).get("body", null)
-	if body != null and is_instance_valid(body):
+	# Read as a Variant and validated BEFORE it is bound: the release template
+	# compiles the typed-assignment check out, so binding a freed body to a
+	# StaticBody3D local there is a dangling pointer, not an error.
+	var body: Variant = (_solid_cache[key] as Dictionary).get("body", null)
+	if body is StaticBody3D and is_instance_valid(body):
 		return true
 	_solid_cache.erase(key)
 	_cache_order.erase(key)
@@ -377,7 +380,9 @@ func _kept_solid_is_live(key: String) -> bool:
 ## decide whether its answer describes one state of the document.
 func _mount_cached_solid(key: String) -> int:
 	var kept: Dictionary = _solid_cache[key]
-	var body: StaticBody3D = kept["body"]
+	var body: Variant = kept["body"]
+	if not (body is StaticBody3D and is_instance_valid(body)):
+		return -1
 	_solid_faces = kept["faces"]
 	_solid_edges = kept["edges"]
 	_solid_bounds = kept["bounds"]
@@ -416,9 +421,9 @@ func _keep_solid(key: String, triangles: int) -> void:
 			continue
 		var kept: Dictionary = _solid_cache.get(evicted, {}) as Dictionary
 		_solid_cache.erase(evicted)
-		var body: StaticBody3D = kept.get("body", null)
-		if body != null and is_instance_valid(body):
-			body.queue_free()
+		var body: Variant = kept.get("body", null)
+		if body is StaticBody3D and is_instance_valid(body):
+			(body as StaticBody3D).queue_free()
 
 
 ## The panel is going away. The cached bodies are held OUT of the tree, so
@@ -434,9 +439,10 @@ func release() -> void:
 func release_solids() -> void:
 	for key in _solid_cache.keys():
 		var kept: Dictionary = _solid_cache[key]
-		var body: StaticBody3D = kept.get("body", null)
-		if body != null and is_instance_valid(body) and body != _solid_body:
-			body.queue_free()
+		var body: Variant = kept.get("body", null)
+		if body is StaticBody3D and is_instance_valid(body) \
+				and body != _solid_body:
+			(body as StaticBody3D).queue_free()
 	_solid_cache.clear()
 	_cache_order.clear()
 

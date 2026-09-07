@@ -26,6 +26,17 @@ extends RefCounted
 ## reply has the same shape and every row in it describes the geometry
 ## standing now.
 ##
+## THE RUN OUTLIVES THE CALL. Four parts and two screws are sixteen collider
+## reservations and eight worker round trips, which no MCP window holds, and
+## a caller whose window closed used to get nothing back while the legs kept
+## running unowned — and a retry started a second traversal beside them on
+## the same collider. So the legs run as ONE detached coroutine per panel:
+## the call waits `wait_ms` (default the verb's own window) and answers with
+## the finished reply, or with a `design-N` ticket that collects it; a fresh
+## call on a panel whose run is still going answers `busy` with that same
+## ticket and starts nothing. A run nobody collects is forgotten after
+## RUN_STALE_MS.
+##
 ## WITH PARTS, EVERY CLEARANCE LEG STARTS BEFORE ANY IS WAITED ON. Each part
 ## is its own worker measurement, so they are started with no wait and then
 ## collected against ONE window shared by all of them; two slow parts cost
@@ -76,6 +87,18 @@ const _ReplyShape: Script = preload("reply_shape.gd")
 ## window, whatever the number of parts.
 const CLEARANCE_WINDOW_MS: int = 20000
 
+## How long a call waits for the run before answering with a ticket. A
+## variable so a test can shrink it to reach the ticket path.
+static var design_window_ms: int = 20000
+## A run that was never collected is forgotten after this long — the same
+## bound part_scope gives one part evaluation in the worker.
+const RUN_STALE_MS: int = 600000
+const DESIGN_TICKET_PREFIX: String = "design-"
+## panel instance id -> {ticket, started_ms, required_mm, reply}; `reply` is
+## empty while the legs are still running.
+static var _runs: Dictionary = {}
+static var _next_run: int = 0
+
 
 ## Run the three checks and fold them into one reply.
 ##
@@ -87,12 +110,112 @@ static func run(panel, args: Dictionary, per_part: Callable,
 		interference: Callable, clearance: Callable,
 		fasteners: Callable) -> Dictionary:
 	var handle := str(args.get("ticket", "")).strip_edges()
+	var wait_ms := int(args.get("wait_ms", design_window_ms))
+	if handle.begins_with(DESIGN_TICKET_PREFIX):
+		return await _collect_run(panel, handle, wait_ms)
 	var required_mm := float(args.get("required_mm", 0.0))
 	if required_mm <= 0.0:
 		return {"success": false, "error": "check_design needs required_mm: "
 			+ "the gap you want between the solid and everything else, in "
 			+ "millimetres. It is what the clearance leg grades against; the "
 			+ "contacts the design MEANS to have go in expected_contacts."}
+	var key := _run_key(panel)
+	var running: Dictionary = _runs.get(key, {})
+	if not running.is_empty() and (running["reply"] as Dictionary).is_empty() \
+			and Time.get_ticks_msec() - int(running["started_ms"]) < RUN_STALE_MS:
+		return _still_running(running, true)
+	_next_run += 1
+	var entry := {"ticket": DESIGN_TICKET_PREFIX + str(_next_run),
+		"started_ms": Time.get_ticks_msec(), "required_mm": required_mm,
+		"reply": {}}
+	_runs[key] = entry
+	# Detached on purpose: the legs run to the end whether or not this call
+	# is still waiting, and the entry is where their reply lands.
+	_execute(panel, args, per_part, interference, clearance, fasteners, entry)
+	return await _await_run(key, entry, wait_ms)
+
+
+## The run's identity: the panel it measures.
+static func _run_key(panel) -> int:
+	return int(panel.get_instance_id())
+
+
+## Run the legs and file the reply on the run's entry.
+static func _execute(panel, args: Dictionary, per_part: Callable,
+		interference: Callable, clearance: Callable, fasteners: Callable,
+		entry: Dictionary) -> void:
+	var reply: Dictionary = await _legs_reply(panel, args, per_part,
+		interference, clearance, fasteners)
+	if reply.is_empty():
+		reply = {"success": false, "error": "the design check produced no reply"}
+	entry["reply"] = reply
+
+
+## Wait for the run's reply, up to `wait_ms`; a run that finished is taken off
+## the panel so the next fresh call starts a new one.
+static func _await_run(key: int, entry: Dictionary, wait_ms: int) -> Dictionary:
+	var tree := Engine.get_main_loop() as SceneTree
+	var deadline := Time.get_ticks_msec() + wait_ms
+	while (entry["reply"] as Dictionary).is_empty():
+		if tree == null or Time.get_ticks_msec() >= deadline:
+			return _still_running(entry, false)
+		await tree.process_frame
+	if is_same(_runs.get(key, null), entry):
+		_runs.erase(key)
+	return entry["reply"]
+
+
+## Collect a run by its ticket. A run is forgotten once collected, so the
+## ticket answers exactly once with the finished reply.
+static func _collect_run(panel, handle: String, wait_ms: int) -> Dictionary:
+	var key := _run_key(panel)
+	var entry: Dictionary = _runs.get(key, {})
+	if entry.is_empty() or str(entry["ticket"]) != handle:
+		return {"success": false, "error": ("no design check named %s is "
+			+ "running on this panel: a run is forgotten once its reply was "
+			+ "collected, or after %d minutes uncollected — start a new one")
+			% [handle, RUN_STALE_MS / 60000]}
+	return await _await_run(key, entry, wait_ms)
+
+
+## The reply for a run that has not finished. NOT a verdict: nothing in it
+## is measured, and the verdict reads advisory so no fold can turn it into a
+## pass. `busy` marks the reply given to a fresh call that found the panel's
+## run already going.
+static func _still_running(entry: Dictionary, busy: bool) -> Dictionary:
+	var ticket := str(entry["ticket"])
+	var age := Time.get_ticks_msec() - int(entry["started_ms"])
+	var out := {
+		"success": true,
+		"checked": false,
+		"status": "running",
+		"ticket": ticket,
+		"elapsed_ms": age,
+		"required_mm": float(entry.get("required_mm", 0.0)),
+		"verdict": "advisory",
+		"checks": {"design": "still running — collect ticket \"%s\"" % ticket},
+		"ticket_note": ("the checks are still running on this panel (%d ms "
+			+ "in); nothing here is a verdict. Call minerva_cad_check_design "
+			+ "again with ticket=\"%s\" (and wait_ms for how long to wait) to "
+			+ "collect the finished reply — the run continues whether or not "
+			+ "anyone waits, and a fresh check_design on this panel while it "
+			+ "runs answers with this same ticket instead of starting another")
+			% [age, ticket],
+	}
+	if busy:
+		out["busy"] = true
+		out["reason"] = ("a design check is already running on this panel "
+			+ "(%d ms in); nothing new was started — collect ticket \"%s\"")\
+			% [age, ticket]
+	return out
+
+
+## The three legs, sequenced and folded. Everything measured comes from here.
+static func _legs_reply(panel, args: Dictionary, per_part: Callable,
+		interference: Callable, clearance: Callable,
+		fasteners: Callable) -> Dictionary:
+	var handle := str(args.get("ticket", "")).strip_edges()
+	var required_mm := float(args.get("required_mm", 0.0))
 
 	var state := {
 		"notes": [],
