@@ -33,6 +33,7 @@ extends SceneTree
 const MeshFeatures := preload("res://../../minerva-plugins/cad/ui/scripts/mesh_features.gd")
 const MeshGauge := preload("res://../../minerva-plugins/cad/ui/scripts/mesh_gauge.gd")
 const PanelTools := preload("res://../../minerva-plugins/cad/ui/panel_tools.gd")
+const GeometryChecks := preload("res://../../minerva-plugins/cad/ui/scripts/geometry_checks.gd")
 
 ## One plate: 40 x 30 in X and Z, 4 thick in Y, holes drilled along +Y.
 const PLATE := Vector3(40.0, 4.0, 30.0)
@@ -56,6 +57,19 @@ const POSE_ORIGIN := Vector3(100.0, 200.0, 300.0)
 
 const CENTRE_TOLERANCE_MM := 0.05
 const PIXEL_SIZE := Vector2i(400, 300)
+
+## The EVALUATED SOLID of the fixture document: a plain plate at the world
+## origin, 2 mm thick in Y, standing a hundred millimetres clear of the posed
+## reference stack so every gauge below is unambiguously about one of the two.
+## This is what a tray floor is in the owner's document, and it is mounted
+## through the real interference_world path — GeometryChecks.build_solid — not
+## as a reference collider.
+const SOLID_PLATE := Vector3(40.0, 2.0, 30.0)
+## Air a gauge is asked to measure above the solid's top face, and below the
+## reference stack's underside. Both are read off the fixture's own numbers.
+const SOLID_GAP_MM := 0.5
+const REFERENCE_GAP_MM := 6.5
+const CLEARANCE_TOLERANCE_MM := 0.05
 
 var _pass: int = 0
 var _fail: int = 0
@@ -124,6 +138,7 @@ func _run() -> void:
 	await _test_a_second_reference_cannot_change_this_one_s_measurement()
 	await _test_a_scaled_pose_reports_world_and_local_diameters()
 	await _test_a_document_changing_under_a_measurement_is_marked_stale()
+	await _test_the_gauge_measures_the_evaluated_solid_and_not_only_references()
 
 	_panel.queue_free()
 
@@ -491,6 +506,118 @@ func _test_the_gauge_verb_answers_fits_and_says_where_it_touched() -> void:
 			"reply=%s" % str(bad_shape))
 
 
+## THE GAUGE MUST SEE THE PART THE DOCUMENT EVALUATES TO.
+##
+## The solid's collider lives in interference_world.gd's own physics world;
+## mesh_gauge.gd holds only the reference colliders. Before this suite, a
+## gauge dropped anywhere in the evaluated solid answered {fits: true,
+## contacts: [], clearance_mm: 0} with the same clearance_bound_mm at every
+## position — the reference box's half diagonal — because no ray ever reached
+## the solid and no clearance was measured for a sphere at all.
+##
+## Four questions, and each one fails on a different half of that:
+##   1. inside the plate            -> fits false, a contact ON THE SOLID
+##   2. half a millimetre above it  -> clearance 0.5, measured not bounded
+##   3. the same shape under the BOARD, scoped by reference= -> the board's
+##      own answer, with the solid left out of it
+##   4. nowhere near either         -> the bound as a FLOOR, as it always was
+func _test_the_gauge_measures_the_evaluated_solid_and_not_only_references() -> void:
+	var checks: RefCounted = GeometryChecks.new()
+	checks.attach(_panel)
+	var plate: ArrayMesh = await _bake_solid_plate()
+	_panel.checks = checks
+	_panel.solid_mesh = _mesh_data(plate)
+	await process_frame
+
+	var buried: Dictionary = await PanelTools.handle(_panel, "minerva_cad_gauge", {
+		"shape": "sphere", "dia_mm": 1.0, "at_mm": [0.0, 0.0, 0.0]})
+	var buried_contacts: Array = buried.get("contacts", [])
+	# The contact of a buried gauge is a WITNESS, not a foul, and says so on
+	# the contact itself: a consumer counting contacts must be able to tell.
+	var on_solid := false
+	for entry in buried_contacts:
+		var touched: Dictionary = entry
+		if str(touched.get("on", "")) == "solid" and bool(touched.get("witness", false)):
+			on_solid = true
+	check("gauge verb: a sphere inside the EVALUATED SOLID does not fit, and "
+			+ "the contact is a witness that names the solid",
+			bool(buried.get("success", false))
+				and not bool(buried.get("fits", true))
+				and str(buried.get("reason", "")) == "inside_solid"
+				and on_solid
+				and bool((buried.get("measured_against", {}) as Dictionary).get("solid", false)),
+			"reply=%s" % str(buried))
+
+	# The plate's top face is at y = +1; a 1 mm ball centred SOLID_GAP_MM
+	# above it has its own surface exactly that far off the material.
+	var above := SOLID_PLATE.y * 0.5 + SOLID_GAP_MM + 0.5
+	var clear: Dictionary = await PanelTools.handle(_panel, "minerva_cad_gauge", {
+		"shape": "sphere", "dia_mm": 1.0, "at_mm": [0.0, above, 0.0]})
+	check("gauge verb: a sphere standing off the solid reports the air under "
+			+ "it as a MEASURED clearance, not as zero",
+			bool(clear.get("fits", false))
+				and bool(clear.get("clearance_bounded", false))
+				and absf(float(clear.get("clearance_mm", -1.0)) - SOLID_GAP_MM)
+					< CLEARANCE_TOLERANCE_MM,
+			"reply=%s" % str(clear))
+
+	# Under the reference stack, scoped to it: the board answers about itself
+	# and the solid is not mounted for the call at all.
+	var axis_world: Vector3 = (_pose.basis * PLATE_AXIS).normalized()
+	var under: Vector3 = _pose * Vector3(0.0, -PLATE.y * 0.5, 0.0) \
+		- axis_world * (REFERENCE_GAP_MM + 0.5)
+	var scoped: Dictionary = await PanelTools.handle(_panel, "minerva_cad_gauge", {
+		"shape": "sphere", "dia_mm": 1.0,
+		"at_mm": [under.x, under.y, under.z],
+		"reference": "board"})
+	check("gauge verb: reference= answers about THAT reference — the gap to "
+			+ "the board's underside — with the solid left out of it",
+			bool(scoped.get("fits", false))
+				and bool(scoped.get("clearance_bounded", false))
+				and absf(float(scoped.get("clearance_mm", -1.0)) - REFERENCE_GAP_MM)
+					< CLEARANCE_TOLERANCE_MM
+				and not bool((scoped.get("measured_against", {}) as Dictionary)
+					.get("solid", true)),
+			"reply=%s" % str(scoped))
+
+	# THE GUARD IS mesh_gauge's OWN, not panel_tools skipping the mount. The
+	# job below carries the module AND a reference scope, and stands exactly
+	# where the first assertion found solid material: an unscoped job answers
+	# inside_solid there, so a scoped one that does not is the mask guard
+	# refusing to let the solid answer a question about the board.
+	var built: int = int(checks.call("build_solid", _panel.solid_mesh, 0, ""))
+	var scoped_direct: Dictionary = await _panel.gauge.call("submit", "gauge", {
+		"shape": "sphere",
+		"size": Vector3(1.0, 0.0, 0.0),
+		"at": Vector3.ZERO,
+		"axis": Vector3.UP,
+		"mask": int(_panel.gauge.call("mask_for", "board")),
+		"reference": "board",
+		"checks": checks,
+		"witness": true,
+	})
+	check("gauge job: a job scoped by reference= does not let the EVALUATED "
+			+ "SOLID answer, even when it carries the module that owns it",
+			built > 0
+				and bool(scoped_direct.get("fits", false))
+				and (scoped_direct.get("contacts", []) as Array).is_empty()
+				and str(scoped_direct.get("reason", "")) != "inside_solid",
+			"triangles=%d reply=%s" % [built, str(scoped_direct)])
+
+	var nowhere: Dictionary = await PanelTools.handle(_panel, "minerva_cad_gauge", {
+		"shape": "sphere", "dia_mm": 1.0, "at_mm": [0.0, 0.0, -5000.0]})
+	check("gauge verb: a sphere in genuinely open space still reports the "
+			+ "search bound as a FLOOR and never as a clearance",
+			bool(nowhere.get("fits", false))
+				and not bool(nowhere.get("clearance_bounded", true))
+				and nowhere.has("clearance_at_least_mm")
+				and not nowhere.has("clearance_mm"),
+			"reply=%s" % str(nowhere))
+
+	_panel.checks = null
+	_panel.solid_mesh = {}
+
+
 # ---------------------------------------------------------------------------
 # minerva_cad_probe
 # ---------------------------------------------------------------------------
@@ -568,6 +695,12 @@ class PanelStandIn extends Node:
 	var churn: bool = false
 	var features: RefCounted = null
 	var gauge: Node = null
+	## The interference module that owns the evaluated solid's own world, and
+	## the tessellation the verb builds its collider from. Null and empty
+	## until a test mounts them, so every other assertion runs against the
+	## references alone.
+	var checks: RefCounted = null
+	var solid_mesh: Dictionary = {}
 	var pose: Transform3D = Transform3D.IDENTITY
 	## Where the stand-in's pick ray is aimed, in the reference's local frame.
 	var ray_local_target: Vector3 = Vector3.ZERO
@@ -591,6 +724,12 @@ class PanelStandIn extends Node:
 
 	func get_mesh_gauge() -> Node:
 		return gauge
+
+	func get_geometry_checks() -> RefCounted:
+		return checks
+
+	func get_document_state() -> Dictionary:
+		return {"source": "part = <the fixture plate>", "mesh": solid_mesh}
 
 	## The same composition CADPanel does: the pose onto the already-converted
 	## part transform, so the gauge works entirely in world millimetres.
@@ -691,6 +830,48 @@ func _bake_plug() -> ArrayMesh:
 	bar.size = Vector3(2.0, 20.0, 2.0)
 	combiner.add_child(bar)
 	return await _bake(combiner)
+
+
+## The EVALUATED SOLID: one plate at the world origin, no holes. It is handed
+## to the interference module as worker mesh data, which is the only way the
+## panel ever supplies it.
+func _bake_solid_plate() -> ArrayMesh:
+	var combiner := CSGCombiner3D.new()
+	combiner.name = "SolidPlate"
+	var box := CSGBox3D.new()
+	box.size = SOLID_PLATE
+	combiner.add_child(box)
+	return await _bake(combiner)
+
+
+## An ArrayMesh in the {vertices, faces} shape the worker sends and
+## interference_world.build_solid() takes. World millimetres: the evaluated
+## solid is never posed.
+func _mesh_data(mesh: ArrayMesh) -> Dictionary:
+	var vertices: Array = []
+	var faces: Array = []
+	for surface in range(mesh.get_surface_count()):
+		var arrays: Array = mesh.surface_get_arrays(surface)
+		if arrays.size() <= Mesh.ARRAY_VERTEX or arrays[Mesh.ARRAY_VERTEX] == null:
+			continue
+		var base := vertices.size()
+		for vertex in (arrays[Mesh.ARRAY_VERTEX] as PackedVector3Array):
+			vertices.append([vertex.x, vertex.y, vertex.z])
+		var raw_index: Variant = arrays[Mesh.ARRAY_INDEX]
+		if raw_index is PackedInt32Array and (raw_index as PackedInt32Array).size() >= 3:
+			var indices: PackedInt32Array = raw_index
+			var i := 0
+			while i + 2 < indices.size():
+				faces.append([base + indices[i], base + indices[i + 1],
+					base + indices[i + 2]])
+				i += 3
+		else:
+			var count := (arrays[Mesh.ARRAY_VERTEX] as PackedVector3Array).size()
+			var j := 0
+			while j + 2 < count:
+				faces.append([base + j, base + j + 1, base + j + 2])
+				j += 3
+	return {"vertices": vertices, "faces": faces}
 
 
 ## CSG needs to be in the tree and processed once before it has geometry.

@@ -74,7 +74,7 @@
     },
     {
       "name": "minerva_cad_gauge",
-      "description": "Put a gauge of a given size at a given place in the posed CAD world and ask whether it fits. shape='cylinder' is a pin (dia_mm + length_mm, pointing along axis), 'box' is a block (size_mm [x,y,z]), 'sphere' is a ball (dia_mm). Returns {fits, contacts[{point_mm {world, local}, node, reference}], clearance_mm, clearance_bound_mm, clearance_bounded}. The gauge is RAY-SAMPLED, not volumetric: rays leave it at 24 azimuths from each of 5 stations along its length (plus its two ends), so 'it fits' means nothing was found on those rays — a rib or a burr between two of them can be missed. A gauge that does not fit reports where it touched, so 'why will this screw not go in' has an answer with coordinates. In open space no ray meets a wall at all: clearance_bounded is then false and the room is reported as clearance_at_least_mm, the search bound, which is a floor and not a measurement. Positions are millimetres in the posed world frame; at_mm is world.",
+      "description": "Put a gauge of a given size at a given place in the posed CAD world and ask whether it fits. shape='cylinder' is a pin (dia_mm + length_mm, pointing along axis), 'box' is a block (size_mm [x,y,z]), 'sphere' is a ball (dia_mm). Returns {fits, contacts[{point_mm {world, local}, node, reference, on, witness}], clearance_mm, clearance_bound_mm, clearance_bounded, measured_against}. IT MEASURES AGAINST THE EVALUATED SOLID AS WELL AS THE REFERENCES: an unscoped gauge mounts the part the document evaluates to and casts into it too, so a gauge inside your own tray floor answers fits:false with a contact whose `on` is \"solid\" (a solid contact has no node and no local frame \u2014 the part is in no reference's pose). A contact with witness:true is NOT a foul: a gauge buried in material thicker than itself reaches no wall, so that contact is the nearest surface of the body it is inside \u2014 do not count it as a place the gauge touched. Pass reference= to ask about ONE mounted reference instead, which leaves the solid out of the answer. Read measured_against before trusting a fit: it says how many reference colliders and whether the solid was there, with solid_reason when it was not. clearance_mm is measured for every shape \u2014 a cylinder grows radially, a sphere and a box are measured from their own surface to the nearest material. The gauge is RAY-SAMPLED, not volumetric: rays leave it at 24 azimuths from each of 5 stations along its length (plus its two ends), so 'it fits' means nothing was found on those rays — a rib or a burr between two of them can be missed. A gauge that does not fit reports where it touched, so 'why will this screw not go in' has an answer with coordinates. In open space no ray meets a wall at all: clearance_bounded is then false and the room is reported as clearance_at_least_mm, the search bound, which is a floor and not a measurement. Positions are millimetres in the posed world frame; at_mm is world.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
@@ -657,8 +657,10 @@
           "ui/scripts/worker_reply.gd",
           "ui/scripts/mesh_features.gd",
           "ui/scripts/mesh_gauge.gd",
-          "ui/scripts/gauge_shapes.gd",
+          "ui/scripts/gauge_probe.gd",
           "ui/scripts/gauge_seed.gd",
+          "ui/scripts/gauge_shapes.gd",
+          "ui/scripts/gauge_solid.gd",
           "ui/scripts/mesh_display.gd",
           "ui/scripts/edge_outline.gd",
           "ui/scripts/Cad_GeometryOverlay.gd",

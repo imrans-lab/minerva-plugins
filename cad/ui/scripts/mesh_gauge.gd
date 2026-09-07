@@ -49,8 +49,18 @@
 ##    resting face to face put two triangles at one point, and finding the
 ##    second one means re-casting with the first one's body excluded.
 ##
-## The gauge frame lives in gauge_shapes.gd and the ray-grid fallback's
-## arithmetic in gauge_seed.gd; what is left here is the queries.
+## The gauge frame lives in gauge_shapes.gd, the ray patterns one gauge is
+## measured with in gauge_probe.gd and the ray-grid fallback's arithmetic in
+## gauge_seed.gd; what is left here is the colliders, the job queue and the
+## casts themselves.
+##
+## 7. THE EVALUATED SOLID IS IN ANOTHER WORLD. Its collider is rebuilt on
+##    every evaluation and belongs to interference_world.gd, so a gauge that
+##    asked only this space read a point buried in the part as open air and
+##    answered "fits" everywhere. An unscoped gauge job therefore carries that
+##    module and casts each ray into BOTH spaces, keeping the nearer hit. A
+##    job scoped by reference= does not: that question is about one mounted
+##    reference, and the part standing next to it is not an answer to it.
 ##
 ## The module is a Node so that it can own a physics step, and it holds its
 ## colliders in a SubViewport with its own World3D — the panel's four panes
@@ -61,19 +71,8 @@ extends Node
 
 const _Shapes: Script = preload("gauge_shapes.gd")
 const _Seed: Script = preload("gauge_seed.gd")
+const _Probe: Script = preload("gauge_probe.gd")
 
-## Contacts reported for one gauge. Contacts are for telling the caller where
-## it fouled, not for a complete census.
-const MAX_CONTACTS: int = 8
-## Rays cast around a gauge's axis, and stations along it. A ray leaving the
-## axis stops at the gauge's own surface, so 24 x 5 rays sample the wall of a
-## pin. The radius they measure is the hole's INRADIUS to within the sagitta of
-## one facet — 0.003 mm on a 5 mm bore cut in 64 facets.
-const GAUGE_AZIMUTHS: int = 24
-const GAUGE_STATIONS: int = 5
-## Rings of cap rays: a gauge also fouls on what its ENDS run into, so each end
-## is sampled from the axis and from two rings inside the gauge radius.
-const CAP_RING_FRACTIONS: Array = [0.0, 0.55, 0.95]
 ## A submitted job that has not run within this long is abandoned. Physics can
 ## stop stepping entirely — the panel closes, the host pauses — and an MCP call
 ## must fail with a reason rather than await forever.
@@ -81,9 +80,6 @@ const JOB_TIMEOUT_MS: int = 5000
 ## How far past a candidate's own extent a centring search may wander, as a
 ## multiple of the candidate radius. This is constraint 3 in one number.
 const SEARCH_BOUND_FACTOR: float = 2.0
-## Clearance either side of a candidate when a ray is cast along its axis to
-## ask whether the hole goes through.
-const THROUGH_PAD_MM: float = 3.0
 ## Gauge length as a fraction of the candidate's axial extent: short enough not
 ## to foul the mouth of the hole, long enough to be a pin and not a disc.
 const GAUGE_LENGTH_FRACTION: float = 0.6
@@ -148,6 +144,14 @@ var _query_mask: int = ALL_LAYERS
 ## serialised in one physics step, so one field keeps the deeply nested gauge
 ## queries honest without threading an exclude list through every helper.
 var _scope_exclude: Array[RID] = []
+## The EVALUATED SOLID's space and the module that owns it, for the job
+## currently running, or null when the job carries none. See constraint 7.
+var _solid_state: PhysicsDirectSpaceState3D = null
+var _solid_checks: Object = null
+## World bounds of that solid, merged into the reach of an unbounded search so
+## a gauge standing outside the references' box is still measured against the
+## part.
+var _solid_bounds: AABB = AABB()
 ## Identity of the reference set the current colliders were built from, as
 ## the CALLER names it (the panel's file/stamp/pose digest).
 var _digest: String = ""
@@ -434,6 +438,11 @@ func run_now(state: PhysicsDirectSpaceState3D, kind: String, args: Dictionary) -
 	_query_mask = int(args.get("mask", ALL_LAYERS))
 	_scope_exclude = _excluded_bodies(
 		str(args.get("reference", "")), _query_mask)
+	# Cleared for every job. Only the gauge takes the solid, and only inside
+	# its own handler: the interference and fastener jobs carry the very same
+	# module in `checks` and cast into its world themselves, so taking it here
+	# would put the solid into every reference ray those checks make.
+	_clear_solid_scope()
 	match kind:
 		"raycast":
 			return _job_raycast(state, args)
@@ -496,6 +505,7 @@ func _job_raycast(state: PhysicsDirectSpaceState3D, args: Dictionary) -> Diction
 ## The gauge verb: place a shape and report whether it fits, what it touched,
 ## and — when it fits — how much larger it could be before it stopped.
 func _job_gauge(state: PhysicsDirectSpaceState3D, args: Dictionary) -> Dictionary:
+	_take_solid_scope(args)
 	var at: Vector3 = args.get("at", Vector3.ZERO)
 	var axis: Vector3 = _Shapes.unit(args.get("axis", Vector3.UP))
 	var kind := str(args.get("shape", "cylinder"))
@@ -503,7 +513,8 @@ func _job_gauge(state: PhysicsDirectSpaceState3D, args: Dictionary) -> Dictionar
 	if not _Shapes.is_supported(kind):
 		return {"error": "unsupported gauge shape '%s'" % kind}
 
-	var contacts := _gauge_fouls(state, kind, size, at, axis)
+	var cast := _caster(state)
+	var contacts: Array = _contacts(_Probe.fouls(cast, kind, size, at, axis))
 	if contacts.is_empty():
 		# A trimesh collider is a SURFACE, not a volume: a gauge buried in solid
 		# material reaches no wall, which is exactly what open air looks like.
@@ -518,28 +529,31 @@ func _job_gauge(state: PhysicsDirectSpaceState3D, args: Dictionary) -> Dictionar
 		if inside > 0:
 			return {
 				"fits": false,
-				"contacts": [],
+				# The skin of the material it is buried in, when the caller
+				# asked for a witness. A gauge inside a wall thicker than
+				# itself crosses no triangle, so the nearest surface is looked
+				# for rather than collected from the rays that tested it — and
+				# the containment probes, which fire thousands of these and
+				# read only `reason`, do not pay for it.
+				"contacts": _witness(cast, at) \
+					if bool(args.get("witness", false)) else [],
 				"clearance_mm": 0.0,
 				"reason": "inside_solid",
 			}
-		var clearance := 0.0
 		# How much fatter a pin could be here. The bound is the caller's own
-		# largest interesting diameter, or the whole reference when it gave
-		# none — never an arbitrary multiple of the pin, which reports 1.5 mm
-		# of clearance for a 1 mm pin standing in a 10 mm bore.
+		# largest interesting diameter, or the whole scene when it gave none —
+		# never an arbitrary multiple of the pin, which reports 1.5 mm of
+		# clearance for a 1 mm pin standing in a 10 mm bore.
 		var bound := float(args.get("max_radius_mm", 0.0))
 		if bound <= 0.0:
-			bound = maxf(size.x * 0.5, _bounds.size.length() * 0.5)
-		# A pin in open space reaches no wall, so the search bound is all the
-		# radial run there is evidence for. That is a FLOOR, not a clearance:
-		# it is reported under its own key so no caller can read the bound as
-		# a measured distance to something.
-		var bounded := true
-		if kind == "cylinder":
-			var grown := _largest_radius(
-				state, at, axis, size.y, size.x * 0.5, bound)
-			bounded = bool(grown["bounded"])
-			clearance = maxf(0.0, float(grown["radius_mm"]) - size.x * 0.5)
+			bound = maxf(size.x * 0.5, _search_bounds().size.length() * 0.5)
+		# A gauge in open space reaches no wall, so the search bound is all
+		# the run there is evidence for. That is a FLOOR, not a clearance: it
+		# is reported under its own key so no caller can read the bound as a
+		# measured distance to something.
+		var grown: Dictionary = _Probe.free_air(cast, kind, size, at, axis, bound)
+		var bounded := bool(grown["bounded"])
+		var clearance := float(grown["clearance_mm"])
 		var fitted_report := {
 			"fits": true,
 			"contacts": [],
@@ -609,12 +623,14 @@ func _verify_hole(state: PhysicsDirectSpaceState3D, candidate: Dictionary) -> Di
 	var length := maxf(0.2, half_extent * 2.0 * GAUGE_LENGTH_FRACTION)
 
 	var basis: Basis = _Shapes.basis_for_axis(axis)
+	var cast := _caster(state)
 	for _round in range(2):
-		centre = _recentre(state, centre, basis.x, probe, bound)
-		centre = _recentre(state, centre, basis.y, probe, bound)
+		centre = _Probe.recentre(cast, centre, basis.x, probe, bound)
+		centre = _Probe.recentre(cast, centre, basis.y, probe, bound)
 
-	var fitted := _largest_radius(state, centre, axis, length, probe, radius * 1.5)
-	var through_report := _through(state, centre, axis, half_extent)
+	var fitted: Dictionary = _Probe.largest_radius(
+		cast, centre, axis, length, probe, radius * 1.5)
+	var through_report: Dictionary = _Probe.through(cast, centre, axis, half_extent)
 
 	var predicted := float(candidate.get("inscribed_dia_mm", radius * 2.0))
 	var fitted_radius := float(fitted["radius_mm"])
@@ -713,9 +729,10 @@ func _verify_convex(state: PhysicsDirectSpaceState3D, candidate: Dictionary) -> 
 ## no colliders, or an unbounded one, is never called inside.
 func _inside_solid(state: PhysicsDirectSpaceState3D, point: Vector3,
 		node_filter: String = "") -> int:
-	if _bounds.size.length_squared() <= 0.0:
+	var box := _search_bounds()
+	if box.size.length_squared() <= 0.0:
 		return 0
-	var reach := _bounds.size.length() + THROUGH_PAD_MM
+	var reach := box.size.length() + _Probe.THROUGH_PAD_MM
 	var first := _parity_inside(state, point, Vector3.RIGHT, reach, node_filter)
 	var second := _parity_inside(state, point, Vector3.BACK, reach, node_filter)
 	if first < 0 or second < 0:
@@ -848,224 +865,9 @@ func _unverified(candidate: Dictionary, reason: String) -> Dictionary:
 	return out
 
 
-## Slide the gauge along `direction` until it stops fitting either way, and
-## return the midpoint of the free interval. Bounded, always.
-func _recentre(
-	state: PhysicsDirectSpaceState3D,
-	centre: Vector3,
-	direction: Vector3,
-	probe_radius: float,
-	bound: float
-) -> Vector3:
-	var forward := _free_run(state, centre, direction, probe_radius, bound)
-	var backward := _free_run(state, centre, -direction, probe_radius, bound)
-	return centre + direction * ((forward - backward) * 0.5)
-
-
-## Largest distance the probe can be pushed along `direction` and still fit.
-##
-## One ray does it: the FIRST surface along that direction is where the probe's
-## leading edge stops, so the run is that distance less the probe's own radius.
-## Constraint 3 comes free — the run cannot jump the wall of the part and read
-## the open air beyond as more room — and it is bounded by `bound` besides.
-func _free_run(
-	state: PhysicsDirectSpaceState3D,
-	centre: Vector3,
-	direction: Vector3,
-	probe_radius: float,
-	bound: float
-) -> float:
-	var reach := bound + probe_radius
-	var hit := _ray(state, centre, centre + direction * reach)
-	if hit.is_empty():
-		return bound
-	var distance := centre.distance_to(hit["position"] as Vector3)
-	return clampf(distance - probe_radius, 0.0, bound)
-
-
-## Largest gauge radius that still fits at `centre`, measured rather than
-## searched: the shortest of the rays leaving the axis IS the radius, because a
-## pin of that radius touches there and nothing smaller touches anywhere.
-##
-## Returns {"radius_mm", "bounded"}. `bounded` is false when NO ray met a
-## surface within `upper`: the gauge stands in open space, `upper` is the search
-## bound rather than a wall, and the radius is only a FLOOR — the caller must
-## report it as "at least this much" and never as a measurement. `radius_mm` is
-## 0.0 (bounded) when a pin of `lower` would already foul, which is the caller's
-## signal that the candidate is not a hole at all.
-func _largest_radius(
-	state: PhysicsDirectSpaceState3D,
-	centre: Vector3,
-	axis: Vector3,
-	length: float,
-	lower: float,
-	upper: float
-) -> Dictionary:
-	var nearest := upper
-	var bounded := false
-	for from in _stations(centre, axis, length):
-		for direction in _radials(axis):
-			var hit := _ray(state, from, from + direction * upper)
-			if hit.is_empty():
-				continue
-			bounded = true
-			nearest = minf(nearest, from.distance_to(hit["position"] as Vector3))
-	if bounded and nearest < lower:
-		return {"radius_mm": 0.0, "bounded": true}
-	return {"radius_mm": nearest, "bounded": bounded}
-
-
-## Does the hole go all the way through? A ray along the axis from clear air on
-## one side to clear air on the other hits nothing in a through hole and hits
-## the floor of a blind pocket. This is the one question a fitter cannot
-## answer: the wall of a blind pocket is the same cylinder as the wall of a
-## through hole.
-func _through(
-	state: PhysicsDirectSpaceState3D,
-	centre: Vector3,
-	axis: Vector3,
-	half_extent: float
-) -> Dictionary:
-	var reach := half_extent + THROUGH_PAD_MM
-	var low := centre - axis * reach
-	var high := centre + axis * reach
-	var forward := _ray(state, low, high)
-	if forward.is_empty():
-		return {"through": true, "depth_mm": half_extent * 2.0}
-	var backward := _ray(state, high, low)
-	var entry_low := centre - axis * half_extent
-	var entry_high := centre + axis * half_extent
-	var depth_from_low := ((forward["position"] as Vector3) - entry_low).dot(axis)
-	var depth_from_high := 0.0
-	if not backward.is_empty():
-		depth_from_high = (entry_high - (backward["position"] as Vector3)).dot(axis)
-	return {
-		"through": false,
-		"depth_mm": maxf(0.0, maxf(depth_from_low, depth_from_high)),
-	}
-
-
 # ---------------------------------------------------------------------------
 # Shapes and queries
 # ---------------------------------------------------------------------------
-
-## Everywhere a gauge of this shape, standing at `centre` along `axis`, runs
-## into mounted geometry. Empty means it fits.
-##
-## Every ray starts inside the gauge and ends on its surface, so a hit is a
-## point the gauge's own volume covers — and the hit names the node and the
-## reference it landed on, which is what a contact has to report.
-func _gauge_fouls(
-	state: PhysicsDirectSpaceState3D,
-	kind: String,
-	size: Vector3,
-	centre: Vector3,
-	axis: Vector3
-) -> Array:
-	var contacts: Array = []
-	match kind:
-		"cylinder":
-			var radius := maxf(0.001, size.x * 0.5)
-			var half := maxf(0.0005, size.y * 0.5)
-			for from in _stations(centre, axis, size.y):
-				_collect(state, from, _radials(axis), radius, contacts)
-			# The ends. A pin also fouls on the floor of a pocket, and the axis
-			# alone would miss a floor that only reaches part of the way in.
-			for direction in [axis, -axis]:
-				for start in _cap_origins(centre, axis, radius):
-					_collect(state, start, [direction], half, contacts)
-		"sphere":
-			_collect(state, centre, _sphere_directions(), maxf(0.001, size.x * 0.5), contacts)
-		"box":
-			var basis: Basis = _Shapes.basis_for_axis(axis)
-			for direction in _sphere_directions():
-				var local: Vector3 = basis.inverse() * direction
-				# The box's own surface along this direction: the shortest of
-				# the three face distances, so the ray ends on the box.
-				var reach := INF
-				for component in [
-					[local.x, size.x * 0.5], [local.y, size.y * 0.5], [local.z, size.z * 0.5]
-				]:
-					if absf(component[0]) > 0.0001:
-						reach = minf(reach, absf(component[1] / component[0]))
-				if reach < INF:
-					_collect(state, centre, [direction], reach, contacts)
-	return contacts
-
-
-## Cast one ray per direction and record every one that lands on geometry.
-func _collect(
-	state: PhysicsDirectSpaceState3D,
-	from: Vector3,
-	directions: Array,
-	reach: float,
-	contacts: Array
-) -> void:
-	for direction in directions:
-		if contacts.size() >= MAX_CONTACTS:
-			return
-		var hit := _ray(state, from, from + (direction as Vector3) * reach)
-		if hit.is_empty():
-			continue
-		contacts.append({
-			"point_mm": hit["position"],
-			"node": _node_for(hit),
-			"reference": _reference_for(hit),
-		})
-
-
-## Points along the gauge axis the wall rays are cast from.
-func _stations(centre: Vector3, axis: Vector3, length: float) -> Array:
-	if length <= 0.0:
-		return [centre]
-	var half := length * 0.5
-	var out: Array = []
-	for k in range(GAUGE_STATIONS):
-		var t := -half + length * float(k) / float(GAUGE_STATIONS - 1)
-		out.append(centre + axis * t)
-	return out
-
-
-## Unit directions around the axis, in the gauge's own frame.
-func _radials(axis: Vector3) -> Array:
-	var basis: Basis = _Shapes.basis_for_axis(axis)
-	var out: Array = []
-	for i in range(GAUGE_AZIMUTHS):
-		var angle := TAU * float(i) / float(GAUGE_AZIMUTHS)
-		out.append((basis.x * cos(angle) + basis.y * sin(angle)).normalized())
-	return out
-
-
-
-## Where the cap rays start: on the axis and on two rings inside the gauge
-## radius, so a floor that only covers part of the pin is still found.
-func _cap_origins(centre: Vector3, axis: Vector3, radius: float) -> Array:
-	var out: Array = [centre]
-	var radials := _radials(axis)
-	for fraction in CAP_RING_FRACTIONS:
-		if float(fraction) <= 0.0:
-			continue
-		var index := 0
-		while index < radials.size():
-			out.append(centre + (radials[index] as Vector3) * radius * float(fraction))
-			# Every third azimuth: a ring is about catching a partial floor,
-			# not about measuring it.
-			index += 3
-	return out
-
-
-## A fixed 26-direction star: the six axes, the twelve edges and the eight
-## corners of a cube. Enough to find any wall a compact gauge touches.
-func _sphere_directions() -> Array:
-	var out: Array = []
-	for x in [-1.0, 0.0, 1.0]:
-		for y in [-1.0, 0.0, 1.0]:
-			for z in [-1.0, 0.0, 1.0]:
-				var direction := Vector3(x, y, z)
-				if direction.length_squared() > 0.0:
-					out.append(direction.normalized())
-	return out
-
 
 ## One ray. `exclude` holds the collision-object RIDs this cast must not see —
 ## the crossing walk uses it to reach the second of two coincident faces.
@@ -1092,7 +894,129 @@ func _ray(
 			if rid.is_valid() and not (rid in ignored):
 				ignored.append(rid)
 		params.exclude = ignored
-	return state.intersect_ray(params)
+	var hit := state.intersect_ray(params)
+	if _solid_state == null:
+		return hit
+	return _nearer(from, hit, _solid_hit(from, to, exclude))
+
+
+## The rays of one job, as the Callable gauge_probe.gd and gauge_seed.gd take.
+## `state` travels in the closure so the patterns never have to hold a space.
+func _caster(state: PhysicsDirectSpaceState3D) -> Callable:
+	return func(from: Vector3, to: Vector3) -> Dictionary:
+		return _ray(state, from, to)
+
+
+## The evaluated solid's answer to the same ray, or {} when the job carries no
+## solid. Marked `solid` so a contact can say what it landed on: that body is
+## in another space and belongs to no mounted reference, so the node and
+## reference lookups here would report it as an unattributed hit.
+##
+## The crossing walk's per-ray exclusions are honoured by DROPPING the hit
+## rather than by handing them to the query — interference_world casts its own
+## rays and takes none — and the walk only ever excludes a body it has already
+## counted, so discarding one it asked not to see is the same answer one cast
+## later.
+func _solid_hit(from: Vector3, to: Vector3, exclude: Array[RID]) -> Dictionary:
+	if _solid_checks == null or not is_instance_valid(_solid_checks):
+		return {}
+	var hit: Dictionary = _solid_checks.call("solid_ray", _solid_state, from, to)
+	if hit.is_empty():
+		return {}
+	var collider: Variant = hit.get("collider", null)
+	if collider is CollisionObject3D \
+			and ((collider as CollisionObject3D).get_rid() in exclude):
+		return {}
+	hit["solid"] = true
+	return hit
+
+
+## Of two hits on one ray, the one the ray reaches first. Either may be empty.
+func _nearer(from: Vector3, first: Dictionary, second: Dictionary) -> Dictionary:
+	if first.is_empty():
+		return second
+	if second.is_empty():
+		return first
+	var a := from.distance_squared_to(first["position"] as Vector3)
+	var b := from.distance_squared_to(second["position"] as Vector3)
+	return first if a <= b else second
+
+
+## Take the evaluated solid into the running job, or leave it out.
+##
+## ONLY AN UNSCOPED JOB GETS IT. `reference` names one mounted reference and a
+## narrower mask says the caller is asking about that part; answering with the
+## solid standing beside it would be a different question. The containment
+## probes in interference_containment.gd are all scoped, and carry no module
+## anyway.
+func _take_solid_scope(args: Dictionary) -> void:
+	_clear_solid_scope()
+	var checks: Object = args.get("checks", null)
+	if checks == null or not is_instance_valid(checks) \
+			or not str(args.get("reference", "")).is_empty() \
+			or _query_mask != ALL_LAYERS:
+		return
+	var state: PhysicsDirectSpaceState3D = checks.call("solid_space")
+	if state == null:
+		return
+	_solid_state = state
+	_solid_checks = checks
+	_solid_bounds = checks.call("get_solid_bounds") as AABB
+
+
+## Leave the solid out of every ray until a gauge job takes it again.
+func _clear_solid_scope() -> void:
+	_solid_state = null
+	_solid_checks = null
+	_solid_bounds = AABB()
+
+
+## Every surface an unbounded search may reach: the reference colliders and,
+## when the job carries it, the evaluated solid. A gauge standing beside the
+## part but outside the references' box needs the merged reach, or its search
+## bound is a box that does not contain the thing it is measured against.
+func _search_bounds() -> AABB:
+	if _solid_bounds.size.length_squared() <= 0.0:
+		return _bounds
+	if _bounds.size.length_squared() <= 0.0:
+		return _solid_bounds
+	return _bounds.merge(_solid_bounds)
+
+
+## The one contact of a BURIED gauge: the nearest surface of the body it is
+## inside, marked `witness` because it is not a place the gauge fouled — no
+## ray of its own reached anything — and a consumer counting contacts as
+## fouls would otherwise read it as one.
+func _witness(cast: Callable, at: Vector3) -> Array:
+	var found := _contacts([_Probe.nearest(cast, at,
+		_search_bounds().size.length() + _Probe.THROUGH_PAD_MM)])
+	for entry in found:
+		(entry as Dictionary)["witness"] = true
+	return found
+
+
+## Raw hits turned into the contacts a caller reads. Empty hits are dropped, so
+## a lookup that found nothing does not become a contact at the origin.
+func _contacts(hits: Array) -> Array:
+	var out: Array = []
+	for entry in hits:
+		var hit: Dictionary = entry
+		if not hit.is_empty():
+			out.append(_contact(hit))
+	return out
+
+
+## One contact from one hit. `on` says which body answered — "solid" is the
+## evaluated part in its own world, which has no node path and belongs to no
+## mounted reference; a contact that did not say so would be read as an
+## unattributed reference hit.
+func _contact(hit: Dictionary) -> Dictionary:
+	return {
+		"point_mm": hit["position"],
+		"node": _node_for(hit),
+		"reference": _reference_for(hit),
+		"on": "solid" if bool(hit.get("solid", false)) else "reference",
+	}
 
 
 ## The bodies a scoped job must not see: every body of ANOTHER reference that

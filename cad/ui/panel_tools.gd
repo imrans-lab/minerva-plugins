@@ -96,6 +96,8 @@ const _FitCapture: Script = preload("scripts/fit_capture.gd")
 const _Freshness: Script = preload("scripts/eval_freshness.gd")
 ## Several screw sizes in one call, each graded against its own reference.
 const _FastenerScrews: Script = preload("scripts/fastener_screws.gd")
+## The evaluated solid, mounted in front of a gauge for one call.
+const _GaugeSolid: Script = preload("scripts/gauge_solid.gd")
 
 ## How long minerva_cad_await_eval waits by default, and the most it will
 ## wait when asked. A heavy document is minutes of worker time, and the cap
@@ -415,8 +417,7 @@ static func _gauge(panel, args: Dictionary) -> Dictionary:
 	var gauge: Node = panel.get_mesh_gauge()
 	if not _gauge_ready(gauge):
 		return _err("measurement gauge is not available on this panel")
-	if panel.ensure_gauge_built() <= 0:
-		return _err("no reference mesh is mounted; nothing to gauge against")
+	var colliders := int(panel.ensure_gauge_built())
 
 	var shape := str(args.get("shape", "cylinder"))
 	var size := Vector3.ONE
@@ -434,18 +435,43 @@ static func _gauge(panel, args: Dictionary) -> Dictionary:
 	var asked := str(args.get("reference", ""))
 	if not asked.is_empty() and not _has_reference(panel, asked):
 		return _err("no reference named '%s' is mounted" % asked)
+
+	# THE EVALUATED SOLID IS PART OF THE ANSWER. It lives in its own physics
+	# world, so it has to be mounted in front of the gauge for the call; an
+	# UNSCOPED question is about everything the pin could run into, and the
+	# part being modelled is the first of those. A question scoped to one
+	# mounted reference is about that reference, so it does not mount the
+	# solid and does not pay for its collider.
+	var solid: Dictionary = {"mounted": false, "reason": "reference= scoped "
+		+ "this question to one mounted reference"}
+	if asked.is_empty():
+		solid = await _GaugeSolid.mount(panel)
+	if not is_instance_valid(panel) or not _gauge_ready(gauge):
+		_GaugeSolid.release(solid)
+		return _err("the CAD panel closed while the gauge was being mounted")
+	if colliders <= 0 and not bool(solid.get("mounted", false)):
+		_GaugeSolid.release(solid)
+		return _err("nothing to gauge against: no reference mesh is mounted "
+			+ "and %s" % str(solid.get("reason", "there is no evaluated solid")))
+
 	var result: Dictionary = await gauge.call("submit", "gauge", {
 		"shape": shape,
 		"size": size,
 		"at": _vector(args.get("at_mm", [0.0, 0.0, 0.0])),
 		"axis": _vector(args.get("axis", [0.0, 0.0, 1.0])),
 		# The clearance search stops here. Without a ceiling from the caller
-		# it runs to the reference's own extent, which is the only bound that
-		# is a fact about the part rather than about the pin.
+		# it runs to the scene's own extent, which is the only bound that is a
+		# fact about the geometry rather than about the pin.
 		"max_radius_mm": float(args.get("max_dia_mm", 0.0)) * 0.5,
 		"mask": _scope_mask(gauge, args, {"name": asked}),
 		"reference": asked,
+		# The module owning the solid's world, so the job's rays reach it.
+		"checks": solid.get("checks", null),
+		# A verb reports WHERE a buried gauge is buried; the containment
+		# probes fire thousands of the same job and read only the reason.
+		"witness": true,
 	})
+	_GaugeSolid.release(solid)
 	if result.has("error"):
 		return _err(str(result["error"]))
 
@@ -463,10 +489,25 @@ static func _gauge(panel, args: Dictionary) -> Dictionary:
 		var reference_name := str(contact.get("reference", ""))
 		if reference_name.is_empty():
 			reference_name = asked
+		var witness := bool(contact.get("witness", false))
+		var on := str(contact.get("on", "reference"))
+		if on == "solid":
+			# The evaluated part is in no reference's frame, so there is no
+			# local coordinate for it and no reference name to invent.
+			contacts.append({
+				"point_mm": _frames(panel, contact.get("point_mm", Vector3.ZERO), ""),
+				"node": "",
+				"reference": "",
+				"on": "solid",
+				"witness": witness,
+			})
+			continue
 		var entry := {
 			"point_mm": _frames(panel, contact.get("point_mm", Vector3.ZERO), reference_name),
 			"node": node_name,
 			"reference": reference_name,
+			"on": "reference",
+			"witness": witness,
 		}
 		contacts.append(entry)
 	var payload := {
@@ -474,7 +515,18 @@ static func _gauge(panel, args: Dictionary) -> Dictionary:
 		"fits": bool(result.get("fits", false)),
 		"contacts": contacts,
 		"clearance_bound_mm": float(result.get("clearance_bound_mm", 0.0)),
+		# WHAT THE ANSWER IS ABOUT. A gauge measured against the references
+		# alone cannot see the part being modelled, and a reader that could
+		# not tell the two cases apart would read "fits" as a fact about the
+		# whole scene.
+		"measured_against": {
+			"reference_colliders": colliders,
+			"solid": bool(solid.get("mounted", false)),
+			"solid_triangles": int(solid.get("triangles", 0)),
+		},
 	}
+	if not bool(solid.get("mounted", false)) and solid.has("reason"):
+		payload["measured_against"]["solid_reason"] = str(solid["reason"])
 	# Clearance is only a measurement when a wall stopped it. In open space the
 	# gauge reports the search bound instead, under a key that says so, so the
 	# two can never be confused by a reader of the payload.
@@ -486,7 +538,10 @@ static func _gauge(panel, args: Dictionary) -> Dictionary:
 		payload["reason"] = str(result["reason"])
 	if str(result.get("reason", "")) == "inside_solid":
 		payload["note"] = "A gauge buried in solid material crosses no "\
-			+ "triangle and so touches nothing; it does not fit, and has no contacts."
+			+ "triangle of its own, so the contact reported carries "\
+			+ "witness: true — the NEAREST surface of the body it is inside, "\
+			+ "and `on` says which body that is. A witness contact is not a "\
+			+ "foul: do not count it as a place the gauge touched."
 	return _ok(payload)
 
 

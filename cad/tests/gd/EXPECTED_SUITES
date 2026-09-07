@@ -82,8 +82,18 @@ test_mesh_measurement.gd assertions=72
 # millimetre under a scaled pose, and that a pose scaled by 2 reports twice
 # the diameter in world and the file's own in local. Also that a reference
 # set which keeps changing while a verb waits comes back marked stale with a
-# reason, and a settled one does not.
-test_measurement_verbs.gd assertions=35
+# reason, and a settled one does not. Also — bug 01a07a19a9e8 — that the
+# gauge verb measures the EVALUATED SOLID and not only the references: a
+# sphere inside a solid plate mounted through the real interference_world
+# path does not fit and reports a WITNESS contact naming the solid (a witness
+# is the nearest surface of the body it is inside, not a foul), one standing
+# 0.5 mm off it reports that air as a MEASURED clearance (a sphere used to
+# report 0 beside the reference box's half diagonal at every position),
+# reference= still answers about that reference alone — proved on
+# mesh_gauge's own mask guard, with a job carrying the module AND a scope
+# where an unscoped one reads solid material — and open space still reports
+# the search bound as a floor.
+test_measurement_verbs.gd assertions=40
 
 # Failure and size handling for references: a truncated GLB, a text file
 # wearing a .glb extension, a missing file, an unreadable format and an
