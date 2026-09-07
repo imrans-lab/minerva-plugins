@@ -363,6 +363,44 @@ func _check_solid_build(checks: RefCounted) -> void:
 			int(checks.build_solid({})) == 0,
 			"an empty mesh produced a collider")
 
+	# A NAMED PART IS THE ONE SHAPE THAT CAN BE CACHED, because it has a
+	# stamp: the digest of the source that evaluates to that binding. Three
+	# legs over one part used to weld its triangles three times; now the body
+	# is swapped back into the world. The two counters are what tell those
+	# apart — the collider the rays meet CHANGED every time (generation), and
+	# it was BUILT once (builds) — and a suite that watched only the returned
+	# triangle count could not see the difference.
+	var builds := int(checks.get_solid_builds())
+	var swap_generation := int(checks.get_solid_generation())
+	var first_triangles := int(checks.build_solid(shell, 0, "digest-bottom"))
+	var second_triangles := int(checks.build_solid(shell, 0, "digest-bottom"))
+	var third_triangles := int(checks.build_solid(shell, 0, "digest-bottom"))
+	check("solid: a part named by its source digest is welded ONCE and "
+			+ "swapped back in for the legs that follow — same triangles, "
+			+ "same edges, one build, three collider changes",
+			int(checks.get_solid_builds()) == builds + 1
+				and int(checks.get_solid_generation()) == swap_generation + 3
+				and second_triangles == first_triangles
+				and third_triangles == first_triangles
+				and int(checks.get_solid_edge_count()) > 0,
+			"builds %d -> %d, generation %d -> %d, triangles %d/%d/%d" % [
+				builds, int(checks.get_solid_builds()), swap_generation,
+				int(checks.get_solid_generation()), first_triangles,
+				second_triangles, third_triangles])
+
+	# A DIFFERENT DOCUMENT IS A DIFFERENT KEY, and the unkeyed render target
+	# still rebuilds every time: a cache that answered either of those would
+	# hand a check the previous document's geometry.
+	var other_builds := int(checks.get_solid_builds())
+	checks.build_solid(shell, 0, "digest-top")
+	checks.build_solid(shell)
+	checks.build_solid(shell)
+	check("solid: another binding is another key, and the document's own "
+			+ "render target — which has no stamp — still rebuilds every time",
+			int(checks.get_solid_builds()) == other_builds + 3,
+			"builds %d -> %d" % [other_builds, int(checks.get_solid_builds())])
+	checks.release_solids()
+
 
 # ---------------------------------------------------------------------------
 # THROUGH — a boss clean through the board
@@ -965,31 +1003,64 @@ func _check_supersession(gauge: Node, checks: RefCounted) -> void:
 				and mesh_root.get_node_or_null(GeometryChecks.MARKER_NODE_NAME) != null,
 			"no marker survived the newest evaluation's own check")
 
-	# A REFUSAL COSTS THE RUNNING CHECK NOTHING. An agent asking for the verb
-	# while an evaluation is in flight is told to retry — and if that refusal
-	# took a ticket, the evaluation would finish, find a newer ticket than its
-	# own, decide it had been overtaken and paint nothing: the pane would go
-	# stale because somebody ASKED A QUESTION.
+	# AN AGENT'S VERB WAITS ITS TURN AND COSTS THE RUNNING CHECK NOTHING. It
+	# used to be bounced with `busy` the moment an evaluation was in flight,
+	# and an agent that has to re-ask inside one tool window mostly does not
+	# get to — five verbs at one panel had three of them time out at the
+	# client. So the verb takes a place in the bounded line and is granted
+	# when the evaluation releases. It must still take NO ticket while it
+	# waits: a ticket taken early would make the evaluation find a newer one
+	# than its own, decide it had been overtaken and paint nothing — the pane
+	# would go stale because somebody ASKED A QUESTION.
 	panel.mesh_data = through
 	var alone: Array = []
 	_collect(checks, panel, alone)
-	var refused: Dictionary = await checks.check(panel, {"on_demand": true})
+	var queued_verb: Dictionary = await checks.check(panel, {"on_demand": true})
 	for _frame in range(900):
 		if not alone.is_empty():
 			break
 		await process_frame
 	var measured: Dictionary = alone[0] if not alone.is_empty() else {}
-	check("queue: an on-demand refusal takes no ticket — the evaluation it "
-			+ "was refused for still owns the newest answer and still paints",
-			bool(refused.get("busy", false))
+	check("queue: a verb arriving while an evaluation runs QUEUES and is "
+			+ "answered — it says how long it waited, and the evaluation it "
+			+ "waited for still owns the newest answer and still paints",
+			bool(queued_verb.get("checked", false))
+				and not bool(queued_verb.get("busy", false))
+				and int(queued_verb.get("queued_ms", 0)) > 0
 				and bool(measured.get("checked", false))
 				and int(measured.get("count", 0)) > 0
 				and not bool(measured.get("superseded", false))
 				and mesh_root != null
 				and mesh_root.get_node_or_null(
 					GeometryChecks.MARKER_NODE_NAME) != null,
-			"refused = %s, measured = %s" % [
-				str(refused.get("busy", refused)), str(measured)])
+			"queued_verb = %s, measured = %s" % [
+				str(queued_verb), str(measured)])
+
+	# TWO VERBS FIRED TOGETHER BOTH ANSWER. This is the reservation every
+	# panel-side check takes — minerva_cad_check_fasteners reserves through
+	# this same module and this same call — so an agent that fires two of them
+	# at one panel gets two answers, not one answer and a `busy` its client
+	# times out re-asking. Exactly one of them waited, and says so.
+	panel.mesh_data = through
+	var together: Array = []
+	_verb(checks, panel, together)
+	_verb(checks, panel, together)
+	for _frame in range(900):
+		if together.size() >= 2:
+			break
+		await process_frame
+	var waits := 0
+	var answered := 0
+	for entry in together:
+		var reply: Dictionary = entry
+		if bool(reply.get("checked", false)) and not bool(reply.get("busy", false)):
+			answered += 1
+		if int(reply.get("queued_ms", 0)) > 0:
+			waits += 1
+	check("queue: two verbs fired at one panel BOTH answer — one measures, "
+			+ "the other queues behind it and reports the wait",
+			together.size() == 2 and answered == 2 and waits == 1,
+			"together = %s" % str(together))
 
 	# THE RUNNING CHECK'S PAINT IS REVOKED THE MOMENT A NEWER EVALUATION
 	# QUEUES. A interferes and is not awaited; B, clean, queues behind it. A
@@ -1571,14 +1642,36 @@ func _check_busy_refusal(gauge: Node, checks: RefCounted) -> void:
 	var first: Dictionary = await checks.reserve()
 	var held := int(first.get("ticket", 0))
 
+	# THE LINE IS BOUNDED, AND PAST THE BOUND THE ANSWER IS STILL BUSY. A verb
+	# waits for a check that is nearly done, but a queue nobody bounds is a
+	# hang with extra steps: the caller's client times out inside it and the
+	# panel looks dead. The bound is driven to zero here rather than filled,
+	# because what is pinned is the REFUSAL, not the size of the line.
+	checks.max_queued_verbs = 0
 	var second: Dictionary = await checks.reserve()
-	check("busy: a request arriving while a check still holds the geometry is "
-			+ "refused, and the refusal names the holder and its age",
+	check("busy: a request arriving to a full wait line while a check still "
+			+ "holds the geometry is refused, and the refusal names the "
+			+ "holder, its age and what the caller spent waiting",
 			held != 0 and int(second.get("ticket", 0)) == 0
 				and bool(second.get("busy", false))
 				and int(second.get("holder_ticket", 0)) == held
-				and int(second.get("holder_age_ms", -1)) >= 0,
+				and int(second.get("holder_age_ms", -1)) >= 0
+				and int(second.get("waited_ms", -1)) == 0,
 			"first=%s second=%s" % [str(first), str(second)])
+
+	# And the other bound: a caller let INTO the line still gives up rather
+	# than standing there past its own budget, and its refusal says so.
+	checks.max_queued_verbs = GeometryChecks.MAX_QUEUED_VERBS
+	checks.verb_queue_timeout_ms = 0
+	var gave_up: Dictionary = await checks.reserve()
+	check("busy: a caller that joined the line and spent its wait budget is "
+			+ "refused too, and the line it left is empty behind it",
+			int(gave_up.get("ticket", 0)) == 0
+				and bool(gave_up.get("busy", false))
+				and str(gave_up.get("reason", "")).contains("queued"),
+			"gave_up = %s" % str(gave_up))
+	checks.verb_queue_timeout_ms = GeometryChecks.VERB_QUEUE_TIMEOUT_MS
+	checks.max_queued_verbs = 0
 
 	var report: Dictionary = checks.refused(second)
 	check("busy: the caller gets a `checked: false` answer that says busy — "
@@ -1648,6 +1741,7 @@ func _check_busy_refusal(gauge: Node, checks: RefCounted) -> void:
 			+ "request",
 			int(after.get("ticket", 0)) != 0, "after = %s" % str(after))
 	checks.release_reservation(int(after.get("ticket", 0)))
+	checks.max_queued_verbs = GeometryChecks.MAX_QUEUED_VERBS
 
 
 # ---------------------------------------------------------------------------
@@ -1840,6 +1934,13 @@ func _check_rebuild_under_a_check_in_flight(gauge: Node, checks: RefCounted) -> 
 ## Start a check without awaiting it and park its reply in `into`.
 func _collect(checks: RefCounted, panel: Node, into: Array) -> void:
 	var reply: Dictionary = await checks.check(panel, {})
+	into.append(reply)
+
+
+## The same, for an AGENT's verb call: on_demand, so it takes a place in the
+## bounded wait line instead of the one evaluation slot.
+func _verb(checks: RefCounted, panel: Node, into: Array) -> void:
+	var reply: Dictionary = await checks.check(panel, {"on_demand": true})
 	into.append(reply)
 
 

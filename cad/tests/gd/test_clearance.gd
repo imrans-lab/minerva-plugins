@@ -56,6 +56,9 @@ extends SceneTree
 const GeometryChecks := preload("res://../../minerva-plugins/cad/ui/scripts/geometry_checks.gd")
 const MeshGauge := preload("res://../../minerva-plugins/cad/ui/scripts/mesh_gauge.gd")
 const ReplyShape := preload("res://../../minerva-plugins/cad/ui/scripts/reply_shape.gd")
+## Where a PART's own interference report is kept between the interference
+## check that measured it and the clearance check that joins it.
+const PartCache := preload("res://../../minerva-plugins/cad/ui/scripts/part_cache.gd")
 
 ## The reference bar, in its own frame: long in X, its top face at z = 0.
 const BAR_HALF_LENGTH := 50.0
@@ -105,6 +108,10 @@ const FAR_NODE := "Assembly/Far"
 ## The document the panel would hand over. Its text is forwarded verbatim; the
 ## suite never evaluates it, the worker does.
 const SOURCE := "part = translate([-2, -50, 0.8], cube(4, 100, 2))"
+## The same document evaluated for ONE binding: the DSL's own render-target
+## rule, and what a `parts` entry is measured against. Its digest is not the
+## document's, which is the whole reason its report has to be kept apart.
+const PART_SOURCE := SOURCE + "\npart\n"
 ## The same document EDITED so the solid grows down around the near bar. The
 ## stand-in worker never reads the source, so its unsigned 0.8 mm stands —
 ## which is exactly the blind spot: only an interference report about THIS
@@ -223,6 +230,7 @@ func _run() -> void:
 	await _check_batching(panel, checks)
 	await _check_refusals(panel, checks)
 	await _check_buried(panel, checks)
+	await _check_a_part_joins_its_own_report(panel, checks)
 	await _check_flush_contact(panel, checks)
 	await _check_expected_contacts(panel, checks)
 	await _check_pin_across_a_repose(panel, checks)
@@ -1033,6 +1041,101 @@ func _check_expected_contacts(panel: Node, checks: RefCounted) -> void:
 			"report = %s" % str(refused))
 
 	_gap_mm = GAP_MM
+	panel.last_eval = _interference_over(SOURCE, [])
+
+
+# ---------------------------------------------------------------------------
+# A PART joins its OWN interference report, never the document's
+# ---------------------------------------------------------------------------
+
+## `parts: ["part"]` measures ONE binding, and the solid it is about is that
+## binding — not the union the document evaluates to. The document's own
+## interference report is about the union, in which a node can be buried in a
+## half this measurement never looks at, so joining it fails a pair that is
+## nowhere near the part; and refusing to join anything leaves the containment
+## question open, which is why a part-scoped clearance could never pass.
+##
+## ORACLE, three calls over the SAME worker answers. The document's report
+## says NEAR_NODE is buried. The part's own report, stamped with the digest of
+## the part source, says nothing is.
+##
+##   1. The part-scoped call must report NEAR_NODE at its measured gap and
+##      PASS. An implementation that joins the document's report reports it at
+##      0 and fails — which is exactly what shipped.
+##   2. The UNSCOPED call, made straight after, must still fail NEAR_NODE off
+##      the document's report: the part's report must not leak the other way.
+##   3. With the part's report gone the same part-scoped call must read
+##      "unavailable" and refuse to pass, never silently fall back to the
+##      document's — a fallback would make case 1 pass for the wrong reason.
+func _check_a_part_joins_its_own_report(panel: Node, checks: RefCounted) -> void:
+	panel.last_eval = _interference_over(SOURCE, [NEAR_NODE])
+	PartCache.clear()
+	PartCache.retain(panel, PartCache.digest(SOURCE))
+	PartCache.put_interference(panel, PartCache.digest(PART_SOURCE),
+		(_interference_over(PART_SOURCE, []) as Dictionary)["interference"])
+
+	var scoped: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5, "source": PART_SOURCE})
+	var near := _pair_for(scoped, NEAR_NODE)
+	check("parts: a part-scoped clearance joins the report for ITS OWN "
+			+ "binding — the node the DOCUMENT's report calls buried keeps "
+			+ "its measured gap and the whole check passes",
+			absf(float(near.get("min_mm", -1.0)) - GAP_MM) < GAP_TOLERANCE_MM
+				and bool(near.get("pass", false))
+				and not bool(near.get("interference", false))
+				and bool(scoped.get("pass", false)),
+			"near = %s, report pass = %s, join = %s" % [str(near),
+				str(scoped.get("pass")), str(scoped.get("interference_join", ""))])
+	check("parts: and the join says so — no overlap, over the part's own "
+			+ "report, so a 0 among these distances would be a flush contact",
+			str(scoped.get("interference_join", "")).contains("no overlap"),
+			"join = '%s'" % str(scoped.get("interference_join", "")))
+
+	var document: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5})
+	var document_near := _pair_for(document, NEAR_NODE)
+	check("parts: the part's report does not leak the other way — the "
+			+ "unscoped call still fails NEAR_NODE off the DOCUMENT's report",
+			is_equal_approx(float(document_near.get("min_mm", -1.0)), 0.0)
+				and bool(document_near.get("interference", false))
+				and not bool(document.get("pass", true)),
+			"near = %s" % str(document_near))
+
+	# A WALK THAT RAN OUT OF RAYS IS NOT A CLEAN REPORT. It names only the
+	# crossings it reached, and the join reads every pair it does not name as
+	# "nothing crossing there" — so a truncated part report certifies exactly
+	# the pairs nobody looked at, and the part passes on them. Same worker
+	# answers, same digest, only `sampling` differs: this must not pass.
+	var truncated: Dictionary = (_interference_over(PART_SOURCE, []) \
+		as Dictionary)["interference"]
+	truncated["sampling"] = "TRUNCATED — 12 of the 40 solid edges that reach "\
+		+ "a reference were not cast; the counts are floors"
+	PartCache.put_interference(panel, PartCache.digest(PART_SOURCE), truncated)
+	var floors: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5, "source": PART_SOURCE})
+	check("parts: a part report whose walk spent its ray budget certifies "
+			+ "nothing — the pairs it never examined are not clear, so the "
+			+ "check refuses to pass and the join says why",
+			not bool(floors.get("pass", true))
+				and str(floors.get("interference_join", "")).begins_with("STALE")
+				and str(floors.get("pass_reason", "")).contains("ray budget"),
+			"floors pass = %s, join = '%s'" % [str(floors.get("pass")),
+				str(floors.get("interference_join", ""))])
+
+	PartCache.clear()
+	var orphaned: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5, "source": PART_SOURCE})
+	check("parts: with no report for that binding the part-scoped call says "
+			+ "the evidence is unavailable and refuses to pass — it does NOT "
+			+ "fall back to the document's report",
+			not bool(orphaned.get("pass", true))
+				and str(orphaned.get("pass_reason", "")).contains("unavailable")
+				and str(orphaned.get("interference_join", "")).contains(
+					"no interference report describes this source"),
+			"orphaned join = '%s', reason = '%s'" % [
+				str(orphaned.get("interference_join", "")),
+				str(orphaned.get("pass_reason", ""))])
+	PartCache.clear()
 	panel.last_eval = _interference_over(SOURCE, [])
 
 

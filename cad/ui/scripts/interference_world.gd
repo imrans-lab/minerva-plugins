@@ -15,14 +15,25 @@ extends "interference_report.gd"
 ## keeps the unique edges the walk casts and the bounds every cull tests
 ## against, and bumps a generation that proves nothing was cached across.
 ##
+## A NAMED PART IS THE ONE THING THAT CAN BE. A part-scoped check evaluates
+## one binding of the document and knows the digest of the source that
+## produced it, so the shape HAS a stamp; build_solid takes it as cache_key
+## and swaps a body already built for that exact source back into the world.
+## Three checks over one part therefore weld once — get_solid_builds() counts
+## the welds, get_solid_generation() counts the changes, and the two differ
+## by exactly the swaps. The document's own render target passes no key and
+## keeps rebuilding.
+##
 ## ONE CHECK AT A TIME, and the reservation here is what says so. That
 ## collider, the records and the cast counters are a single set of module
 ## state, so a second check running against them would hand a queued job the
 ## other one's geometry — and freeing a body under a live physics query is a
 ## crash, not a wrong number. A grant takes a ticket; an evaluation queues one
-## deep and stands down when a newer one arrives; a verb is refused as busy; a
-## holder past its deadline is reclaimed in reserve() and nowhere else, so a
-## coroutine that wakes late finds holds() false and writes nothing.
+## deep and stands down when a newer one arrives; a verb takes a place in a
+## bounded wait line and is refused as busy only past that bound or past its
+## own wait budget; a holder past its deadline is reclaimed in reserve() and
+## nowhere else, so a coroutine that wakes late finds holds() false and
+## writes nothing.
 ##
 ## The markers are here too, because they are drawn from this module's own
 ## crossings into the panel's mesh roots: the node is freed and rebuilt on
@@ -66,12 +77,35 @@ const MAX_SOLID_EDGES: int = 60000
 const MAX_REFERENCE_TRIANGLES: int = 400000
 
 
+## Named shapes whose collider is kept ready to swap back in. A part-scoped
+## check_design over four parts wants all four alive at once — the three legs
+## walk them in the same order — and a shell's ConcavePolygonShape3D is real
+## memory, so the bound is a few parts and not a document's worth.
+const MAX_CACHED_SOLIDS: int = 6
+
+
 ## How long a request will queue behind a running check: mesh_gauge's
 ## JOB_TIMEOUT_MS (5 s, after which a queued job gives up) plus a margin for
 ## the walk that FOLLOWS the step — a hundred thousand reference triangles
 ## inside one physics frame. Past it the new request is REFUSED as busy; the
 ## module is never taken away from a holder that may still be casting.
 const RESERVATION_TIMEOUT_MS: int = 8000
+
+
+## Verb calls that may stand in the wait line at once, and how long one of
+## them may stand there.
+##
+## A VERB WAITS RATHER THAN BOUNCING. Five check verbs fired at one panel used
+## to have four of them come straight back `busy`, and an agent that has to
+## re-ask four times inside one tool window mostly does not get to: the calls
+## time out at its client and the panel looks hung. So a verb takes a place in
+## line and is granted the moment the holder releases, which for a check that
+## is nearly done is a frame or two. The line is BOUNDED because an unbounded
+## one is the same hang wearing a queue: past the bound, and past the time one
+## caller may spend in it, the answer is still `busy` — with `waited_ms`, so
+## the caller can tell a refusal from a wait that ran out.
+const MAX_QUEUED_VERBS: int = 4
+const VERB_QUEUE_TIMEOUT_MS: int = 15000
 
 
 ## The solid's own physics world. Its collider is rebuilt per evaluation, so it
@@ -84,9 +118,24 @@ var _solid_faces: PackedVector3Array = PackedVector3Array()
 ## Unique edges of the solid, two entries per edge, world millimetres.
 var _solid_edges: PackedVector3Array = PackedVector3Array()
 var _solid_bounds: AABB = AABB()
-## Increments on every actual solid rebuild — the observable that proves the
-## collider is not cached across evaluations.
+## Increments whenever the collider the rays meet CHANGES — a rebuild or a
+## swap out of the part cache alike. Every epoch guard in the chain compares
+## it to decide whether its answer describes one state of the document.
 var _solid_generation: int = 0
+## Increments only when the triangles were actually welded and shaped. The
+## observable that separates a rebuild from a swap: three checks over one
+## part move the generation three times and this once.
+var _solid_builds: int = 0
+## Colliders built for a NAMED shape — source digest -> {body, faces, edges,
+## bounds, triangles} — so a part checked by three legs in a row is welded
+## once. Only the current entry's body is a child of the viewport; the rest
+## are held out of the tree, which is why they are freed here and nowhere
+## else. The document's own render target is never cached (empty key).
+var _solid_cache: Dictionary = {}
+## Cache keys, least recently mounted first. The eviction order.
+var _cache_order: Array[String] = []
+## Which cached shape is in the world now, or "" for one built without a key.
+var _current_key: String = ""
 
 ## Rays the check may spend on solid edges. Read from the variable rather
 ## than the constant so a suite can drive the ceiling without generating a
@@ -125,6 +174,15 @@ var _arrivals: int = 0
 ## The ticket the running reservation was taken with. Only that ticket's
 ## release frees the module.
 var _holder: int = 0
+## Verb calls standing in the wait line right now. Bounded: five agents firing
+## five verbs at one panel must not all sit there, and the fifth is better
+## served by "retry" than by a wait its own client will time out inside.
+var _verbs_waiting: int = 0
+## The bound, and how long one waiter may stand there. Both are variables so
+## a suite can drive a full line and a give-up without spending the window;
+## nothing in the panel ever writes them.
+var max_queued_verbs: int = MAX_QUEUED_VERBS
+var verb_queue_timeout_ms: int = VERB_QUEUE_TIMEOUT_MS
 
 ## Emitted when a check releases the module. Waited on by a request that found
 ## one already running.
@@ -154,9 +212,16 @@ func attach(host: Node) -> void:
 ## millimetres, which is also the world frame: the evaluated solid is never
 ## posed. Returns the triangle count.
 ##
-## ALWAYS rebuilds. The mesh changes on every evaluation and there is no path
-## or stamp to key a cache on, so a cache here would answer this evaluation's
-## question with the last one's geometry.
+## REBUILDS UNLESS THE CALLER NAMES THE SHAPE. With no `cache_key` — the
+## document's own render target, which changes on every keystroke and has no
+## stamp to key a cache on — it always rebuilds, because a cache there would
+## answer this evaluation's question with the last one's geometry. A
+## PART-SCOPED caller has a stamp: the digest of the source that evaluates to
+## that binding. Naming it swaps a collider already built for that exact
+## source back into the world instead of welding and re-shaping the same
+## triangles, which is what makes three checks over one part cost one build.
+## A key is a source digest, so a document that changed produces a different
+## key and the stale bodies age out of the bound below.
 ##
 ## `ticket` is the reservation the caller holds. Rebuilding FREES the current
 ## collider, so while ANY reservation is out the caller must be its holder —
@@ -167,18 +232,18 @@ func attach(host: Node) -> void:
 ## physics query, and a freed RID under a running query is a crash, not a
 ## wrong number. With no reservation out (a suite driving the module directly)
 ## ticket 0 is the caller and the rebuild goes ahead.
-func build_solid(mesh_data: Dictionary, ticket: int = 0) -> int:
+func build_solid(mesh_data: Dictionary, ticket: int = 0,
+		cache_key: String = "") -> int:
 	if _in_flight and ticket != _holder:
 		return -1
 	_solid_faces = PackedVector3Array()
 	_solid_edges = PackedVector3Array()
 	_solid_bounds = AABB()
-	if _solid_body != null and is_instance_valid(_solid_body):
-		_solid_body.get_parent().remove_child(_solid_body)
-		_solid_body.queue_free()
-	_solid_body = null
+	_detach_solid_body()
 	if _viewport == null:
 		return 0
+	if not cache_key.is_empty() and _kept_solid_is_live(cache_key):
+		return _mount_cached_solid(cache_key)
 
 	var raw_vertices: Array = mesh_data.get("vertices", []) as Array
 	var raw_faces: Array = mesh_data.get("faces", []) as Array
@@ -252,12 +317,128 @@ func build_solid(mesh_data: Dictionary, ticket: int = 0) -> int:
 	_solid_body.shape_owner_add_shape(owner_id, shape)
 	_viewport.add_child(_solid_body)
 	_solid_generation += 1
+	_solid_builds += 1
+	_current_key = cache_key
+	if not cache_key.is_empty():
+		_keep_solid(cache_key, triangles)
 	return triangles
 
 
 ## How many times the solid's collider has actually been rebuilt.
 func get_solid_generation() -> int:
 	return _solid_generation
+
+
+## How many times the triangles were actually welded and shaped — a swap out
+## of the cache does not count. The observable that separates "the collider
+## changed" from "the collider was built".
+func get_solid_builds() -> int:
+	return _solid_builds
+
+
+## Take the current body out of the world, keeping it alive when it belongs to
+## a cached shape and freeing it when it does not. A body left in the world
+## would answer the next check's rays as if it were this document's geometry.
+func _detach_solid_body() -> void:
+	if _solid_body != null and is_instance_valid(_solid_body):
+		if _solid_body.get_parent() != null:
+			_solid_body.get_parent().remove_child(_solid_body)
+		if not _cached_body(_current_key, _solid_body):
+			_solid_body.queue_free()
+	_solid_body = null
+	_current_key = ""
+
+
+## Is this body the one the cache holds under `key`? A body that is not is
+## nobody's but the caller's, and must be freed with the rebuild.
+func _cached_body(key: String, body: StaticBody3D) -> bool:
+	if key.is_empty() or not _solid_cache.has(key):
+		return false
+	return (_solid_cache[key] as Dictionary).get("body", null) == body
+
+
+## Is there still a body to swap in under `key`? An entry whose body has gone
+## is dropped here, so the caller falls through and welds the shape again
+## rather than reporting a document with no solid geometry in it.
+func _kept_solid_is_live(key: String) -> bool:
+	if not _solid_cache.has(key):
+		return false
+	var body: StaticBody3D = (_solid_cache[key] as Dictionary).get("body", null)
+	if body != null and is_instance_valid(body):
+		return true
+	_solid_cache.erase(key)
+	_cache_order.erase(key)
+	return false
+
+
+## Put the shape built for `key` back into the world without touching a
+## triangle. The generation still moves: the collider the rays meet IS a
+## different one, and every epoch guard in the chain reads that number to
+## decide whether its answer describes one state of the document.
+func _mount_cached_solid(key: String) -> int:
+	var kept: Dictionary = _solid_cache[key]
+	var body: StaticBody3D = kept["body"]
+	_solid_faces = kept["faces"]
+	_solid_edges = kept["edges"]
+	_solid_bounds = kept["bounds"]
+	_solid_body = body
+	_viewport.add_child(body)
+	_solid_generation += 1
+	_current_key = key
+	# Most recently used goes to the back, so the bound below evicts the
+	# binding nobody has asked about for longest.
+	_cache_order.erase(key)
+	_cache_order.append(key)
+	return int(kept["triangles"])
+
+
+## Keep the shape just built under `key`, evicting the least recently used
+## once the bound is reached. The evicted body is freed here — it is out of
+## the world already, since only the current one is ever a child.
+func _keep_solid(key: String, triangles: int) -> void:
+	_solid_cache[key] = {
+		"body": _solid_body,
+		"faces": _solid_faces,
+		"edges": _solid_edges,
+		"bounds": _solid_bounds,
+		"triangles": triangles,
+	}
+	_cache_order.erase(key)
+	_cache_order.append(key)
+	while _cache_order.size() > MAX_CACHED_SOLIDS:
+		var evicted := str(_cache_order.pop_front())
+		if evicted == _current_key:
+			# The shape in the world is never the one evicted: freeing it
+			# would take the collider out from under the check that just
+			# built it. It goes to the back and the next one out is the
+			# genuinely oldest.
+			_cache_order.append(evicted)
+			continue
+		var kept: Dictionary = _solid_cache.get(evicted, {}) as Dictionary
+		_solid_cache.erase(evicted)
+		var body: StaticBody3D = kept.get("body", null)
+		if body != null and is_instance_valid(body):
+			body.queue_free()
+
+
+## The panel is going away. The cached bodies are held OUT of the tree, so
+## nothing else would ever free them; the blob store below this in the chain
+## still gets its own turn.
+func release() -> void:
+	release_solids()
+	super.release()
+
+
+## Drop every cached shape, keeping the one currently in the world — that one
+## is a child of the viewport and dies with it.
+func release_solids() -> void:
+	for key in _solid_cache.keys():
+		var kept: Dictionary = _solid_cache[key]
+		var body: StaticBody3D = kept.get("body", null)
+		if body != null and is_instance_valid(body) and body != _solid_body:
+			body.queue_free()
+	_solid_cache.clear()
+	_cache_order.clear()
 
 
 func get_solid_bounds() -> AABB:
@@ -327,22 +508,39 @@ func reserve(queued: bool = false) -> Dictionary:
 	# instead, which orders the queue and nothing else.
 	var arrival := 0
 	var tree := _tree()
+	var waiting_since := Time.get_ticks_msec()
+	var in_line := false
 	while _in_flight:
 		var age := Time.get_ticks_msec() - _holder_since
 		if age >= reservation_timeout_ms:
 			# The holder is past its window: reclaimed here, and nowhere else.
 			break
 		if not queued:
-			return {
-				"ticket": 0,
-				"busy": true,
-				"holder_ticket": _holder,
-				"holder_age_ms": age,
-				"reason": ("check %d has held this panel's geometry for %d ms "
-					+ "and has not finished; running a second check now would "
-					+ "hand it the other one's collider. Retry in a moment.")
-					% [_holder, age],
-			}
+			var waited := Time.get_ticks_msec() - waiting_since
+			# JOIN THE LINE ONCE. A verb that has already taken a place keeps
+			# it until it is granted or gives up; a verb arriving to a full
+			# line is refused at once, because a queue nobody bounds is a
+			# hang with extra steps.
+			if not in_line:
+				if tree == null:
+					return _busy(waited, age,
+						"this module has no scene tree to wait a frame in")
+				if _verbs_waiting >= max_queued_verbs:
+					return _busy(waited, age,
+						"the wait line for this panel's geometry already has "
+						+ "%d call(s) in it" % _verbs_waiting)
+				_verbs_waiting += 1
+				in_line = true
+			if waited >= verb_queue_timeout_ms:
+				_verbs_waiting -= 1
+				return _busy(waited, age,
+					"this call queued for %d ms and the line did not clear"
+					% waited)
+			# Evaluations have the right of way: the panel wants the newest
+			# document checked and painted, and a verb is a question that can
+			# afford to be a frame later.
+			await tree.process_frame
+			continue
 		# One place in the queue. A newer evaluation takes it, and this one
 		# stands down rather than measuring a document that has moved on.
 		if arrival == 0:
@@ -360,6 +558,8 @@ func reserve(queued: bool = false) -> Dictionary:
 				"reason": "a newer evaluation arrived while this check waited "
 					+ "for the panel's geometry; that one is being checked",
 			}
+	if in_line:
+		_verbs_waiting -= 1
 	if arrival != 0 and _pending == arrival:
 		_pending = 0
 	_ticket += 1
@@ -367,7 +567,27 @@ func reserve(queued: bool = false) -> Dictionary:
 	_in_flight = true
 	_holder = ticket
 	_holder_since = Time.get_ticks_msec()
-	return {"ticket": ticket}
+	# How long this caller stood in the line. It travels into the reply so a
+	# call that took a while says why, rather than looking like a slow check.
+	return {"ticket": ticket, "waited_ms": Time.get_ticks_msec() - waiting_since}
+
+
+## The refusal a verb gets when it cannot be let in: the line is full, the
+## module has no tree to wait a frame in, or the caller stood in it for as
+## long as it may. `waited_ms` is what it spent, so a caller can tell a
+## straight refusal from one that queued and gave up.
+func _busy(waited_ms: int, holder_age_ms: int, why: String) -> Dictionary:
+	return {
+		"ticket": 0,
+		"busy": true,
+		"holder_ticket": _holder,
+		"holder_age_ms": holder_age_ms,
+		"waited_ms": waited_ms,
+		"reason": ("check %d has held this panel's geometry for %d ms and has "
+			+ "not finished; %s. Running a second check now would hand it the "
+			+ "other one's collider — retry in a moment.")
+			% [_holder, holder_age_ms, why],
+	}
 
 
 ## Restart the holder's clock. Called at the boundary between a check's
@@ -420,6 +640,9 @@ func refused(reservation: Dictionary) -> Dictionary:
 		report["busy"] = true
 		report["holder_ticket"] = int(reservation.get("holder_ticket", 0))
 		report["holder_age_ms"] = int(reservation.get("holder_age_ms", 0))
+		# What the caller spent standing in the line before being refused.
+		# Zero means it was never let in at all.
+		report["queued_ms"] = int(reservation.get("waited_ms", 0))
 		return report
 	# Displaced in the queue by a newer evaluation: its answer is the one the
 	# panel wants, and this reply says why there is nothing here.

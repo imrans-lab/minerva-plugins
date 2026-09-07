@@ -56,6 +56,9 @@ const _MeshImportUiScript: Script = preload("scripts/mesh_import_ui.gd")
 ## modules; the panel only holds them and hands them the mounted references.
 ## Which reference node the user is pointing at: the per-pane click nodes, the
 ## sidebar list, the selection itself and the point anchors made from it.
+## The per-panel store of evaluated parts; this panel drops its own slot when
+## the tab closes.
+const _PartCache: Script = preload("scripts/part_cache.gd")
 const _ReferenceSelectionScript: Script = preload("scripts/reference_selection.gd")
 const _MeshFeaturesScript: Script = preload("scripts/mesh_features.gd")
 const _MeshGaugeScript: Script = preload("scripts/mesh_gauge.gd")
@@ -452,6 +455,10 @@ func _exit_tree() -> void:
 		_annotation_host.drop_pending_captures()
 	if _geometry_checks != null and _geometry_checks.has_method("release"):
 		_geometry_checks.release()
+	# The evaluated parts and their interference reports live in a static
+	# store keyed by panel, which sweeps a dead slot only when another panel
+	# touches it — so the last tab to close has to drop its own.
+	_PartCache.forget(self)
 
 
 func get_mesh_features() -> RefCounted:

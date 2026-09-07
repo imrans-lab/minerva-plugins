@@ -23,6 +23,9 @@ const _MeshGauge: Script = preload("mesh_gauge.gd")
 ## The contacts the caller declared intended, and the rule for what a
 ## declaration does and does not excuse.
 const _Expected: Script = preload("expected_contacts.gd")
+## A part-scoped measurement joins the report for ITS OWN binding, which is
+## kept here by the interference check rather than in the last eval result.
+const _PartCache: Script = preload("part_cache.gd")
 
 ## The phrase every unbounded-tolerance pass_reason is built from, and the one
 ## the status line reads back to tell that cause from a join failure.
@@ -389,16 +392,38 @@ func _buried_pairs(document: Dictionary, source: String, records: Array,
 		panel: Object) -> Dictionary:
 	var out := {"fresh": false, "nodes": {}, "undecided": {},
 		"undecided_references": {}}
-	var last_eval: Variant = document.get("last_eval", {})
-	if not (last_eval is Dictionary):
-		return out
-	var report: Variant = (last_eval as Dictionary).get("interference", {})
-	if not (report is Dictionary):
-		return out
-	var interference: Dictionary = report
+	var digest := _source_digest(source)
+	# A PART is measured against its own report, never the document's: the
+	# document's solid is the union of every binding, so a node buried in
+	# another half would be joined onto this one. The store is keyed by the
+	# digest of the source that produced the report, so a hit is by
+	# construction about the same shape this measurement is about.
+	var interference: Dictionary = _PartCache.interference(panel, digest)
+	if interference.is_empty():
+		var last_eval: Variant = document.get("last_eval", {})
+		if not (last_eval is Dictionary):
+			return out
+		var report: Variant = (last_eval as Dictionary).get("interference", {})
+		if not (report is Dictionary):
+			return out
+		interference = report
 	if not bool(interference.get("checked", false)):
 		return out
-	if str(interference.get("source_digest", "")) != _source_digest(source):
+	if str(interference.get("source_digest", "")) != digest:
+		return out
+	# A WALK THAT RAN OUT OF RAYS NAMES ONLY SOME OF WHAT CROSSES. The join
+	# reads a pair the report does not name as "nothing crossing there", so a
+	# truncated report certifies exactly the pairs it never looked at — and a
+	# part-scoped check, whose report is the only one it has, would pass on
+	# them. Its counts are floors and it is treated as stale: the rows keep
+	# their unsigned distances and the check cannot pass on any of them.
+	if str(interference.get("sampling", "")).begins_with("TRUNCATED"):
+		out["stale"] = true
+		out["reason"] = ("the interference report for this source spent its "
+			+ "ray budget before the walk finished, so the pairs it does NOT "
+			+ "name are unexamined rather than clear; a mesh-to-mesh distance "
+			+ "is unsigned and cannot tell them apart, so this check cannot "
+			+ "pass — narrow the check with reference= or node= and ask again")
 		return out
 	var moved := str(interference.get("records_digest", "")) \
 		!= str(_MeshGauge.bodies_digest(_MeshGauge.bodies_from_records(records)))

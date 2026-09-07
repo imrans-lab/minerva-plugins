@@ -24,6 +24,9 @@ extends SceneTree
 ##     res://../../minerva-plugins/cad/tests/gd/test_check_design.gd
 
 const PanelTools := preload("res://../../minerva-plugins/cad/ui/panel_tools.gd")
+## Each binding evaluated once per document. The count it saves is what the
+## evaluate-once case reads.
+const PartCache := preload("res://../../minerva-plugins/cad/ui/scripts/part_cache.gd")
 
 ## The gap this design has to keep, in millimetres, and the pinch that fails it.
 const REQUIRED_MM := 1.0
@@ -67,6 +70,7 @@ func _run() -> void:
 	await _check_a_violation_behind_the_limit_still_fails()
 	await _check_a_finished_part_failing_is_not_lost_behind_a_ticket()
 	await _check_parts_share_one_clearance_window()
+	await _check_every_binding_is_evaluated_once()
 
 
 # ---------------------------------------------------------------------------
@@ -645,6 +649,83 @@ func _good_screw() -> Dictionary:
 	}
 
 
+## ORACLE: COUNT THE EVALUATIONS. minerva_cad_check_design over four parts
+## runs three legs, and every leg used to reach a binding by evaluating the
+## whole document with that binding as its trailing expression — twelve worker
+## translates for four shapes, at seventeen seconds each on the rev-4
+## enclosure, so the caller's MCP window closed with nothing in it.
+##
+## The stand-in counts every evaluate it is asked for. Four parts, three legs,
+## one call: the count must be FOUR. Twelve is the shipped behaviour and one
+## is a cache that has stopped keying on the binding — both fail here.
+##
+## And then the document changes. The cache is keyed on the document's source
+## digest, so the next call must pay for all four again: a cache that served
+## the old document's parts would answer about a shape that no longer exists,
+## which is worse than the cost it saves.
+func _check_every_binding_is_evaluated_once() -> void:
+	PartCache.clear()
+	var panel := _panel()
+	panel.document_source = "bottom = cube(10, 10, 10)\ntop = cube(10, 10, 2)\n"\
+		+ "door = cube(4, 4, 1)\nshells = bottom + top\n"
+	panel.interference = _interference_report([])
+	panel.clearance = _clearance_report([_gap(2.5)])
+	panel.fasteners = _fastener_report([_good_screw()])
+	var parts := ["bottom", "top", "door", "shells"]
+	var args := {"required_mm": REQUIRED_MM, "parts": parts,
+		"screw": {"dia_mm": 3.0, "length_mm": 8.0}}
+
+	var reply: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_check_design", args)
+	check("evaluate-once: four parts and three legs cost FOUR worker "
+			+ "evaluations, not twelve",
+			panel.evaluate_calls == parts.size(),
+			"evaluate_calls = %d for %d parts" % [panel.evaluate_calls,
+				parts.size()])
+	check("evaluate-once: and all four parts are still cached SEPARATELY — "
+			+ "one entry each, so no leg was answered about another binding",
+			PartCache.part_count(panel) == parts.size()
+				and str(PartCache.part(panel, "door").get("source", "")) \
+					.ends_with("\ndoor\n"),
+			"cached = %d, door source = %s" % [PartCache.part_count(panel),
+				str(PartCache.part(panel, "door").get("source", ""))])
+
+	# ALL THREE LEGS ARE COMPLETE FOR EVERY PART. A reply that reached its
+	# verdict by skipping legs would also have a low evaluation count.
+	var checks_ran: Dictionary = reply.get("checks", {}) as Dictionary
+	check("evaluate-once: the one reply still carries all three legs, "
+			+ "complete, with a verdict over the lot and no ticket left over",
+			str(checks_ran.get("interference", "")) == "ran"
+				and str(checks_ran.get("clearance", "")) == "ran"
+				and str(checks_ran.get("fasteners", "")) == "ran"
+				and str(reply.get("verdict", "")) == "pass"
+				and not reply.has("ticket")
+				and not reply.has("tickets"),
+			"reply = %s" % str(reply))
+
+	# THE SAME CALL AGAIN COSTS NOTHING. The document has not moved, so every
+	# binding is already known.
+	panel.evaluate_calls = 0
+	await PanelTools.handle(panel, "minerva_cad_check_design", args)
+	check("evaluate-once: asking again about the same document evaluates "
+			+ "nothing at all",
+			panel.evaluate_calls == 0,
+			"evaluate_calls = %d" % panel.evaluate_calls)
+
+	# THE DOCUMENT MOVES. Every part of the old source is a different shape.
+	panel.document_source += "lid = cube(2, 2, 2)\n"
+	panel.evaluate_calls = 0
+	await PanelTools.handle(panel, "minerva_cad_check_design", args)
+	check("evaluate-once: the next evaluation of the document invalidates "
+			+ "every binding — all four are asked for again",
+			panel.evaluate_calls == parts.size()
+				and PartCache.part_count(panel) == parts.size(),
+			"evaluate_calls = %d, cached = %d" % [panel.evaluate_calls,
+				PartCache.part_count(panel)])
+	panel.free()
+	PartCache.clear()
+
+
 # ---------------------------------------------------------------------------
 # The rig
 # ---------------------------------------------------------------------------
@@ -681,6 +762,11 @@ class _DesignStandIn extends Node:
 	## Every clearance call in order: "start:<part>:wait=<ms|default>" or
 	## "collect:<ticket>:wait=<ms>".
 	var clearance_calls: Array = []
+	## Worker evaluations this panel was asked for, and the document they are
+	## asked about. The count is the oracle for evaluate-once: three legs over
+	## four parts must cost four evaluations and not twelve.
+	var evaluate_calls: int = 0
+	var document_source: String = "bottom = cube(10, 10, 10)\ntop = cube(10, 10, 2)\n"
 
 	var _gauge: _GaugeStandIn = null
 	var _features: _FeatureStandIn = null
@@ -743,11 +829,11 @@ class _DesignStandIn extends Node:
 	## source and a worker that evaluates one binding of it. The mesh is a
 	## single triangle — enough to be "solid geometry" for the fold under test.
 	func get_document_state() -> Dictionary:
-		return {"source": "bottom = cube(10, 10, 10)\ntop = cube(10, 10, 2)\n",
-			"last_eval": {"shape_name": "top"}}
+		return {"source": document_source, "last_eval": {"shape_name": "top"}}
 
 	func call_backend(_channel: String, args: Dictionary,
 			_timeout_ms: int = 30000) -> Dictionary:
+		evaluate_calls += 1
 		await (Engine.get_main_loop() as SceneTree).process_frame
 		var source := str(args.get("source", "")).strip_edges()
 		return {"success": true, "result": {"ok": true, "result": {

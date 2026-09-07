@@ -30,6 +30,9 @@ extends RefCounted
 ## Consumers: preload("scripts/part_scope.gd") from panel_tools.gd.
 
 const _WorkerReply: Script = preload("worker_reply.gd")
+## Evaluated once per (document, binding) and read by every leg after the
+## first. Without it a three-legged verb pays for each binding three times.
+const _PartCache: Script = preload("part_cache.gd")
 
 ## Channel name = MCP tool name; the worker method behind it is "evaluate".
 const EVALUATE_CHANNEL: String = "cad.evaluate"
@@ -86,6 +89,14 @@ static func render_target(panel: Object) -> String:
 ## worker's own tessellation of that binding — the same one the panel would
 ## render — so a collider built from it is the part, not an approximation of
 ## it.
+##
+## EVALUATED ONCE PER DOCUMENT. Every check leg asks for the same bindings —
+## minerva_cad_check_design asks three times over — and a binding of a source
+## that has not changed is the same shape every time, so the answer is kept in
+## part_cache.gd against the document's source digest and only the first
+## asking reaches the worker. The moment the document evaluates to something
+## else the digest moves and the whole slot goes with it, so no leg can ever
+## be handed the previous document's part.
 static func resolve(panel: Object, part: String) -> Dictionary:
 	if panel == null or not is_instance_valid(panel) \
 			or not panel.has_method("get_document_state") \
@@ -99,19 +110,32 @@ static func resolve(panel: Object, part: String) -> Dictionary:
 	var source := str(document.get("source", ""))
 	if source.strip_edges().is_empty():
 		return {"error": "there is no DSL source to evaluate a part from"}
+	_PartCache.retain(panel, _PartCache.digest(source))
+	var kept: Dictionary = _PartCache.part(panel, part)
+	if not kept.is_empty():
+		return kept
 	var scoped := source_for(source, part)
 	var envelope: Variant = await panel.call_backend(EVALUATE_CHANNEL,
 		{"source": scoped}, EVALUATE_TIMEOUT_MS)
 	var result: Dictionary = _WorkerReply.unwrap(envelope, "part '%s'" % part)
+	# A binding that will not evaluate is kept too: it is the same refusal for
+	# every leg of the same document, and re-asking the worker three times to
+	# be told the same thing is what this cache exists to stop.
 	if result.has("error"):
-		return {"error": ("part '%s' did not evaluate: %s — a `parts` entry "
-			+ "must name a binding the document assigns a 3D shape to")
+		var refused := {"error": ("part '%s' did not evaluate: %s — a `parts` "
+			+ "entry must name a binding the document assigns a 3D shape to")
 			% [part, str(result["error"])]}
+		_PartCache.put_part(panel, part, refused)
+		return refused
 	var mesh: Dictionary = result.get("mesh", {}) as Dictionary
 	if (mesh.get("faces", []) as Array).is_empty():
-		return {"error": "part '%s' produced no solid geometry" % part}
-	return {
+		var empty := {"error": "part '%s' produced no solid geometry" % part}
+		_PartCache.put_part(panel, part, empty)
+		return empty
+	var resolved := {
 		"source": scoped,
 		"mesh": mesh,
 		"shape_name": str(result.get("shape_name", part)),
 	}
+	_PartCache.put_part(panel, part, resolved)
+	return resolved

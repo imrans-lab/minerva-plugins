@@ -41,7 +41,10 @@ extends "interference_containment.gd"
 ##    concave shapes, and a ray that starts inside a wall reports nothing.
 ## 3. THE SOLID'S COLLIDER IS REBUILT EVERY EVALUATION. The DSL solid changes
 ##    on every keystroke and has no path to key a cache on; the references are
-##    the only side that caches (mesh_gauge, on its digest).
+##    the only side that caches (mesh_gauge, on its digest). A NAMED PART is
+##    the exception, and it is one because it has a stamp: the digest of the
+##    source that evaluates to that binding, which is what the collider is
+##    cached under so three legs over one part weld it once.
 ##
 ## WHAT IT COSTS. The whole job runs inside ONE physics step, so its cost is a
 ## stall and not a slowdown, and the reply carries `casts` and `elapsed_ms` so
@@ -140,12 +143,14 @@ const ALL_LAYERS: int = 0xFFFFFFFF
 ## the reply with what was measured for it, and one whose overlap ran deeper
 ## is reported as interference anyway. See scripts/expected_contacts.gd.
 func check(panel: Object, args: Dictionary = {}) -> Dictionary:
-	# An agent's verb call says so and is refused while a check runs; the
-	# panel's own per-evaluation check says nothing and queues.
+	# An agent's verb call says so and takes a place in the bounded wait line
+	# while a check runs; the panel's own per-evaluation check says nothing
+	# and queues in the evaluation slot instead.
 	var reservation := await reserve(not bool(args.get("on_demand", false)))
 	var ticket := int(reservation.get("ticket", 0))
 	if ticket == 0:
 		return refused(reservation)
+	var queued_ms := int(reservation.get("waited_ms", 0))
 	# The queue as it stood when this check was granted. An evaluation that
 	# QUEUES behind this one from here on is the newer document, and the
 	# moment it arrives this check's paint is revoked: it keeps its ticket
@@ -157,6 +162,10 @@ func check(panel: Object, args: Dictionary = {}) -> Dictionary:
 	var arrivals_at_grant := _arrivals
 	_marker_points = PackedVector3Array()
 	var report := await _run(panel, args, ticket)
+	# How long this call stood in the wait line before it could measure. A
+	# reply that took a while must say which half of it was waiting.
+	if queued_ms > 0:
+		report["queued_ms"] = queued_ms
 	if not holds(ticket):
 		# Reclaimed while this check was awaiting a physics step: the module's
 		# collider, records and counters belong to another check now. The
@@ -167,6 +176,7 @@ func check(panel: Object, args: Dictionary = {}) -> Dictionary:
 	# it): nothing on screen may come from that.
 	if bool(report.get("superseded", false)):
 		return report
+	_keep_part_report(panel, args, report)
 	# Only the newest request may paint. A superseded reply still goes back to
 	# its own caller — it is a true answer about the geometry it was asked
 	# about — but repainting from it would leave the previous evaluation's red
@@ -181,6 +191,36 @@ func check(panel: Object, args: Dictionary = {}) -> Dictionary:
 	_draw_markers(panel)
 	report["painted"] = true
 	return report
+
+
+## Keep a PART's interference report where the clearance check can find it.
+##
+## The document's own report rides in the last eval result, which is what the
+## unscoped clearance check joins against. A part has no such home: it is
+## evaluated for the duration of one verb call and its report would be thrown
+## away, so the clearance leg of the same call would fall back to the
+## DOCUMENT's report — measured against the union of every binding, in which
+## a node buried nowhere near this half still reads as buried. That join is
+## wrong rather than merely unavailable, so the part's own report is stored
+## under the digest of the source that produced it and the joiner asks for
+## that digest.
+##
+## ONLY AN UNSCOPED REPORT IS KEPT. A joiner reads a pair the report does not
+## name as "no crossing there", so a report narrowed by reference= or node=
+## would excuse every node it never looked at.
+func _keep_part_report(panel: Object, args: Dictionary,
+		report: Dictionary) -> void:
+	if str(args.get("source", "")).strip_edges().is_empty():
+		return
+	if not str(args.get("reference", "")).is_empty() \
+			or not str(args.get("node", "")).is_empty():
+		return
+	if not bool(report.get("checked", false)):
+		return
+	# _PartCache is declared by clearance_report.gd, further down the chain
+	# this script extends, which is the other half of the same join.
+	_PartCache.put_interference(panel, str(report.get("source_digest", "")),
+		report)
 
 
 func _run(panel: Object, args: Dictionary, ticket: int = 0) -> Dictionary:
@@ -212,9 +252,14 @@ func _run(panel: Object, args: Dictionary, ticket: int = 0) -> Dictionary:
 	var scoped_source := str(args.get("source", ""))
 	if (scoped_mesh.get("faces", []) as Array).is_empty():
 		scoped_mesh = document.get("mesh", {}) as Dictionary
-	if scoped_source.strip_edges().is_empty():
+	var part_scoped := not scoped_source.strip_edges().is_empty()
+	if not part_scoped:
 		scoped_source = str(document.get("source", ""))
-	var triangles := build_solid(scoped_mesh, ticket)
+	# A named part has a stamp — the digest of the source that evaluates to
+	# it — so its collider is welded once and swapped back in for the legs
+	# that follow. The document's own render target has none and rebuilds.
+	var triangles := build_solid(scoped_mesh, ticket,
+		_source_digest(scoped_source) if part_scoped else "")
 	if triangles < 0:
 		return _nothing("another check holds this panel's geometry; nothing "
 			+ "was measured")

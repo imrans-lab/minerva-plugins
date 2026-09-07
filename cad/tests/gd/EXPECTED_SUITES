@@ -243,7 +243,11 @@ test_cad_note.gd assertions=40
 # the other with the two remainders adding up to the whole, both declared and
 # the check passing, the falsifier — a contact 1.6 mm deep against a
 # declaration allowing 0.5 — and a declaration that matched nothing).
-test_interference.gd assertions=77
+# Also: a named part's collider is welded once and swapped back in for the
+# legs that follow (builds vs generation), a verb arriving while a check
+# runs QUEUES and reports the wait instead of bouncing, two verbs fired
+# together both answer, and both bounds on that line still refuse.
+test_interference.gd assertions=81
 
 # Clearance between the evaluated solid and a reference: two bars crossing at
 # right angles with 0.8 mm of air between them, the reference YAWED 30 degrees
@@ -346,7 +350,11 @@ test_interference.gd assertions=77
 # tolerance grades EVERY row false; the reply states how many pairs were
 # hidden and states none when nothing was filtered; limit applies to what
 # survives the filter, so the surviving row can be the further of the two.
-test_clearance.gd assertions=76
+# Also: a part-scoped measurement joins the interference report for ITS OWN
+# binding — not the document's, whose solid is the union — and refuses to
+# pass when that part has no report, or when the walk that made it spent its
+# ray budget, rather than falling back or certifying what nobody examined.
+test_clearance.gd assertions=81
 
 # Reference against reference, and how tall the references are over a
 # footprint. Two 6 x 8 x 4 blocks posed 0.5 mm apart (their faces overlapping,
@@ -710,7 +718,10 @@ test_eval_banner.gd assertions=9
 # as advisory, and (2) a violation pushed out of the rows by ten uncertified
 # overlaps at the default limit still reads fail off the leg's own count,
 # with failing_rows_hidden saying so, and travels once the limit is raised.
-test_check_design.gd assertions=24
+# Also the evaluate-once oracle: four parts across three legs cost FOUR
+# worker evaluations and not twelve, an unchanged document costs none, and
+# the next evaluation of the document invalidates every binding.
+test_check_design.gd assertions=29
 
 # minerva_cad_snapshot_fit: a capture framed on the evaluated solid, a named
 # reference or a world box, rendered from a camera of its own so the pane the

@@ -78,6 +78,9 @@ const _EvalReplyScript: Script = preload("scripts/eval_reply.gd")
 ## Which PART of the document a check is about, and how a named binding is
 ## evaluated into a mesh of its own.
 const _PartScope: Script = preload("scripts/part_scope.gd")
+## Each binding evaluated once per document, and the interference report the
+## part-scoped clearance check joins against.
+const _PartCache: Script = preload("scripts/part_cache.gd")
 ## The three checks run together and folded into one verdict. It is handed
 ## the check Callables rather than preloading this script back.
 const _DesignCheck: Script = preload("scripts/design_check.gd")
@@ -519,6 +522,7 @@ static func _check_clearance(panel, args: Dictionary) -> Dictionary:
 	var asked := str(args.get("reference", ""))
 	if not asked.is_empty() and not _has_reference(panel, asked):
 		return _err("no reference named '%s' is mounted" % asked)
+	await _ensure_part_interference(panel, args)
 	var asked_clearance := {
 		# The clearance measurement re-tessellates in the worker, so a
 		# part-scoped call hands it that part's SOURCE rather than a mesh.
@@ -544,6 +548,51 @@ static func _check_clearance(panel, args: Dictionary) -> Dictionary:
 		return _err(str(report["error"]))
 	return _ok(_ReplyShape.filter_clearance(report,
 		int(args.get("limit", 0)), bool(args.get("failing_only", false))))
+
+
+## Make sure a PART has an interference report of its own before its
+## clearance is measured.
+##
+## A clearance distance is unsigned: it cannot tell a 0 that is a flush
+## contact from a 0 that is a node buried in the wall, so the check joins the
+## interference report for the same solid and refuses to pass without one.
+## The document gets that report free — every evaluation runs the check — but
+## a named part is a shape that exists only for the duration of this call, and
+## with nothing to join, a part-scoped clearance could never pass. So the
+## part's own check runs here first, unscoped, and lands in the part cache
+## where the joiner looks for it.
+##
+## The collider for this part is already built by then (the check that built
+## it is keyed on the same source digest), so this costs the ray walk and no
+## rebuild. A report already in the cache for the colliders standing now — the
+## interference leg of minerva_cad_check_design, one leg earlier — is left
+## alone; whether it is really fresh enough to join is still decided by the
+## joiner, against the poses and the generation it recorded.
+static func _ensure_part_interference(panel, args: Dictionary) -> void:
+	var source := str(args.get("source", ""))
+	if source.strip_edges().is_empty():
+		return
+	var kept: Dictionary = _PartCache.interference(panel, _PartCache.digest(source))
+	if not kept.is_empty() and int(kept.get("gauge_generation", -1)) == _gauge_generation(panel):
+		return
+	await _check_interference(panel, {
+		"mesh": args.get("mesh", {}),
+		"source": source,
+		"expected_contacts": args.get("expected_contacts", []),
+	})
+
+
+## The gauge's collider generation, or -2 for a panel with no gauge — a value
+## no report carries, so "no gauge" never reads as "the report is current".
+static func _gauge_generation(panel) -> int:
+	if panel == null or not is_instance_valid(panel) \
+			or not panel.has_method("get_mesh_gauge"):
+		return -2
+	var gauge: Object = panel.get_mesh_gauge()
+	if gauge == null or not is_instance_valid(gauge) \
+			or not gauge.has_method("get_generation"):
+		return -2
+	return int(gauge.call("get_generation"))
 
 
 ## The two reference-against-reference entry points, as verbs _fresh can

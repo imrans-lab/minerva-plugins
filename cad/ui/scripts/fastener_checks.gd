@@ -113,12 +113,25 @@ const PATH_END_EPSILON_MM: float = 0.01
 ## Every collision layer at once — the unscoped mask, matching mesh_gauge.
 const ALL_LAYERS: int = 0xFFFFFFFF
 
+## The source digest a part-scoped collider is cached under. Shared with the
+## interference chain so both name the same body for the same binding.
+const _PartCache: Script = preload("part_cache.gd")
+
 
 ## Rays the running check's path fans placed, summed over every screw. Reported
 ## beside the spacing so a reader can see how densely the disc was covered.
 var _path_rays: int = 0
 ## Wall clock of the running check, microseconds.
 var _started_us: int = 0
+
+
+## The key build_solid caches this call's collider under: the digest of the
+## source that evaluates to the named part, and "" — always rebuild — for the
+## document's own render target, which has no stamp.
+static func _solid_cache_key(source: String) -> String:
+	if source.strip_edges().is_empty():
+		return ""
+	return _PartCache.digest(source)
 
 
 # ---------------------------------------------------------------------------
@@ -253,17 +266,24 @@ func check(panel: Object, args: Dictionary = {}) -> Dictionary:
 			+ "given no longer describe where they are; run "
 			+ "minerva_cad_find_holes again and re-ask")
 
-	# Un-queued: this check only ever runs because an agent asked for it, and
-	# an agent is better served by "retry" than by an invisible wait.
+	# Not an evaluation: this check only ever runs because an agent asked for
+	# it, so it takes a place in the bounded verb line rather than the one
+	# evaluation slot. It waits there for a check that is nearly done and is
+	# refused — with what it waited — when the line is full or the wait runs
+	# out, because a wait nobody bounds is a hang the caller's client times
+	# out inside.
 	var reservation: Dictionary = await checks.call("reserve", false)
 	var ticket := int(reservation.get("ticket", 0))
 	if ticket == 0:
 		# The interference module owns the solid's collider and hands out one
 		# reservation at a time; a refusal is its answer, not this module's.
 		return checks.call("refused", reservation)
+	var queued_ms := int(reservation.get("waited_ms", 0))
 
 	var report := await _run(gauge, checks, mesh_data, features, holes,
 		screw, args, ticket, records)
+	if queued_ms > 0:
+		report["queued_ms"] = queued_ms
 	# The colliders the rays were cast against are the ones the poses above
 	# describe, or the answer is two epochs stitched together.
 	if int(gauge.call("get_generation")) != epoch \
@@ -306,7 +326,12 @@ func _run(
 	# every rebuild, so the ticket travels with the request: a caller that is
 	# not the holder is refused rather than allowed to free a body another
 	# check is casting against.
-	var triangles := int(checks.call("build_solid", mesh_data, ticket))
+	# A part-scoped check names the shape it is about — the digest of the
+	# source that evaluates to that binding — so the collider the interference
+	# leg already welded for it is swapped back in rather than rebuilt. The
+	# document's own render target names nothing and rebuilds.
+	var triangles := int(checks.call("build_solid", mesh_data, ticket,
+		_solid_cache_key(str(args.get("source", "")))))
 	if triangles < 0:
 		return _nothing("another check holds this panel's geometry; nothing "
 			+ "was measured")

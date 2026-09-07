@@ -628,6 +628,7 @@
           "ui/scripts/fit_capture.gd",
           "ui/scripts/keepout_dsl.gd",
           "ui/scripts/ortho_silhouette.gd",
+          "ui/scripts/part_cache.gd",
           "ui/scripts/part_scope.gd",
           "ui/scripts/reference_pairs.gd",
           "ui/scripts/reference_profile.gd",

@@ -247,15 +247,30 @@ static func _attach_tickets(out: Dictionary, tickets: Dictionary,
 ## `busy` is the collider reservation refusing a second caller — nothing was
 ## measured and nothing is wrong. Every other reply, including a failure, is
 ## returned on the first attempt.
+##
+## A LEG THAT ALREADY WAITED IS NOT ASKED AGAIN. The reservation puts a verb
+## into a bounded wait line before it refuses, so a busy reply carrying
+## `queued_ms` has already spent that line's whole budget; retrying it spends
+## the budget again, and four attempts times three legs times a part apiece is
+## minutes inside one MCP window. That reply is returned as it stands.
 static func _unbusy(panel, args: Dictionary, per_part: Callable,
 		verb: Callable) -> Dictionary:
 	var reply: Dictionary = {}
 	for attempt in range(BUSY_ATTEMPTS):
 		reply = await per_part.call(panel, args, verb)
-		if not _is_busy(reply):
+		if not _is_busy(reply) or _already_queued(reply):
 			return reply
 		await _idle(BUSY_FRAMES)
 	return reply
+
+
+## Did any leg of this reply stand in the reservation's wait line before it
+## was refused? Then it has been retried already, by the reservation itself.
+static func _already_queued(reply: Dictionary) -> bool:
+	for leg in _legs(reply):
+		if int((leg["report"] as Dictionary).get("queued_ms", 0)) > 0:
+			return true
+	return false
 
 
 ## Did this reply — or any part of it — come back refused for the collider?
