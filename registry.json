@@ -18,14 +18,14 @@
     {
       "id": "cad",
       "name": "CAD",
-      "version": "0.3.7",
-      "manifest_version": "0.3.7",
-      "release_tag": "cad-v0.3.7",
+      "version": "0.3.8",
+      "manifest_version": "0.3.8",
+      "release_tag": "cad-v0.3.8",
       "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/main/cad/manifest.json",
       "downloads": {
-        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.3.7/cad-0.3.7-linux-x86_64.tar.gz",
-        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.3.7/cad-0.3.7-macos-universal.tar.gz",
-        "windows-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.3.7/cad-0.3.7-windows-x86_64.tar.gz"
+        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.3.8/cad-0.3.8-linux-x86_64.tar.gz",
+        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.3.8/cad-0.3.8-macos-universal.tar.gz",
+        "windows-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.3.8/cad-0.3.8-windows-x86_64.tar.gz"
       }
     },
     {
