@@ -329,10 +329,9 @@ func _pair_row(pair: Dictionary) -> Dictionary:
 	}
 	if float(pair["penetration_mm"]) > 0.0:
 		entry["penetration_mm"] = float(pair["penetration_mm"])
-		entry["penetration_note"] = "the deepest run of one body's edge " \
-			+ "inside the other, taken from whichever of the two bodies' " \
-			+ "edges ran the shorter: a run across the overlap measures the " \
-			+ "feature's width, not how deep it went"
+		entry["penetration_note"] = "the shorter of the two bodies' " \
+			+ "longest chords through the other; a lower bound on the " \
+			+ "overlap, not a separation depth"
 	if not str(pair["note"]).is_empty():
 		entry["note"] = str(pair["note"])
 	return entry

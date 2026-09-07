@@ -1797,15 +1797,28 @@ func _check_two_shell_from_below(module: RefCounted, panel: Node) -> void:
 		"pairs": [{"solid_feature": 1, "reference_hole": 0}],
 	})
 	var forced_row := _row_at(forced, HOLE_XY[0])
+	# The head sits on the SOLID here, so the shank's own disc passes through
+	# the seat plane — a face of the solid. It is the surface the head lands
+	# on, not something in the shank's way, and a fan that counted it filled
+	# the row with obstructions all sitting at exactly the seat.
+	var forced_seat_t := float(forced_row.get("seat_offset_mm", 0.0))
+	var at_the_seat := 0
+	for entry in (forced_row.get("obstructions", []) as Array):
+		if absf(float((entry as Dictionary).get("axial_mm", 0.0)) - forced_seat_t) \
+				< NUMERIC_TOLERANCE_MM:
+			at_the_seat += 1
 	check("stack: forced onto the tray's CLEARANCE bore the screw fails — the "
-			+ "overlap is reported, the fit says what kind of hole it is, and "
-			+ "it is not engagement",
+			+ "overlap is reported, the fit says what kind of hole it is, it "
+			+ "is not engagement, and nothing is reported in the shank's way "
+			+ "AT the seat plane the head lands on",
 			str(forced_row.get("bore_fit", "")) == "clearance"
 				and float(forced_row.get("engagement_mm", 0.0)) > 0.0
 				and not bool(forced_row.get("engagement_ok", true))
+				and at_the_seat == 0
 				and not bool(forced_row.get("pass", true))
 				and str(forced_row.get("why", "")).contains("passes through"),
-			"row = %s" % str(forced_row))
+			"seat_t = %s, at the seat = %d, row = %s"
+				% [str(forced_seat_t), at_the_seat, str(forced_row)])
 
 	panel.mesh_data = original_mesh
 	panel.bores = original_bores

@@ -645,9 +645,19 @@ func _one_screw(
 		"datum": hole_centre,
 		"direction": direction,
 	}
+	# Where the SHANK's approach begins. Outside everything, except when the
+	# head sits on the solid: there the seat plane is a face of the solid the
+	# shank's own disc passes through, and a span that started above it counts
+	# that face — the head's own bearing surface — as an obstruction. The head
+	# fan already covers everything above the seat, at a radius that reaches
+	# past the shank's whenever the screw has a head at all, so the shank
+	# starts AT the seat plane, to the same tolerance the seat ring lands with.
+	var shank_from_t := start_t
+	if seat_on == SEAT_ON_SOLID and head_dia >= dia:
+		shank_from_t = seat_t + SEAT_TOLERANCE_MM
 	var shank := _fan_clear(
 		gauge, state, solid_state, checks, origin, direction,
-		dia * 0.5, start_t, wall_entry_t - PATH_END_EPSILON_MM,
+		dia * 0.5, shank_from_t, wall_entry_t - PATH_END_EPSILON_MM,
 		hole_centre, mask, reference_scope, expected
 	)
 	var head := {"clear": true, "obstructions": [], "rays": 0}
@@ -871,7 +881,8 @@ func _radial_offset(
 ## and that is exactly where a rib bridging a bore sits. The spacing IS the
 ## guarantee: an obstruction narrower than it can pass between two rays
 ## unseen. Every ray starts at `origin`, which the caller has already put
-## outside every body.
+## outside every body — `from_t` is where the JUDGED span begins, which may be
+## well inside that travel, and a hit short of it belongs to another fan.
 ##
 ## WHICH BODIES COUNT. Every ray sees the references. Whether it also sees the
 ## SOLID depends on `expected`: pass the bore's geometry and the fan sees the
@@ -928,7 +939,13 @@ func _fan_clear(
 	var floor_from_t := float(expected.get("bore_exit_t", INF)) - BORE_WALL_TOLERANCE_MM
 	var floor_t: Variant = null
 	var far_end := maxf(to_t, bore_to_t)
-	var travel := (far_end - from_t) + OUTSIDE_MARGIN_MM * 2.0 + (datum - origin).length()
+	# Long enough to carry every ray from where it starts to the far end of
+	# the span, measured from the ORIGIN: the caller may begin the span well
+	# inside the ray's travel (a shank seated on the solid starts at the seat
+	# plane, not outside), and a length derived from the span's start would
+	# then stop the ray short of what it has to look at.
+	var origin_t := (origin - datum).dot(direction)
+	var travel := (far_end - origin_t) + OUTSIDE_MARGIN_MM * 2.0
 	var see_solid := not expected.is_empty()
 	for index in range(rays.size()):
 		var offset: Vector3 = rays[index]
