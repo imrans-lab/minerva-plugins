@@ -99,6 +99,11 @@ static func render_target(panel: Object) -> String:
 ## source digest and only the first asking reaches the worker. The moment the
 ## document evaluates to something else the digest moves and the whole slot
 ## goes with it, so no leg can ever be handed the previous document's part.
+##
+## The digest is read BEFORE the worker is asked and handed to the store with
+## the answer: the document can move while the worker is busy, and an answer
+## about the old source is then returned to this caller unfiled, with a
+## `note`, rather than filed as a part of the new one.
 static func resolve(panel: Object, part: String) -> Dictionary:
 	if panel == null or not is_instance_valid(panel) \
 			or not panel.has_method("get_document_state") \
@@ -112,7 +117,8 @@ static func resolve(panel: Object, part: String) -> Dictionary:
 	var source := str(document.get("source", ""))
 	if source.strip_edges().is_empty():
 		return {"error": "there is no DSL source to evaluate a part from"}
-	_PartCache.retain(panel, _PartCache.digest(source))
+	var document_digest: String = _PartCache.digest(source)
+	_PartCache.retain(panel, document_digest)
 	var kept: Dictionary = _PartCache.part(panel, part)
 	if not kept.is_empty():
 		return kept
@@ -131,19 +137,22 @@ static func resolve(panel: Object, part: String) -> Dictionary:
 			+ "entry must name a binding the document assigns a 3D shape to")
 			% [part, str(result["error"])]}
 		if not bool(result.get("transient", false)):
-			_PartCache.put_part(panel, part, refused)
+			_PartCache.put_part(panel, part, refused, document_digest)
 		return refused
 	var mesh: Dictionary = result.get("mesh", {}) as Dictionary
 	if (mesh.get("faces", []) as Array).is_empty():
 		var empty := {"error": "part '%s' produced no solid geometry" % part}
-		_PartCache.put_part(panel, part, empty)
+		_PartCache.put_part(panel, part, empty, document_digest)
 		return empty
 	var resolved := {
 		"source": scoped,
 		"mesh": mesh,
 		"shape_name": str(result.get("shape_name", part)),
 	}
-	_PartCache.put_part(panel, part, resolved)
+	if not _PartCache.put_part(panel, part, resolved, document_digest):
+		resolved["note"] = ("part '%s' was evaluated from a source the "
+			+ "document has since moved past; it is answered from but not "
+			+ "kept, and the next call evaluates the current document") % part
 	return resolved
 
 

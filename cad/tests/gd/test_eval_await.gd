@@ -85,6 +85,7 @@ func _run() -> void:
 	await _test_a_newer_evaluation_still_preempts_an_older_one()
 	await _test_awaiting_covers_the_debounce_as_well_as_the_worker()
 	await _test_a_check_refuses_geometry_the_document_moved_past()
+	await _test_a_measurement_outrun_by_an_evaluation_is_stamped_stale()
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +382,21 @@ func _test_a_check_refuses_geometry_the_document_moved_past() -> void:
 				and not refused_gap.has("pairs"),
 			"refused = %s" % str(refused_gap))
 
+	# The gauge mounts the evaluated solid in front of its pin, so it is a
+	# measuring verb like the others and is refused on the same terms.
+	var refused_gauge: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_gauge", {"shape": "sphere", "dia_mm": 1.0,
+				"at_mm": [5.0, 5.0, 5.0]})
+	check("stale: the gauge verb is refused inside the debounce too — it "
+			+ "measures the evaluated solid, and a pin answered against the "
+			+ "previous evaluation would be a fit nobody asked about",
+			not bool(refused_gauge.get("checked", true))
+				and bool(refused_gauge.get("stale", false))
+				and str(refused_gauge.get("reason", "")).contains(
+					"buffer newer than evaluation")
+				and not refused_gauge.has("fits"),
+			"refused = %s" % str(refused_gauge))
+
 	# An against= key on a verb that has no pair branch is ignored by that
 	# verb's body: it still measures the evaluated solid, so it must not lift
 	# the gate the way a real reference-against-reference call does.
@@ -465,6 +481,86 @@ func _test_a_check_refuses_geometry_the_document_moved_past() -> void:
 			"broken = %s / measured = %s" % [
 				str(broken.get("evaluation_status", "<absent>")),
 				str(measured.get("evaluation_status", "<absent>"))])
+	_teardown(rig)
+
+
+# ---------------------------------------------------------------------------
+# A MEASUREMENT THE EVALUATION OVERTOOK IS STALE, WHATEVER THE PANEL SAYS NOW
+# ---------------------------------------------------------------------------
+
+## The gate runs before dispatch and the stamp after, and between the two a
+## verb can spend seconds in the worker. A material probe that started against
+## the evaluation of version 1 and returned after version 2 was painted used
+## to be stamped with the state standing at its return — source_version 2,
+## stale false — as if its numbers were about the new shape. The stamp has to
+## compare the painted evaluation before and after the verb, and a change
+## between them is a stale reply naming both versions.
+func _test_a_measurement_outrun_by_an_evaluation_is_stamped_stale() -> void:
+	var rig := _make_rig("cad_panel_outrun")
+	if rig.is_empty():
+		return
+	var panel: Node = rig["panel"]
+	panel._eval_await_chunk_ms = CHUNK_MS
+	panel._eval_give_up_ms = PATIENT_GIVE_UP_MS
+
+	_attach_document(rig, SOURCE)
+	var opened: Array = _evaluations(rig["dispatched"])
+	if opened.is_empty():
+		_teardown(rig)
+		return
+	_reply(rig, str((opened[0] as Dictionary)["reply_id"]), _worker_answer())
+	await create_timer(0.2).timeout
+	var before: Dictionary = panel.evaluation_freshness()
+
+	# The probe goes out against the evaluation standing now, and the worker
+	# (this suite) sits on it.
+	var outcome: Dictionary = {"reply": {}}
+	var probe := func() -> void:
+		outcome["reply"] = await PanelTools.handle(panel,
+				"minerva_cad_material", {"at_mm": [5.0, 5.0, 5.0]})
+	probe.call()
+	await create_timer(0.1).timeout
+	var probes: Array = []
+	for entry in rig["dispatched"]:
+		if str((entry as Dictionary)["channel"]) == "cad.material":
+			probes.append(entry)
+
+	# Meanwhile the document is edited, evaluated and PAINTED.
+	(rig["buffer"] as Object).apply_edit(EDITED_SOURCE)
+	await create_timer(0.4).timeout
+	var dispatched: Array = _evaluations(rig["dispatched"])
+	if dispatched.size() >= 2:
+		_reply(rig, str((dispatched[1] as Dictionary)["reply_id"]), _worker_answer())
+	await create_timer(0.3).timeout
+	var after: Dictionary = panel.evaluation_freshness()
+
+	# Now the worker answers the probe it was sat on.
+	if not probes.is_empty():
+		_reply(rig, str((probes[0] as Dictionary)["reply_id"]), {
+			"ok": true,
+			"result": {"mode": "point", "at_mm": [5.0, 5.0, 5.0],
+				"inside": true, "state": "inside", "body": "part",
+				"body_index": 0, "body_count": 1, "shape_name": "part",
+				"units": "mm"},
+		})
+	await create_timer(0.3).timeout
+	var reply: Dictionary = outcome["reply"]
+	check("outrun: a probe that started against one evaluation and returned "
+			+ "after the next was painted is STALE — stamped with the version "
+			+ "it started against, not the one standing at its return, and "
+			+ "the reason names both",
+			probes.size() == 1
+				and not bool(after.get("stale", true))
+				and int(after["source_version"]) > int(before["source_version"])
+				and bool(reply.get("checked", false))
+				and bool(reply.get("stale", false))
+				and int(reply.get("source_version", -1)) == int(before["source_version"])
+				and str(reply.get("stale_reason", "")).contains(
+					"version %d" % int(before["source_version"]))
+				and str(reply.get("stale_reason", "")).contains(
+					"version %d" % int(after["source_version"])),
+			"before = %s after = %s reply = %s" % [str(before), str(after),
+				str(reply)])
 	_teardown(rig)
 
 

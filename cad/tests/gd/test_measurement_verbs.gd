@@ -614,6 +614,29 @@ func _test_the_gauge_measures_the_evaluated_solid_and_not_only_references() -> v
 				and not nowhere.has("clearance_mm"),
 			"reply=%s" % str(nowhere))
 
+	# THE SOLID THAT COULD NOT BE MOUNTED IS NOT A SOLID THAT WAS CLEAR. With
+	# another check holding the module and no room in its wait line, the
+	# unscoped gauge used to go on against the references alone and answer
+	# fits:true for the very sphere the first assertion found buried. The
+	# verdict is withheld instead, and the reply says why.
+	var held: Dictionary = await checks.call("reserve", false)
+	checks.max_queued_verbs = 0
+	var withheld: Dictionary = await PanelTools.handle(_panel, "minerva_cad_gauge", {
+		"shape": "sphere", "dia_mm": 1.0, "at_mm": [0.0, 0.0, 0.0]})
+	checks.call("release_reservation", int(held.get("ticket", 0)))
+	check("gauge verb: an unscoped gauge whose solid could NOT be mounted "
+			+ "withholds its verdict — fits null, checked false, the reason "
+			+ "naming why the solid went unmeasured — rather than answering "
+			+ "fits from the references alone",
+			int(held.get("ticket", 0)) > 0
+				and bool(withheld.get("success", false))
+				and withheld.has("fits") and withheld["fits"] == null
+				and not bool(withheld.get("checked", true))
+				and str(withheld.get("reason", "")).begins_with("solid not measured:")
+				and not bool((withheld.get("measured_against", {}) as Dictionary)
+					.get("solid", true)),
+			"reply=%s" % str(withheld))
+
 	_panel.checks = null
 	_panel.solid_mesh = {}
 

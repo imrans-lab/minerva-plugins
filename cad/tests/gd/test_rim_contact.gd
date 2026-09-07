@@ -28,9 +28,15 @@ extends SceneTree
 ## that measured offset, and the exactly-coplanar case beside it is the
 ## control that shows the lift is what does it.
 ##
-## THE RULE UNDER TEST is rim_contact.gd: overlap is SHARED MATERIAL, so the
-## four quadrants around the crossing — each one CONTACT_TOLERANCE_MM clear of
-## both surfaces — are asked whether any of them is inside both bodies.
+## THE RULE UNDER TEST is rim_contact.gd: overlap is SHARED MATERIAL, and four
+## samples can only bound it where the two bodies LAND on each other — a face
+## of each, antiparallel within five degrees, found by rays around the
+## crossing. Then the samples one CONTACT_TOLERANCE_MM either side of that
+## plane bound the slab the bodies could share. A crossing with no landing is
+## unproven and stays reported: two faces meeting at any other angle share a
+## wedge, and a wedge thin at the crossing can be deep a little further on.
+## The wedge itself is driven through the rule directly, as half-spaces,
+## before the fixtures.
 ##
 ## THREE CONTROLS, EACH DEFEATING A DIFFERENT CHEAP FIX.
 ##
@@ -65,6 +71,7 @@ extends SceneTree
 ##   scripts/run-gd-tests.sh --plugin cad <path-to-minerva-checkout>
 
 const GeometryChecks := preload("res://../../minerva-plugins/cad/ui/scripts/geometry_checks.gd")
+const RimContact := preload("res://../../minerva-plugins/cad/ui/scripts/rim_contact.gd")
 const MeshGauge := preload("res://../../minerva-plugins/cad/ui/scripts/mesh_gauge.gd")
 const ExpectedContacts := preload("res://../../minerva-plugins/cad/ui/scripts/expected_contacts.gd")
 
@@ -104,13 +111,15 @@ const SPIGOT_CLEAR_RADIUS := 0.9
 const SPIGOT_HEIGHT := 1.0
 
 ## The draft a moulded or printed boss carries: its outer wall leans out on
-## the way down, so the wall's normal is TEN DEGREES off the plate's underside
-## normal instead of square to it. That is the angle at which the two axes the
-## rim rule samples along have to be orthogonalized against each other — an
-## offset along one of two oblique axes eats the clearance from the other, and
-## the sample ends up a fraction of the tolerance from a surface it was meant
-## to be one whole tolerance clear of.
+## the way down, so the crossing the plate's edges make on it lies a hair
+## OUTSIDE the seat's rim, where a ray fired straight along the seat's
+## boundary misses the seat. The landing the rule needs is still there — the
+## seat under the plate's underside — and has to be found from behind the
+## drafted wall rather than at the crossing itself.
 const BOSS_DRAFT_DEG := 10.0
+## The wedge two half-spaces share when their faces are this far from
+## antiparallel: thin at the crossing, unbounded beyond it.
+const WEDGE_DEG := 10.0
 
 ## The plate no probe fits inside, and the bite taken out of it. Both are
 ## smaller than the contact tolerance the rim rule measures with, which is the
@@ -148,6 +157,7 @@ func check(label: String, ok: bool, detail: String = "") -> void:
 
 
 func _run() -> void:
+	_wedge_rule()
 	var plate := _hole_plate(PLATE_THICKNESS)
 	check("fixture: the plate's hole lies wholly INSIDE the boss's clearance "
 			+ "bore — the coaxial seat the bug is about, where every crossing "
@@ -260,9 +270,9 @@ func _run() -> void:
 	checks.build_solid(_drafted_boss(NOISE_LIFT_MM))
 	var drafted: Dictionary = await _submit(gauge, checks)
 	check("a boss whose outer wall carries ten degrees of draft is a contact "
-			+ "at the same seat: the two surfaces meeting at the rim are "
-			+ "oblique, and the samples are still one whole tolerance clear "
-			+ "of each of them",
+			+ "at the same seat: the crossings lie on the drafted wall, a hair "
+			+ "outside the seat's rim, and the landing is the seat found "
+			+ "from behind that wall",
 			bool(drafted.get("checked", false))
 				and int(drafted.get("count", 0)) == 0
 				and int(drafted.get("point_count", 0)) == 0,
@@ -282,6 +292,65 @@ func _run() -> void:
 
 	await _declarations(gauge, checks, plate)
 	await _swapped_roles(gauge, checks, plate)
+
+
+## THE WEDGE, driven through the rule as two half-spaces. The crossed body
+## occupies x < 0 (its face's normal +X) and the other occupies the side of a
+## plane through the origin whose normal is WEDGE_DEG from -X. Every quadrant
+## sample a tolerance from the crossing lies in at most one of them, so a
+## rule that read separate witnesses as no shared material called this
+## touching — while (-0.1t, 2t) is inside both, and the wedge only widens
+## from there. The control beside it is the same pair with the other face
+## antiparallel and a tenth of a tolerance into the crossed body: a slab
+## thinner than the tolerance, which is the contact the rule exists to
+## clear — so an answer of "unproven for everything" fails this too.
+func _wedge_rule() -> void:
+	var tolerance: float = ExpectedContacts.CONTACT_TOLERANCE_MM
+	var crossed_normal := Vector3.RIGHT
+	var wedge_normal := Vector3(-cos(deg_to_rad(WEDGE_DEG)),
+		-sin(deg_to_rad(WEDGE_DEG)), 0.0)
+	# The edge that found the crossing lies in the other body's face.
+	var wedge_edge := Vector3.BACK
+	var wedge: int = RimContact.classify(Vector3.ZERO, crossed_normal,
+		wedge_edge,
+		_half_space_ray(crossed_normal, 0.0), _half_space_ray(wedge_normal, 0.0),
+		_half_space_inside(crossed_normal, 0.0),
+		_half_space_inside(wedge_normal, 0.0), tolerance)
+	var slab_normal := Vector3.LEFT
+	var slab: int = RimContact.classify(Vector3.ZERO, crossed_normal,
+		Vector3.BACK,
+		_half_space_ray(crossed_normal, 0.0),
+		_half_space_ray(slab_normal, 0.1 * tolerance),
+		_half_space_inside(crossed_normal, 0.0),
+		_half_space_inside(slab_normal, 0.1 * tolerance), tolerance)
+	check("rule: two half-spaces whose faces meet ten degrees from "
+			+ "antiparallel share a WEDGE and are unproven — kept as "
+			+ "interference — while the same pair landing antiparallel a tenth "
+			+ "of a tolerance deep is a touch",
+			wedge == RimContact.Verdict.UNPROVEN
+				and slab == RimContact.Verdict.TOUCHING,
+			"wedge = %d slab = %d (crossing 0, touching 1, unproven 2)"
+				% [wedge, slab])
+
+
+## The ray into the half-space {p . normal < offset} — so a positive offset
+## moves its face INTO the body whose face has the opposite normal: the
+## segment hits the face when it enters from outside, and reports the face's
+## outward normal.
+func _half_space_ray(normal: Vector3, offset: float) -> Callable:
+	return func(from: Vector3, to: Vector3) -> Dictionary:
+		var start := from.dot(normal) - offset
+		var finish := to.dot(normal) - offset
+		if start <= 0.0 or finish >= 0.0:
+			return {}
+		var position := from.lerp(to, start / (start - finish))
+		return {"position": position, "normal": normal}
+
+
+## The parity probe of the same half-space.
+func _half_space_inside(normal: Vector3, offset: float) -> Callable:
+	return func(point: Vector3) -> int:
+		return 1 if point.dot(normal) - offset < 0.0 else 0
 
 
 ## What a region drawn round the seat is worth, and what it is not.

@@ -27,6 +27,9 @@ const PanelTools := preload("res://../../minerva-plugins/cad/ui/panel_tools.gd")
 ## Each binding evaluated once per document. The count it saves is what the
 ## evaluate-once case reads.
 const PartCache := preload("res://../../minerva-plugins/cad/ui/scripts/part_cache.gd")
+## The resolver the cache is filled through, driven directly for the case
+## where the document moves while the worker is evaluating a binding.
+const PartScope := preload("res://../../minerva-plugins/cad/ui/scripts/part_scope.gd")
 
 ## The gap this design has to keep, in millimetres, and the pinch that fails it.
 const REQUIRED_MM := 1.0
@@ -71,6 +74,7 @@ func _run() -> void:
 	await _check_a_finished_part_failing_is_not_lost_behind_a_ticket()
 	await _check_parts_share_one_clearance_window()
 	await _check_every_binding_is_evaluated_once()
+	await _check_a_part_of_the_old_document_is_not_filed_under_the_new()
 	await _check_a_ticket_start_leg_never_aggregates_to_pass()
 	await _check_a_stale_leg_never_folds_to_pass()
 	await _check_a_leg_with_no_verdict_never_aggregates_to_pass()
@@ -726,6 +730,45 @@ func _check_every_binding_is_evaluated_once() -> void:
 				and PartCache.part_count(panel) == parts.size(),
 			"evaluate_calls = %d, cached = %d" % [panel.evaluate_calls,
 				PartCache.part_count(panel)])
+	panel.free()
+	PartCache.clear()
+
+
+## ORACLE: a resolve that goes to the worker for the document at S1 must not
+## file its answer once the document is at S2. The stand-in's worker answers a
+## frame later; in that frame the document is edited and the store retained
+## for the new digest (what any other verb's first leg does). The answer that
+## comes back is about S1 and the store must hold nothing under S2 — a slot
+## that filed it would hand every later leg a part of a document that no
+## longer exists — and the caller is told the answer was not kept.
+func _check_a_part_of_the_old_document_is_not_filed_under_the_new() -> void:
+	PartCache.clear()
+	var panel := _panel()
+	panel.document_source = "bottom = cube(10, 10, 10)\ntop = cube(10, 10, 2)\n"
+	var outcome: Dictionary = {"resolved": {}}
+	var resolve := func() -> void:
+		outcome["resolved"] = await PartScope.resolve(panel, "top")
+	resolve.call()
+	# The worker has been asked (one frame's delay stands in for it) and the
+	# document moves under it.
+	panel.document_source += "lid = cube(2, 2, 2)\n"
+	PartCache.retain(panel, PartCache.digest(panel.document_source))
+	await process_frame
+	await process_frame
+	var resolved: Dictionary = outcome["resolved"]
+	check("moved-under: a binding evaluated from the source before an edit "
+			+ "is answered but NOT filed under the document standing now — "
+			+ "the store holds no part for it and the answer says it was not "
+			+ "kept",
+			panel.evaluate_calls == 1
+				and not resolved.is_empty()
+				and not resolved.has("error")
+				and PartCache.part_count(panel) == 0
+				and PartCache.part(panel, "top").is_empty()
+				and str(resolved.get("note", "")).contains("moved past"),
+			"evaluate_calls = %d, cached = %d, resolved = %s" % [
+				panel.evaluate_calls, PartCache.part_count(panel),
+				str(resolved)])
 	panel.free()
 	PartCache.clear()
 

@@ -37,6 +37,20 @@ zero-length interval that changes no verdict, and a tangential graze that
 touches without entering is an interval whose midpoint is outside. The parity
 of the hit count is never consulted, so it can never lie.
 
+WHAT THE MERGE CAN HIDE, AND HOW THAT IS SAID. A seam's two hits are the same
+parameter to the last bit. Two hits that are NOT the same parameter but still
+closer than HIT_MERGE_MM are a different thing: a wall thinner than the merge
+width, whose entry and exit collapse into one place and whose material is then
+never asked about. Such a merge is recorded as an UNCERTAIN BOUNDARY — the
+reply lists them and marks segments_certified false — and the raw hits travel
+beside the merged ones so a reader can see what was collapsed.
+
+AN UNSOUND BODY WITHHOLDS THE WALK. A reversed or open body inverts the
+classifier, so a ray that meets one has no segments: they, the total and
+started_inside are null with the reason, and only the raw face hits are
+reported. A ray that meets no face of an unsound body is walked against the
+sound bodies alone and says which bodies it left out.
+
 EVERY LENGTH IS A MILLIMETRE, in the solid's own frame — which is also the
 panel's world frame, because the evaluated solid is never posed.
 """
@@ -57,6 +71,11 @@ CLASSIFY_TOLERANCE_MM = 1.0e-7
 #: is what a coincident-face seam produces, and the merge is why it cannot
 #: split a slab in two or erase one.
 HIT_MERGE_MM = 1.0e-6
+
+#: Two hits closer than this are the same parameter by arithmetic, not by
+#: geometry: a seam's doubled hit. Anything wider that still merges is a wall
+#: too thin for the merge, and is reported as uncertain rather than dropped.
+HIT_NOISE_MM = 1.0e-12
 
 #: How far along the ray the walk looks when the caller does not say.
 DEFAULT_MAX_DISTANCE_MM = 10000.0
@@ -171,11 +190,14 @@ def _bodies(occt: dict, shape) -> list:
         classifier = occt["BRepClass3d_SolidClassifier"](solid)
         classifier.PerformInfinitePoint(CLASSIFY_TOLERANCE_MM)
         out.append({
+            "solid": solid,
             "classifier": classifier,
             "orientation_ok": classifier.State() == occt["TopAbs_OUT"],
             "closed": _shells_closed(occt, solid),
         })
         explorer.Next()
+    for body in out:
+        body["sound"] = body["orientation_ok"] and body["closed"]
     return out
 
 
@@ -194,8 +216,7 @@ def _shells_closed(occt: dict, solid) -> bool:
 
 def _unsound(bodies: list) -> list:
     """The indices of the bodies whose containment verdict cannot be trusted."""
-    return [index for index, body in enumerate(bodies)
-            if not body["orientation_ok"] or not body["closed"]]
+    return [index for index, body in enumerate(bodies) if not body["sound"]]
 
 
 def _unsound_reason(bodies: list, unsound: list) -> str:
@@ -246,9 +267,15 @@ def _classify(occt: dict, bodies: list, point, tolerance: float) -> tuple:
     A point ON a face is reported as such and is NOT counted as inside: a
     surface is where material stops, and calling the boundary material would
     make a zero-thickness floor read as a floor.
+
+    Only the SOUND bodies answer. An unsound one reports the outside as inside,
+    and a single such body would otherwise make every point on every ray read
+    as material; the callers decide what its absence from the verdict means.
     """
     on_index = -1
     for index, body in enumerate(bodies):
+        if not body["sound"]:
+            continue
         classifier = body["classifier"]
         classifier.Perform(point, tolerance)
         state = classifier.State()
@@ -304,13 +331,12 @@ def _point_answer(occt: dict, shape, bodies: list, at: tuple,
     return out
 
 
-def _hits(occt: dict, shape, origin: tuple, direction: tuple,
-          max_distance: float) -> list:
-    """Distances along the ray where it meets a face, forward only, merged.
+def _raw_hits(occt: dict, shape, origin: tuple, direction: tuple,
+              max_distance: float) -> list:
+    """Every parameter along the ray where it meets a face of `shape`, sorted.
 
     The line is infinite in both directions, so hits behind the origin are
-    dropped here rather than confusing the walk. Hits within HIT_MERGE_MM of
-    each other are one place — that is the coincident seam.
+    dropped here rather than confusing the walk.
     """
     line = occt["gp_Lin"](occt["gp_Pnt"](*origin), occt["gp_Dir"](*direction))
     walker = occt["BRepIntCurveSurface_Inter"]()
@@ -322,12 +348,32 @@ def _hits(occt: dict, shape, origin: tuple, direction: tuple,
             raw.append(max(w, 0.0))
         walker.Next()
     raw.sort()
+    return raw
+
+
+def _hits(raw: list) -> tuple:
+    """(merged, uncertain): the raw hits with runs closer than HIT_MERGE_MM
+    collapsed to one place, and the places where that collapse swallowed a
+    hit at a DIFFERENT parameter — a wall thinner than the merge width, whose
+    material the walk can no longer ask about.
+    """
     merged: list = []
+    uncertain: list = []
     for w in raw:
         if merged and w - merged[-1] <= HIT_MERGE_MM:
+            if w - merged[-1] > HIT_NOISE_MM and merged[-1] not in uncertain:
+                uncertain.append(merged[-1])
             continue
         merged.append(w)
-    return merged
+    return merged, uncertain
+
+
+def _touched(occt: dict, bodies: list, indices: list, origin: tuple,
+             direction: tuple, max_distance: float) -> list:
+    """Which of the bodies at `indices` the ray meets a face of."""
+    return [index for index in indices
+            if _raw_hits(occt, bodies[index]["solid"], origin, direction,
+                         max_distance)]
 
 
 def _walk(occt: dict, shape, bodies: list, origin: tuple, direction: tuple,
@@ -352,7 +398,37 @@ def _walk(occt: dict, shape, bodies: list, origin: tuple, direction: tuple,
                 origin[1] + direction[1] * w,
                 origin[2] + direction[2] * w)
 
-    hits = _hits(occt, shape, origin, direction, max_distance)
+    raw = _raw_hits(occt, shape, origin, direction, max_distance)
+    hits, uncertain = _hits(raw)
+    payload = {
+        "mode": "ray",
+        "from_mm": list(origin),
+        "direction_mm": list(direction),
+        "max_distance_mm": max_distance,
+        "surface_crossings": len(hits),
+        # Every face the ray met, before the merge: what the walk was given.
+        "raw_hits": [{"at_mm": w, "point_mm": list(at(w))} for w in raw],
+    }
+
+    # A ray that meets an unsound body has no walk: the classifier it would
+    # be decided by is inverted there, and the sound bodies alone cannot say
+    # what lies between the hits it left.
+    unsound = _unsound(bodies)
+    touched = _touched(occt, bodies, unsound, origin, direction, max_distance)
+    if touched:
+        payload.update({
+            "count": None,
+            "segments": None,
+            "total_thickness_mm": None,
+            "started_inside": None,
+            "unbounded": None,
+            "segments_certified": False,
+            "reason": ("this ray meets %s, so no segment is certified: "
+                       % ", ".join("body %d" % index for index in touched))
+                      + _unsound_reason(bodies, touched),
+        })
+        return payload
+
     cuts = [0.0] + [w for w in hits if w > 0.0] + [max_distance]
     runs: list = []
     for index in range(len(cuts) - 1):
@@ -392,18 +468,32 @@ def _walk(occt: dict, shape, bodies: list, origin: tuple, direction: tuple,
             "body_index": run["body_index"],
         })
     started_inside = bool(segments) and segments[0]["entry_mm"] <= 0.0
-    return {
-        "mode": "ray",
-        "from_mm": list(origin),
-        "direction_mm": list(direction),
-        "max_distance_mm": max_distance,
+    payload.update({
         "count": len(segments),
         "segments": segments,
         "total_thickness_mm": sum(s["thickness_mm"] for s in segments),
         "started_inside": started_inside,
-        "surface_crossings": len(hits),
         "unbounded": unbounded,
-    }
+        "uncertain_boundaries": {
+            "count": len(uncertain),
+            "parameters_mm": list(uncertain),
+            "points_mm": [list(at(w)) for w in uncertain],
+        },
+        "segments_certified": not uncertain,
+    })
+    if uncertain:
+        payload["reason"] = (
+            "%d boundar%s merged face hits that were distinct but closer than "
+            "%g mm: material thinner than that may lie there and is not in "
+            "the segments — see uncertain_boundaries and raw_hits"
+            % (len(uncertain), "y" if len(uncertain) == 1 else "ies",
+               HIT_MERGE_MM))
+    if unsound:
+        payload["note"] = ("%s unsound and left out of this walk; the ray "
+                           "meets no face of %s"
+                           % (", ".join("body %d is" % i for i in unsound),
+                              "it" if len(unsound) == 1 else "them"))
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -512,21 +602,18 @@ def material(params: dict) -> dict:
     unsound = _unsound(bodies)
     if unsound:
         payload["unsound_bodies"] = unsound
-        payload.setdefault("reason", _unsound_reason(bodies, unsound))
+        if payload["mode"] == "point":
+            payload.setdefault("reason", _unsound_reason(bodies, unsound))
     # The body a run or a point is IN, named. It is deliberately not called
     # `part`: the panel's verb layer calls the binding it probed `part` (which
     # shape the question was about), and this says which solid of it the answer
     # landed in — "" for a probe that landed in air. A compound's solids have
     # no names of their own, so they are numbered under the binding's.
-    if unsound and payload["mode"] == "ray":
-        # The runs are still reported: they are where the ray met faces. What
-        # is withheld is any claim that being between two of them is material.
-        payload["segments_certified"] = False
     if payload["mode"] == "point":
         payload["body"] = _body_name(shape_name, int(payload["body_index"]),
                                      len(bodies))
     else:
-        for segment in payload["segments"]:
+        for segment in payload["segments"] or []:
             segment["body"] = _body_name(shape_name,
                                          int(segment["body_index"]),
                                          len(bodies))
@@ -537,7 +624,10 @@ def material(params: dict) -> dict:
         "classifying its midpoint, so a coincident-face seam cannot flip a "
         "parity that is never counted; two bodies sharing a face are two "
         "segments with contiguous_with_previous set and their thicknesses "
-        "already summed into total_thickness_mm"
+        "already summed into total_thickness_mm; segments_certified is false "
+        "when a merge swallowed distinct hits (uncertain_boundaries) or the "
+        "ray met an unsound body, and raw_hits are the face hits before any "
+        "merge"
     )
     return {"ok": True, "result": payload}
 

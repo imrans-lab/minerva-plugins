@@ -149,10 +149,16 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 	var reply: Dictionary = await _dispatch(panel, tool_name, args)
 	if not _Freshness.STAMPED_VERBS.has(tool_name):
 		return reply
-	# Read AGAIN: the document can change while a measurement runs, and a
-	# reply stamped with the state before it would say the geometry it
-	# describes is current when it no longer is.
-	return _Freshness.stamp(reply, _Freshness.read(panel))
+	# Read AGAIN: the document can change while a measurement runs. A reply
+	# stamped only with the state before it would say the geometry it
+	# describes is current when it no longer is; one stamped only with the
+	# state after would claim the NEW evaluation for numbers measured
+	# against the old one. A painted evaluation that moved in between makes
+	# the reply stale, with both versions named.
+	var after: Dictionary = _Freshness.read(panel)
+	if _Freshness.outrun(tool_name, freshness, after):
+		return _Freshness.stamp_moved(reply, freshness, after)
+	return _Freshness.stamp(reply, after)
 
 
 static func _dispatch(panel, tool_name: String, args: Dictionary) -> Dictionary:
@@ -407,6 +413,29 @@ static func _gauge(panel, args: Dictionary) -> Dictionary:
 		_GaugeSolid.release(solid)
 		return _err("nothing to gauge against: no reference mesh is mounted "
 			+ "and %s" % str(solid.get("reason", "there is no evaluated solid")))
+	# AN UNSCOPED GAUGE WHOSE SOLID WENT UNMEASURED HAS NO VERDICT. The
+	# question was about everything the pin could run into, and the part
+	# being modelled is there but was not measured — another check holds it,
+	# or its collider could not be built — so `fits` from the references
+	# alone would answer yes to a pin buried in the solid. The verdict is
+	# withheld and the reason named; reference= is the way to ask about the
+	# references alone on purpose. A document with no solid geometry is
+	# different: there is nothing the references could be hiding.
+	if asked.is_empty() and bool(solid.get("unmeasured", false)):
+		return _ok({
+			"units": "mm",
+			"checked": false,
+			"fits": null,
+			"contacts": [],
+			"reason": "solid not measured: %s" % str(solid.get("reason",
+				"the evaluated solid could not be mounted")),
+			"measured_against": {
+				"reference_colliders": colliders,
+				"solid": false,
+				"solid_triangles": 0,
+				"solid_reason": str(solid.get("reason", "")),
+			},
+		})
 
 	var result: Dictionary = await gauge.call("submit", "gauge", {
 		"shape": shape,

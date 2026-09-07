@@ -100,10 +100,19 @@ static func part(panel: Object, part_name: String) -> Dictionary:
 
 ## Keep a binding's evaluation. `resolved` is part_scope's own reply shape and
 ## is stored as handed over; the caller owns it afterwards.
-static func put_part(panel: Object, part_name: String, resolved: Dictionary) -> void:
+##
+## FILED ONLY UNDER THE DOCUMENT IT WAS EVALUATED FROM. `document_digest` is
+## the digest the caller read before it went to the worker; the slot may have
+## been retained for a newer document while the worker was busy, and a part
+## of the old source filed under the new one would answer every later leg
+## about a shape the document no longer has. Returns whether it was filed.
+static func put_part(panel: Object, part_name: String, resolved: Dictionary,
+		document_digest: String) -> bool:
 	var slot := _slot(panel)
 	if slot.is_empty() or resolved.is_empty():
-		return
+		return false
+	if str(slot["document"]) != document_digest:
+		return false
 	var parts: Dictionary = slot["parts"]
 	var order: Array = slot["order"]
 	if not parts.has(part_name):
@@ -112,6 +121,7 @@ static func put_part(panel: Object, part_name: String, resolved: Dictionary) -> 
 	while order.size() > MAX_PARTS:
 		var evicted := str(order.pop_front())
 		parts.erase(evicted)
+	return true
 
 
 ## The interference report measured against the source whose digest is

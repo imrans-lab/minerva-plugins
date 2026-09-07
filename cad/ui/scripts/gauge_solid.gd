@@ -26,10 +26,14 @@ extends RefCounted
 
 ## Mount the panel's evaluated solid for one gauge call.
 ##
-## Returns {mounted, triangles, checks, ticket} — `mounted` false with a
-## `reason` when there is no solid to mount or the module is busy, which is
-## never fatal on its own: a gauge against the references alone is still an
-## answer, and the caller reports what it measured against.
+## Returns {mounted, triangles, checks, ticket, unmeasured} — `mounted` false
+## with a `reason` when there is no solid to mount or the module is busy.
+## `unmeasured` tells the two apart: a document with no solid geometry has
+## nothing a gauge could miss, and the references alone are the whole answer;
+## a solid that IS there but could not be put in front of the pin — the
+## module held by another check, its collider unbuildable — is one the
+## caller's verdict has to withhold, because a pin buried in it would read
+## as fitting.
 static func mount(panel: Object) -> Dictionary:
 	if panel == null or not is_instance_valid(panel) \
 			or not panel.has_method("get_geometry_checks"):
@@ -47,12 +51,13 @@ static func mount(panel: Object) -> Dictionary:
 	var reservation: Dictionary = await checks.call("reserve", false)
 	var ticket := int(reservation.get("ticket", 0))
 	if ticket == 0:
-		return _absent("another check holds this panel's geometry; the gauge "
-			+ "measured against the mounted references only")
+		return _absent("another check holds this panel's geometry: %s"
+			% str(reservation.get("reason", "the reservation was refused")), true)
 	var triangles := int(checks.call("build_solid", mesh_data, ticket, ""))
 	if triangles <= 0:
 		checks.call("release_reservation", ticket)
-		return _absent("the evaluation produced no solid geometry to gauge against")
+		return _absent("the evaluation's mesh built no collider to gauge "
+			+ "against", true)
 	# The synchronous phase — welding a keyless render target, which is every
 	# triangle of the part — ends here; past this point mesh_gauge times its
 	# own job out. The reclaim clock is restarted rather than charged for
@@ -76,6 +81,6 @@ static func release(mounted: Dictionary) -> void:
 		checks.call("release_reservation", int(mounted.get("ticket", 0)))
 
 
-static func _absent(reason: String) -> Dictionary:
+static func _absent(reason: String, unmeasured: bool = false) -> Dictionary:
 	return {"mounted": false, "triangles": 0, "checks": null, "ticket": 0,
-		"reason": reason}
+		"reason": reason, "unmeasured": unmeasured}

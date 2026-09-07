@@ -417,8 +417,8 @@ func _mesh_vertices(mesh: Mesh, xform: Transform3D) -> PackedVector3Array:
 # ---------------------------------------------------------------------------
 
 ## Is this crossing of a REFERENCE surface a rim touch rather than an overlap?
-## The rule is rim_contact.gd's; what is here is the two spaces it needs, the
-## budget, and what a verdict does — a proven touch is recorded as a contact,
+## The rule is rim_contact.gd's; what is here is the two spaces it needs (a
+## ray and a parity probe into each body), the budget, and what a verdict does — a proven touch is recorded as a contact,
 ## and a proven overlap closes the gate for the rest of that pair, whose
 ## crossings the rule can no longer change.
 func _rim_touching_reference(
@@ -438,6 +438,7 @@ func _rim_touching_reference(
 		return false
 	var verdict: int = _RimContact.classify(
 		point, hit.get("normal", Vector3.ZERO), direction,
+		_reference_probe.bind(gauge, state, reference_name, node_path),
 		_solid_probe.bind(solid_state),
 		_reference_inside.bind(gauge, state, reference_name, node_path),
 		_solid_inside.bind(solid_state),
@@ -462,6 +463,7 @@ func _rim_touching_solid(
 		return false
 	var verdict: int = _RimContact.classify(
 		point, hit.get("normal", Vector3.ZERO), direction,
+		_solid_probe.bind(solid_state),
 		_reference_probe.bind(gauge, state, reference_name, node_path),
 		_solid_inside.bind(solid_state),
 		_reference_inside.bind(gauge, state, reference_name, node_path),

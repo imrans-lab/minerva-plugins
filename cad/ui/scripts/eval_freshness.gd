@@ -35,9 +35,11 @@ extends RefCounted
 ## Consumers: ui/panel_tools.gd, around the verb dispatch.
 
 ## The verbs that MEASURE, and so must not run against geometry the document
-## has moved past. minerva_cad_await_eval is deliberately not among them: it is
-## the way out of a stale panel.
+## has moved past. The gauge is one of them: it mounts the evaluated solid in
+## front of its pin. minerva_cad_await_eval is deliberately not among them: it
+## is the way out of a stale panel.
 const MEASURING_VERBS: Array = [
+	"minerva_cad_gauge",
 	"minerva_cad_material",
 	"minerva_cad_check_interference",
 	"minerva_cad_check_clearance",
@@ -52,6 +54,7 @@ const MEASURING_VERBS: Array = [
 ## says which evaluation it is of.
 const STAMPED_VERBS: Array = [
 	"minerva_cad_snapshot_posed",
+	"minerva_cad_gauge",
 	"minerva_cad_material",
 	"minerva_cad_check_interference",
 	"minerva_cad_check_clearance",
@@ -95,6 +98,41 @@ static func refusal(freshness: Dictionary) -> Dictionary:
 		"measured": false,
 	}
 	return stamp(reply, freshness)
+
+
+## The verb that waits for the next evaluation to paint. The painted
+## evaluation moving under it is its whole purpose, never a staleness.
+const AWAIT_VERB: String = "minerva_cad_await_eval"
+
+
+## Was this verb overtaken: did the panel paint a different evaluation
+## between `before` and `after`, read around its dispatch? A measurement that
+## started against one evaluation and returned after another was painted
+## describes geometry the reply's own stamp would call current.
+static func outrun(tool_name: String, before: Dictionary,
+		after: Dictionary) -> bool:
+	if tool_name == AWAIT_VERB:
+		return false
+	if not bool(before.get("known", false)) or not bool(after.get("known", false)):
+		return false
+	return int(before.get("source_version", -1)) != int(after.get("source_version", -1)) \
+		or float(before.get("evaluated_at", 0.0)) != float(after.get("evaluated_at", 0.0))
+
+
+## The stamp for a reply whose verb ran while the painted evaluation moved:
+## stamped with the state it STARTED against, stale, and the reason naming
+## both versions. The numbers were measured against the earlier evaluation
+## (or an unknowable mix of the two), and neither is what the document shows.
+static func stamp_moved(reply: Dictionary, before: Dictionary,
+		after: Dictionary) -> Dictionary:
+	reply["stale"] = true
+	reply["stale_reason"] = ("the evaluation changed while this call ran: it "
+		+ "started against the evaluation of version %d and version %d was "
+		+ "painted before it returned, so the numbers describe geometry the "
+		+ "document no longer shows — call again now that it is settled") \
+		% [int(before.get("source_version", -1)),
+			int(after.get("source_version", -1))]
+	return stamp(reply, before)
 
 
 ## The five fields on a reply that is going out. A reply from a panel that

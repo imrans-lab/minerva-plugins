@@ -405,3 +405,75 @@ def test_a_thin_wall_survives_a_coarse_tolerance() -> None:
     }))
     assert answer["count"] == 1
     assert answer["total_thickness_mm"] == pytest.approx(0.3, abs=1.0e-6)
+
+
+def test_a_wall_thinner_than_the_merge_width_is_uncertain_not_absent() -> None:
+    """A 0.0000005 mm wall is reported as an uncertain boundary, never as air.
+
+    THE ORACLE. The walk merges hits closer than HIT_MERGE_MM (1e-6 mm) into
+    one place, which is what a coincident seam needs. A wall thinner than that
+    has its entry and exit merged too, so the interval that was the wall no
+    longer exists: count 0, total_thickness_mm 0 and nothing in the reply to
+    say a face pair was swallowed — the verb that exists to find missing
+    material erasing the material it found. The merge is kept, and the swallow
+    is REPORTED: the boundary is listed as uncertain, the segments are marked
+    uncertified with the reason, and both raw hits still travel.
+
+    The control is the seam fixture, whose doubled hit is the SAME parameter
+    to the last bit: that merge hides nothing and stays certified.
+    """
+    answer = _ok(material({
+        "source": "wall = cube(10, 10, 0.0000005)",
+        "from_mm": [5.0, 5.0, -5.0],
+        "direction_mm": [0, 0, 1],
+    }))
+    assert answer["segments_certified"] is False
+    assert answer["uncertain_boundaries"]["count"] == 1
+    assert answer["uncertain_boundaries"]["parameters_mm"] == pytest.approx(
+        [5.0], abs=1.0e-9)
+    assert len(answer["raw_hits"]) == 2
+    assert [hit["at_mm"] for hit in answer["raw_hits"]] == pytest.approx(
+        [5.0, 5.0000005], abs=1.0e-12)
+    assert "thinner" in answer["reason"]
+
+    occt = mat._occt()
+    compound = _stacked_compound()
+    seam = mat._walk(occt, compound, mat._bodies(occt, compound),
+                     (PROBE_X, PROBE_Y, RAY_Z), (0.0, 0.0, -1.0), 100.0)
+    assert seam["segments_certified"] is True
+    assert seam["uncertain_boundaries"]["count"] == 0
+    assert len(seam["raw_hits"]) == 4
+    assert _ray(TRAY)["segments_certified"] is True
+
+
+def test_a_ray_through_an_unsound_body_withholds_its_segments() -> None:
+    """A ray meeting a reversed box has null segments and its raw hits.
+
+    THE ORACLE. The walk decides each interval by classifying its midpoint,
+    and on a reversed body the classifier is inverted: the ray used to come
+    back with segments and a total_thickness_mm read off that inversion,
+    flagged only segments_certified false. Nothing between the hits can be
+    certified, so segments, total and started_inside are null with the reason
+    naming the body, and the face hits are all that is reported. A ray that
+    meets no face of the unsound body is still walked, against the sound
+    bodies alone, and says which body it left out.
+    """
+    occt = mat._occt()
+    shape = _reversed_box()
+    bodies = mat._bodies(occt, shape)
+
+    answer = mat._walk(occt, shape, bodies, (5.0, 5.0, -5.0), (0.0, 0.0, 1.0), 100.0)
+    assert answer["segments"] is None
+    assert answer["count"] is None
+    assert answer["total_thickness_mm"] is None
+    assert answer["started_inside"] is None
+    assert answer["segments_certified"] is False
+    assert "body 0" in answer["reason"]
+    assert [hit["at_mm"] for hit in answer["raw_hits"]] == pytest.approx(
+        [5.0, 15.0], abs=1.0e-9)
+
+    missed = mat._walk(occt, shape, bodies, (50.0, 50.0, -5.0), (0.0, 0.0, 1.0), 100.0)
+    assert missed["segments"] == []
+    assert missed["raw_hits"] == []
+    assert "left out" in missed["note"]
+
