@@ -28,7 +28,7 @@ const PANEL_SCENE_PATH := "res://../../minerva-plugins/cad/ui/CADPanel.tscn"
 ## parsed from outside Minerva's res:// tree, and the paths are pinned in
 ## tests/gd/REQUIRED_HOST_FILES so a host refactor fails by name.
 const DocumentBufferScript := preload("res://Scripts/Services/Documents/DocumentBuffer.gd")
-const PanelBrokerScript := preload("res://Scripts/Services/Plugins/PluginScenePanelBroker.gd")
+const PANEL_BROKER_PATH := "res://Scripts/Services/Plugins/PluginScenePanelBroker.gd"
 ## The panel's MCP verb surface, which is where the staleness guard sits.
 const PanelTools := preload("res://../../minerva-plugins/cad/ui/panel_tools.gd")
 
@@ -51,6 +51,16 @@ const CHUNK_MS := 60
 ## Long enough that the waits in this suite never reach it, except where a
 ## give-up is what is being tested.
 const PATIENT_GIVE_UP_MS := 30000
+
+class WaitPanel extends Node:
+	var known := true
+	var effective_timeout := -1
+	func evaluation_freshness() -> Dictionary:
+		return {"known": known, "stale": true, "evaluation_status": "ok", "source_version": 1}
+	func await_evaluation(timeout_ms: int) -> Dictionary:
+		effective_timeout = timeout_ms
+		await get_tree().create_timer(timeout_ms / 1000.0).timeout
+		return {"timed_out": true, "waited_ms": timeout_ms, "last_eval": {"status": "ok"}}
 
 var _pass: int = 0
 var _fail: int = 0
@@ -79,6 +89,7 @@ func _run() -> void:
 		document.store_string(SOURCE)
 		document.close()
 
+	await _test_pending_wait_contract()
 	await _test_a_slow_answer_is_still_painted()
 	await _test_one_open_is_one_evaluation()
 	await _test_giving_up_is_said_out_loud()
@@ -592,7 +603,7 @@ func _make_rig(panel_name: String) -> Dictionary:
 		return {}
 	root.add_child(panel)
 
-	var broker = PanelBrokerScript.new()
+	var broker = load(PANEL_BROKER_PATH).new()
 	broker.register_panel(panel, "cad", panel_name,
 			PackedStringArray(["cad.evaluate", "cad.cancel_eval"]))
 	# register_panel also wires the panel's `request` signal to the broker's
@@ -726,3 +737,16 @@ func check(desc: String, ok: bool, detail: String = "") -> void:
 			printerr("  FAIL: %s — %s" % [desc, detail])
 		else:
 			printerr("  FAIL: %s" % desc)
+
+
+func _test_pending_wait_contract() -> void:
+	var panel := WaitPanel.new()
+	root.add_child(panel)
+	var reply := await PanelTools.handle(panel, "minerva_cad_await_eval", {"timeout_ms": 0})
+	check("wait timeout declares pending independently of the old successful model",
+		reply.get("status") == "pending" and reply.get("evaluation_status") == "ok")
+	check("zero-time polls have a bounded active wait", panel.effective_timeout == 50)
+	panel.known = false
+	reply = await PanelTools.handle(panel, "minerva_cad_await_eval", {"timeout_ms": 0})
+	check("unknown freshness still carries an explicit continuation status", reply.get("status") == "pending")
+	panel.queue_free()

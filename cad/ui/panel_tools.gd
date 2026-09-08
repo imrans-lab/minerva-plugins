@@ -543,11 +543,12 @@ static func _await_eval(panel, args: Dictionary) -> Dictionary:
 	if panel == null or not panel.has_method("await_evaluation"):
 		return _err("this panel cannot report evaluation status")
 	var timeout_ms := int(args.get("timeout_ms", DEFAULT_AWAIT_TIMEOUT_MS))
-	timeout_ms = clampi(timeout_ms, 0, MAX_AWAIT_TIMEOUT_MS)
+	timeout_ms = clampi(timeout_ms, 50, MAX_AWAIT_TIMEOUT_MS)
 	var settled: Dictionary = await panel.await_evaluation(timeout_ms)
 	if not is_instance_valid(panel):
 		return _err("the CAD panel closed while its evaluation was awaited")
 	var payload := {
+		"status": "pending" if bool(settled.get("timed_out", false)) else "completed",
 		"timed_out": bool(settled.get("timed_out", false)),
 		"waited_ms": int(settled.get("waited_ms", 0)),
 		"timeout_ms": timeout_ms,
