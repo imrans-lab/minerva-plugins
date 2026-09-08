@@ -105,6 +105,9 @@ func (s *Store) Load(raw []byte) (LoadReport, error) {
 	if err := json.Unmarshal(raw, &next); err != nil {
 		return LoadReport{}, err
 	}
+	if err := checkSnapshotBudget(next); err != nil {
+		return LoadReport{}, err
+	}
 	demoted := contract.RehydrateOnLoad(next)
 	// Demotion rewrites run and session statuses, so the document that comes
 	// out of load is not the one that went in. It gets its own revision:
@@ -296,6 +299,9 @@ func (s *Store) applyMutation(req *Request, cmd command) Reply {
 	var canonical map[string]any
 	if err := json.Unmarshal(raw, &canonical); err != nil {
 		return errReply(req.RequestID, s.revision(), fail(CodeInternal, "could not re-read the resulting snapshot: "+err.Error(), false))
+	}
+	if err := checkSnapshotBudget(canonical); err != nil {
+		return errReply(req.RequestID, s.revision(), fail(CodePayloadTooLarge, err.Error(), false))
 	}
 	s.snapshot = canonical
 
