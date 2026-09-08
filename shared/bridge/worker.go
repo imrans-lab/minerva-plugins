@@ -123,6 +123,9 @@ type Worker struct {
 
 	// doneC is closed when the reader goroutine exits (worker crashed/stopped).
 	doneC chan struct{}
+
+	// exitC closes after cmd.Wait reaps this process.
+	exitC chan struct{}
 }
 
 // New creates a Worker that will spawn `python -m <workerModule>` using the
@@ -146,7 +149,15 @@ func (w *Worker) IsAlive() bool {
 
 // isAliveLocked requires mu held.
 func (w *Worker) isAliveLocked() bool {
-	return w.cmd != nil && w.cmd.ProcessState == nil
+	if w.cmd == nil {
+		return false
+	}
+	select {
+	case <-w.exitC:
+		return false
+	default:
+		return true
+	}
 }
 
 // circuitOpen reports whether the circuit breaker has tripped (§2).
@@ -224,6 +235,7 @@ func (w *Worker) startLocked(ctx context.Context) error {
 	w.stdout = bufio.NewReaderSize(stdoutPipe, 1<<20)
 	w.readyC = make(chan struct{})
 	w.doneC = make(chan struct{})
+	w.exitC = make(chan struct{})
 
 	// Pump stderr to parent stderr with [worker] prefix (§5).
 	go pumpStderr(stderrPipe, w.StderrCallback)
@@ -232,8 +244,10 @@ func (w *Worker) startLocked(ctx context.Context) error {
 	go w.reader()
 
 	// Wait for cmd.Wait() to reap the process.
+	exitC := w.exitC
 	go func() {
-		w.cmd.Wait() //nolint:errcheck
+		cmd.Wait() //nolint:errcheck
+		close(exitC)
 	}()
 
 	// Release mu while we wait for ready — reader goroutine holds its own lock

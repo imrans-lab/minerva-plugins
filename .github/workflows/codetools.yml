@@ -210,6 +210,7 @@ jobs:
           retention-days: 14
 
   release:
+    concurrency: codetools-release
     name: Publish release
     needs: build
     if: github.event_name == 'push'
@@ -218,6 +219,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Download all matrix tarballs
         uses: actions/download-artifact@v4
@@ -247,9 +250,11 @@ jobs:
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "prerelease=$PRE" >> "$GITHUB_OUTPUT"
+          bash scripts/release-publish-guard.sh "$TAG" "$PRE"
           echo "Computed: tag=$TAG prerelease=$PRE"
 
       - name: Publish GitHub Release
+        if: steps.tag.outputs.publish == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}

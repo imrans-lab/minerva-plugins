@@ -26,12 +26,12 @@ import (
 )
 
 // stubWorkerSource is a minimal mcad_worker that speaks the bridge framing
-// protocol. `evaluate` sleeps for params.stub_delay_ms before answering, which
-// is how a test makes an eval slow enough to still be in flight when the panel
-// closes. It answers with the worker's ok/error envelope shape: stub_fail=true
+// protocol. A request-start notification and release file let the test cancel
+// an evaluation while it is actually executing. stub_fail=true
 // yields a python error naming the shape, exactly like a failing source.
 const stubWorkerSource = `
-import json, sys, time
+import json, os, sys, time
+from pathlib import Path
 
 def read_frame():
     length = -1
@@ -58,6 +58,8 @@ def write_frame(obj):
     sys.stdout.buffer.write(body)
     sys.stdout.buffer.flush()
 
+# Deliberately cold startup: longer than the old test's 150 ms cancel timer.
+time.sleep(0.25)
 write_frame({"method": "worker.ready", "params": {}})
 
 while True:
@@ -68,7 +70,14 @@ while True:
         write_frame({"id": req["id"], "ok": True, "result": {}})
         break
     params = req.get("params") or {}
-    time.sleep(params.get("stub_delay_ms", 0) / 1000.0)
+    gate = os.environ.get("STUB_RELEASE_FILE")
+    if gate and params.get("request_id") != "eval_reopened":
+        print("stub.request_started", file=sys.stderr, flush=True)
+        deadline = time.monotonic() + 15
+        while not Path(gate).exists():
+            if time.monotonic() > deadline:
+                raise RuntimeError("test did not release evaluation")
+            time.sleep(0.01)
     if params.get("stub_fail"):
         write_frame({"id": req["id"], "ok": False, "error": {
             "kind": "python",
@@ -113,14 +122,13 @@ func useStubWorker(t *testing.T) {
 
 // callEvaluate drives one cad.evaluate through the real MCP entry point and
 // returns the {ok, result|error} envelope the panel would decode.
-func callEvaluate(t *testing.T, requestID string, delayMS int, fail bool) (ok bool, kind string) {
+func callEvaluate(t *testing.T, requestID string, fail bool) (ok bool, kind string) {
 	t.Helper()
 
 	args := map[string]interface{}{
-		"source":        "shell = box(10, 10, 10)",
-		"request_id":    requestID,
-		"stub_delay_ms": delayMS,
-		"stub_fail":     fail,
+		"source":     "shell = box(10, 10, 10)",
+		"request_id": requestID,
+		"stub_fail":  fail,
 	}
 	argsJSON, err := json.Marshal(args)
 	if err != nil {
@@ -186,7 +194,7 @@ func decodeEnvelope(t *testing.T, resp rpcResponse) (bool, string) {
 //
 // Both endings the panel can produce are covered: an evaluate cancelled
 // mid-flight (cad.cancel_eval, as the closing panel emits) and one that simply
-// runs to completion. Both run slow enough that the worker is genuinely busy.
+// runs to completion. Cancellation waits until the worker is genuinely busy.
 func TestReopenAfterInflightEvalIsNotCrashed(t *testing.T) {
 	if testing.Short() {
 		t.Skip("spawns a worker subprocess; -short")
@@ -212,29 +220,48 @@ func TestReopenAfterInflightEvalIsNotCrashed(t *testing.T) {
 			resetInflight(t)
 
 			requestID := fmt.Sprintf("eval_%s", tc.name)
+			release := func() {}
+			cancelDone := make(chan struct{})
 			if tc.cancelMidflight {
-				// The panel's close arrives on another goroutine; the stub is
-				// still sleeping when the cancel trips the request context.
-				// The server's own JSON-RPC loop is serial, so a real
-				// cad.cancel_eval currently lands only after the evaluate it
-				// names has returned — driving it concurrently here is the
-				// worst case for the worker's lifetime, not a claim about the
-				// loop.
+				gate := filepath.Join(t.TempDir(), "release")
+				release = func() {
+					if err := os.WriteFile(gate, nil, 0o600); err != nil {
+						t.Errorf("release stub evaluation: %v", err)
+					}
+				}
+				t.Cleanup(release)
+				worker.ExtraEnv = []string{"STUB_RELEASE_FILE=" + gate}
+				started := make(chan struct{}, 1)
+				worker.StderrCallback = func(line string) {
+					if line == "stub.request_started" {
+						started <- struct{}{}
+					}
+				}
+				// Drive the panel close concurrently with evaluation. The worker
+				// cannot reply until we have observed cancellation and release it.
 				go func() {
-					time.Sleep(150 * time.Millisecond)
-					args, _ := json.Marshal(map[string]string{"request_id": requestID})
-					handleCancelEval(json.RawMessage(`2`), args)
+					defer close(cancelDone)
+					select {
+					case <-started:
+						args, _ := json.Marshal(map[string]string{"request_id": requestID})
+						handleCancelEval(json.RawMessage(`2`), args)
+					case <-time.After(10 * time.Second):
+						t.Error("worker did not start evaluation before watchdog expired")
+					}
 				}()
+			} else {
+				close(cancelDone)
 			}
 
-			// The panel that is about to close: one slow evaluate.
-			firstOK, firstKind := callEvaluate(t, requestID, 600, tc.fail)
+			firstOK, firstKind := callEvaluate(t, requestID, tc.fail)
+			<-cancelDone
+			release()
 			if tc.cancelMidflight && firstKind != "cancelled" {
 				t.Fatalf("first eval: want kind=cancelled after cad.cancel_eval, got ok=%v kind=%q", firstOK, firstKind)
 			}
 
 			// The reopened panel's FIRST evaluate, issued immediately after.
-			secondOK, secondKind := callEvaluate(t, "eval_reopened", 0, false)
+			secondOK, secondKind := callEvaluate(t, "eval_reopened", false)
 			if secondKind == "crashed" {
 				t.Fatalf("reopened panel's first eval crashed (%q) — the worker was killed with the previous request", secondKind)
 			}

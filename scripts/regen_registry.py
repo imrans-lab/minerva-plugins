@@ -1,23 +1,14 @@
 #!/usr/bin/env python3
-"""Generate registry.json at repo root from per-plugin manifest.json files.
+"""Generate the marketplace registry from tagged release manifests.
 
-Walks each known plugin directory (scansort/, cad/, presentation/),
-reads manifest.json, finds the latest matching git tag of the form
-`<id>-v*`. Emits registry.json that Minerva's marketplace consumes
-to enumerate available plugins.
-
-Plugins without any matching git tag are SKIPPED — the marketplace
-should only advertise released plugins, not in-development ones.
-
-Usage:
-  python3 scripts/regen_registry.py
-
-  Writes registry.json at repo root. Output is stable (sorted plugin
-  list, no timestamp) so drift-check workflows can `git diff` it.
+Run after a successful release: git fetch --tags && python3 scripts/regen_registry.py
+Use --check to validate the committed release selections without advancing them.
+Use --published with --check to verify GitHub has every advertised asset (gh required).
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 import sys
@@ -30,7 +21,7 @@ REGISTRY_VERSION = 2
 
 REPO_OWNER = "imrans-lab"
 REPO_NAME = "minerva-plugins"
-RAW_BASE = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main"
+RAW_BASE = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}"
 RELEASES_BASE = f"https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/download"
 
 # The full set of platform targets the marketplace understands. This is the
@@ -81,19 +72,24 @@ def latest_tag_for(plugin_id: str, repo_root: Path):
     return None
 
 
-def build_plugin_entry(plugin_dir: Path, repo_root: Path):
+def build_plugin_entry(plugin_dir: Path, repo_root: Path, tag: str | None = None):
     manifest_path = plugin_dir / "manifest.json"
     if not manifest_path.exists():
         return None
-    manifest = json.loads(manifest_path.read_text())
-    plugin_id = manifest.get("id")
-    if not plugin_id:
-        return None
-    tag = latest_tag_for(plugin_id, repo_root)
+    plugin_id = json.loads(manifest_path.read_text())["id"]
+    tag = tag or latest_tag_for(plugin_id, repo_root)
     if not tag:
-        # Plugin not yet released. Skip from marketplace registry —
-        # users only see things they can actually install.
         return None
+    if not tag.startswith(f"{plugin_id}-v") or "-branch-" in tag:
+        raise ValueError(f"{plugin_id}: invalid marketplace release tag {tag!r}")
+    rel_manifest = (plugin_dir / "manifest.json").relative_to(repo_root).as_posix()
+    result = subprocess.run(
+        ["git", "-C", str(repo_root), "show", f"refs/tags/{tag}:{rel_manifest}"],
+        check=True, capture_output=True, text=True,
+    )
+    manifest = json.loads(result.stdout)
+    if manifest.get("id") != plugin_id:
+        raise ValueError(f"{tag}: manifest id does not match {plugin_id}")
 
     # Tarball file naming uses the MANIFEST's version field, not the
     # version derived from the tag — the per-plugin workflows read
@@ -103,7 +99,8 @@ def build_plugin_entry(plugin_dir: Path, repo_root: Path):
     prefix = f"{plugin_id}-v"
     tag_version = tag[len(prefix):] if tag.startswith(prefix) else manifest_version
 
-    rel_manifest = manifest_path.relative_to(repo_root).as_posix()
+    if tag_version != manifest_version:
+        raise ValueError(f"{tag}: manifest version is {manifest_version}, not {tag_version}")
 
     # Targets this plugin actually builds. Declared per-plugin in manifest.json
     # as `release_targets`; absent that, default to the full TARGETS set. This
@@ -134,7 +131,7 @@ def build_plugin_entry(plugin_dir: Path, repo_root: Path):
         "version": tag_version,
         "manifest_version": manifest_version,
         "release_tag": tag,
-        "manifest_url": f"{RAW_BASE}/{rel_manifest}",
+        "manifest_url": f"{RAW_BASE}/{tag}/{rel_manifest}",
         "downloads": downloads,
     }
 
@@ -152,16 +149,53 @@ def build_registry(repo_root: Path):
     }
 
 
+def check_registry(repo_root: Path, registry: dict, published: bool = False):
+    if registry.get("registry_version") != REGISTRY_VERSION:
+        raise ValueError("unsupported registry_version")
+    directories = {
+        json.loads((repo_root / name / "manifest.json").read_text())["id"]: repo_root / name
+        for name in PLUGIN_DIRS if (repo_root / name / "manifest.json").exists()
+    }
+    seen = set()
+    for entry in registry["plugins"]:
+        plugin_id = entry["id"]
+        if plugin_id not in directories or plugin_id in seen:
+            raise ValueError(f"unknown or duplicate plugin: {plugin_id}")
+        seen.add(plugin_id)
+        expected = build_plugin_entry(directories[plugin_id], repo_root, entry["release_tag"])
+        if entry != expected:
+            raise ValueError(f"{plugin_id}: registry differs from its tagged manifest; regenerate after release")
+        if published:
+            result = subprocess.run(
+                ["gh", "api", f"repos/{REPO_OWNER}/{REPO_NAME}/releases/tags/{entry['release_tag']}"],
+                check=True, capture_output=True, text=True,
+            )
+            release = json.loads(result.stdout)
+            if release.get("draft") or release.get("prerelease"):
+                raise ValueError(f"{plugin_id}: release is not published for the marketplace")
+            assets = {a["browser_download_url"]: a for a in release["assets"]}
+            for url in entry["downloads"].values():
+                asset = assets.get(url)
+                if not asset or asset["size"] <= 0 or asset["state"] != "uploaded":
+                    raise ValueError(f"{plugin_id}: published asset missing or incomplete: {url}")
+
+
 def main(argv) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--check", action="store_true")
+    parser.add_argument("--published", action="store_true")
+    args = parser.parse_args(argv[1:])
+    if args.published and not args.check:
+        parser.error("--published requires --check")
     repo_root = get_repo_root()
-    registry = build_registry(repo_root)
-    out = json.dumps(registry, indent=2) + "\n"
     out_path = repo_root / "registry.json"
-    out_path.write_text(out)
-    print(
-        f"wrote {out_path} ({len(registry['plugins'])} plugin(s))",
-        file=sys.stderr,
-    )
+    if args.check:
+        check_registry(repo_root, json.loads(out_path.read_text()), args.published)
+        print("registry release selections verified")
+    else:
+        registry = build_registry(repo_root)
+        out_path.write_text(json.dumps(registry, indent=2) + "\n")
+        print(f"wrote {out_path} ({len(registry['plugins'])} plugin(s))", file=sys.stderr)
     return 0
 
 

@@ -808,6 +808,7 @@ jobs:
           retention-days: 14
 
   release:
+    concurrency: pcb-release
     # A SKIPPED JOB IS NOT A PASSED JOB. Listing these in `needs` alone would
     # make GitHub skip `release` on any ref where one of them does not run —
     # dcr/** branches, where the platform matrix is deliberately off — turning
@@ -833,6 +834,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Download all tarballs
         uses: actions/download-artifact@v4
@@ -863,8 +866,10 @@ jobs:
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "prerelease=$PRE" >> "$GITHUB_OUTPUT"
+          bash scripts/release-publish-guard.sh "$TAG" "$PRE"
 
       - name: Publish release
+        if: steps.tag.outputs.publish == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}

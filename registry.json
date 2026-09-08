@@ -7,7 +7,7 @@
       "version": "0.2.1",
       "manifest_version": "0.2.1",
       "release_tag": "agent_relay-v0.2.1",
-      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/main/agent-relay/manifest.json",
+      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/agent_relay-v0.2.1/agent-relay/manifest.json",
       "downloads": {
         "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/agent_relay-v0.2.1/agent_relay-0.2.1-linux-x86_64.tar.gz",
         "linux-arm64": "https://github.com/imrans-lab/minerva-plugins/releases/download/agent_relay-v0.2.1/agent_relay-0.2.1-linux-arm64.tar.gz",
@@ -21,7 +21,7 @@
       "version": "0.3.11",
       "manifest_version": "0.3.11",
       "release_tag": "cad-v0.3.11",
-      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/main/cad/manifest.json",
+      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/cad-v0.3.11/cad/manifest.json",
       "downloads": {
         "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.3.11/cad-0.3.11-linux-x86_64.tar.gz",
         "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.3.11/cad-0.3.11-macos-universal.tar.gz",
@@ -34,7 +34,7 @@
       "version": "0.3.1",
       "manifest_version": "0.3.1",
       "release_tag": "codetools-v0.3.1",
-      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/main/codetools/manifest.json",
+      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/codetools-v0.3.1/codetools/manifest.json",
       "downloads": {
         "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/codetools-v0.3.1/codetools-0.3.1-linux-x86_64.tar.gz",
         "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/codetools-v0.3.1/codetools-0.3.1-macos-universal.tar.gz",
@@ -47,7 +47,7 @@
       "version": "0.0.1",
       "manifest_version": "0.0.1",
       "release_tag": "drive-v0.0.1",
-      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/main/drive/manifest.json",
+      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/drive-v0.0.1/drive/manifest.json",
       "downloads": {
         "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/drive-v0.0.1/drive-0.0.1-linux-x86_64.tar.gz",
         "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/drive-v0.0.1/drive-0.0.1-macos-universal.tar.gz",
@@ -60,7 +60,7 @@
       "version": "0.0.1",
       "manifest_version": "0.0.1",
       "release_tag": "gen3d-v0.0.1",
-      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/main/3d-gen/manifest.json",
+      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/gen3d-v0.0.1/3d-gen/manifest.json",
       "downloads": {
         "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/gen3d-v0.0.1/gen3d-0.0.1-linux-x86_64.tar.gz",
         "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/gen3d-v0.0.1/gen3d-0.0.1-macos-universal.tar.gz",
@@ -73,7 +73,7 @@
       "version": "0.0.1",
       "manifest_version": "0.0.1",
       "release_tag": "movie_gen-v0.0.1",
-      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/main/movie-gen/manifest.json",
+      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/movie_gen-v0.0.1/movie-gen/manifest.json",
       "downloads": {
         "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/movie_gen-v0.0.1/movie_gen-0.0.1-linux-x86_64.tar.gz",
         "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/movie_gen-v0.0.1/movie_gen-0.0.1-macos-universal.tar.gz",
@@ -86,7 +86,7 @@
       "version": "0.8.2",
       "manifest_version": "0.8.2",
       "release_tag": "pcb-v0.8.2",
-      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/main/pcb/manifest.json",
+      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/pcb-v0.8.2/pcb/manifest.json",
       "downloads": {
         "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/pcb-v0.8.2/pcb-0.8.2-linux-x86_64.tar.gz",
         "linux-arm64": "https://github.com/imrans-lab/minerva-plugins/releases/download/pcb-v0.8.2/pcb-0.8.2-linux-arm64.tar.gz",
@@ -100,7 +100,7 @@
       "version": "0.0.3",
       "manifest_version": "0.0.3",
       "release_tag": "presentation-v0.0.3",
-      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/main/presentation/manifest.json",
+      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/presentation-v0.0.3/presentation/manifest.json",
       "downloads": {
         "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/presentation-v0.0.3/presentation-0.0.3-linux-x86_64.tar.gz",
         "linux-arm64": "https://github.com/imrans-lab/minerva-plugins/releases/download/presentation-v0.0.3/presentation-0.0.3-linux-arm64.tar.gz",
@@ -114,7 +114,7 @@
       "version": "0.0.1",
       "manifest_version": "0.0.1",
       "release_tag": "scansort-v0.0.1",
-      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/main/scansort/manifest.json",
+      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/scansort-v0.0.1/scansort/manifest.json",
       "downloads": {
         "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/scansort-v0.0.1/scansort-0.0.1-linux-x86_64.tar.gz",
         "linux-arm64": "https://github.com/imrans-lab/minerva-plugins/releases/download/scansort-v0.0.1/scansort-0.0.1-linux-arm64.tar.gz",
