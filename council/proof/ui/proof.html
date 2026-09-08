@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Council wrapper proof</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; font: 15px/1.5 ui-serif, Georgia, serif; background: #f7f4ef; color: #22201d; padding: 24px; }
+  @media (prefers-color-scheme: dark) { body { background: #171614; color: #e8e4dc; } }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.sub { margin: 0 0 20px; opacity: .7; font-size: 13px; }
+  button { font: inherit; padding: 6px 14px; margin-right: 8px; cursor: pointer; }
+  pre { background: rgba(127,127,127,.12); padding: 12px; border-radius: 6px; overflow-x: auto; font: 12px/1.5 ui-monospace, monospace; }
+</style>
+</head>
+<body>
+<h1>Council wrapper proof</h1>
+<p class="sub">This page is rendered by a CefTexture owned by a native plugin scene panel. Everything below travels over Council's own envelope, not the host webview broker.</p>
+
+<button id="read">snapshot.get</button>
+<button id="command">run.start (a command)</button>
+<button id="nobase">run.start with no base_revision</button>
+
+<pre id="log">ready</pre>
+
+<script>
+  var revision = null;
+  var log = document.getElementById('log');
+  function show(label, envelope) {
+    if (envelope.snapshot_revision !== undefined) { revision = envelope.snapshot_revision; }
+    log.textContent = label + '\n' + JSON.stringify(envelope, null, 2);
+  }
+
+  // A read. The wrapper answers this from the record it persists.
+  document.getElementById('read').onclick = function () {
+    council.call('snapshot.get', {}).then(function (r) { show('reply', r); });
+  };
+
+  // A command. The engine applies these; the wrapper relays and persists what
+  // comes back. With no backend attached the proof refuses it and says why —
+  // which is the point: the wrapper never edits a record itself.
+  document.getElementById('command').onclick = function () {
+    council.call('run.start', { session_id: 'ses-proof' }, revision)
+      .then(function (r) { show('reply (expect: the engine owns this command)', r); });
+  };
+
+  // The envelope check the wrapper does own: a command must say which revision
+  // it was written against.
+  document.getElementById('nobase').onclick = function () {
+    council.call('run.start', { session_id: 'ses-proof' })
+      .then(function (r) { show('reply (expect: missing base_revision)', r); });
+  };
+
+  council.onEvent(function (e) { show('event', e); });
+  council.call('snapshot.get', {}).then(function (r) { show('reply', r); });
+</script>
+</body>
+</html>

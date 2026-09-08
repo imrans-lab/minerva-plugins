@@ -1,0 +1,132 @@
+{
+  "id": "council",
+  "name": "Council",
+  "version": "0.1.0",
+  "host_api_version": "1",
+  "release_targets": [
+    "linux-x86_64"
+  ],
+  "backend": {
+    "transport": "stdio",
+    "entrypoint": "./council-plugin",
+    "args": []
+  },
+  "tools": [
+    {
+      "description": "Liveness handshake for the Council backend. Returns {ok, plugin, version, protocol_version, snapshot_revision} and echoes the optional 'echo' string so a caller can verify round-trip integrity.",
+      "input_schema": {
+        "properties": {
+          "echo": {
+            "description": "Optional string echoed back verbatim.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "minerva_council_ping"
+    },
+    {
+      "description": "Apply one Council protocol command and return the reply envelope. The arguments ARE the request envelope: {request_id, command, base_revision, payload}. Mutating commands (definition.upsert, definition.import, source.upsert, session.create, session.bind_chat, run.start, run.cancel, run.retry, outcome.retain) must carry base_revision equal to the current snapshot_revision; read commands (snapshot.get, source.fetch, definition.export) must not carry it. A repeated request_id returns the stored reply with replayed:true and applies nothing a second time. Every reply carries the snapshot_revision it was produced against; a failure carries {code, message, retryable}. source.fetch returns the NEWEST capture of a source when payload.source_revision is omitted; pass a source_revision to read the exact capture a past contribution was grounded in.",
+      "input_schema": {
+        "properties": {
+          "base_revision": {
+            "description": "The snapshot_revision this command was written against. Required by every mutating command, refused on a read.",
+            "type": "integer"
+          },
+          "command": {
+            "enum": [
+              "snapshot.get",
+              "definition.upsert",
+              "definition.export",
+              "definition.import",
+              "source.upsert",
+              "source.fetch",
+              "session.create",
+              "session.bind_chat",
+              "run.start",
+              "run.cancel",
+              "run.retry",
+              "outcome.retain"
+            ],
+            "type": "string"
+          },
+          "payload": {
+            "description": "Command arguments. See the Council architecture document for the shape each command takes.",
+            "type": "object"
+          },
+          "request_id": {
+            "description": "Caller-minted idempotency key. Repeating one returns the stored reply.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "command",
+          "payload"
+        ],
+        "type": "object"
+      },
+      "name": "minerva_council_command"
+    },
+    {
+      "description": "Hand the backend the council_project_snapshot the panel restored, replacing whatever it was working on. Runs the interruption rule: a run that was in flight when its owning process went away is demoted to a visible failed state with an explicit retry, never resumed. Returns {ok, snapshot_revision, definitions, sessions, runs_demoted}.",
+      "input_schema": {
+        "properties": {
+          "snapshot": {
+            "description": "A council_project_snapshot record.",
+            "type": "object"
+          }
+        },
+        "required": [
+          "snapshot"
+        ],
+        "type": "object"
+      },
+      "name": "minerva_council_load_snapshot"
+    },
+    {
+      "description": "Return the acknowledged council_project_snapshot for the host to persist. This is the state the panel writes into the project and into a .mcouncil file; the backend keeps nothing durable of its own.",
+      "input_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "name": "minerva_council_export_snapshot"
+    },
+    {
+      "description": "Summarise the loaded snapshot without moving it: the councils it holds, and for each session its status, chat binding, runs and how many outcomes were retained.",
+      "input_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "name": "minerva_council_status"
+    }
+  ],
+  "capabilities": [],
+  "permissions": {
+    "host_capabilities": [],
+    "network": {
+      "mode": "none"
+    },
+    "filesystem": {
+      "mode": "none",
+      "paths": []
+    }
+  },
+  "autostart": false,
+  "auto_reload": true,
+  "setup": {
+    "requires": [
+      {
+        "tool": "go",
+        "min": "1.22"
+      }
+    ],
+    "steps": [
+      {
+        "type": "go_build",
+        "package": "./",
+        "output": "council-plugin"
+      }
+    ]
+  }
+}

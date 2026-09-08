@@ -1,0 +1,7 @@
+# Build outputs. The plugin's manifest artifact is council-plugin; `go build`
+# without -o also drops a binary named after the package directory. The wrapper
+# proof is a second module with its own pair. None of them is ever checked in.
+/council-plugin
+/council
+proof/proof
+proof/council-proof-plugin

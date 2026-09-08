@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "project_snapshot.schema.json",
+  "title": "Council project snapshot",
+  "description": "The one authoritative Council record. It is what the wrapper returns from the project serialize channel and from a host-owned save, and what it is handed back on deserialize/load. The plugin backend's live execution state and the browser's rendered state are both derived from this; neither may hold anything that is not either present here or in flight. snapshot_revision advances on every accepted mutation and is the concurrency token every command is checked against.",
+  "type": "object",
+  "properties": {
+    "schema_version": { "$ref": "common.schema.json#/$defs/SchemaVersion" },
+    "record_kind": { "const": "council_project_snapshot" },
+    "snapshot_revision": { "$ref": "common.schema.json#/$defs/Revision" },
+    "definitions": {
+      "type": "array",
+      "description": "Councils available in this project. Editing one advances its definition_revision; sessions already started keep their own embedded snapshot.",
+      "items": { "$ref": "council_definition.schema.json" }
+    },
+    "sessions": {
+      "type": "array",
+      "items": { "$ref": "session.schema.json" }
+    },
+    "view": { "$ref": "#/$defs/ViewState" }
+  },
+  "required": ["schema_version", "record_kind", "snapshot_revision", "definitions", "sessions"],
+  "additionalProperties": false,
+  "$defs": {
+    "ViewState": {
+      "type": "object",
+      "description": "User-intent view state: which session and pane the user last had open. Persisted because losing it is annoying, but it is never load-bearing — a snapshot with no 'view' key opens correctly.",
+      "properties": {
+        "selected_session_id": { "$ref": "common.schema.json#/$defs/Id" },
+        "selected_definition_id": { "$ref": "common.schema.json#/$defs/Id" },
+        "pane": { "type": "string", "enum": ["session", "members", "sources"] }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -3,6 +3,8 @@ go 1.22
 use (
 	./cad
 	./codetools
+	./council
+	./council/proof
 	./nametag-maker
 	./pcb
 	./presentation

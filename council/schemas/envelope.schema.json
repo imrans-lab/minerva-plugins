@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "envelope.schema.json",
+  "title": "Council protocol envelopes",
+  "description": "One request/reply/event family used on both hops: page to wrapper, and wrapper to backend. Mutating requests carry base_revision (checked against the snapshot) and request_id (the idempotency key), so a retried command can never apply twice and a command written against a stale view is refused rather than merged.",
+  "oneOf": [
+    { "$ref": "#/$defs/Request" },
+    { "$ref": "#/$defs/Reply" },
+    { "$ref": "#/$defs/Event" }
+  ],
+  "$defs": {
+    "Command": {
+      "type": "string",
+      "enum": [
+        "snapshot.get",
+        "definition.upsert",
+        "definition.export",
+        "definition.import",
+        "source.upsert",
+        "source.fetch",
+        "session.create",
+        "session.bind_chat",
+        "run.start",
+        "run.cancel",
+        "run.retry",
+        "outcome.retain"
+      ],
+      "description": "snapshot.get and source.fetch and definition.export are reads: they omit base_revision and never advance the snapshot. Everything else mutates."
+    },
+    "Request": {
+      "type": "object",
+      "properties": {
+        "schema_version": { "$ref": "common.schema.json#/$defs/SchemaVersion" },
+        "envelope": { "const": "request" },
+        "request_id": { "$ref": "common.schema.json#/$defs/Id" },
+        "command": { "$ref": "#/$defs/Command" },
+        "base_revision": {
+          "$ref": "common.schema.json#/$defs/Revision",
+          "description": "Required on a mutating command. Must equal the current snapshot_revision or the reply is a stale_revision error carrying the current snapshot."
+        },
+        "payload": { "type": "object" }
+      },
+      "required": ["schema_version", "envelope", "request_id", "command", "payload"],
+      "additionalProperties": false
+    },
+    "Reply": {
+      "type": "object",
+      "description": "Every reply carries the snapshot_revision it was produced against, so a view that applies replies out of order can detect it and re-read rather than render a mixture.",
+      "properties": {
+        "schema_version": { "$ref": "common.schema.json#/$defs/SchemaVersion" },
+        "envelope": { "const": "reply" },
+        "request_id": { "$ref": "common.schema.json#/$defs/Id" },
+        "ok": { "type": "boolean" },
+        "snapshot_revision": { "$ref": "common.schema.json#/$defs/Revision" },
+        "replayed": { "type": "boolean", "description": "True when this request_id was already applied and the stored reply is being returned unchanged." },
+        "payload": { "type": "object" },
+        "error": { "$ref": "session.schema.json#/$defs/Failure" }
+      },
+      "required": ["schema_version", "envelope", "request_id", "ok", "snapshot_revision"],
+      "additionalProperties": false
+    },
+    "Event": {
+      "type": "object",
+      "description": "One-way push from the backend towards the view. An event never carries authority: it announces that the snapshot moved, and the view re-reads what it needs.",
+      "properties": {
+        "schema_version": { "$ref": "common.schema.json#/$defs/SchemaVersion" },
+        "envelope": { "const": "event" },
+        "event": {
+          "type": "string",
+          "enum": ["council.snapshot_changed", "council.run_progress", "council.contribution_ready", "council.run_finished", "council.compatibility"]
+        },
+        "snapshot_revision": { "$ref": "common.schema.json#/$defs/Revision" },
+        "payload": { "type": "object" }
+      },
+      "required": ["schema_version", "envelope", "event", "snapshot_revision", "payload"],
+      "additionalProperties": false
+    }
+  }
+}
