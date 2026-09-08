@@ -1,6 +1,7 @@
-"""The smart-remote-v2 enclosure fixture set, checked into the repo.
+"""The smart-remote-v2 enclosure fixture set, private to the owner's sandbox.
 
-`cad/tests/fixtures/smart-remote-v2/` carries the three enclosure revisions, the
+The real shell never lives in this public repo (owner ruling 2026-09-07); the
+set MCAD_PRIVATE_FIXTURES points at carries the three enclosure revisions, the
 six stand-in part meshes and the board GLB that every filed geometry-check
 reproduction names. Two things have to stay true for those reproductions to run
 from a checkout:
@@ -10,7 +11,7 @@ from a checkout:
 * the newest revision still evaluates.
 
 ORACLE. The evaluation numbers are the worker's own result for the fixture as
-committed, not a count read off the source. Rev 3 unions a tray, a top shell, a
+stored in the private set, not a count read off the source. Rev 3 unions a tray, a top shell, a
 battery door and four keycaps; the fused result is six solids, because the
 keycap over SW1 touches the shell at its notch and fuses into it.
 `reference_count` is one per `mesh()` binding. An independent observation that
@@ -24,7 +25,6 @@ test needs no live Minerva and no GPU — the same document in the panel would.
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
 import pytest
 
@@ -32,7 +32,9 @@ pytest.importorskip("build123d", reason="build123d not installed in this environ
 
 from mcad.evaluator import evaluate_source  # noqa: E402
 
-FIXTURES = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "smart-remote-v2"
+from tests._private_fixtures import private_enclosure_fixtures  # noqa: E402
+
+FIXTURES = private_enclosure_fixtures(module=True)
 REVISIONS = ("enclosure-rev1.mcad", "enclosure.mcad", "enclosure-rev3.mcad")
 
 # mesh("<path>", ...) — the first string literal of the call is the file.

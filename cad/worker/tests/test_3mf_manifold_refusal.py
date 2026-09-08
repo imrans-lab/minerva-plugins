@@ -6,8 +6,8 @@ STL streams the same part out without asking — so a user gets a file from one
 format, a shrug from the other, and no way to tell whether the design or the
 exporter is at fault.
 
-ORACLE. The rev-3 enclosure fixture checked in under
-`cad/tests/fixtures/smart-remote-v2/` is a part the 3MF writer refuses and the
+ORACLE. The rev-3 enclosure fixture (private set, MCAD_PRIVATE_FIXTURES —
+without it this class skips) is a part the 3MF writer refuses and the
 STL writer accepts; an independent observation is opening enclosure-rev3.stl in
 a mesh tool and finding the non-manifold edges the evaluation counts. The
 defect count in the export message must be the SAME number the evaluation
@@ -19,7 +19,6 @@ reporting the refusal without the class and count fails the message ones.
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
 import pytest
 
@@ -27,13 +26,7 @@ pytest.importorskip("build123d", reason="build123d not installed in this environ
 
 from mcad_worker.methods import _evaluate, _export  # noqa: E402
 
-FIXTURE = (
-    Path(__file__).resolve().parents[2]
-    / "tests"
-    / "fixtures"
-    / "smart-remote-v2"
-    / "enclosure-rev3.mcad"
-)
+from tests._private_fixtures import private_enclosure_fixtures  # noqa: E402
 
 # "2 non-manifold edges", "642 degenerate faces" — the class and its count.
 _DEFECT_PHRASE = re.compile(r"(\d+) (non-manifold edges?|degenerate faces?|duplicate faces?|open edges?)")
@@ -47,7 +40,7 @@ def refused(tmp_path_factory) -> dict:
     have happened first, exactly as it has when a user exports what they are
     looking at.
     """
-    source = FIXTURE.read_text(encoding="utf-8")
+    source = (private_enclosure_fixtures() / "enclosure-rev3.mcad").read_text(encoding="utf-8")
     out = tmp_path_factory.mktemp("export")
     summary = _evaluate({"source": source, "summary": True})
     assert summary["ok"] is True, summary

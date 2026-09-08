@@ -28,7 +28,7 @@ pytest.importorskip("build123d", reason="build123d not installed in this environ
 
 from mcad_worker import methods  # noqa: E402
 
-FIXTURES = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "smart-remote-v2"
+from tests._private_fixtures import private_enclosure_fixtures  # noqa: E402
 
 #: A lex error (an unexpected character), a parse error (a well-formed token
 #: stream the grammar rejects) and a translate error (valid syntax, no such
@@ -41,7 +41,7 @@ TRANSLATE_SOURCE = "part = boxx(1, 1, 1)"
 #: a 10 mm cube, and build123d raises a bare ValueError that names no binding.
 KERNEL_SOURCE = "part = cube(10, 10, 10)\nfillet part, [1], r=20"
 
-#: The two-section loft in the committed rev-3 fixture, and the three-section
+#: The two-section loft in the private rev-3 fixture, and the three-section
 #: variant that fails in tessellation. Substituted rather than copied so the
 #: fixture stays the single source of truth for the rest of the document.
 TWO_SECTION_HUMP = (
@@ -143,7 +143,7 @@ def test_a_kernel_failure_names_the_binding_and_keeps_its_traceback() -> None:
 
 
 def test_the_three_section_hump_attributes_its_tessellation_failure() -> None:
-    source = (FIXTURES / "enclosure-rev3.mcad").read_text(encoding="utf-8")
+    source = (private_enclosure_fixtures() / "enclosure-rev3.mcad").read_text(encoding="utf-8")
     assert TWO_SECTION_HUMP in source, "the rev-3 fixture no longer holds hump_in"
     err_source = source.replace(TWO_SECTION_HUMP, THREE_SECTION_HUMP)
 

@@ -18,20 +18,12 @@ different stories about the same mesh.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from mcad_worker import mesh_defects
 from mcad_worker.methods import _mesh_defects
 
-FIXTURE = (
-    Path(__file__).resolve().parents[2]
-    / "tests"
-    / "fixtures"
-    / "smart-remote-v2"
-    / "enclosure-rev3.mcad"
-)
+from tests._private_fixtures import private_enclosure_fixtures
 
 
 def _fin_mesh() -> dict:
@@ -107,7 +99,8 @@ def test_rev3_fixture_reports_both_edges_with_positions():
     pytest.importorskip("build123d", reason="build123d not installed here")
     from mcad_worker.methods import _evaluate
 
-    response = _evaluate({"source": FIXTURE.read_text(encoding="utf-8"), "summary": True})
+    fixture = private_enclosure_fixtures() / "enclosure-rev3.mcad"
+    response = _evaluate({"source": fixture.read_text(encoding="utf-8"), "summary": True})
     assert response["ok"] is True, response
     summary = response["result"]
 
