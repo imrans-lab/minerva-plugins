@@ -182,3 +182,81 @@ func local(from string, ref string) (string, bool) {
 	}
 	return resolved, true
 }
+
+// A panel script may only dispatch an IPC channel the manifest declares, and
+// the host checks TWO lists: the panel's own ui.panels[].ipc_channels and the
+// plugin-wide ui.ipc_messages allowlist (a panel channel missing from either
+// is answered permission_denied, never reaching the worker). A worker route
+// can therefore be fully implemented — Go tool, worker method, panel client —
+// and still be unreachable because the manifest never named it.
+//
+// THE ORACLE IS THE BACKEND REGISTRY, not the manifest: a dotted "cad.*"
+// string literal in a panel script is a channel exactly when the plugin
+// registers an MCP tool of that name (the tool name, the IPC channel and the
+// worker method are one name by construction). That keeps unrelated dotted
+// constants — "cad.document" is a note schema — out of the check, and makes
+// the next route that ships without a declaration fail here.
+func TestPanelDispatchedChannelsAreDeclared(t *testing.T) {
+	initRegistry()
+	backend := map[string]bool{}
+	for _, spec := range registry.Specs() {
+		if strings.HasPrefix(spec.Name, "cad.") {
+			backend[spec.Name] = true
+		}
+	}
+	if len(backend) == 0 {
+		t.Fatal("the tool registry declares no cad.* tools")
+	}
+
+	raw, err := os.ReadFile("manifest.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m struct {
+		UI struct {
+			Panels []struct {
+				Name     string   `json:"name"`
+				Scripts  []string `json:"scripts"`
+				Channels []string `json:"ipc_channels"`
+			} `json:"panels"`
+			Messages []string `json:"ipc_messages"`
+		} `json:"ui"`
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	allowlist := map[string]bool{}
+	for _, ch := range m.UI.Messages {
+		allowlist[ch] = true
+	}
+
+	for _, p := range m.UI.Panels {
+		declared := map[string]bool{}
+		for _, ch := range p.Channels {
+			declared[ch] = true
+		}
+		for _, script := range p.Scripts {
+			body, err := os.ReadFile(script)
+			if err != nil {
+				t.Errorf("panel %q lists %s, which cannot be read: %v", p.Name, script, err)
+				continue
+			}
+			for _, mm := range dottedChannel.FindAllStringSubmatch(code(string(body)), -1) {
+				ch := mm[1]
+				if !backend[ch] {
+					continue
+				}
+				if !declared[ch] {
+					t.Errorf("%s dispatches %s, not in ui.panels[].ipc_channels for panel %q",
+						script, ch, p.Name)
+				}
+				if !allowlist[ch] {
+					t.Errorf("%s dispatches %s, not in ui.ipc_messages", script, ch)
+				}
+			}
+		}
+	}
+}
+
+// A dotted plugin channel/tool name as a GDScript string literal.
+var dottedChannel = regexp.MustCompile(`"(cad\.[a-z_]+)"`)

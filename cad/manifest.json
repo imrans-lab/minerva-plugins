@@ -757,7 +757,8 @@
           "cad.export",
           "cad.clearance",
           "cad.cylindrical_features",
-          "cad.material"
+          "cad.material",
+          "cad.reference_pairs"
         ],
         "save_mode": "host_owned"
       }
@@ -771,8 +772,9 @@
       "cad.cancel_eval",
       "cad.export",
       "cad.clearance",
-          "cad.cylindrical_features",
-          "cad.material"
+      "cad.cylindrical_features",
+      "cad.material",
+      "cad.reference_pairs"
     ]
   },
   "editor_items": [
