@@ -104,6 +104,7 @@ var _eval_buffer_version: int = -1
 ## colliders. -1 for a panel that has painted nothing.
 var _painted_buffer_version: int = -1
 
+var _evaluation_state := preload("scripts/evaluation_state.gd").new()
 var _build := preload("scripts/build_controls.gd").new(self)
 
 func build_status() -> Dictionary:
@@ -231,6 +232,7 @@ func receive(channel: String, payload: Dictionary) -> void:
 			if not _buffer_path.is_empty():
 				_document_path = _buffer_path
 				_import_notice = ""
+			_evaluation_state.attach(payload)
 			_buffer_version = int(payload.get("version", 0))
 			var text: String = str(payload.get("text", ""))
 			_pending_dsl_text = text
@@ -262,6 +264,8 @@ func receive(channel: String, payload: Dictionary) -> void:
 			_eval_buffer_version = -1
 			_painted_buffer_version = -1
 			_build.has_painted = false
+			_evaluation_state.completed = {}
+			_evaluation_state.document_id = ""
 			_pending_dsl_text = ""
 			_open_eval_text = ""
 	_build.refresh()
@@ -549,50 +553,17 @@ func await_evaluation(timeout_ms: int) -> Dictionary:
 ## caller reaching a panel that has no such method reads it as unknown and
 ## refuses nothing.
 func evaluation_freshness() -> Dictionary:
-	var status: String = str(_last_eval_result.get("status", ""))
-	var out := {
-		"known": true,
-		"buffer_version": _buffer_version,
-		"source_version": _painted_buffer_version,
-		"evaluated_at": float(_last_eval_result.get("ts", 0.0)),
-		"evaluation_status": status,
-		"stale": false,
-		"stale_reason": "",
-	}
-	if _build.mode == "manual" and _build.state().build_required:
-		out["stale"] = true
-		out["stale_reason"] = "Source differs from the displayed model. Call minerva_cad_build with action=build_latest, then await evaluation."
-		return out
+	return _evaluation_state.freshness(self)
 
-	# A REFUSED EVALUATION IS A STALE PANEL. It painted nothing, so the
-	# colliders are still the previous evaluation's while every version number
-	# in the document has moved past them.
-	if (status == "error" or status == "timeout") \
-			and _eval_buffer_version > _painted_buffer_version:
-		out["stale"] = true
-		out["stale_reason"] = ("the evaluation of version %d %s (%s), so it "
-			+ "painted nothing: the geometry standing now is the evaluation "
-			+ "of version %d. Fix the document, then call "
-			+ "minerva_cad_await_eval and ask again.") % [_eval_buffer_version,
-			"failed" if status == "error" else "was given up on",
-			str(_last_eval_result.get("error_kind", status)),
-			_painted_buffer_version]
-		return out
-	# Nothing has ever been painted, so there is no evaluation for the
-	# buffer to be ahead of; a check refuses such a panel on its own terms.
-	if _painted_buffer_version >= 0 and _buffer_version > _painted_buffer_version:
-		out["stale"] = true
-		out["stale_reason"] = ("buffer newer than evaluation: the document is "
-			+ "at version %d and the geometry on screen is the evaluation of "
-			+ "version %d. Call minerva_cad_await_eval, then ask again.") 			% [_buffer_version, _painted_buffer_version]
-		return out
-	if _evaluation_is_unsettled():
-		out["stale"] = true
-		out["stale_reason"] = ("the evaluation of version %d has not been "
-			+ "painted yet — it is queued behind the edit debounce or still "
-			+ "with the worker, and the geometry standing now is the previous "
-			+ "one. Call minerva_cad_await_eval, then ask again.") 			% _buffer_version
-	return out
+func get_evaluation_state() -> Dictionary:
+	return _evaluation_state.completed.duplicate()
+
+func begin_evaluation_read(args: Dictionary, require_current: bool = false) -> Dictionary:
+	return _evaluation_state.preflight(self, args, require_current)
+
+func finish_evaluation_read(reply: Dictionary, before: Dictionary) -> Dictionary:
+	return _evaluation_state.finish(self, reply, before)
+
 
 
 ## True while an evaluation is either queued behind the debounce or still out
@@ -741,6 +712,7 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 	# evaluate dispatches, and the paint below must stamp the version THIS run
 	# was of.
 	var dispatched_version: int = _buffer_version
+	var snapshot: Dictionary = _evaluation_state.capture(self, dsl_text, dispatched_version)
 	_last_eval_result = {
 		"status": "pending",
 		"request_id": request_id,
@@ -876,7 +848,8 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 	_last_mesh_data = mesh_data
 	# The geometry every measurement verb reaches is now this run's, so the
 	# freshness stamp moves here and nowhere else.
-	_painted_buffer_version = dispatched_version
+	_painted_buffer_version = int(snapshot.source_version)
+	_evaluation_state.painted(self, snapshot, eval_result)
 	_build.painted_source = dsl_text
 	_build.has_painted = true
 	_edge_registry = edges

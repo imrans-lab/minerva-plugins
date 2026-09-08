@@ -137,6 +137,14 @@ const PAIR_VERBS: Array[String] = [
 
 static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 	var freshness: Dictionary = _Freshness.read(panel)
+	if tool_name not in ["minerva_cad_build", "minerva_cad_await_eval"]:
+		var requirement_error: String = _Freshness.requirement_error(args, freshness)
+		if not requirement_error.is_empty():
+			return _Freshness.stamp({"success": false, "checked": false,
+				"error": requirement_error, "error_code": "evaluation_requirement"}, freshness)
+		args = args.duplicate(true)
+		args["_evaluated_document"] = preload("scripts/evaluation_state.gd").document(panel)
+
 	# A reference-against-reference call measures two mounted meshes and never
 	# the evaluated solid, so the document running ahead of its evaluation
 	# says nothing about its answer: it is STAMPED but not refused. Only the
@@ -144,10 +152,10 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 	# an against= key on any other verb is ignored by its body and must not
 	# lift the gate.
 	var pair_call: bool = PAIR_VERBS.has(tool_name) and _ReferenceVerbs.is_pair_call(args)
-	if not pair_call and _Freshness.blocks(tool_name, freshness):
+	if not pair_call and not _Freshness.accepts_stale(args) and _Freshness.blocks(tool_name, freshness):
 		return _Freshness.refusal(freshness)
 	var reply: Dictionary = await _dispatch(panel, tool_name, args)
-	if not _Freshness.STAMPED_VERBS.has(tool_name):
+	if tool_name == "minerva_cad_build":
 		return reply
 	# Read AGAIN: the document can change while a measurement runs. A reply
 	# stamped only with the state before it would say the geometry it
@@ -311,6 +319,7 @@ static func _references(panel, args: Dictionary) -> Dictionary:
 			"name": str(record.get("name", "")),
 			"path": str(record.get("path", "")),
 			"resolved_path": str(record.get("resolved_path", "")),
+			"content_stamp": str(record.get("stamp", "")),
 			"status": status,
 			"reason": str(record.get("reason", "")),
 			"warning": str(record.get("warning", "")),

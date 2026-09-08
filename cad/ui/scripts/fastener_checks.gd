@@ -196,7 +196,7 @@ func check(panel: Object, args: Dictionary = {}) -> Dictionary:
 
 	var document: Dictionary = {}
 	if panel.has_method("get_document_state"):
-		document = panel.get_document_state()
+		document = preload("evaluation_state.gd").document(panel, args)
 	# A part-scoped check brings the tessellation AND the source of ITS part;
 	# with neither, both come from the document's own render target.
 	var mesh_data: Dictionary = args.get("mesh", {}) as Dictionary

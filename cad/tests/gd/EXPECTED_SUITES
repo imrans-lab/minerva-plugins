@@ -782,7 +782,7 @@ test_ortho_speckles.gd assertions=19
 # + 1 a probe that started against one evaluation and returned after the next
 # was painted is stamped stale, with the version it started against and a
 # reason naming both versions.
-test_eval_await.gd assertions=47
+test_eval_await.gd assertions=53
 
 # Two documents open on ONE real broker: each keeps its own registration, IPC
 # helper and evaluation, an edit to one reaches only its own worker, and

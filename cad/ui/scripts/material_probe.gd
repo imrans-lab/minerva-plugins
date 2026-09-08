@@ -72,7 +72,7 @@ static func probe(panel: Object, args: Dictionary) -> Dictionary:
 	# none the document's own source is the solid.
 	var source := str(args.get("source", ""))
 	if source.strip_edges().is_empty() and panel.has_method("get_document_state"):
-		source = str((panel.get_document_state() as Dictionary).get("source", ""))
+		source = str((preload("evaluation_state.gd").document(panel, args) as Dictionary).get("source", ""))
 	if source.strip_edges().is_empty():
 		return _refused("there is no DSL source to evaluate a solid from")
 	request["source"] = source

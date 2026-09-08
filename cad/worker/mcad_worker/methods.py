@@ -694,6 +694,16 @@ def _export(params: dict) -> dict:
             "reused_evaluation": reused,
             "part": name,
             "source_digest": digest,
+            "document_id": params.get("document_id", ""),
+            "evaluation_provenance": params.get("evaluation_provenance", {}),
+            "provenance": {
+                "source_digest": digest,
+                "source_version": params.get("source_version"),
+                "document_id": params.get("document_id", ""),
+                "operation": "export",
+                "format": fmt,
+                "part": name,
+            },
             "source_version": params.get("source_version"),
         },
     }

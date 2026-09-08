@@ -261,7 +261,7 @@ func _run(panel: Object, args: Dictionary, ticket: int = 0) -> Dictionary:
 
 	var document: Dictionary = {}
 	if panel.has_method("get_document_state"):
-		document = panel.get_document_state()
+		document = preload("evaluation_state.gd").document(panel, args)
 	# A part-scoped check brings its own tessellation; otherwise the shape the
 	# document evaluates to.
 	var scoped_mesh: Dictionary = args.get("mesh", {}) as Dictionary

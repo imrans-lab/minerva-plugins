@@ -334,3 +334,11 @@ func TestExportCollectionAcceptsFloatWaitMS(t *testing.T) {
 		t.Fatalf("the export ran %d times; float wait_ms broke job joining", got)
 	}
 }
+
+func TestExportJobsKeepDocumentAttributionSeparate(t *testing.T) {
+	a := json.RawMessage(`{"source":"cube(2)","format":"stl","path":"/tmp/shared.stl","source_version":1,"document_id":"doc-a"}`)
+	b := json.RawMessage(`{"source":"cube(2)","format":"stl","path":"/tmp/shared.stl","source_version":1,"document_id":"doc-b"}`)
+	if exportJobKey(a) == exportJobKey(b) {
+		t.Fatal("distinct document identities share an export job")
+	}
+}

@@ -79,11 +79,11 @@ static func source_for(source: String, part: String) -> String:
 
 ## The name the document itself evaluates to, or "" when nothing has evaluated
 ## yet. Reported on every single-part check so the reply says what it is about.
-static func render_target(panel: Object) -> String:
+static func render_target(panel: Object, args: Dictionary = {}) -> String:
 	if panel == null or not is_instance_valid(panel) \
 			or not panel.has_method("get_document_state"):
 		return ""
-	var document: Dictionary = panel.get_document_state()
+	var document: Dictionary = preload("evaluation_state.gd").document(panel, args)
 	var last: Dictionary = document.get("last_eval", {}) as Dictionary
 	return str(last.get("shape_name", ""))
 
@@ -104,7 +104,7 @@ static func render_target(panel: Object) -> String:
 ## the answer: the document can move while the worker is busy, and an answer
 ## about the old source is then returned to this caller unfiled, with a
 ## `note`, rather than filed as a part of the new one.
-static func resolve(panel: Object, part: String) -> Dictionary:
+static func resolve(panel: Object, part: String, args: Dictionary = {}) -> Dictionary:
 	if panel == null or not is_instance_valid(panel) \
 			or not panel.has_method("get_document_state") \
 			or not panel.has_method("call_backend"):
@@ -113,7 +113,7 @@ static func resolve(panel: Object, part: String) -> Dictionary:
 		return {"error": ("'%s' is not a DSL binding name; `parts` names "
 			+ "bindings the document assigns (bottom, top, door), one per "
 			+ "entry") % part}
-	var document: Dictionary = panel.get_document_state()
+	var document: Dictionary = preload("evaluation_state.gd").document(panel, args)
 	var source := str(document.get("source", ""))
 	if source.strip_edges().is_empty():
 		return {"error": "there is no DSL source to evaluate a part from"}
@@ -174,7 +174,7 @@ static func per_part(panel, args: Dictionary, verb: Callable,
 	var wanted: Array = names(args)
 	if wanted.is_empty():
 		var single: Dictionary = await fresh.call(panel, args, verb)
-		var target: String = render_target(panel)
+		var target: String = render_target(panel, args)
 		if not target.is_empty():
 			single["part"] = target
 		return single
@@ -198,14 +198,14 @@ static func per_part(panel, args: Dictionary, verb: Callable,
 		# started yet rather than adding one more answer about geometry the
 		# document has moved past.
 		var standing: Dictionary = _Freshness.read(panel)
-		if bool(standing.get("stale", false)) and bool(standing.get("known", false)):
+		if not _Freshness.accepts_stale(args) and bool(standing.get("stale", false)) and bool(standing.get("known", false)):
 			var refused := {"part": part, "checked": false,
 				"reason": str(standing.get("stale_reason", "")), "stale": true}
 			rows.append(refused)
 			unmeasured.append(_unmeasured_leg(part, refused))
 			failed += 1
 			continue
-		var resolved: Dictionary = await resolve(panel, part)
+		var resolved: Dictionary = await resolve(panel, part, args)
 		if resolved.has("error"):
 			var unresolved := {"part": part, "checked": false,
 				"reason": str(resolved["error"])}
@@ -213,7 +213,7 @@ static func per_part(panel, args: Dictionary, verb: Callable,
 			unmeasured.append(_unmeasured_leg(part, unresolved))
 			failed += 1
 			continue
-		var scoped: Dictionary = args.duplicate(true)
+		var scoped: Dictionary = args.duplicate()
 		scoped.erase("parts")
 		# What the check measures instead of the document's own render target:
 		# this part's tessellation for the colliders, and the source that

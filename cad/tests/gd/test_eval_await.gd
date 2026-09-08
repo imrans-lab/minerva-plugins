@@ -643,6 +643,52 @@ func _test_manual_builds() -> void:
 	check("restoring a manual note does not compile",
 		note_script.restore(note, panel) and _evaluations(rig.dispatched).size() == before_restore,
 		str(panel.build_status()))
+	var completed: Dictionary = panel.evaluation_freshness()
+	AnnotationHostRegistry.register("manual-provenance-host", panel._annotation_host)
+	var legacy_tools = load("res://Scripts/Services/MCP/Modules/MCPCadTools.gd").new(null)
+	var legacy: Dictionary = await legacy_tools.handle("minerva_cad_get_mesh_info",
+		{"editor_name": "manual-provenance-host", "require_source_digest": EDITED_SOURCE.sha256_text()})
+	check("legacy host inspection carries the plugin evaluation contract",
+		legacy.get("success", false) and legacy.get("provenance", {}) == completed.provenance,
+		str(legacy))
+	var legacy_refused: Dictionary = await legacy_tools.handle("minerva_cad_get_mesh_info",
+		{"editor_name": "manual-provenance-host", "require_source_digest": "wrong"})
+	check("legacy revision refusal remains a serializable tool reply",
+		not legacy_refused.get("success", true) and not legacy_refused.has("panel")
+		and JSON.parse_string(JSON.stringify(legacy_refused)) is Dictionary, str(legacy_refused))
+	AnnotationHostRegistry.deregister("manual-provenance-host")
+	rig.buffer.apply_edit(BROKEN_SOURCE)
+	var mismatch: Dictionary = await PanelTools.handle(panel, "minerva_cad_check_interference",
+		{"require_source_version": rig.buffer.version, "accept_last_completed": true})
+	check("required revision cannot be bypassed by accepting an older model",
+		mismatch.get("error_code", "") == "evaluation_requirement", str(mismatch))
+	var outcome := {"reply": {}}
+	var ask := func() -> void:
+		outcome.reply = await PanelTools.handle(panel, "minerva_cad_material",
+			{"at_mm": [5, 5, 5], "accept_last_completed": true,
+			"require_source_digest": EDITED_SOURCE.sha256_text()})
+	ask.call()
+	await process_frame
+	var probes: Array = rig.dispatched.filter(func(entry): return entry.channel == "cad.material")
+	check("accepted stale measurement sends evaluated source, never the current edits",
+		probes.size() == 1 and probes[0].payload.source == EDITED_SOURCE, str(probes))
+	if not probes.is_empty():
+		_reply(rig, str(probes[0].reply_id), {"ok": true, "result": {
+			"mode": "point", "inside": true, "state": "inside", "units": "mm"}})
+	await process_frame
+	check("accepted stale reply identifies its completed source and document",
+		outcome.reply.get("stale", false)
+		and outcome.reply.get("provenance", {}).get("source_digest", "") == EDITED_SOURCE.sha256_text()
+		and outcome.reply.get("document_id", "") == rig.buffer.document_id, str(outcome.reply))
+	panel.build_latest()
+	evals = _evaluations(rig.dispatched)
+	_reply(rig, str(evals[-1].reply_id), _worker_error())
+	await process_frame
+	var failed: Dictionary = panel.evaluation_freshness()
+	check("failed builds never rewrite completed geometry attribution",
+		failed.evaluated_at == completed.evaluated_at and failed.provenance == completed.provenance,
+		str(failed))
+
 	_teardown(rig)
 
 

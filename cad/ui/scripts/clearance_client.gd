@@ -224,7 +224,7 @@ func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
 
 	var document: Dictionary = {}
 	if panel.has_method("get_document_state"):
-		document = panel.get_document_state()
+		document = preload("evaluation_state.gd").document(panel, args)
 	# A part-scoped check states the source that evaluates to ITS part; with
 	# none the document's own source is the solid.
 	var source := str(args.get("source", ""))

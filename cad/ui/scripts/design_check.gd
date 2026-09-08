@@ -239,7 +239,7 @@ static func _legs_reply(panel, args: Dictionary, per_part: Callable,
 	}
 	var scoped := not (args.get("parts", []) as Array).is_empty()
 
-	var solid_args := args.duplicate(true)
+	var solid_args := args.duplicate()
 	# The ticket names a clearance measurement and nothing else; the other two
 	# legs would read it as a scope they do not have.
 	solid_args.erase("ticket")
@@ -249,7 +249,7 @@ static func _legs_reply(panel, args: Dictionary, per_part: Callable,
 	var fastener_rows: Array = await _run_fasteners(
 		panel, solid_args, per_part, fasteners, state)
 
-	var clearance_args := args.duplicate(true)
+	var clearance_args := args.duplicate()
 	clearance_args["failing_only"] = true
 	if int(clearance_args.get("limit", 0)) <= 0:
 		clearance_args["limit"] = DEFAULT_CLEARANCE_LIMIT

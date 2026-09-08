@@ -17,6 +17,9 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
+          "require_source_version": {"type": "integer", "description": "Require this completed buffer revision; mismatch refuses the operation."},
+          "require_source_digest": {"type": "string", "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."},
           "editor_name": {"type": "string", "description": "Name of the CAD editor tab (as returned by minerva_list_editors)."},
           "reference": {"type": "string", "description": "Only the reference of this name (as bound in the DSL). Default: every mounted reference."},
           "detail": {"type": "string", "enum": ["lean", "full"], "description": "How much of each row travels. Default 'lean': name, status, world bounding box, node count. 'full' adds the paths, the 4x4 pose, both frames of every box, the per-node boxes and the load statistics."},
@@ -34,6 +37,9 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
+          "require_source_version": {"type": "integer", "description": "Require this completed buffer revision; mismatch refuses the operation."},
+          "require_source_digest": {"type": "string", "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."},
           "editor_name": {"type": "string", "description": "Name of the CAD editor tab (as returned by minerva_list_editors)."},
           "reference": {"type": "string", "description": "Restrict to the reference of this name (as bound in the DSL). Default: every mounted reference."},
           "node": {"type": "string", "description": "Restrict to one node inside the file, as named by minerva_cad_references."},
@@ -60,6 +66,9 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
+          "require_source_version": {"type": "integer", "description": "Require this completed buffer revision; mismatch refuses the operation."},
+          "require_source_digest": {"type": "string", "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."},
           "editor_name": {"type": "string", "description": "Name of the CAD editor tab (as returned by minerva_list_editors)."},
           "reference": {"type": "string", "description": "Restrict to the reference of this name."},
           "node": {"type": "string", "description": "Restrict to one node inside the file."},
@@ -79,6 +88,9 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
+          "require_source_version": {"type": "integer", "description": "Require this completed buffer revision; mismatch refuses the operation."},
+          "require_source_digest": {"type": "string", "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."},
           "editor_name": {"type": "string", "description": "Name of the CAD editor tab (as returned by minerva_list_editors)."},
           "shape": {"type": "string", "enum": ["cylinder", "box", "sphere"], "description": "Gauge shape. Default 'cylinder'."},
           "dia_mm": {"type": "number", "description": "Diameter for cylinder and sphere gauges."},
@@ -98,6 +110,9 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
+          "require_source_version": {"type": "integer", "description": "Require this completed buffer revision; mismatch refuses the operation."},
+          "require_source_digest": {"type": "string", "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."},
           "against": {
             "type": "string",
             "description": "Name a SECOND mounted reference and the measurement becomes reference-against-reference \u2014 part against part, with no involvement of the evaluated solid. Pass \"all-pairs\" as `reference` instead to measure every pair of mounted references. This is the off-board-layout question (does the OLED sit on the devkit, does the joystick clear the connector); it is measured from the meshes themselves, so nothing is tessellated and no tessellation tolerance is quoted. A positive distance is between SURFACES, so wherever one node's box lies inside the other's the pair is probed for containment by ray parity: a contained pair is reported as an overlap (containment: a_inside_b|b_inside_a) and never excused, and one whose containment could not be decided (an open outer mesh) withholds the pass. The verdict is graded on bound_mm \u2014 min_mm less quantization_mm \u2014 and candidate pairs beyond max_pairs whose bounding-box gap does not itself clear required_mm withhold the pass with a pass_reason."
@@ -126,6 +141,9 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
+          "require_source_version": {"type": "integer", "description": "Require this completed buffer revision; mismatch refuses the operation."},
+          "require_source_digest": {"type": "string", "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."},
           "against": {
             "type": "string",
             "description": "Name a SECOND mounted reference and the measurement becomes reference-against-reference \u2014 part against part, with no involvement of the evaluated solid. Pass \"all-pairs\" as `reference` instead to measure every pair of mounted references. This is the off-board-layout question (does the OLED sit on the devkit, does the joystick clear the connector); it is measured from the meshes themselves, so nothing is tessellated and no tessellation tolerance is quoted. A positive distance is between SURFACES, so wherever one node's box lies inside the other's the pair is probed for containment by ray parity: a contained pair is reported as an overlap (containment: a_inside_b|b_inside_a) and never excused, and one whose containment could not be decided (an open outer mesh) withholds the pass. The verdict is graded on bound_mm \u2014 min_mm less quantization_mm \u2014 and candidate pairs beyond max_pairs whose bounding-box gap does not itself clear required_mm withhold the pass with a pass_reason."
@@ -198,6 +216,9 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
+          "require_source_version": {"type": "integer", "description": "Require this completed buffer revision; mismatch refuses the operation."},
+          "require_source_digest": {"type": "string", "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."},
           "editor_name": {"type": "string", "description": "Name of the CAD editor tab (as returned by minerva_list_editors)."},
           "region_mm": {
             "type": "object",
@@ -217,6 +238,9 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
+          "require_source_version": {"type": "integer", "description": "Require this completed buffer revision; mismatch refuses the operation."},
+          "require_source_digest": {"type": "string", "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."},
           "editor_name": {
             "type": "string",
             "description": "Name of the CAD editor tab (as returned by minerva_list_editors)."
@@ -338,6 +362,9 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
+          "require_source_version": {"type": "integer", "description": "Require this completed buffer revision; mismatch refuses the operation."},
+          "require_source_digest": {"type": "string", "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."},
           "editor_name": {
             "type": "string",
             "description": "Name of the CAD editor tab (as returned by minerva_list_editors)."
@@ -477,6 +504,9 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
+          "require_source_version": {"type": "integer", "description": "Require this completed buffer revision; mismatch refuses the operation."},
+          "require_source_digest": {"type": "string", "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."},
           "editor_name": {"type": "string", "description": "Name of the CAD editor tab (as returned by minerva_list_editors)."},
           "view": {"type": "string", "enum": ["iso", "top", "front", "right", "active"], "description": "Which pane the pixel is in. Default 'active'. In narrow layout only one pane renders, so a named pane is REFUSED with a reason rather than answered from the pane that happens to be showing \u2014 use 'active' there, as minerva_cad_snapshot requires."},
           "px": {"type": "array", "items": {"type": "number"}, "description": "[x, y] pixel in that pane, top-left origin."}
@@ -491,6 +521,9 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
+          "require_source_version": {"type": "integer", "description": "Require this completed buffer revision; mismatch refuses the operation."},
+          "require_source_digest": {"type": "string", "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."},
           "editor_name": {"type": "string", "description": "Name of the CAD editor tab (as returned by minerva_list_editors)."},
           "at_mm": {"type": "array", "items": {"type": "number"}, "description": "[x, y, z] world point \u2014 the point form. Give this OR from_mm, never both."},
           "from_mm": {"type": "array", "items": {"type": "number"}, "description": "[x, y, z] world point the ray starts at \u2014 the ray form, with direction_mm."},
@@ -509,6 +542,9 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
+          "require_source_version": {"type": "integer", "description": "Require this completed buffer revision; mismatch refuses the operation."},
+          "require_source_digest": {"type": "string", "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."},
           "editor_name": {"type": "string", "description": "Name of the CAD editor tab (as returned by minerva_list_editors)."},
           "view": {"type": "string", "enum": ["iso", "top", "front", "right", "active"], "description": "Which pane to capture. Default 'active'. In narrow layout only one pane renders, so a named pane is REFUSED with a reason — use 'active' there."},
           "fit": {"description": "What to frame on: 'solid' (default), 'reference:<name>', or [[x0,y0,z0], [x1,y1,z1]] — two opposite corners of a world box in millimetres, either order."},
@@ -527,6 +563,9 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
+          "require_source_version": {"type": "integer", "description": "Require this completed buffer revision; mismatch refuses the operation."},
+          "require_source_digest": {"type": "string", "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."},
           "editor_name": {"type": "string", "description": "Name of the CAD editor tab (as returned by minerva_list_editors)."},
           "view": {"type": "string", "enum": ["+x", "-x", "+y", "-y", "+z", "-z", "iso", "iso-under", "top", "bottom", "under", "front", "back", "left", "right"], "description": "Which DIRECTION to stand in — not which pane. '-z' is under the part looking up, '+z' is straight down, 'iso' is the iso pane's own three-quarter angle and 'iso-under' the same from below. Give this, or pose, or both (pose wins where they overlap)."},
           "pose": {"type": "object", "description": "The camera pose. {yaw_deg, pitch_deg} place it on the sphere around the target: yaw about world +Z with 0 on the +X side, pitch degrees above the XY plane (-90 = directly underneath). distance_mm (optional) overrides how far back the fit would have put it; target_mm (optional) [x,y,z] is the point it aims at, default the centre of the fit box.", "properties": {"yaw_deg": {"type": "number"}, "pitch_deg": {"type": "number"}, "distance_mm": {"type": "number"}, "target_mm": {"type": "array", "items": {"type": "number"}}}},
@@ -547,6 +586,9 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
+          "require_source_version": {"type": "integer", "description": "Require this completed buffer revision; mismatch refuses the operation."},
+          "require_source_digest": {"type": "string", "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."},
           "editor_name": {"type": "string", "description": "Name of the CAD editor tab (as returned by minerva_list_editors)."},
           "overlay": {"type": "string", "enum": ["none", "grid", "axes", "grid+axes"], "description": "What to draw. Default 'grid'."},
           "grid_mm": {"type": "number", "description": "Requested grid spacing in millimetres. Doubled as needed to keep the grid readable; the spacing actually drawn is returned. Default 10."}
@@ -561,6 +603,9 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
+          "require_source_version": {"type": "integer", "description": "Require this completed buffer revision; mismatch refuses the operation."},
+          "require_source_digest": {"type": "string", "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."},
           "editor_name": {"type": "string", "description": "Name of the CAD editor tab (as returned by minerva_list_editors)."},
           "include_hole": {"type": "boolean", "description": "Look for the fitted hole the selected point lies inside. Costs one segmentation pass on the first call for a file, cached afterwards. Default true."}
         },
@@ -574,6 +619,9 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
+          "require_source_version": {"type": "integer", "description": "Require this completed buffer revision; mismatch refuses the operation."},
+          "require_source_digest": {"type": "string", "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."},
           "editor_name": {"type": "string", "description": "Name of the CAD editor tab (as returned by minerva_list_editors)."},
           "reference": {"type": "string", "description": "Reference name, as reported by minerva_cad_references."},
           "node": {"type": "string", "description": "Node inside that reference (references[].nodes[].name). Defaults to its first node."},
@@ -590,6 +638,9 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
+          "require_source_version": {"type": "integer", "description": "Require this completed buffer revision; mismatch refuses the operation."},
+          "require_source_digest": {"type": "string", "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."},
           "editor_name": {"type": "string", "description": "Name of the CAD editor tab (as returned by minerva_list_editors)."}
         },
         "required": ["editor_name"]
@@ -773,7 +824,8 @@
           "ui/scripts/rim_contact.gd",
           "ui/scripts/stl_reader.gd",
           "ui/tools/cad_edge_number_tool.gd",
-        "ui/scripts/build_controls.gd"
+        "ui/scripts/build_controls.gd",
+        "ui/scripts/evaluation_state.gd"
         ],
         "file_extensions": [
           ".mcad"
