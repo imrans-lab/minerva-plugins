@@ -92,18 +92,25 @@ func handleExportWith(ctx context.Context, params json.RawMessage,
 	call func(context.Context, json.RawMessage) (json.RawMessage, error)) (json.RawMessage, error) {
 
 	var args struct {
-		JobID  string `json:"job_id"`
-		WaitMS *int   `json:"wait_ms"`
+		JobID  string          `json:"job_id"`
+		WaitMS json.RawMessage `json:"wait_ms"`
 	}
 	if err := json.Unmarshal(params, &args); err != nil {
 		return nil, &bridge.WorkerError{Kind: "internal", Message: "invalid export arguments"}
 	}
 	wait := exportFirstReply
-	if args.WaitMS != nil {
-		if *args.WaitMS < 0 || *args.WaitMS > 20000 {
-			return nil, &bridge.WorkerError{Kind: "internal", Message: "wait_ms must be 0..20000"}
+	if !jsonAbsent(args.WaitMS) {
+		// jsonInt, not a Go int field: the host may spell an integer 0 as 0.0.
+		ms, err := jsonInt(args.WaitMS)
+		if err != nil {
+			return nil, &bridge.WorkerError{Kind: "internal",
+				Message: "wait_ms " + err.Error() + "; expected 0..20000 milliseconds, got " + string(args.WaitMS)}
 		}
-		wait = time.Duration(*args.WaitMS) * time.Millisecond
+		if ms < 0 || ms > 20000 {
+			return nil, &bridge.WorkerError{Kind: "internal",
+				Message: "wait_ms must be 0..20000 milliseconds; got " + string(args.WaitMS)}
+		}
+		wait = time.Duration(ms) * time.Millisecond
 	}
 	var job *exportJob
 	if args.JobID != "" {
@@ -149,11 +156,11 @@ func handleExportWith(ctx context.Context, params json.RawMessage,
 // caller collect a running one by simply asking again.
 func exportJobKey(params json.RawMessage) string {
 	var a struct {
-		Source  string `json:"source"`
-		Part    string `json:"part"`
-		Version *int   `json:"source_version"`
-		Format  string `json:"format"`
-		Path    string `json:"path"`
+		Source  string          `json:"source"`
+		Part    string          `json:"part"`
+		Version json.RawMessage `json:"source_version"`
+		Format  string          `json:"format"`
+		Path    string          `json:"path"`
 	}
 	sum := sha256.New()
 	if err := json.Unmarshal(params, &a); err != nil {
@@ -161,7 +168,26 @@ func exportJobKey(params json.RawMessage) string {
 		// two such calls still share one (fast) job.
 		sum.Write(params)
 	} else {
-		encoded, _ := json.Marshal(a)
+		// source_version is normalized rather than hashed as written, so the
+		// host's 4 and 4.0 spellings of one version name the same export.
+		keyed := struct {
+			Source  string `json:"source"`
+			Part    string `json:"part"`
+			Version *int64 `json:"source_version"`
+			Format  string `json:"format"`
+			Path    string `json:"path"`
+		}{Source: a.Source, Part: a.Part, Format: a.Format, Path: a.Path}
+		if !jsonAbsent(a.Version) {
+			if v, err := jsonInt(a.Version); err == nil {
+				keyed.Version = &v
+			} else {
+				// Not a version the worker will accept either; keep the
+				// verbatim text in the key so the bad request still joins
+				// itself rather than colliding with a valid one.
+				sum.Write(a.Version)
+			}
+		}
+		encoded, _ := json.Marshal(keyed)
 		sum.Write(encoded)
 	}
 	return hex.EncodeToString(sum.Sum(nil))

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"github.com/imrans-lab/minerva-plugins/shared/bridge"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -188,5 +189,139 @@ func TestExportHandleCollectionIsStable(t *testing.T) {
 	_, err = handleExportWith(context.Background(), json.RawMessage(`{"job_id":"absent"}`), slow)
 	if err == nil {
 		t.Fatal("unknown handle accepted")
+	}
+}
+
+// ORACLE for the wait_ms cases below: the handler's OUTCOME CLASS for a given
+// raw argument, which is observable without knowing how the argument is
+// parsed. An accepted wait_ms yields no error and a reply carrying a job_id
+// (pending or completed — both mean the export was dispatched); a refused one
+// yields a WorkerError that names wait_ms and quotes the offending value, and
+// leaves the worker uncalled. The inputs are the raw request bytes, in both
+// the integer and the float spelling of the same value, because the host
+// re-serializes arguments through a float-only JSON parser and either
+// spelling can arrive on the wire.
+func TestExportWaitMSAcceptsHostNumberSpellings(t *testing.T) {
+	cases := []struct {
+		name    string
+		waitMS  string
+		accept  bool
+		mustSay string
+	}{
+		{name: "integer zero", waitMS: `0`, accept: true},
+		{name: "float zero as the host spells it", waitMS: `0.0`, accept: true},
+		{name: "negative zero", waitMS: `-0.0`, accept: true},
+		{name: "float upper bound", waitMS: `20000.0`, accept: true},
+		{name: "exponent spelling", waitMS: `1e3`, accept: true},
+		{name: "null is absent", waitMS: `null`, accept: true},
+		{name: "fractional", waitMS: `0.5`, accept: false, mustSay: "0.5"},
+		{name: "negative", waitMS: `-1`, accept: false, mustSay: "-1"},
+		{name: "above the bound", waitMS: `20001`, accept: false, mustSay: "20001"},
+		{name: "above the bound as a float", waitMS: `20000.5`, accept: false, mustSay: "20000.5"},
+		{name: "quoted number is not a number", waitMS: `"0"`, accept: false, mustSay: "number"},
+		{name: "boolean", waitMS: `true`, accept: false, mustSay: "number"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetExportJobs(t)
+			prior := exportFirstReply
+			exportFirstReply = 40 * time.Millisecond
+			defer func() { exportFirstReply = prior }()
+
+			var calls int32
+			done := func(_ context.Context, _ json.RawMessage) (json.RawMessage, error) {
+				atomic.AddInt32(&calls, 1)
+				return json.RawMessage(`{"path":"/tmp/w.stl","bytes_written":4,"format":"stl"}`), nil
+			}
+			args := json.RawMessage(`{"source":"part = box(1,1,1)\n","format":"stl","path":"/tmp/` +
+				tc.name + `.stl","wait_ms":` + tc.waitMS + `}`)
+
+			res, err := handleExportWith(context.Background(), args, done)
+			if !tc.accept {
+				we, ok := err.(*bridge.WorkerError)
+				if !ok {
+					t.Fatalf("wait_ms %s was accepted (result %s, err %v); expected a refusal", tc.waitMS, res, err)
+				}
+				if !strings.Contains(we.Message, "wait_ms") || !strings.Contains(we.Message, tc.mustSay) {
+					t.Fatalf("refusal of wait_ms %s is not descriptive: %q", tc.waitMS, we.Message)
+				}
+				if strings.Contains(we.Message, "invalid export arguments") {
+					t.Fatalf("wait_ms %s got the opaque catch-all message", tc.waitMS)
+				}
+				if got := atomic.LoadInt32(&calls); got != 0 {
+					t.Fatalf("a refused wait_ms still dispatched %d export(s)", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("wait_ms %s was refused: %v", tc.waitMS, err)
+			}
+			var r map[string]any
+			if uerr := json.Unmarshal(res, &r); uerr != nil {
+				t.Fatalf("wait_ms %s: reply is not an object: %v (%s)", tc.waitMS, uerr, res)
+			}
+			if id, _ := r["job_id"].(string); id == "" {
+				t.Fatalf("wait_ms %s: reply carries no job handle: %s", tc.waitMS, res)
+			}
+		})
+	}
+}
+
+// Both spellings of one source_version name the SAME export, so a caller who
+// asks again while it builds joins the running job instead of starting a
+// second copy of it — and two different versions still key apart.
+func TestExportJobKeyNormalizesSourceVersionSpelling(t *testing.T) {
+	body := `{"source":"a=cube(2)\n","format":"stl","path":"/tmp/v.stl","source_version":`
+	asInt := exportJobKey(json.RawMessage(body + `4}`))
+	asFloat := exportJobKey(json.RawMessage(body + `4.0}`))
+	if asInt != asFloat {
+		t.Fatal("4 and 4.0 keyed apart; the host's float spelling would start a second export")
+	}
+	if asInt == exportJobKey(json.RawMessage(body+`5}`)) {
+		t.Fatal("two source versions must key apart, or one export collects the other's geometry")
+	}
+}
+
+// A float wait_ms on the collection path bounds the wait like its integer
+// twin: the handle stays collectable and the result is the worker's payload.
+func TestExportCollectionAcceptsFloatWaitMS(t *testing.T) {
+	resetExportJobs(t)
+	release := make(chan struct{})
+	var calls int32
+	slow := func(_ context.Context, _ json.RawMessage) (json.RawMessage, error) {
+		atomic.AddInt32(&calls, 1)
+		<-release
+		return json.RawMessage(`{"path":"/tmp/float.stl","bytes_written":7}`), nil
+	}
+	start := json.RawMessage(`{"source":"a=cube(3)\n","format":"stl","path":"/tmp/float.stl","wait_ms":0.0}`)
+	pending, err := handleExportWith(context.Background(), start, slow)
+	assertRunning(t, pending, err)
+
+	var r map[string]any
+	if uerr := json.Unmarshal(pending, &r); uerr != nil {
+		t.Fatal(uerr)
+	}
+	poll := json.RawMessage(`{"job_id":"` + r["job_id"].(string) + `","wait_ms":0.0}`)
+	polled, perr := handleExportWith(context.Background(), poll, slow)
+	assertRunning(t, polled, perr)
+
+	close(release)
+	collect := json.RawMessage(`{"job_id":"` + r["job_id"].(string) + `","wait_ms":20000.0}`)
+	res, err := handleExportWith(context.Background(), collect, slow)
+	if err != nil {
+		t.Fatalf("collecting with a float wait_ms failed: %v", err)
+	}
+	var payload struct {
+		BytesWritten int    `json:"bytes_written"`
+		Status       string `json:"status"`
+	}
+	if uerr := json.Unmarshal(res, &payload); uerr != nil {
+		t.Fatal(uerr)
+	}
+	if payload.BytesWritten != 7 || payload.Status != "completed" {
+		t.Fatalf("collected the wrong payload: %s", res)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("the export ran %d times; float wait_ms broke job joining", got)
 	}
 }
