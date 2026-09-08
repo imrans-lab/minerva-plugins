@@ -57,6 +57,7 @@ BUILTIN_FUNCTIONS: dict[str, frozenset[str]] = {
 
 # Statement-level commands (``fillet beam, 2, r=4``) and their keywords.
 BUILTIN_COMMANDS: dict[str, frozenset[str]] = {
+    "annotate": frozenset({"id", "text", "dimension", "nominal", "tolerance"}),
     "fillet": frozenset({"r"}),
     "chamfer": frozenset({"d"}),
     "shell": frozenset({"t", "thickness", "open"}),

@@ -891,3 +891,6 @@ test_snapshot_posed.gd assertions=22
 
 # Stepped mounting holes, metre-scale seat physics and countersunk head profiles.
 test_fastener_mounting.gd assertions=12
+
+# Source-owned overlays: all panes, replacement, read-only ownership and failed builds.
+test_source_annotations.gd assertions=14

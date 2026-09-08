@@ -276,6 +276,7 @@ func _ready() -> void:
 	_BuiltinKindsScript.register_all(_annotation_registry)
 	# Register cad_edge_number: numbered callout bubbles for LLM/user edge disambiguation.
 	_annotation_registry.register_annotation_kind(_CadEdgeNumberKindScript.new())
+	_annotation_registry.register_annotation_kind(preload("kinds/cad_source_annotation_kind.gd").new())
 
 	_annotation_host = _CadAnnotationHostScript.new()
 	_annotation_host._registry = _annotation_registry

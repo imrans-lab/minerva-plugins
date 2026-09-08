@@ -52,7 +52,7 @@ _last_program: Optional[Tuple[tuple[str, float, float], dict]] = None
 # write one document's geometry into the other's file with no signal at all.
 _last_shape: Optional[Tuple[str, str, Any]] = None
 # A few recently evaluated documents, including their final named solids.
-_shape_documents: OrderedDict[str, tuple[str, dict[str, Any]]] = OrderedDict()
+_shape_documents: OrderedDict[str, tuple[str, dict[str, Any], list[dict[str, Any]]]] = OrderedDict()
 _MAX_SHAPE_DOCUMENTS = 4
 
 
@@ -283,6 +283,7 @@ def _summarise(result: dict) -> dict:
         "face_count": len(mesh.get("faces") or []),
         "edge_count": len(result.get("edges") or []),
         "reference_count": len(result.get("references") or []),
+        "annotations": result.get("annotations", []),
     }
     # Counts and locations both come from the walk the evaluation already
     # did; a summary of a dict that predates it (a direct caller, an old
@@ -433,6 +434,7 @@ def _evaluate(params: dict) -> dict:
         "mesh": result.mesh,
         "edges": result.edges,
         "references": result.references,
+        "annotations": result.annotations,
         "provenance": {
             "source_digest": h[0],
             "settings": {"tolerance": tolerance, "angular_tolerance": angular_tolerance},
@@ -453,7 +455,7 @@ def _evaluate(params: dict) -> dict:
     # shape in place rather than caching a None an export would trip over.
     if result.shape is not None:
         _last_shape = (_digest(source), result.shape_name, result.shape)
-        _shape_documents[_digest(source)] = (result.shape_name, result.bindings)
+        _shape_documents[_digest(source)] = (result.shape_name, result.bindings, result.annotations)
         _shape_documents.move_to_end(_digest(source))
         while len(_shape_documents) > _MAX_SHAPE_DOCUMENTS:
             _shape_documents.popitem(last=False)
@@ -692,6 +694,7 @@ def _export(params: dict) -> dict:
             # this call. A reader watching an export get slow can tell the two
             # apart without guessing.
             "reused_evaluation": reused,
+            "annotations": {"included_in_geometry": False, "records": cached[2]},
             "part": name,
             "source_digest": digest,
             "document_id": params.get("document_id", ""),

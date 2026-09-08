@@ -59,6 +59,7 @@ class EvaluationResult:
     # Foreign mesh files the source referenced, each with its composed pose.
     # The worker never opens them; the panel resolves and loads them.
     references: list[dict[str, Any]] = field(default_factory=list)
+    annotations: list[dict[str, Any]] = field(default_factory=list)
     # The live B-Rep the mesh was tessellated from. NOT serializable and never
     # part of the reply: it is here so a caller that already paid to build the
     # part can export it without translating the DSL a second time.
@@ -115,6 +116,7 @@ def evaluate_source(
                 shape_name="",
                 body_count=0,
                 references=references,
+                annotations=translator.annotations,
             )
         message = "No 3D part produced. Define a shape with extrude(...) before evaluating."
         raise EvaluationError(message) from TranslatorError(message)
@@ -160,6 +162,7 @@ def evaluate_source(
         shape_name=shape_name,
         body_count=body_count_of(shape),
         references=references,
+        annotations=translator.annotations,
         shape=shape,
         bindings={name: value for name, value in translator.env.items()
                   if translator.is_part(value)},

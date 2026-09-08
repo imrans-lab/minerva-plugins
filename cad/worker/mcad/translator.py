@@ -171,6 +171,7 @@ class Translator:
         # records intent — it does NOT write to disk during translation.
         # Call ``write_exports()`` (or walk this list externally) to flush.
         self.export_targets: list[dict[str, Any]] = []
+        self.annotations: list[dict[str, Any]] = []
         self._in_sketch = False  # whether we're inside a sketch: block
         # Track 2D profile vertices for edge numbering.
         # Maps variable name -> list of (x, y) vertices of the composite profile.
@@ -1351,7 +1352,19 @@ class Translator:
     # ------------------------------------------------------------------
 
     def _eval_command(self, node: Command) -> None:
-        if node.name == "fillet":
+        if node.name == "annotate":
+            from .annotations import annotation_record
+            try:
+                record = annotation_record([self._eval_expr(a) for a in node.args],
+                    {k: self._eval_expr(v) for k, v in node.kwargs.items()}, len(self.annotations), node.line)
+                if any(a["id"] == record["id"] for a in self.annotations):
+                    raise ValueError(f"duplicate annotation id: {record['id']}")
+                if len(self.annotations) >= 200:
+                    raise ValueError("a render supports at most 200 source annotations")
+                self.annotations.append(record)
+            except ValueError as exc:
+                raise TranslatorError(str(exc), line=node.line) from exc
+        elif node.name == "fillet":
             self._cmd_fillet(node)
         elif node.name == "chamfer":
             self._cmd_chamfer(node)

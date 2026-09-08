@@ -821,6 +821,12 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 		return
 
 	var eval_result: Dictionary = worker_payload.get("result", {}) as Dictionary
+	var prepared_annotations: Dictionary = _annotation_host.prepare_source_annotations(eval_result.get("annotations", []))
+	if prepared_annotations.has("error"):
+		_last_eval_result = {"status": "error", "error_kind": "annotations",
+			"error_message": prepared_annotations.error, "request_id": request_id}
+		_show_eval_error("CAD annotations rejected: " + str(prepared_annotations.error))
+		return
 	var mesh_data: Dictionary = eval_result.get("mesh", {}) as Dictionary
 	var edges_var: Variant = eval_result.get("edges", [])
 	var edges: Array = edges_var if edges_var is Array else []
@@ -850,6 +856,8 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 	# freshness stamp moves here and nowhere else.
 	_painted_buffer_version = int(snapshot.source_version)
 	_evaluation_state.painted(self, snapshot, eval_result)
+	_annotation_host.set_source_annotations(prepared_annotations.annotations,
+		_evaluation_state.completed.get("provenance", {}))
 	_build.painted_source = dsl_text
 	_build.has_painted = true
 	_edge_registry = edges

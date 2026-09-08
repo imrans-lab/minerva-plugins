@@ -48,6 +48,7 @@ class TT(Enum):
     KW_AT       = auto()
     KW_EXTRUDE  = auto()
     KW_LOFT     = auto()
+    KW_ANNOTATE = auto()
     KW_FILLET   = auto()
     KW_CHAMFER  = auto()
     KW_SHELL    = auto()
@@ -103,6 +104,7 @@ KEYWORDS: dict[str, TT] = {
     "at":      TT.KW_AT,
     "extrude": TT.KW_EXTRUDE,
     "loft":    TT.KW_LOFT,
+    "annotate": TT.KW_ANNOTATE,
     "fillet":  TT.KW_FILLET,
     "chamfer": TT.KW_CHAMFER,
     "shell":   TT.KW_SHELL,

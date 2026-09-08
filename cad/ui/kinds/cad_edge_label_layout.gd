@@ -67,7 +67,7 @@ static func get_layout(
 	# of cad_edge_number annotations. A change in any invalidates the cache.
 	var ann_count := 0
 	for ann in annotations:
-		if ann is Dictionary and str((ann as Dictionary).get("kind", "")) == "cad_edge_number":
+		if ann is Dictionary and str((ann as Dictionary).get("kind", "")) in ["cad_edge_number", "cad_source_annotation"]:
 			ann_count += 1
 
 	var cam_id: int = camera.get_instance_id()
@@ -99,24 +99,28 @@ static func get_layout(
 		if not (ann is Dictionary):
 			continue
 		var ann_d: Dictionary = ann as Dictionary
-		if str(ann_d.get("kind", "")) != "cad_edge_number":
+		var kind: String = str(ann_d.get("kind", ""))
+		if kind not in ["cad_edge_number", "cad_source_annotation"]:
 			continue
-		var anchor: Variant = _anchor_for_annotation(ann_d)
-		if not (anchor is Dictionary):
-			continue
-		if not host.has_method("_resolve_edge_anchor"):
-			continue
-		var resolved: Variant = host._resolve_edge_anchor(anchor)
-		if not (resolved is Dictionary):
-			continue
-		var resolved_d: Dictionary = resolved as Dictionary
-
-		var leader_start_world: Vector3 = resolved_d.get("position", Vector3.ZERO)
-		var edge_id: int = int(resolved_d.get("edge_id", (anchor as Dictionary).get("id", -1)))
-		if edge_id < 0:
-			continue
-
-		var payload: Dictionary = ann_d.get("payload", {})
+		var leader_start_world: Vector3
+		var edge_id: Variant
+		if kind == "cad_source_annotation":
+			leader_start_world = _vec3_from_payload(ann_d.get("anchor", {}).get("point", []))
+			edge_id = str(ann_d.get("id", ""))
+		else:
+			if camera.projection != Camera3D.PROJECTION_PERSPECTIVE:
+				continue
+			var anchor: Variant = _anchor_for_annotation(ann_d)
+			if not anchor is Dictionary or not host.has_method("_resolve_edge_anchor"):
+				continue
+			var resolved: Variant = host._resolve_edge_anchor(anchor)
+			if not resolved is Dictionary:
+				continue
+			leader_start_world = resolved.get("position", Vector3.ZERO)
+			edge_id = int(resolved.get("edge_id", anchor.get("id", -1)))
+			if edge_id < 0:
+				continue
+		var payload: Dictionary = ann_d.get("kind_payload", ann_d.get("payload", {}))
 		var user_placed: bool = bool(payload.get("user_placed", false))
 		var box_offset: Vector3 = _vec3_from_payload(payload.get("box_offset", [0.0, 0.0, 0.0]))
 		var leader_end_world: Vector3 = leader_start_world + box_offset
@@ -135,7 +139,8 @@ static func get_layout(
 				# per fan_index so co-located anchors don't all stack.
 				var angle: float = TAU * float(fan_index) / 8.0
 				dir = Vector2(cos(angle), sin(angle))
-			box_center = anchor_screen + dir.normalized() * _DEFAULT_RADIAL_PUSH_PX
+			var push_px := 140.0 if kind == "cad_source_annotation" else _DEFAULT_RADIAL_PUSH_PX
+			box_center = anchor_screen + dir.normalized() * push_px
 			fan_index += 1
 
 		positions[edge_id] = box_center
