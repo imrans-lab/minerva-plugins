@@ -203,7 +203,8 @@
         },
         "text": {
           "type": "string",
-          "maxLength": 100000
+          "maxLength": 32768,
+          "description": "The member's answer as written. Capped at the inline ceiling: v0.1 moves whole snapshots across the host's 64 KiB IPC hop, so no single field may fill it. The chair's synthesis is a Contribution and inherits the same cap."
         },
         "claims": {
           "type": "array",

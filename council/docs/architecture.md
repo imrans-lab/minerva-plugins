@@ -41,8 +41,8 @@ An HTML panel is opened as a plain `Editor.Type.WEBVIEW`:
 Every panel lifecycle hook is gated on `Type.PLUGIN_SCENE` with a non-null
 `plugin_scene_root`: dirty tracking (`Editor.gd:1539`), Ctrl+S
 (`Editor.gd:1711`), mark-saved (`Editor.gd:2072`), create-note
-(`Editor.gd:2226`), note refresh (`Editor.gd:2434`), chat-inject toggle
-(`Editor.gd:2493`), unload (`Editor.gd:748`), undo (`Editor.gd:2167`), project
+(`Editor.gd:2226`), note refresh (`Editor.gd:2435`), chat-inject toggle
+(`Editor.gd:2494`), unload (`Editor.gd:748`), undo (`Editor.gd:2167`), project
 serialize (`src/Scripts/UI/Controls/vboxEditor.gd:164`, `:494`) and project restore
 (`vboxEditor.gd:769`).
 
@@ -88,8 +88,12 @@ inside a panel that receives the full hook set dispatched by
 `invoke_inject_toggle:404`, `invoke_unload:451`).
 
 `council/proof/` is that proof: manifest, scene, wrapper script, injected
-bridge, a page that exercises the protocol, and a near-empty backend so the
-plugin is installable. Both scripts pass `godot --headless --check-only`.
+bridge, a page that drives the envelope, and a near-empty backend so the plugin
+is installable. It demonstrates exactly two things — that an HTML surface
+renders inside a native panel, and that the panel's lifecycle hooks fire — and
+deliberately nothing else. It applies no commands and edits no record, because
+that is the engine's job (§3). Both scripts pass
+`godot --headless --check-only`.
 
 ### 1.3 Three host behaviours the wrapper must copy, not discover
 
@@ -146,13 +150,13 @@ freeing its own texture cannot shut CEF down.
 - **`window.minerva.call()` is not brokered.** It `fetch`es
   `http://localhost:9315` directly from the page
   (`src/Scripts/UI/Controls/WebViewEditor/minerva_bridge.gd:13-41`,
-  `cef_bridge.gd:132-160`) into the unauthenticated MCP HTTP server
+  `cef_bridge.gd:19-26`) into the unauthenticated MCP HTTP server
   (`src/Scripts/Services/MCP/MinervaMCPHttpServer.gd:12`), bypassing the
   manifest allowlist and the capability policy. Council's page must never use
   it; the wrapper injects its own bridge and the page reaches nothing else.
 - **`plugin_owned` save is unimplemented** — `Editor.gd:1714-1721` warns and
   writes nothing. Council uses `host_owned`.
-- **`invoke_restore_from_note` is not awaited** (`Note.gd:733`), unlike
+- **`invoke_restore_from_note` is not awaited** (`src/Scripts/UI/Controls/Note.gd:733`), unlike
   `invoke_create_note` (`Editor.gd:2263`). Council's restore hook must be a
   plain function; a coroutine there would return a truthy state object and look
   like success.
@@ -200,7 +204,7 @@ responsibility cannot rename a person.
 ### 2.2 Invariants the schemas cannot state
 
 Enforced in `internal/contract/invariants.go` and exercised by the sixteen
-records in `fixtures/invalid/`:
+records in `fixtures/invalid/`, each of which fails for its one named reason:
 
 - A council has **exactly one chair**.
 - Every seat names a member that exists; every grounding ref names a
@@ -223,6 +227,12 @@ records in `fixtures/invalid/`:
 - Outcomes reference a run that exists and a contribution within it.
 - A mutating command carries `base_revision`; a read command does not.
 - A failed reply carries an error; a successful one does not.
+- **A session's status equals `DeriveSessionStatus(session)`** (§4.1). This is the
+  invariant that makes the rest of the model deterministic: status is computed,
+  never chosen, so a valid record loads unchanged and at the same revision. Only
+  a document the engine had to rewrite — an interrupted run demoted on load —
+  comes back at a new `snapshot_revision`, because two different documents must
+  never claim the same one.
 
 ---
 
@@ -233,8 +243,10 @@ survives Minerva restarting.
 
 | State | Owner | Where it lives | Durable | Rebuilt from |
 |---|---|---|---|---|
-| Council definitions, sessions, runs, contributions, outcomes, source captures | **native wrapper** | `_snapshot` in the panel; written into the project by `vboxEditor.gd:495-497` as `__panel_state`, and to a `.mcouncil` file by `Editor.gd:1711-1760` | yes | — it *is* the source |
-| `snapshot_revision` | native wrapper | same | yes | — |
+| Council definitions, sessions, runs, contributions, outcomes, source captures — the durable record | **native wrapper**, which persists it but never edits it | `_snapshot` in the panel; written into the project by `vboxEditor.gd:495-497` as `__panel_state`, and to a `.mcouncil` file by `Editor.gd:1711-1760` | yes | — it *is* the source |
+| `snapshot_revision` | **plugin backend** — minted on each accepted mutation, and on a load that had to rewrite the record | the record, persisted by the wrapper | yes | — |
+| The record while a session is open (mutations, derivations, validation) | **plugin backend** — the one engine, `session.Store` | backend process memory | **no** | seeded by `minerva_council_load_snapshot` from the wrapper's persisted record; read back with `minerva_council_export_snapshot` |
+| The idempotency ledger (`request_id` → the reply already produced) | **plugin backend** | backend process memory, cleared by every `Load` | **no** | not rebuilt — it is scoped to one loaded record, so a replay can never return a reply produced against a different snapshot |
 | In-flight model calls, per-member timers, cancellation tokens | **plugin backend** | backend process memory | **no** | not rebuilt: an interrupted run is demoted, never resumed (§4.3) |
 | Rendered roster, open pane, scroll position, in-progress typing | **page (CEF)** | JS heap | no | re-read via `snapshot.get` |
 | Last selected session / pane | native wrapper | `snapshot.view` | yes | defaults if absent |
@@ -243,13 +255,22 @@ survives Minerva restarting.
 | Panel reopen payload | Minerva notes | a `plugin_data` note's `linked_plugin_payload` (`Note.gd:363-369`) | yes | the snapshot it was made from |
 | Source material larger than `InlineLimit` | host blob store | `(editor_name, "blob-N")`, referenced by `blob_handle` | yes, with the document | — |
 
-Three rules follow, and they are the ones that keep the model honest:
+The seeding path is the seam between the two halves and is worth naming
+explicitly: the wrapper holds the durable record, the backend holds the engine,
+and `minerva_council_load_snapshot` / `minerva_council_export_snapshot` move the
+record between them. A backend restart loses nothing durable, because everything
+it held was either already in the record or was in-flight work that §4.3 refuses
+to resume.
 
-1. **The page is a view.** It never holds state that is not in the snapshot or
+Four rules follow, and they are the ones that keep the model honest:
+
+1. **The page is a view.** It never holds state that is not in the record or
    in flight. A page reload loses nothing.
-2. **The backend is derived.** Anything it holds that must outlive the process
-   has already been written into the snapshot.
-3. **Nothing is shown as saved before it is in the snapshot.** The backend
+2. **The wrapper is a store, not an engine.** It persists and re-serves the
+   record; it does not edit one, derive a status, or mint a revision.
+3. **The backend is the only engine, and it is not durable.** Anything it holds
+   that must outlive the process has already gone back into the record.
+4. **Nothing is shown as saved before it is in the record.** The backend
    applies a mutation, advances `snapshot_revision` and replies; the wrapper
    persists the snapshot it gets back and emits `content_changed` (which marks
    the tab dirty at `Editor.gd:2095-2096`). The reply carries the new revision,
@@ -275,22 +296,31 @@ participate in project save.
 
 ## 4. State machines
 
-### 4.1 Session
+### 4.1 Session — derived, never set
 
-```
-        create                    run.start
-draft ─────────────► draft ─────────────────► running
-                                                 │
-              all members answered + synthesised │──► complete
-              some member failed / cancelled     │──► partial
-              user cancelled                     │──► cancelled
-              round could not start              │──► failed
-```
+A session's status is a **function of its run set and of nothing else**. No code
+path assigns it; `contract.DeriveSessionStatus` computes it, and
+`checkSession` asserts that a stored record agrees. That makes the derivation
+the single oracle rather than a convention several writers each interpret.
+
+| Run set | Status |
+|---|---|
+| no runs | `draft` |
+| any run `pending` or `running` | `running` |
+| otherwise the **last** run is `complete` | `complete` |
+| otherwise the last run is `cancelled` | `cancelled` |
+| otherwise the last run is `partial` | `partial` |
+| otherwise the last run is `failed` **with contributions** | `partial` — members were dispatched, so some work exists |
+| otherwise the last run is `failed` with none | `failed` — the round never started |
+
+The last run decides because that is the state the user is looking at. An
+earlier cancelled round does not keep a session cancelled once a later round has
+answered.
 
 `complete`, `partial`, `cancelled` and `failed` are all resting states from
-which `run.start` (a follow-up or a retry) moves back to `running`. Reopening a
-session never changes its status by itself — except for the interruption rule
-below.
+which a new run moves the session back to `running` — again by derivation, not
+by assignment. Reopening a session never changes its status by itself, with the
+one exception in §4.3, and that exception works by changing *runs*.
 
 ### 4.2 Run and contribution
 
@@ -306,12 +336,26 @@ newer run, a newer revision, or another project.
 ### 4.3 The interruption rule
 
 A run left in `pending` or `running` when the panel closed, the plugin stopped,
-or Minerva exited is **not resumed**. The process that owned those model calls
-is gone. On load, `contract.RehydrateOnLoad` (and its mirror in the wrapper)
-demotes the run and its unfinished contributions to `failed` with
-`code: "interrupted"`, `retryable: true`, and moves a `running` session to
-`partial`. The user sees a visible failure with an explicit retry; nothing
-spends tokens on its own. Applying the rule twice changes nothing.
+or Minerva exited is **not resumed**. The process that owned those model calls is
+gone.
+
+`contract.RehydrateOnLoad`, called by `session.Store.Load`, demotes the run and
+its unfinished contributions to `failed` with `code: "interrupted"`,
+`retryable: true`, and then re-derives the session status per §4.1. The user sees
+a visible failure with an explicit retry; nothing spends tokens on its own.
+Applying the rule twice changes nothing.
+
+**There is one engine and it is the backend.** The wrapper does not demote, does
+not re-derive, and does not mint revisions — a second implementation of this rule
+in the panel would be a second engine free to disagree with the first. The
+wrapper persists what `Load` returns.
+
+**A rewrite costs a revision.** Demotion produces a document that is not the one
+handed in, so `Load` increments `snapshot_revision` when it demoted anything.
+Two different documents must never claim the same revision, and the wrapper has
+to persist the demoted form rather than the one it sent. The corollary is the
+useful half: a valid record loads **unchanged and at the same revision**, because
+with the derivation invariant in force there is nothing left to fix.
 
 ---
 
@@ -325,10 +369,10 @@ are exact.
 | Hook | Council's contract | Error case |
 |---|---|---|
 | `_on_panel_loaded(ctx: Dictionary) -> void` | mounts the CEF surface from `ctx.data_directory`; `ctx` shape at `PluginScenePanelHost.gd:657-685` | `CefTexture` missing, page file missing, `user://` unwritable → an explanatory label, never a blank panel |
-| `_on_panel_save_request() -> Dictionary` | returns the snapshot verbatim | none: it cannot fail. A non-Dictionary return is refused by the host at `Editor.gd:1730` |
-| `_on_panel_load_request(document) -> void` | replaces the snapshot, applies the interruption rule, tells the page | non-Dictionary → ignored, panel keeps its current state |
-| `_on_panel_create_note_request(ctx) -> Dictionary` | `{kind: "plugin_data", plugin_id, panel_name, payload: <snapshot>, preview_alt_text: <one line>}`; accepted shapes at `Editor.gd:2298-2334` | omitting the hook degrades to a screenshot note (`Editor.gd:2286`). The host backfills a missing preview image (`Editor.gd:2270-2275`) |
-| `_on_panel_restore_from_note(payload: Dictionary) -> bool` | `false` unless `record_kind == "council_project_snapshot"` and `schema_version == 1` | `false` → the host toasts and leaves the panel blank (`Note.gd:733`). Must not be a coroutine |
+| `_on_panel_save_request() -> Dictionary` | returns the held record verbatim | none: it cannot fail. A non-Dictionary return is refused by the host at `Editor.gd:1733` |
+| `_on_panel_load_request(document) -> void` | strips the host's `file_path` / `raw_text` keys, checks `record_kind` + `schema_version`, replaces the record, tells the page to re-read. Does **not** demote or re-derive — the engine does that on `Load` (§4.3) | the file-open path passes `{"file_path": path}` merged with the parsed JSON, or `raw_text` for a non-JSON file (`Editor.gd:1271-1279`). An empty, non-JSON or unrecognised document opens an empty council, never a half-recognised one |
+| `_on_panel_create_note_request(ctx) -> Dictionary` | `{kind: "plugin_data", plugin_id, panel_name, payload: <snapshot>, preview_alt_text: <one line>}`; accepted shapes at `Editor.gd:2298-2334` | omitting the hook degrades to a screenshot note (`Editor.gd:2289`). The host backfills a missing preview image (`Editor.gd:2272-2278`) |
+| `_on_panel_restore_from_note(payload: Dictionary) -> bool` | `false` unless `record_kind == "council_project_snapshot"` and `schema_version == 1` | `false` → the host toasts and leaves the panel blank (`src/Scripts/UI/Controls/Note.gd:733`). Must not be a coroutine |
 | `_on_panel_render_for_llm(ctx) -> Array` | one `{"type":"text","text":…}` part | **no production caller today** — implemented for the day there is one |
 | `receive(channel: String, payload: Dictionary) -> void` | raw event name, or the literal `"state"` | unknown channel → forwarded to the page as an event; the page re-reads |
 | `_on_panel_unload() -> void` | disconnects `ipc_message`, removes the staged page file | none |
@@ -356,11 +400,18 @@ Envelope shapes are in `envelope.schema.json`. Rules:
   `retryable: true`, and the reply carries the current revision so the page can
   re-read.
 - A repeated `request_id` returns the stored reply with `replayed: true`. The
-  command is applied once.
+  command is applied once. The ledger holding those replies lives in the backend
+  and is cleared by every `Load`, so a replay can never return a reply produced
+  against a different record.
 - Every reply carries the `snapshot_revision` it was produced against.
-- An event never carries authority. It says the snapshot moved; the page
-  re-reads what it needs.
-- A message over `InlineLimit` (32768) is refused rather than truncated.
+- An event never carries authority. It says the record moved; the page re-reads
+  what it needs.
+- A message over `InlineLimit` (32768 UTF-16 code units) is **refused with a
+  `payload_too_large` reply**, not dropped. A dropped message leaves the page's
+  Promise pending forever, which is indistinguishable from a hung panel.
+- The wrapper answers reads from the record it holds and relays everything else.
+  It applies no command itself: `base_revision` checking, mutation, derivation
+  and revision minting all belong to the one engine in the backend (§3).
 
 Error codes are the `Failure.code` enum in `session.schema.json`:
 `model_unavailable`, `model_error`, `timeout`, `cancelled`, `interrupted`,
@@ -434,7 +485,7 @@ Two notes, two jobs, and the distinction matters:
   (`Note.gd:684-733`).
 
 The split exists because of a measured limitation: a `plugin_data` note is built
-with `NoteImageControls` (`Note.gd:349`, `:357`), so what a provider sees is the
+with `NoteImageControls` (`Note.gd:349`, `:358`), so what a provider sees is the
 preview image plus a **single-line caption** (`image_controls.gd:64`; the
 caption reaches a prompt via the image-caption path, e.g.
 `GoogleProvider.gd:305-312`). That is enough to say *which* council session this
@@ -452,14 +503,28 @@ Council's existing hook supplies the full text with no plugin change.
   creates a new `source_revision`; the old one stays so a past contribution can
   still be inspected against what it actually read. Re-grounding a member is an
   explicit act that selects new revisions and advances `member_revision`.
-- **Under `InlineLimit` (32768):** the content travels inline, and its
-  `byte_length` and `content_hash` are checked on every validation.
-- **Over it:** the content goes to the host blob store and the record carries a
-  `blob_handle` with the same hash and length. Per `host.documents.put_blob`, a
-  blob is unreferenced until a `patch_state` embeds its
-  `{"__blob_handle__", "content_type"}` placeholder, so a `put_blob` is always
-  followed by the write that references it, or the blob lingers until the editor
-  closes.
+- **The v0.1 ceiling is the whole record.** v0.1 moves an entire snapshot across
+  the host's pluginIPC hop in one message, and that hop is capped at 65536
+  (`PluginWebviewBroker.gd:42`; see §1.5 for how it is measured). So the ceiling
+  is not per field — it is that **every council, every session, every
+  contribution and every embedded excerpt in one project must together fit in
+  65536**. `InlineLimit` is 32768, half of it, and is the maximum for any single
+  free-text field: contribution text, the chair's synthesis, and a captured
+  source excerpt all carry that same `maxLength` in the schemas, derived from
+  the one constant and asserted against it by
+  `TestInlineLimitIsDerivedFromTheHostIPCCap`. No single field may fill the hop
+  on its own.
+- **This is a real limit, not a safety margin.** A project with a few long
+  councils will reach it, and when it does the transport fails loudly rather
+  than truncating. Lifting it — chunked snapshot transport, and moving source
+  payloads to the host blob store so they never cross the hop — is tracked as
+  work item `01a08311401f` and is the follow-up this section exists to point at.
+- **Over `InlineLimit`, the intended path** is the host blob store: the record
+  carries a `blob_handle` with the same hash and length. Per
+  `host.documents.put_blob`, a blob is unreferenced until a `patch_state` embeds
+  its `{"__blob_handle__", "content_type"}` placeholder, so a `put_blob` is
+  always followed by the write that references it, or the blob lingers until the
+  editor closes. v0.1 defines the shape; the follow-up above wires it.
 - A source with an inventory entry but no payload is legitimate — that is what
   an import without embedded content looks like. Its citations resolve to
   "material not available", which is a state the UI shows, not an error.
@@ -514,7 +579,7 @@ run from the previous snapshot cannot apply: the run id is not present, and
 | formatting | `gofmt -l .` (in `council/`) | clean |
 | static analysis | `GOWORK=off go vet ./...` | clean |
 | build | `GOWORK=off go build ./...` (in `council/` and `council/proof/`) | clean |
-| contract tests | `GOWORK=off go test ./internal/contract/` | 5 tests, over 6 valid and 16 invalid fixtures |
+| contract tests | `GOWORK=off go test ./internal/contract/` | 5 tests, over 8 valid and 16 invalid fixtures |
 | GDScript syntax | `godot --headless --check-only -s <file>` on both wrapper scripts | clean |
 
 `council/` is outside the repo's `go.work`, so Go commands there need

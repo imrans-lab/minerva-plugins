@@ -11,31 +11,37 @@ extends Control
 ## is a plain ClassDB class, so a scene panel can host the same HTML surface
 ## while keeping the native lifecycle. This wrapper is that proof.
 ##
-## Authority. The dictionary in `_snapshot` is the panel's copy of the
-## project-owned record. It is what `_on_panel_save_request` returns and what
-## `_on_panel_load_request` replaces. The page holds a view of it and nothing
-## else; every page mutation is a request that this wrapper accepts or refuses,
-## and the page is told the revision it was answered against.
+## Authority. There is exactly one engine and it lives in the backend. The
+## dictionary in `_snapshot` is the acknowledged record the wrapper persists and
+## re-serves: it is what `_on_panel_save_request` returns and what
+## `_on_panel_load_request` replaces. The wrapper never edits a record, never
+## mints a revision, and never decides a status — it relays a request to the
+## engine and persists whatever comes back. The page holds a view and nothing
+## else. This proof has no backend attached, so it serves reads from the record
+## it holds and refuses every command by saying who owns it.
 
 const CouncilBridge := preload("council_bridge.gd")
 
-## Half the host's 64 KiB pluginIPC cap. Council's own page IPC is not brokered,
-## but the wrapper holds itself to the same budget so the protocol stays valid
-## if a message ever has to travel the brokered path.
-const MAX_MESSAGE_BYTES := 32768
+## Ceiling on one page message, in UTF-16 code units — the unit `String.length()`
+## returns, which is also the unit the host's own broker measures (its constant
+## is named MAX_PAYLOAD_BYTES but counts code units). Half the host's 64 KiB cap,
+## so a message stays valid under either reading if it ever has to travel the
+## brokered path.
+const MAX_MESSAGE_CODE_UNITS := 32768
 
 var _ctx: Dictionary = {}
 var _cef: Control = null
 var _fallback: Label = null
 var _page_path: String = ""
 
-## The authoritative panel record. Shape: schemas/project_snapshot.schema.json.
+## The acknowledged record this panel persists and re-serves. Shape:
+## schemas/project_snapshot.schema.json. It is only ever replaced wholesale —
+## by a load, or by the snapshot the engine returns.
 var _snapshot: Dictionary = _empty_snapshot()
 
-## request_id -> reply, so a repeated request returns the first answer instead
-## of applying twice.
-var _replies: Dictionary = {}
-
+## The host wires this to the tab's dirty flag. The real plugin emits it when the
+## engine hands back a snapshot that differs from the persisted one; this proof
+## has no engine, so nothing here ever makes the tab dirty.
 signal content_changed()
 
 ## The scene-panel broker routes this to the declared backend channel and calls
@@ -86,15 +92,40 @@ func _on_panel_save_request() -> Dictionary:
 	return _snapshot.duplicate(true)
 
 
-## Opening a bound file and restoring a project both land here. A run that was
-## in flight when the record was written is never resumed: it is demoted to a
-## visible failure with a retry, so reopening cannot spend tokens.
+## Opening a bound file and restoring a project both land here.
+##
+## The file-open path does not hand over the document alone: it builds
+## {"file_path": path} and merges the parsed JSON into it, or sets "raw_text"
+## when the file is not JSON. Those two keys are the host's, not the record's,
+## so they are stripped before the payload is treated as a snapshot. An empty,
+## non-JSON or unrecognised document opens an empty council rather than a broken
+## one — the same guard the restore-from-note hook applies.
+##
+## Demotion of interrupted runs is NOT done here. The engine owns that, and it
+## bumps the revision when it rewrites a record; a wrapper that also demoted
+## would be a second engine disagreeing with the first.
 func _on_panel_load_request(document) -> void:
+	_snapshot = _snapshot_from_document(document)
+	_push_event("council.snapshot_changed", {})
+
+
+## Extracts a Council record from whatever the host handed over, or returns an
+## empty one. Never returns a partially-recognised record.
+func _snapshot_from_document(document) -> Dictionary:
 	if not (document is Dictionary):
-		return
-	_snapshot = (document as Dictionary).duplicate(true)
-	var interrupted := _demote_interrupted_runs()
-	_push_event("council.snapshot_changed", {"interrupted_runs": interrupted})
+		return _empty_snapshot()
+	var candidate: Dictionary = (document as Dictionary).duplicate(true)
+	candidate.erase("file_path")
+	candidate.erase("raw_text")
+	if not _is_council_snapshot(candidate):
+		return _empty_snapshot()
+	return candidate
+
+
+func _is_council_snapshot(candidate: Dictionary) -> bool:
+	if str(candidate.get("record_kind", "")) != "council_project_snapshot":
+		return false
+	return int(candidate.get("schema_version", 0)) == 1
 
 
 ## Building a note from the panel. The plugin_data kind is what allows the note
@@ -114,11 +145,10 @@ func _on_panel_create_note_request(ctx: Dictionary) -> Dictionary:
 ## The inverse of the note hook. An unrecognised payload returns false so the
 ## host can tell the user rather than opening a blank council.
 func _on_panel_restore_from_note(payload: Dictionary) -> bool:
-	if str(payload.get("record_kind", "")) != "council_project_snapshot":
+	if not _is_council_snapshot(payload):
 		return false
-	if int(payload.get("schema_version", 0)) != 1:
-		return false
-	_on_panel_load_request(payload)
+	_snapshot = payload.duplicate(true)
+	_push_event("council.snapshot_changed", {})
 	return true
 
 
@@ -205,11 +235,14 @@ func _show_unavailable(message: String) -> void:
 # Page protocol
 # ---------------------------------------------------------------------------
 
-## One request envelope from the page. Every mutating command is checked against
-## base_revision and deduplicated on request_id before anything is applied.
+## One request envelope from the page.
+##
+## The wrapper validates the envelope's shape and answers reads from the record
+## it holds. It does not apply commands: the engine does, and this proof has no
+## engine attached. A malformed or oversized message still gets a reply whenever
+## a request_id can be recovered, because a page whose Promise never settles
+## looks identical to a hung panel.
 func _on_page_message(raw: String) -> void:
-	if raw.length() > MAX_MESSAGE_BYTES:
-		return
 	var parsed: Variant = JSON.parse_string(raw)
 	if not (parsed is Dictionary):
 		return
@@ -219,57 +252,31 @@ func _on_page_message(raw: String) -> void:
 	var request_id := str(request.get("request_id", ""))
 	if request_id == "":
 		return
-	if _replies.has(request_id):
-		var stored: Dictionary = (_replies[request_id] as Dictionary).duplicate(true)
-		stored["replayed"] = true
-		_send(stored)
+
+	var revision := int(_snapshot.get("snapshot_revision", 1))
+	if raw.length() > MAX_MESSAGE_CODE_UNITS:
+		_send(_err(request_id, revision, "payload_too_large",
+			"That request is %d code units, over the %d the panel accepts in one message."
+				% [raw.length(), MAX_MESSAGE_CODE_UNITS], false))
+		return
+	if not (request.get("payload", {}) is Dictionary):
+		_send(_err(request_id, revision, "internal", "A request payload must be an object.", false))
 		return
 
-	var reply := _apply(request)
-	_replies[request_id] = reply.duplicate(true)
-	_send(reply)
+	_send(_reply_to(request, request_id, revision))
 
 
-func _apply(request: Dictionary) -> Dictionary:
-	var request_id := str(request.get("request_id", ""))
+func _reply_to(request: Dictionary, request_id: String, revision: int) -> Dictionary:
 	var command := str(request.get("command", ""))
-	var revision := int(_snapshot.get("snapshot_revision", 1))
-
 	if command == "snapshot.get":
 		return _ok(request_id, revision, {"snapshot": _snapshot.duplicate(true)})
-
 	if not request.has("base_revision"):
 		return _err(request_id, revision, "internal",
-			"Command '%s' changes the council and must say which revision it was written against." % command, false)
-	if int(request.get("base_revision", 0)) != revision:
-		return _err(request_id, revision, "stale_revision",
-			"This view is behind the saved council. Reload it and try again.", true)
-
-	# The proof mutates one field so that save, reload and revision checking are
-	# all exercised end to end; the real command set lands with the engine.
-	if command == "definition.upsert":
-		var incoming: Variant = request.get("payload", {}).get("definition", null)
-		if not (incoming is Dictionary):
-			return _err(request_id, revision, "internal", "No definition in the request.", false)
-		_upsert_definition(incoming as Dictionary)
-		revision += 1
-		_snapshot["snapshot_revision"] = revision
-		content_changed.emit()
-		_push_event("council.snapshot_changed", {})
-		return _ok(request_id, revision, {})
-
-	return _err(request_id, revision, "internal", "Council does not know the command '%s'." % command, false)
-
-
-func _upsert_definition(definition: Dictionary) -> void:
-	var definitions: Array = _snapshot.get("definitions", [])
-	var id := str(definition.get("definition_id", ""))
-	for i in definitions.size():
-		if str((definitions[i] as Dictionary).get("definition_id", "")) == id:
-			definitions[i] = definition
-			return
-	definitions.append(definition)
-	_snapshot["definitions"] = definitions
+			"Command '%s' changes the council and must say which revision it was written against." % command,
+			false)
+	return _err(request_id, revision, "internal",
+		"The Council engine applies '%s'. This wrapper proof has no backend attached; it renders the panel and persists what the engine returns." % command,
+		false)
 
 
 func _ok(request_id: String, revision: int, payload: Dictionary) -> Dictionary:
@@ -306,41 +313,6 @@ func _send(envelope: Dictionary) -> void:
 # ---------------------------------------------------------------------------
 # Record helpers
 # ---------------------------------------------------------------------------
-
-## Mirrors contract.RehydrateOnLoad: a run left mid-flight becomes a visible,
-## retryable failure instead of silently continuing.
-func _demote_interrupted_runs() -> int:
-	var demoted := 0
-	for session_variant in _snapshot.get("sessions", []):
-		var session: Dictionary = session_variant
-		for run_variant in session.get("runs", []):
-			var run: Dictionary = run_variant
-			var status := str(run.get("status", ""))
-			if status != "pending" and status != "running":
-				continue
-			for contribution_variant in run.get("contributions", []):
-				var contribution: Dictionary = contribution_variant
-				var c_status := str(contribution.get("status", ""))
-				if c_status == "pending" or c_status == "running":
-					contribution["status"] = "failed"
-					contribution["failure"] = _interrupted()
-			run["status"] = "failed"
-			run["failure"] = _interrupted()
-			demoted += 1
-		# The status describes the session, not the runs: a session whose runs
-		# are all already terminal is still not running.
-		if str(session.get("status", "")) == "running":
-			session["status"] = "partial"
-	return demoted
-
-
-func _interrupted() -> Dictionary:
-	return {
-		"code": "interrupted",
-		"message": "The run was in flight when the session was last closed. It was not resumed; start it again to retry.",
-		"retryable": true,
-	}
-
 
 ## The one line of text a note carries into a chat turn.
 func _caption_for_llm() -> String:

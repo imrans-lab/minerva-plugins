@@ -175,9 +175,8 @@ func checkPayload(p map[string]any, at string, errs *[]string) (inline string, h
 func checkSession(s map[string]any, at string, errs *[]string) {
 	add := adder(at, errs)
 
-	if _, ok := s["chat_binding"].(map[string]any); !ok {
-		add(": a session must carry an explicit chat_binding; the destination is never inferred from the focused tab")
-	}
+	// chat_binding is not checked here: the schema makes it a required property,
+	// so a session without one never reaches the invariants.
 
 	def, ok := s["definition_snapshot"].(map[string]any)
 	if !ok {
@@ -284,15 +283,13 @@ func checkSession(s map[string]any, at string, errs *[]string) {
 		}
 	}
 
-	switch str(s["status"]) {
-	case "complete":
-		if len(runs) == 0 || obj(runs[len(runs)-1])["synthesis"] == nil {
-			add(": status 'complete' requires the last run to carry a synthesis")
-		}
-	case "draft":
-		if len(runs) > 0 {
-			add(": status 'draft' cannot have runs")
-		}
+	// The session status is a function of the run set and of nothing else, so it
+	// is checked against that function rather than against a list of special
+	// cases. This makes the derivation the single oracle: any code that writes a
+	// status has to agree with DeriveSessionStatus, and a stored record that
+	// disagrees is a defect rather than a matter of taste.
+	if want := DeriveSessionStatus(s); str(s["status"]) != want {
+		add(": status %q does not match the run set, which derives %q", str(s["status"]), want)
 	}
 
 	for i, o := range arr(s["outcomes"]) {

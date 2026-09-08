@@ -5,53 +5,106 @@
   "description": "The reusable half of a council: who is on it, what each seat is responsible for, how a round is run, and which sources ground each member. This is the ONLY record that may be exported or imported. It deliberately has no place to put a question, a transcript, an outcome, a chat id, or a note id, so a definition cannot carry one project's session into another.",
   "type": "object",
   "properties": {
-    "schema_version": { "$ref": "common.schema.json#/$defs/SchemaVersion" },
-    "record_kind": { "const": "council_definition" },
-    "definition_id": { "$ref": "common.schema.json#/$defs/Id" },
-    "definition_revision": { "$ref": "common.schema.json#/$defs/Revision" },
-    "name": { "type": "string", "minLength": 1, "maxLength": 200 },
-    "purpose": { "type": "string", "maxLength": 4000 },
+    "schema_version": {
+      "$ref": "common.schema.json#/$defs/SchemaVersion"
+    },
+    "record_kind": {
+      "const": "council_definition"
+    },
+    "definition_id": {
+      "$ref": "common.schema.json#/$defs/Id"
+    },
+    "definition_revision": {
+      "$ref": "common.schema.json#/$defs/Revision"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "purpose": {
+      "type": "string",
+      "maxLength": 4000
+    },
     "members": {
       "type": "array",
       "description": "Member identity, independent of any council seat. The same member record can be seated differently in different councils.",
-      "items": { "$ref": "#/$defs/Member" },
+      "items": {
+        "$ref": "#/$defs/Member"
+      },
       "minItems": 1
     },
     "seats": {
       "type": "array",
       "description": "A seat binds one member to one responsibility in THIS council. Identity and responsibility are separate so that neither is renamed by editing the other.",
-      "items": { "$ref": "#/$defs/Seat" },
+      "items": {
+        "$ref": "#/$defs/Seat"
+      },
       "minItems": 1
     },
     "sources": {
       "type": "array",
       "description": "The source inventory. Present in an export as an inventory even when the user chose not to embed the material, so a missing reference is visible at import rather than silently unsupported.",
-      "items": { "$ref": "#/$defs/Source" }
+      "items": {
+        "$ref": "#/$defs/Source"
+      }
     },
-    "deliberation": { "$ref": "#/$defs/DeliberationRules" }
+    "deliberation": {
+      "$ref": "#/$defs/DeliberationRules"
+    }
   },
-  "required": ["schema_version", "record_kind", "definition_id", "definition_revision", "name", "members", "seats", "sources", "deliberation"],
+  "required": [
+    "schema_version",
+    "record_kind",
+    "definition_id",
+    "definition_revision",
+    "name",
+    "members",
+    "seats",
+    "sources",
+    "deliberation"
+  ],
   "additionalProperties": false,
   "$defs": {
     "Member": {
       "type": "object",
       "description": "A participant identity. member_revision advances when scope, limitations, or grounding change; a contribution records the revision it was produced from so an old answer is never re-attributed to a newer member.",
       "properties": {
-        "member_id": { "$ref": "common.schema.json#/$defs/Id" },
-        "member_revision": { "$ref": "common.schema.json#/$defs/Revision" },
-        "kind": { "$ref": "common.schema.json#/$defs/MemberKind" },
-        "display_name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "member_id": {
+          "$ref": "common.schema.json#/$defs/Id"
+        },
+        "member_revision": {
+          "$ref": "common.schema.json#/$defs/Revision"
+        },
+        "kind": {
+          "$ref": "common.schema.json#/$defs/MemberKind"
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
         "represents": {
           "type": "string",
           "maxLength": 200,
           "description": "For a simulant, the real author or perspective being interpreted. The simulant and that person remain distinct identities; this field never asserts the person participated."
         },
-        "scope": { "type": "string", "maxLength": 2000, "description": "What this member is qualified to speak to, stated narrowly." },
-        "limitations": { "type": "string", "maxLength": 2000, "description": "What the grounding does NOT establish. Rendered next to the member, not buried." },
+        "scope": {
+          "type": "string",
+          "maxLength": 2000,
+          "description": "What this member is qualified to speak to, stated narrowly."
+        },
+        "limitations": {
+          "type": "string",
+          "maxLength": 2000,
+          "description": "What the grounding does NOT establish. Rendered next to the member, not buried."
+        },
         "grounding": {
           "type": "array",
           "description": "The source revisions this member was grounded on. Changing grounding is an explicit act: it selects new source_revision values and advances member_revision.",
-          "items": { "$ref": "#/$defs/GroundingRef" }
+          "items": {
+            "$ref": "#/$defs/GroundingRef"
+          }
         },
         "model_hint": {
           "type": "string",
@@ -59,83 +112,176 @@
           "description": "Optional preferred host model id. Advisory: the host's enabled-model selection wins, and an unavailable hint is reported, never silently substituted."
         }
       },
-      "required": ["member_id", "member_revision", "kind", "display_name", "grounding"],
+      "required": [
+        "member_id",
+        "member_revision",
+        "kind",
+        "display_name",
+        "grounding"
+      ],
       "additionalProperties": false
     },
     "GroundingRef": {
       "type": "object",
       "properties": {
-        "source_id": { "$ref": "common.schema.json#/$defs/Id" },
-        "source_revision": { "$ref": "common.schema.json#/$defs/Revision" }
+        "source_id": {
+          "$ref": "common.schema.json#/$defs/Id"
+        },
+        "source_revision": {
+          "$ref": "common.schema.json#/$defs/Revision"
+        }
       },
-      "required": ["source_id", "source_revision"],
+      "required": [
+        "source_id",
+        "source_revision"
+      ],
       "additionalProperties": false
     },
     "Seat": {
       "type": "object",
       "properties": {
-        "seat_id": { "$ref": "common.schema.json#/$defs/Id" },
-        "member_id": { "$ref": "common.schema.json#/$defs/Id" },
-        "responsibility": { "type": "string", "minLength": 1, "maxLength": 400 },
+        "seat_id": {
+          "$ref": "common.schema.json#/$defs/Id"
+        },
+        "member_id": {
+          "$ref": "common.schema.json#/$defs/Id"
+        },
+        "responsibility": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 400
+        },
         "role": {
           "type": "string",
-          "enum": ["chair", "advisor"],
+          "enum": [
+            "chair",
+            "advisor"
+          ],
           "description": "Exactly one seat is the chair. The chair synthesises; advisors contribute."
         },
         "relevance_tags": {
           "type": "array",
-          "items": { "type": "string", "minLength": 1, "maxLength": 60 },
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 60
+          },
           "description": "Used to pick a relevant subset for a bounded round. Selection is proposed, then shown; it is never silently narrowed."
         }
       },
-      "required": ["seat_id", "member_id", "responsibility", "role"],
+      "required": [
+        "seat_id",
+        "member_id",
+        "responsibility",
+        "role"
+      ],
       "additionalProperties": false
     },
     "Source": {
       "type": "object",
       "description": "A captured grounding source. A source_revision pins one capture of the material: changing the content is a NEW revision, never an edit of an old one, so a past contribution can still be inspected against what it actually read.",
       "properties": {
-        "source_id": { "$ref": "common.schema.json#/$defs/Id" },
-        "source_revision": { "$ref": "common.schema.json#/$defs/Revision" },
-        "title": { "type": "string", "minLength": 1, "maxLength": 300 },
-        "author": { "type": "string", "maxLength": 200 },
-        "locator": { "type": "string", "maxLength": 1000, "description": "Where the material came from, as the user gave it: a note title, a path, a URL, or 'pasted excerpt'." },
-        "captured_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
-        "artifact": { "$ref": "common.schema.json#/$defs/ArtifactRef" },
-        "payload": { "$ref": "common.schema.json#/$defs/PayloadRef" },
+        "source_id": {
+          "$ref": "common.schema.json#/$defs/Id"
+        },
+        "source_revision": {
+          "$ref": "common.schema.json#/$defs/Revision"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "author": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "locator": {
+          "type": "string",
+          "maxLength": 1000,
+          "description": "Where the material came from, as the user gave it: a note title, a path, a URL, or 'pasted excerpt'."
+        },
+        "captured_at": {
+          "$ref": "common.schema.json#/$defs/Timestamp"
+        },
+        "artifact": {
+          "$ref": "common.schema.json#/$defs/ArtifactRef"
+        },
+        "payload": {
+          "$ref": "common.schema.json#/$defs/PayloadRef"
+        },
         "anchors": {
           "type": "array",
           "description": "Named spans inside the captured payload that a citation may point at. An anchor with no payload present is an inventory entry: citations against it resolve to 'material not available'.",
-          "items": { "$ref": "#/$defs/Anchor" }
+          "items": {
+            "$ref": "#/$defs/Anchor"
+          }
         }
       },
-      "required": ["source_id", "source_revision", "title", "captured_at", "anchors"],
+      "required": [
+        "source_id",
+        "source_revision",
+        "title",
+        "captured_at",
+        "anchors"
+      ],
       "additionalProperties": false
     },
     "Anchor": {
       "type": "object",
       "properties": {
-        "anchor_id": { "$ref": "common.schema.json#/$defs/Id" },
-        "quote": { "type": "string", "maxLength": 4000, "description": "The excerpt as captured, so a citation reads correctly even when the payload was not embedded." },
-        "start": { "type": "integer", "minimum": 0 },
-        "end": { "type": "integer", "minimum": 0 }
+        "anchor_id": {
+          "$ref": "common.schema.json#/$defs/Id"
+        },
+        "quote": {
+          "type": "string",
+          "maxLength": 32768,
+          "description": "The excerpt as captured, so a citation reads correctly even when the payload was not embedded. Capped at the same inline ceiling as any other free text: v0.1 moves whole snapshots across the host's 64 KiB IPC hop, so no single field may fill it."
+        },
+        "start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "end": {
+          "type": "integer",
+          "minimum": 0
+        }
       },
-      "required": ["anchor_id", "quote"],
+      "required": [
+        "anchor_id",
+        "quote"
+      ],
       "additionalProperties": false
     },
     "DeliberationRules": {
       "type": "object",
       "description": "How one consultation runs. v0.1 is one bounded independent round followed by chair synthesis; the fields exist so a preset can tune it, not so the engine can grow modes implicitly.",
       "properties": {
-        "max_members_per_round": { "type": "integer", "minimum": 1, "maximum": 12 },
+        "max_members_per_round": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 12
+        },
         "independent_initial_round": {
           "const": true,
           "description": "Initial member calls see the same context snapshot and their own grounding, never one another's answers. v0.1 does not offer the alternative."
         },
-        "preserve_disagreement": { "type": "boolean", "description": "When true the chair must report substantive disagreement rather than resolving it into a single voice." },
-        "per_member_timeout_seconds": { "type": "integer", "minimum": 5, "maximum": 900 }
+        "preserve_disagreement": {
+          "type": "boolean",
+          "description": "When true the chair must report substantive disagreement rather than resolving it into a single voice."
+        },
+        "per_member_timeout_seconds": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 900
+        }
       },
-      "required": ["max_members_per_round", "independent_initial_round", "preserve_disagreement", "per_member_timeout_seconds"],
+      "required": [
+        "max_members_per_round",
+        "independent_initial_round",
+        "preserve_disagreement",
+        "per_member_timeout_seconds"
+      ],
       "additionalProperties": false
     }
   }

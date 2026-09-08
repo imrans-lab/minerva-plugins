@@ -341,3 +341,22 @@ func toStrings(v any) []string {
 func equalJSON(a, b any) bool {
 	return fmt.Sprintf("%v|%T", a, a) == fmt.Sprintf("%v|%T", b, b)
 }
+
+// lookup walks a schema document by property names and returns the subschema it
+// finds. It exists so a test can assert a constraint the validator itself only
+// applies — a ceiling that has to agree with a Go constant is worth checking in
+// the schema, not only in the records validated against it.
+func (r *Registry) lookup(schemaFile string, path []string) (map[string]any, error) {
+	node, ok := r.docs[schemaFile]
+	if !ok {
+		return nil, fmt.Errorf("no such schema %q", schemaFile)
+	}
+	for _, seg := range path {
+		next, ok := node[seg].(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("no subschema at %q", strings.Join(path, "/"))
+		}
+		node = next
+	}
+	return node, nil
+}

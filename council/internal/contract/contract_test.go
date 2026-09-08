@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/ipeerbhai/plugins/council/fixtures"
+	"github.com/ipeerbhai/plugins/council/schemas"
 )
 
 // hostIPCRequestCap is the host's pluginIPC payload limit
@@ -215,12 +216,12 @@ func TestInterruptedRunsAreNotResumed(t *testing.T) {
 	if got := str(run["status"]); got != "failed" {
 		t.Errorf("run status = %q, want failed", got)
 	}
-	// The session status is derived from the run set, and run-2 — cancelled —
-	// is the most recent run. Per the state model a resting session reports the
-	// outcome of its last run, so demoting the older run-1 leaves the session
-	// reading "cancelled". run-1 itself still reports the interruption.
-	if got := str(session["status"]); got != "cancelled" {
-		t.Errorf("session status = %q, want cancelled", got)
+	// The session status is derived from the run set: a resting session reports
+	// the outcome of its last run. run-2 failed after collecting contributions,
+	// so demoting the older run-1 leaves the session reading "partial". run-1
+	// itself still reports the interruption.
+	if got := str(session["status"]); got != "partial" {
+		t.Errorf("session status = %q, want partial", got)
 	}
 	for i, c := range arr(run["contributions"]) {
 		if s := str(obj(c)["status"]); s == "pending" || s == "running" {
@@ -251,18 +252,43 @@ func TestInterruptedRunsAreNotResumed(t *testing.T) {
 	if n := RehydrateOnLoad(snapshot); n != 0 {
 		t.Errorf("expected no demotable runs, got %d", n)
 	}
-	if got := str(session["status"]); got != "cancelled" {
-		t.Errorf("session with no live runs left in state %q, want cancelled", got)
+	if got := str(session["status"]); got != "partial" {
+		t.Errorf("session with no live runs left in state %q, want partial", got)
 	}
 }
 
 // TestInlineLimitIsDerivedFromTheHostIPCCap pins the transport assumption the
-// protocol rests on. InlineLimit is deliberately half the host's pluginIPC
-// request cap, so a payload plus the envelope around it fits even when the host
-// counts the cap in UTF-16 code units rather than bytes. Changing either number
-// without re-deriving the other is the failure this catches.
+// protocol rests on. v0.1 moves a whole snapshot across the host's pluginIPC
+// hop, so no single free-text field may be allowed to fill it: InlineLimit is
+// half the host cap, and every free-text ceiling in the schemas is that same
+// number. Typing a different number into a schema is the failure this catches —
+// the limit is derived in one place and asserted here, never maintained twice.
 func TestInlineLimitIsDerivedFromTheHostIPCCap(t *testing.T) {
 	if InlineLimit*2 != hostIPCRequestCap {
 		t.Fatalf("InlineLimit %d is no longer half the host cap %d; re-derive it", InlineLimit, hostIPCRequestCap)
+	}
+
+	r := registry(t)
+	freeText := []struct {
+		schema  string
+		pointer []string
+	}{
+		{schemas.Session, []string{"$defs", "Contribution", "properties", "text"}},
+		{schemas.CouncilDefinition, []string{"$defs", "Anchor", "properties", "quote"}},
+	}
+	for _, ft := range freeText {
+		node, err := r.lookup(ft.schema, ft.pointer)
+		if err != nil {
+			t.Errorf("%s %v: %v", ft.schema, ft.pointer, err)
+			continue
+		}
+		got, ok := node["maxLength"].(float64)
+		if !ok {
+			t.Errorf("%s %v: no maxLength; every free-text field carries the inline ceiling", ft.schema, ft.pointer)
+			continue
+		}
+		if int(got) != InlineLimit {
+			t.Errorf("%s %v: maxLength %d, want InlineLimit %d", ft.schema, ft.pointer, int(got), InlineLimit)
+		}
 	}
 }

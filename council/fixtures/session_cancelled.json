@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "record_kind": "council_session",
-  "session_id": "ses-recurring-order",
-  "session_revision": 7,
+  "session_id": "ses-cancelled-followup",
+  "session_revision": 3,
   "definition_snapshot": {
     "schema_version": 1,
     "record_kind": "council_definition",
@@ -114,91 +114,27 @@
     "origin_message_id": "msg-0004",
     "bound_at": "2026-09-08T09:12:44Z"
   },
-  "question": "Should the workshop take the recurring 40-unit order at 0.7x price?",
+  "question": "Should the workshop raise its price before the order is answered?",
   "context_snapshot": {
     "content_type": "text/plain",
     "byte_length": 159,
     "content_hash": "sha256:f3a1388c0eb44091119e808e91d10a30c197d799db4578c0a5bdb6353361b360",
     "inline": "Order under consideration: 40 units a month for a year, at 0.7x the current unit price. Observed: the bench cleared 52 units last month with two late evenings."
   },
-  "status": "partial",
+  "status": "cancelled",
   "runs": [
     {
-      "run_id": "run-1",
-      "request_id": "req-1a",
-      "kind": "initial_round",
-      "status": "partial",
-      "started_at": "2026-09-08T09:12:45Z",
-      "ended_at": "2026-09-08T09:13:31Z",
-      "prompt": "",
-      "contributions": [
-        {
-          "contribution_id": "con-1",
-          "seat_id": "seat-capacity",
-          "member_id": "mem-okonkwo",
-          "member_revision": 2,
-          "status": "complete",
-          "model_id": "claude-sonnet-4-6",
-          "text": "Take it only at a price that buys back the refusals it costs.",
-          "claims": [
-            {
-              "claim_id": "clm-1",
-              "support": "source",
-              "text": "A recurring order removes the freedom to decline work, so it is priced as a loss of that freedom.",
-              "citations": [
-                {
-                  "source_id": "src-capacity-essay",
-                  "source_revision": 2,
-                  "anchor_id": "anc-freedom"
-                }
-              ]
-            },
-            {
-              "claim_id": "clm-2",
-              "support": "inference",
-              "text": "At 0.7x with the bench already near its ceiling, the order consumes the capacity that discretionary work would have used.",
-              "citations": []
-            },
-            {
-              "claim_id": "clm-3",
-              "support": "unknown",
-              "text": "Whether the customer would accept a higher price is not established by the available material.",
-              "citations": []
-            }
-          ]
-        },
-        {
-          "contribution_id": "con-2",
-          "seat_id": "seat-observed",
-          "member_id": "mem-operator",
-          "member_revision": 1,
-          "status": "failed",
-          "claims": [],
-          "failure": {
-            "code": "timeout",
-            "message": "No response within the per-member timeout of 120s.",
-            "retryable": true
-          }
-        }
-      ],
-      "failure": {
-        "code": "timeout",
-        "message": "One member did not answer; the round is partial and was not synthesised.",
-        "retryable": true
-      }
-    },
-    {
-      "run_id": "run-2",
-      "request_id": "req-1a",
+      "run_id": "run-c1",
+      "request_id": "req-c1",
       "kind": "follow_up",
-      "status": "failed",
+      "status": "cancelled",
       "started_at": "2026-09-08T09:20:02Z",
       "ended_at": "2026-09-08T09:20:09Z",
       "prompt": "What price would buy the refusals back?",
       "addressed_seat_id": "seat-capacity",
       "contributions": [
         {
-          "contribution_id": "con-3",
+          "contribution_id": "con-c1",
           "seat_id": "seat-capacity",
           "member_id": "mem-okonkwo",
           "member_revision": 2,
@@ -209,23 +145,11 @@
         }
       ],
       "failure": {
-        "code": "interrupted",
-        "message": "The run was in flight when the session was last closed. It was not resumed; start it again to retry.",
+        "code": "cancelled",
+        "message": "Cancelled by the user.",
         "retryable": true
       }
     }
   ],
-  "outcomes": [
-    {
-      "outcome_id": "out-1",
-      "run_id": "run-1",
-      "contribution_id": "con-1",
-      "note": {
-        "kind": "note",
-        "ref": "note-outcome-1",
-        "label": "Council: price the refusals"
-      },
-      "retained_at": "2026-09-08T09:18:00Z"
-    }
-  ]
+  "outcomes": []
 }
