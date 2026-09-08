@@ -299,6 +299,7 @@ func _run() -> void:
 
 	await _declarations(gauge, checks, plate)
 	await _swapped_roles(gauge, checks, plate)
+	await _coaxial_seat(gauge, checks)
 
 
 ## THE WEDGE, driven through the rule as two half-spaces. The crossed body
@@ -371,17 +372,17 @@ func _wedge_rule() -> void:
 		"distance": ledge_depth, "point": Vector3(-ledge_depth, 0.0, 0.0)}]
 	var on_plane: Array[Dictionary] = [{"normal": Vector3.LEFT,
 		"distance": 2.0 * tolerance, "point": Vector3(0.0, 2.0 * tolerance, 0.0)}]
-	var ledge_landing: Variant = RimContact.landing_normal(through, off_plane,
+	var ledge_landing: Variant = RimContact.landing_normals(through, off_plane,
 		Vector3.ZERO, tolerance)
-	var seat_landing: Variant = RimContact.landing_normal(through, on_plane,
+	var seat_landing: Variant = RimContact.landing_normals(through, on_plane,
 		Vector3.ZERO, tolerance)
 	check("rule: a two-degree wedge is unproven; the ledge's end face three "
 			+ "tolerances off the crossing is no landing, while the same pair "
 			+ "on the crossing's own plane is; and the block the ledge belongs "
 			+ "to is not a touch",
 			narrow == RimContact.Verdict.UNPROVEN
-				and ledge_landing == null
-				and seat_landing is Vector3
+				and ledge_landing.is_empty()
+				and seat_landing.size() == 1
 				and ledge != RimContact.Verdict.TOUCHING,
 			"narrow = %d ledge = %d ledge_landing = %s seat_landing = %s"
 				% [narrow, ledge, str(ledge_landing), str(seat_landing)])
@@ -722,15 +723,15 @@ func _spigot_boss(lift: float, spigot_radius: float) -> Dictionary:
 ## left, which is what makes the swept faces face out of the material; the
 ## band for one segment is wound the way the flush suite's hand-built boss
 ## winds its own outer wall.
-func _lathe(profile: Array) -> Dictionary:
+func _lathe(profile: Array, facets: int = BOSS_FACETS, phase: float = 0.0) -> Dictionary:
 	var vertices: Array = []
 	var faces: Array = []
 	var rings: Array = []
 	for entry in profile:
 		var point: Vector2 = entry
 		var ring: Array = []
-		for facet in range(BOSS_FACETS):
-			var angle := TAU * float(facet) / float(BOSS_FACETS)
+		for facet in range(facets):
+			var angle := phase + TAU * float(facet) / float(facets)
 			ring.append(vertices.size())
 			vertices.append([point.x * cos(angle), point.x * sin(angle),
 				point.y])
@@ -738,8 +739,8 @@ func _lathe(profile: Array) -> Dictionary:
 	for index in range(profile.size()):
 		var near: Array = rings[index]
 		var far: Array = rings[(index + 1) % profile.size()]
-		for facet in range(BOSS_FACETS):
-			var next := (facet + 1) % BOSS_FACETS
+		for facet in range(facets):
+			var next := (facet + 1) % facets
 			faces.append([near[facet], far[facet], far[next]])
 			faces.append([near[facet], far[next], near[next]])
 	return {"vertices": vertices, "faces": faces}
@@ -829,3 +830,32 @@ func _penetration_of(report: Dictionary) -> float:
 		deepest = maxf(deepest,
 			float((entry as Dictionary).get("penetration_mm", 0.0)))
 	return deepest
+
+
+## Independently tessellated coaxial parts share both a seat and an outer rim.
+## Backface normals used to let the outer walls impersonate opposing seats;
+## the resulting samples lay on the actual seat and falsely proved overlap.
+func _coaxial_seat(gauge: Node, checks: RefCounted) -> void:
+	var lower := _lathe([Vector2(1.21, 18.5), Vector2(2.2, 18.5),
+		Vector2(2.2, 17.3), Vector2(1.21, 17.3)], 120)
+	for vertex: Array in lower["vertices"]:
+		vertex[0] += 11.5
+		vertex[1] -= 38.0
+	var mesh := _mesh_from(lower)
+	gauge.build([{"mesh": mesh, "transform": Transform3D.IDENTITY,
+		"node": NODE_PATH, "reference": REFERENCE_NAME}], "coaxial-seat")
+	checks.set_records([{"name": REFERENCE_NAME, "pose": Transform3D.IDENTITY,
+		"world_aabb": mesh.get_aabb().grow(0.001), "parts": [{"mesh": mesh,
+		"transform": Transform3D.IDENTITY, "node_path": NODE_PATH}]}])
+	for depth: float in [0.0, 0.02]:
+		var upper := _lathe([Vector2(1.0, 24.0), Vector2(2.2, 24.0),
+			Vector2(2.2, 18.5 - depth), Vector2(1.0, 18.5 - depth)], 126, 0.017)
+		for vertex: Array in upper["vertices"]:
+			vertex[0] += 11.5
+			vertex[1] -= 38.0
+		checks.build_solid(upper)
+		var report := await _submit(gauge, checks)
+		check("coaxial tessellations distinguish a seat from 0.02 mm overlap (%s)" % depth,
+			bool(report.get("checked", false))
+			and bool(report.get("pass", false)) == (depth == 0.0)
+			and bool(report.get("coverage", {}).get("complete", false)), str(report))

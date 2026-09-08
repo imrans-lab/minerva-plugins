@@ -167,33 +167,20 @@ static func classify(
 		reach, tolerance_mm * INSET_TOLERANCES)
 	var other_faces: Array[Dictionary] = faces_near(point, other_ray,
 		reach, tolerance_mm * INSET_TOLERANCES)
-	var landing: Variant = landing_normal(crossed_faces, other_faces, point,
-		tolerance_mm)
-	if not (landing is Vector3):
-		# No pair of antiparallel faces meets here: the bodies are not
-		# resting on each other at this crossing, so no sample set bounds
-		# their shared region. Shared material can still be SHOWN, and a
-		# proof of overlap closes the gate for the whole pair.
-		var fallback: Variant = across_axis(crossed_normal.normalized(),
-			_across_candidates([], other_faces, edge_direction))
-		if fallback is Vector3 and _sampled(point, crossed_normal.normalized(),
-				fallback, inside_crossed, inside_other, tolerance_mm) \
-				== Verdict.CROSSING:
-			return Verdict.CROSSING
-		return Verdict.UNPROVEN
-	var normal: Vector3 = landing
-	var across: Variant = across_axis(normal, _across_candidates(
-		[crossed_normal], crossed_faces + other_faces, edge_direction))
-	if not (across is Vector3):
-		return Verdict.UNPROVEN
-	var verdict := _sampled(point, normal, across, inside_crossed, inside_other,
-		tolerance_mm)
-	if verdict != Verdict.TOUCHING:
-		return verdict
-	if not _planes_held(point, normal, across, crossed_ray, other_ray,
-			tolerance_mm):
-		return Verdict.UNPROVEN
-	return Verdict.TOUCHING
+	# Backface hits can carry either normal sign. Try every nearby plane;
+	# sampling one arbitrary wall can put all samples on the actual seat.
+	for landing: Vector3 in landing_normals(crossed_faces, other_faces, point, tolerance_mm):
+		var across: Variant = across_axis(landing, _across_candidates(
+			[crossed_normal], crossed_faces + other_faces, edge_direction))
+		if not (across is Vector3):
+			continue
+		if not _planes_held(point, landing, across, crossed_ray, other_ray, tolerance_mm):
+			continue
+		var verdict := _sampled(point, landing, across, inside_crossed, inside_other,
+			tolerance_mm)
+		if verdict != Verdict.UNPROVEN:
+			return verdict
+	return Verdict.UNPROVEN
 
 
 ## The four quadrant samples, read. CROSSING on the first sample inside both
@@ -222,30 +209,31 @@ static func _sampled(point: Vector3, normal: Vector3, across: Vector3,
 	return Verdict.TOUCHING
 
 
-## The landing normal — the crossed body's face of the nearest antiparallel
-## pair whose two planes both pass through `point` within `tolerance_mm`,
-## pointing out of it and into the other body — or null when no such pair
-## exists. A pair that is antiparallel but off the crossing is a ledge or a
-## seat elsewhere, and bounds a slab the crossing is not in.
-static func landing_normal(crossed_faces: Array[Dictionary],
+## Candidate landing normals whose planes both pass through the crossing.
+## Backface hits may reverse normals, so opposing normals alone are not a
+## proof of a seat. classify verifies the boundaries along the sample lines
+## before interpreting parity. Parallel candidates share that same check.
+static func landing_normals(crossed_faces: Array[Dictionary],
 		other_faces: Array[Dictionary], point: Vector3,
-		tolerance_mm: float) -> Variant:
-	var nearest := INF
-	var found: Variant = null
+		tolerance_mm: float) -> Array[Vector3]:
+	var found: Array[Vector3] = []
 	for here in crossed_faces:
 		var here_normal: Vector3 = here["normal"]
 		if plane_offset(here, point) > tolerance_mm:
 			continue
 		for there in other_faces:
-			var there_normal: Vector3 = there["normal"]
-			if here_normal.dot(there_normal) > -LANDING_COS:
+			if here_normal.dot(there["normal"] as Vector3) > -LANDING_COS:
 				continue
 			if plane_offset(there, point) > tolerance_mm:
 				continue
-			var away: float = float(here["distance"]) + float(there["distance"])
-			if away < nearest:
-				nearest = away
-				found = here_normal
+			var duplicate := false
+			for held: Vector3 in found:
+				if absf(held.dot(here_normal)) > LANDING_COS:
+					duplicate = true
+					break
+			if not duplicate:
+				found.append(here_normal)
+			break
 	return found
 
 

@@ -704,12 +704,6 @@ func _cross_into_references(
 			and _straddles(a, b, point, hit) \
 			and _penetrates_reference(gauge, state, point, direction, mask,
 				str(hit.get("reference", "")), str(hit.get("node", "")))
-		# The rim of a bore in a landing face passes every test above: the
-		# crossing is square, and the material a probe step behind it is real.
-		# Only shared material tells it from an overlap.
-		if penetrating and _rim_touching_reference(gauge, state, solid_state,
-				point, hit, direction, node_scope):
-			penetrating = false
 		# Every hit is kept, the discarded ones marked: a hit this edge did
 		# not pass through is still the place it met the surface, and the
 		# contact-run rule measures its runs BETWEEN surfaces. Dropping it
@@ -717,6 +711,7 @@ func _cross_into_references(
 		# end, through the air past the rim.
 		out.append({
 			"point": point,
+			"normal": hit.get("normal", Vector3.ZERO),
 			"key": str(hit.get("reference", "")) + "\n"
 				+ str(hit.get("node", "")),
 			"node": str(hit.get("node", "")),
@@ -728,9 +723,16 @@ func _cross_into_references(
 		if a.distance_to(next) >= length:
 			break
 		cursor = next
-	return _drop_contact_runs(a, b, out,
+	# Spend the rim budget only on crossings not settled by contact runs.
+	var penetrating := _drop_contact_runs(a, b, out,
 		_reference_ray_for.bind(gauge, state),
 		_reference_inside_for.bind(gauge, state))
+	var kept: Array = []
+	for crossing: Dictionary in penetrating:
+		if not _rim_touching_reference(gauge, state, solid_state,
+				crossing["point"], crossing, direction, node_scope):
+			kept.append(crossing)
+	return kept
 
 
 # ---------------------------------------------------------------------------
@@ -851,14 +853,9 @@ func _cross_into_solid(
 			and (length - travelled) > TOUCH_EPSILON_MM \
 			and _straddles(a, b, point, hit) \
 			and _penetrates_solid(solid_state, point, direction)
-		# The same rim rule as the reference leg, roles swapped: here the
-		# crossed surface is the solid's and the body resting on it is the
-		# reference node whose triangle this edge came from.
-		if penetrating and _rim_touching_solid(gauge, state, solid_state,
-				point, hit, direction, reference_name, node_path, node_scope):
-			penetrating = false
 		candidates.append({
 			"point": point,
+			"normal": hit.get("normal", Vector3.ZERO),
 			"key": "",
 			"bound_only": not penetrating,
 		})
@@ -873,5 +870,8 @@ func _cross_into_solid(
 			func(_key: String) -> Callable: return _solid_hit.bind(solid_state),
 			func(_key: String) -> Callable: return _solid_inside.bind(solid_state),
 			PARITY_SPHERE_MM):
-		out.append((candidates[kept] as Dictionary).get("point", Vector3.ZERO))
+		var crossing: Dictionary = candidates[kept]
+		if not _rim_touching_solid(gauge, state, solid_state,
+				crossing["point"], crossing, direction, reference_name, node_path, node_scope):
+			out.append(crossing["point"])
 	return out
