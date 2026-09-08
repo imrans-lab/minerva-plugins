@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "envelope": "reply",
+  "request_id": "req-1a",
+  "ok": true,
+  "snapshot_revision": 12,
+  "replayed": true,
+  "payload": {
+    "run_id": "run-1"
+  }
+}

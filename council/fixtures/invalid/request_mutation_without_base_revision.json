@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "envelope": "request",
+  "request_id": "req-2a",
+  "command": "run.start",
+  "payload": {
+    "session_id": "ses-recurring-order",
+    "kind": "follow_up",
+    "addressed_seat_id": "seat-capacity",
+    "prompt": "What price would buy the refusals back?"
+  }
+}

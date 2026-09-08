@@ -1,0 +1,50 @@
+{
+  "id": "council_proof",
+  "name": "Council wrapper proof",
+  "version": "0.0.1",
+  "host_api_version": "1",
+  "release_targets": ["linux-x86_64"],
+  "backend": {
+    "transport": "stdio",
+    "entrypoint": "./council-proof-plugin",
+    "args": []
+  },
+  "tools": [],
+  "ui": {
+    "ipc_messages": [],
+    "panels": [
+      {
+        "name": "council_wrapper_proof",
+        "kind": "godot_scene",
+        "entry_scene": "ui/CouncilWrapperPanel.tscn",
+        "scripts": [
+          "ui/council_wrapper_panel.gd",
+          "ui/council_bridge.gd"
+        ],
+        "ipc_channels": [],
+        "file_extensions": [".mcouncil"],
+        "save_mode": "host_owned"
+      }
+    ]
+  },
+  "editor_items": [
+    {
+      "id": "new_mcouncil",
+      "name": "New Council (proof)",
+      "panel": "council_wrapper_proof",
+      "default_filename": "untitled.mcouncil"
+    }
+  ],
+  "capabilities": ["host_owned_save"],
+  "permissions": {
+    "host_capabilities": [],
+    "network": { "mode": "none" },
+    "filesystem": { "mode": "none", "paths": [] }
+  },
+  "autostart": false,
+  "auto_reload": true,
+  "setup": {
+    "requires": [{ "tool": "go", "min": "1.22" }],
+    "steps": [{ "type": "go_build", "package": "./", "output": "council-proof-plugin" }]
+  }
+}

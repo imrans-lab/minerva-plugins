@@ -1,0 +1,373 @@
+package session
+
+import (
+	"encoding/json"
+	"fmt"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/ipeerbhai/plugins/council/internal/contract"
+)
+
+// idPattern is the Id shape from common.schema.json. It is applied to a raw
+// request before anything else, because a reply envelope has nowhere to put a
+// request_id that is not a valid Id — a request that cannot be identified
+// cannot be answered in the protocol and is reported as a transport error.
+var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+
+// Store is the working copy of one Council snapshot plus the idempotency
+// ledger for the requests applied to it.
+//
+// Everything in it is process memory. Load seeds it from the wrapper's durable
+// snapshot; Export hands the acknowledged state back for persistence. The
+// ledger is scoped to the loaded snapshot and is cleared by Load, because a
+// request_id is only meaningful against the snapshot it was written for.
+type Store struct {
+	mu       sync.Mutex
+	registry *contract.Registry
+	snapshot map[string]any
+	ledger   map[string]Reply
+	seq      map[string]int
+
+	// now returns the timestamp written into new records. Injectable so a test
+	// can assert an exact record rather than matching a wall clock.
+	now func() string
+}
+
+// New creates a Store holding an empty snapshot at revision 1.
+func New() (*Store, error) {
+	r, err := contract.LoadRegistry()
+	if err != nil {
+		return nil, err
+	}
+	return &Store{
+		registry: r,
+		snapshot: emptySnapshot(),
+		ledger:   map[string]Reply{},
+		seq:      map[string]int{},
+		now:      func() string { return time.Now().UTC().Format("2006-01-02T15:04:05Z") },
+	}, nil
+}
+
+// SetClock replaces the timestamp source. Tests use it to make minted records
+// exactly comparable; production never calls it.
+func (s *Store) SetClock(f func() string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.now = f
+}
+
+func emptySnapshot() map[string]any {
+	return map[string]any{
+		"schema_version":    float64(SchemaVersion),
+		"record_kind":       "council_project_snapshot",
+		"snapshot_revision": float64(1),
+		"definitions":       []any{},
+		"sessions":          []any{},
+	}
+}
+
+// LoadReport says what changed when a snapshot was adopted. runs_demoted is the
+// count the interruption rule acted on: work that was in flight when the owning
+// process went away, and which is now a visible failure with a retry rather
+// than something that quietly resumes and spends tokens.
+type LoadReport struct {
+	SnapshotRevision int `json:"snapshot_revision"`
+	Definitions      int `json:"definitions"`
+	Sessions         int `json:"sessions"`
+	RunsDemoted      int `json:"runs_demoted"`
+}
+
+// Load replaces the working snapshot with one the wrapper restored, applies the
+// interruption rule, and clears the idempotency ledger.
+//
+// Rehydration only demotes statuses and attaches an interrupted failure, both
+// of which the schema and the invariants already permit, so the validated input
+// is still valid afterwards.
+func (s *Store) Load(raw []byte) (LoadReport, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// v0.1 moves the whole snapshot across the host's IPC hop in one message, so
+	// the document itself is bounded by that hop. The refusal names the numbers
+	// and what the document holds, because "too large" on its own tells a user
+	// nothing they can act on.
+	if len(raw) > MaxEnvelopeBytes {
+		return LoadReport{}, fmt.Errorf(
+			"this Council document is %d bytes and the host's IPC transport carries %d in one message, so it cannot be loaded; it holds %d council(s) and %d session(s), and v0.1 moves the whole snapshot at once",
+			len(raw), MaxEnvelopeBytes, countRecords(raw, "definitions"), countRecords(raw, "sessions"))
+	}
+	if errs := s.registry.ValidateRecord("council_project_snapshot", raw); len(errs) > 0 {
+		return LoadReport{}, fmt.Errorf("snapshot is not a valid council_project_snapshot: %s", joinErrs(errs))
+	}
+	var next map[string]any
+	if err := json.Unmarshal(raw, &next); err != nil {
+		return LoadReport{}, err
+	}
+	if err := checkSnapshotBudget(next); err != nil {
+		return LoadReport{}, err
+	}
+	demoted := contract.RehydrateOnLoad(next)
+	// Demotion rewrites run and session statuses, so the document that comes
+	// out of load is not the one that went in. It gets its own revision:
+	// two different documents must never claim the same snapshot_revision, and
+	// the wrapper has to persist the demoted form rather than the one it sent.
+	if demoted > 0 {
+		next["snapshot_revision"] = float64(int(num(next["snapshot_revision"])) + 1)
+	}
+	s.snapshot = next
+	s.ledger = map[string]Reply{}
+	s.seq = map[string]int{}
+	return LoadReport{
+		SnapshotRevision: s.revision(),
+		Definitions:      len(arr(next["definitions"])),
+		Sessions:         len(arr(next["sessions"])),
+		RunsDemoted:      demoted,
+	}, nil
+}
+
+// Export returns the acknowledged snapshot for the wrapper to persist. It is a
+// copy: the caller cannot reach into the engine's state through it.
+func (s *Store) Export() map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return deepCopy(s.snapshot)
+}
+
+// Revision reports the current snapshot revision, which is the concurrency
+// token every mutating command is checked against.
+func (s *Store) Revision() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.revision()
+}
+
+// Status is a small summary of the working snapshot: enough to answer "what is
+// this council doing" without moving the whole document.
+func (s *Store) Status() map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	definitions := []any{}
+	for _, d := range arr(s.snapshot["definitions"]) {
+		def := obj(d)
+		definitions = append(definitions, map[string]any{
+			"definition_id":       str(def["definition_id"]),
+			"definition_revision": num(def["definition_revision"]),
+			"name":                str(def["name"]),
+			"seats":               len(arr(def["seats"])),
+		})
+	}
+	sessions := []any{}
+	for _, x := range arr(s.snapshot["sessions"]) {
+		ses := obj(x)
+		runs := []any{}
+		for _, r := range arr(ses["runs"]) {
+			run := obj(r)
+			runs = append(runs, map[string]any{
+				"run_id":        str(run["run_id"]),
+				"kind":          str(run["kind"]),
+				"status":        str(run["status"]),
+				"contributions": len(arr(run["contributions"])),
+			})
+		}
+		sessions = append(sessions, map[string]any{
+			"session_id":       str(ses["session_id"]),
+			"session_revision": num(ses["session_revision"]),
+			"status":           str(ses["status"]),
+			"question":         str(ses["question"]),
+			"chat_id":          str(obj(ses["chat_binding"])["chat_id"]),
+			"runs":             runs,
+			"outcomes":         len(arr(ses["outcomes"])),
+		})
+	}
+	return map[string]any{
+		"snapshot_revision": s.revision(),
+		"definitions":       definitions,
+		"sessions":          sessions,
+	}
+}
+
+// Dispatch applies one protocol envelope and returns the reply envelope.
+//
+// It returns a Go error only when no reply is possible — a message that is not
+// JSON, or one whose request_id is not an Id, has nothing to address a reply
+// to. Every other failure, including a refused command, comes back as a
+// well-formed reply carrying a Failure the view can render.
+func (s *Store) Dispatch(raw []byte) (Reply, error) {
+	var probe struct {
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return Reply{}, fmt.Errorf("request is not a JSON object: %w", err)
+	}
+	if !idPattern.MatchString(probe.RequestID) {
+		return Reply{}, fmt.Errorf("request carries no usable request_id; a reply has nowhere to be addressed")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(raw) > MaxEnvelopeBytes {
+		return errReply(probe.RequestID, s.revision(), fail(CodePayloadTooLarge,
+			fmt.Sprintf("request of %d bytes exceeds the %d byte transport budget; carry the content as a blob handle instead", len(raw), MaxEnvelopeBytes),
+			false)), nil
+	}
+
+	// The schema and its invariants decide what a well-formed request is:
+	// the command enum, the required fields, and the rule that a mutating
+	// command carries base_revision while a read does not.
+	if errs := s.registry.ValidateRecord("council_envelope", raw); len(errs) > 0 {
+		return errReply(probe.RequestID, s.revision(), fail(CodeInternal,
+			"request does not satisfy the Council envelope contract: "+joinErrs(errs), false)), nil
+	}
+
+	var req Request
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return Reply{}, err
+	}
+	if req.Envelope != "request" {
+		return errReply(req.RequestID, s.revision(), fail(CodeInternal,
+			fmt.Sprintf("the backend answers requests; it was sent a %q envelope", req.Envelope), false)), nil
+	}
+
+	// A repeated request_id returns the stored reply unchanged. The command is
+	// applied once, so a retry after a lost reply cannot start a second run.
+	// The ledger lives for the life of the process and is cleared only by Load,
+	// because a request_id is only meaningful against the snapshot it was
+	// written for.
+	if stored, ok := s.ledger[req.RequestID]; ok {
+		stored.Replayed = true
+		return stored, nil
+	}
+
+	cmd, known := commands[req.Command]
+	if !known {
+		return errReply(req.RequestID, s.revision(), fail(CodeInternal,
+			fmt.Sprintf("command %q is in the schema but has no handler in this build", req.Command), false)), nil
+	}
+
+	// base_revision is the classification, not a second table here: the envelope
+	// invariant this request has already passed refuses a mutating command that
+	// omits it and a read that carries it, so its presence says which this is.
+	if req.BaseRevision != nil {
+		if *req.BaseRevision != s.revision() {
+			return errReply(req.RequestID, s.revision(), fail(CodeStaleRevision,
+				fmt.Sprintf("base_revision %d is behind the current snapshot revision %d; re-read and retry.", *req.BaseRevision, s.revision()),
+				true)), nil
+		}
+		return s.applyMutation(&req, cmd), nil
+	}
+
+	payload, f := cmd.apply(s, s.snapshot, &req)
+	if f != nil {
+		return errReply(req.RequestID, s.revision(), f), nil
+	}
+	// A read is not recorded in the ledger: replaying it would return a view of
+	// a revision that has since moved, which is worse than reading again.
+	return okReply(req.RequestID, s.revision(), payload), nil
+}
+
+// applyMutation runs a command against a copy, advances the revision, and
+// commits only if the whole snapshot still satisfies the contract. A command
+// that would produce an invalid record leaves the snapshot untouched and the
+// caller is told which invariant refused it.
+func (s *Store) applyMutation(req *Request, cmd command) Reply {
+	next := deepCopy(s.snapshot)
+	payload, f := cmd.apply(s, next, req)
+	if f != nil {
+		return errReply(req.RequestID, s.revision(), f)
+	}
+	// changed=false is how an already-satisfied command (cancelling a run that
+	// has already stopped) reports success without moving the revision, so a
+	// fire-and-forget cancel cannot invalidate every other view.
+	if changed, ok := payload["changed"].(bool); ok && !changed {
+		reply := okReply(req.RequestID, s.revision(), payload)
+		s.ledger[req.RequestID] = reply
+		return reply
+	}
+
+	next["snapshot_revision"] = float64(s.revision() + 1)
+	raw, err := json.Marshal(next)
+	if err != nil {
+		return errReply(req.RequestID, s.revision(), fail(CodeInternal, "could not serialise the resulting snapshot: "+err.Error(), false))
+	}
+	if errs := s.registry.ValidateRecord("council_project_snapshot", raw); len(errs) > 0 {
+		return errReply(req.RequestID, s.revision(), fail(CodeInternal,
+			"the command was refused because the resulting snapshot would break the contract: "+joinErrs(errs), false))
+	}
+	var canonical map[string]any
+	if err := json.Unmarshal(raw, &canonical); err != nil {
+		return errReply(req.RequestID, s.revision(), fail(CodeInternal, "could not re-read the resulting snapshot: "+err.Error(), false))
+	}
+	if err := checkSnapshotBudget(canonical); err != nil {
+		return errReply(req.RequestID, s.revision(), fail(CodePayloadTooLarge, err.Error(), false))
+	}
+	s.snapshot = canonical
+
+	reply := okReply(req.RequestID, s.revision(), payload)
+	// Only a successful mutation is remembered, for the life of the process.
+	s.ledger[req.RequestID] = reply
+	return reply
+}
+
+func (s *Store) revision() int { return int(num(s.snapshot["snapshot_revision"])) }
+
+// mintID issues the ids the backend owns — runs, contributions and outcomes.
+// Every other identity is minted by the wrapper and arrives in the payload.
+// The counter is per prefix so ids read predictably, and taken() skips a value
+// a loaded snapshot already used.
+func (s *Store) mintID(prefix string, taken func(string) bool) string {
+	for {
+		s.seq[prefix]++
+		id := fmt.Sprintf("%s-%d", prefix, s.seq[prefix])
+		if !taken(id) {
+			return id
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// decoding helpers — the snapshot is held as decoded JSON, not as typed structs,
+// because the schemas are the source of truth for its shape and a second
+// hand-maintained transcription of them is exactly what the contract forbids.
+// ---------------------------------------------------------------------------
+
+func arr(v any) []any          { a, _ := v.([]any); return a }
+func obj(v any) map[string]any { m, _ := v.(map[string]any); return m }
+func str(v any) string         { s, _ := v.(string); return s }
+func num(v any) float64        { f, _ := v.(float64); return f }
+
+// countRecords reports how many entries a top-level snapshot array holds. It
+// decodes defensively because it is only ever called to describe a document the
+// loader is already refusing, and an unreadable one must not turn a clear
+// refusal into a decode error.
+func countRecords(raw []byte, field string) int {
+	var probe map[string]any
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return 0
+	}
+	return len(arr(probe[field]))
+}
+
+func deepCopy(m map[string]any) map[string]any {
+	raw, err := json.Marshal(m)
+	if err != nil {
+		return map[string]any{}
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return map[string]any{}
+	}
+	return out
+}
+
+// joinErrs renders a validation report as one line, capped so a pathological
+// document cannot push a multi-kilobyte error message through the transport.
+func joinErrs(errs []string) string {
+	const maxReported = 6
+	if len(errs) > maxReported {
+		return strings.Join(errs[:maxReported], "; ") + fmt.Sprintf("; and %d more", len(errs)-maxReported)
+	}
+	return strings.Join(errs, "; ")
+}

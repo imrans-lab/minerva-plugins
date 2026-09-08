@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "envelope": "event",
+  "event": "council.contribution_ready",
+  "snapshot_revision": 12,
+  "payload": {
+    "session_id": "ses-recurring-order",
+    "run_id": "run-1",
+    "contribution_id": "con-1"
+  }
+}

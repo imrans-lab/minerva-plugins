@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "envelope": "reply",
+  "request_id": "req-2a",
+  "ok": false,
+  "snapshot_revision": 12,
+  "error": {
+    "code": "stale_revision",
+    "message": "base_revision 11 is behind the current snapshot revision 12; re-read and retry.",
+    "retryable": true
+  }
+}
