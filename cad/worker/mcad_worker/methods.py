@@ -35,10 +35,10 @@ from mcad_worker import mesh_defects as _defect_module
 WORKER_VERSION = "0.1.0"
 
 # Module-level last-program cache (design §5).
-# Keyed by hash(source); holds the last evaluation result as a plain dict.
+# Keyed by SHA-256(source) and tessellation settings; holds the mesh reply.
 # Size 1: replaced on each new source. Threadsafe is not required — the worker
 # is single-threaded by design (§2 process model).
-_last_program: Optional[Tuple[int, dict]] = None
+_last_program: Optional[Tuple[tuple[str, float, float], dict]] = None
 
 # The B-Rep the last evaluation built, as (source digest, shape_name, shape).
 # Separate from _last_program because it is a different product of the same
@@ -150,7 +150,7 @@ def _defects_for_source(source: str) -> tuple[dict, str, int]:
     the one standing in the cache — an export of never-evaluated source has
     nothing measured to quote.
     """
-    if _last_program is None or _last_program[0] != hash(source):
+    if _last_program is None or _last_program[0][0] != _digest(source):
         return {}, "", 0
     cached = _last_program[1]
     counts = (cached["mesh_defects"] if "mesh_defects" in cached
@@ -183,7 +183,7 @@ def _mesh_invalid_error(exc: Exception, source: str, part: str = "") -> dict:
     thing to a body name the exporter has.
     """
     defects, shape_name, body_count = _defects_for_source(source)
-    evaluated = _last_program is not None and _last_program[0] == hash(source)
+    evaluated = _last_program is not None and _last_program[0][0] == _digest(source)
     if part and part != shape_name:
         # A named export may select another binding from the same document.
         # Assembly diagnostics cannot be attributed to that part's mesh.
@@ -275,6 +275,7 @@ def _summarise(result: dict) -> dict:
     mesh: dict = result.get("mesh") or {}
     summary = {
         "summary": True,
+        "provenance": result.get("provenance", {}),
         "shape_name": result.get("shape_name", ""),
         "body_count": result.get("body_count", 0),
         "bbox": _mesh_bbox(mesh),
@@ -331,7 +332,7 @@ def _evaluate(params: dict) -> dict:
 
     summary_only = bool(params.get("summary", False))
 
-    h = hash(source)
+    h = (_digest(source), tolerance, angular_tolerance)
     if _last_program is not None and _last_program[0] == h:
         cached = _last_program[1]
         return {"ok": True, "result": _summarise(cached) if summary_only else cached}
@@ -432,6 +433,12 @@ def _evaluate(params: dict) -> dict:
         "mesh": result.mesh,
         "edges": result.edges,
         "references": result.references,
+        "provenance": {
+            "source_digest": h[0],
+            "settings": {"tolerance": tolerance, "angular_tolerance": angular_tolerance},
+            "worker_version": WORKER_VERSION,
+            "occt_version": _OCCT_VERSION,
+        },
     }
     # One walk of the tessellation, cached with it: the counts the summary and
     # the 3MF refusal quote, and the positions that say WHICH edge is bad.
@@ -473,8 +480,7 @@ def _list_edges(params: dict) -> dict:
             },
         }
 
-    h = hash(source)
-    if _last_program is not None and _last_program[0] == h:
+    if _last_program is not None and _last_program[0][0] == _digest(source):
         return {"ok": True, "result": _without_polylines(_last_program[1]["edges"])}
 
     # Cache miss — run the full evaluate pipeline.
