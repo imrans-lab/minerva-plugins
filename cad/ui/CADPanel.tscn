@@ -1,4 +1,4 @@
-[gd_scene load_steps=11 format=3]
+[gd_scene load_steps=12 format=3]
 
 [ext_resource type="Script" path="CADPanel.gd" id="1_cadpanel"]
 [ext_resource type="Script" path="scripts/orbit_camera.gd" id="2_orbitcam"]
@@ -29,6 +29,14 @@ sky_material = SubResource("ProceduralSkyMaterial_cad")
 background_mode = 2
 sky = SubResource("Sky_cad")
 sky_rotation = Vector3(1.5707964, 0, 0)
+ambient_light_source = 2
+ambient_light_color = Color(0.9, 0.92, 0.96, 1)
+ambient_light_energy = 1.2
+
+[sub_resource type="Environment" id="Environment_orthographic"]
+background_mode = 1
+background_color = Color(0.94, 0.95, 0.97, 1)
+sky = SubResource("Sky_cad")
 ambient_light_source = 2
 ambient_light_color = Color(0.9, 0.92, 0.96, 1)
 ambient_light_energy = 1.2
@@ -78,6 +86,7 @@ size = Vector2i(400, 300)
 
 [node name="OrbitCamera" type="Camera3D" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/TopView/SubViewport"]
 script = ExtResource("2_orbitcam")
+orthographic_environment = SubResource("Environment_orthographic")
 
 [node name="MeshRoot" type="Node3D" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/TopView/SubViewport"]
 script = ExtResource("3_meshdisplay")
@@ -124,6 +133,7 @@ size = Vector2i(400, 300)
 
 [node name="OrbitCamera" type="Camera3D" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/FrontView/SubViewport"]
 script = ExtResource("2_orbitcam")
+orthographic_environment = SubResource("Environment_orthographic")
 
 [node name="MeshRoot" type="Node3D" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/FrontView/SubViewport"]
 script = ExtResource("3_meshdisplay")
@@ -170,6 +180,7 @@ size = Vector2i(400, 300)
 
 [node name="OrbitCamera" type="Camera3D" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/RightView/SubViewport"]
 script = ExtResource("2_orbitcam")
+orthographic_environment = SubResource("Environment_orthographic")
 
 [node name="MeshRoot" type="Node3D" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/RightView/SubViewport"]
 script = ExtResource("3_meshdisplay")
@@ -216,6 +227,7 @@ size = Vector2i(400, 300)
 
 [node name="OrbitCamera" type="Camera3D" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/IsoView/SubViewport"]
 script = ExtResource("2_orbitcam")
+orthographic_environment = SubResource("Environment_orthographic")
 
 [node name="MeshRoot" type="Node3D" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/IsoView/SubViewport"]
 script = ExtResource("3_meshdisplay")
@@ -321,6 +333,7 @@ size = Vector2i(400, 300)
 
 [node name="OrbitCamera" type="Camera3D" parent="ResponsiveContainer/NarrowLayout/SingleView/SubViewport"]
 script = ExtResource("2_orbitcam")
+orthographic_environment = SubResource("Environment_orthographic")
 
 [node name="MeshRoot" type="Node3D" parent="ResponsiveContainer/NarrowLayout/SingleView/SubViewport"]
 script = ExtResource("3_meshdisplay")

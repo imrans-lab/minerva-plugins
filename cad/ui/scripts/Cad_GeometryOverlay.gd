@@ -5,7 +5,7 @@ const _DEBUG_EDGE_PICK: bool = true
 ## CAD geometry overlay: silhouette + selected-edge highlight + click-to-pick.
 ##
 ## Lives one-per-pane (Top / Front / Right / Iso / narrow-single). Responsibilities:
-##   - Ortho panes: paint a clean blueprint background + draw silhouette edges
+##   - Ortho panes: draw silhouette edges over the camera background
 ##     projected from the 3-D mesh.
 ##   - All panes (incl. perspective): draw a marker for the selected edge so
 ##     tree clicks and edge-tool selections show up visually.
@@ -14,17 +14,11 @@ const _DEBUG_EDGE_PICK: bool = true
 ##
 ## CAD-specific geometry visualisation — NOT annotation territory.
 ##
-## Phase A R2a originally extracted only the silhouette path here, dropping
-## background fill + selection rendering + click picking. Restored after HITL
-## flagged "mesh-colored silhouette" (mesh visible behind silhouette = no bg
-## paint) and "edge highlight doesn't work" (no marker + no click pickup).
-
 signal edge_selected(edge_id: int)
 
 ## The outline the ortho panes draw, and the caches that keep it affordable.
 const _OrthoSilhouetteScript: Script = preload("ortho_silhouette.gd")
 
-const ORTHO_BACKGROUND := Color(0.94, 0.95, 0.97, 1.0)
 const ORTHO_EDGE_COLOR := Color(0.18, 0.19, 0.22, 1.0)
 const SELECTED_EDGE_COLOR := Color(0.62, 0.08, 0.08, 1.0)
 const OUTLINE_COLOR := Color(0.02, 0.02, 0.03, 0.95)
@@ -159,13 +153,9 @@ func _draw() -> void:
 
 	var is_perspective := _camera.projection == Camera3D.PROJECTION_PERSPECTIVE
 
-	# Ortho panes paint an opaque blueprint background to hide the 3-D mesh
-	# behind the SubViewport (the panel hides MeshInstance but not the whole
-	# Node3D, so without this fill the gold mesh shows through the silhouette).
-	# Perspective panes leave the background alone — the shaded mesh IS the
-	# intended visualisation in iso/Perspective.
+	# The camera's environment supplies the blueprint background behind 3D
+	# references. An opaque canvas fill here would cover their outlines.
 	if not is_perspective:
-		draw_rect(Rect2(Vector2.ZERO, size), ORTHO_BACKGROUND, true)
 		_draw_silhouette()
 
 	# Refresh projected-edge lookup before highlight + future hit-tests. The

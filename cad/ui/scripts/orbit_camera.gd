@@ -8,6 +8,8 @@
 extends Camera3D
 class_name OrbitCamera
 
+@export var orthographic_environment: Environment
+
 # -------------------------------------------------------------------------
 # Defaults
 # -------------------------------------------------------------------------
@@ -129,6 +131,7 @@ const _Z_UP: Vector3 = Vector3(0, 0, 1)
 
 
 func _apply_transform() -> void:
+	environment = orthographic_environment if _view_preset != "Perspective" else null
 	if _view_preset != "Perspective":
 		_apply_orthographic_transform()
 		return
