@@ -215,6 +215,7 @@ func TestExportWaitMSAcceptsHostNumberSpellings(t *testing.T) {
 		{name: "exponent spelling", waitMS: `1e3`, accept: true},
 		{name: "null is absent", waitMS: `null`, accept: true},
 		{name: "fractional", waitMS: `0.5`, accept: false, mustSay: "0.5"},
+		{name: "fraction rounded by float64", waitMS: `1.00000000000000001`, accept: false, mustSay: "whole number"},
 		{name: "negative", waitMS: `-1`, accept: false, mustSay: "-1"},
 		{name: "above the bound", waitMS: `20001`, accept: false, mustSay: "20001"},
 		{name: "above the bound as a float", waitMS: `20000.5`, accept: false, mustSay: "20000.5"},
@@ -279,6 +280,14 @@ func TestExportJobKeyNormalizesSourceVersionSpelling(t *testing.T) {
 	}
 	if asInt == exportJobKey(json.RawMessage(body+`5}`)) {
 		t.Fatal("two source versions must key apart, or one export collects the other's geometry")
+	}
+	for _, version := range []string{"9007199254740993", "9223372036854775807"} {
+		if exportJobKey(json.RawMessage(body+version+`}`)) != exportJobKey(json.RawMessage(body+version+`.0}`)) {
+			t.Fatalf("exact source version %s changed during decimal normalization", version)
+		}
+	}
+	if exportJobKey(json.RawMessage(body+`9007199254740993.0}`)) == exportJobKey(json.RawMessage(body+`9007199254740992.0}`)) {
+		t.Fatal("adjacent source versions above float64 precision joined the same job")
 	}
 }
 

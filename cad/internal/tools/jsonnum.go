@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"math/big"
 )
 
 // errNotAWholeNumber says the value was a number but had a fractional part,
@@ -53,22 +54,18 @@ func jsonInt(raw json.RawMessage) (int64, error) {
 	if i, err := num.Int64(); err == nil {
 		return i, nil
 	}
-	f, err := num.Float64()
+	// A 64-bit mantissa represents every int64 exactly. Retain the parse
+	// accuracy too: rounding a fraction to an integer must not accept it.
+	f, _, err := big.ParseFloat(num.String(), 10, 64, big.ToZero)
 	if err != nil {
 		return 0, errNotANumber
 	}
-	if math.IsNaN(f) {
-		return 0, errNotANumber
-	}
-	// The upper bound is 2^63 written out, not math.MaxInt64: MaxInt64 has no
-	// exact float64, and converting it ROUNDS UP to 2^63 — so comparing
-	// against it would admit the one value whose int64(f) overflows. MinInt64
-	// is exactly representable, so its own comparison is already right.
-	if math.IsInf(f, 0) || f < math.MinInt64 || f >= 9223372036854775808.0 {
+	if f.Cmp(new(big.Float).SetInt64(math.MinInt64)) < 0 || f.Cmp(new(big.Float).SetInt64(math.MaxInt64)) > 0 {
 		return 0, errOutOfRange
 	}
-	if f != math.Trunc(f) {
+	i, accuracy := f.Int64()
+	if f.Acc() != big.Exact || accuracy != big.Exact {
 		return 0, errNotAWholeNumber
 	}
-	return int64(f), nil
+	return i, nil
 }
