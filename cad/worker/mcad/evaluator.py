@@ -116,9 +116,8 @@ def evaluate_source(
                 body_count=0,
                 references=references,
             )
-        raise EvaluationError(
-            "No 3D part produced. Define a shape with extrude(...) before evaluating."
-        )
+        message = "No 3D part produced. Define a shape with extrude(...) before evaluating."
+        raise EvaluationError(message) from TranslatorError(message)
 
     # A kernel failure here is attributed to the render-target binding rather
     # than surfacing as a bare AttributeError from inside build123d.
