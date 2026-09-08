@@ -209,6 +209,7 @@ func checkSession(s map[string]any, at string, errs *[]string) {
 
 	requests := map[string]bool{}
 	runIDs := map[string]map[string]bool{} // run -> contribution ids
+	contributionIDs := map[string]bool{}
 	runs := arr(s["runs"])
 	for i, r := range runs {
 		ro := obj(r)
@@ -229,6 +230,9 @@ func checkSession(s map[string]any, at string, errs *[]string) {
 			add("/runs/%d: a follow-up must name either a seat or a prompt", i)
 		}
 
+		if _, duplicate := runIDs[str(ro["run_id"])]; duplicate {
+			add("/runs/%d: duplicate run_id %q", i, str(ro["run_id"]))
+		}
 		ids := map[string]bool{}
 		runIDs[str(ro["run_id"])] = ids
 		contributions := arr(ro["contributions"])
@@ -238,6 +242,10 @@ func checkSession(s map[string]any, at string, errs *[]string) {
 		for j, c := range contributions {
 			co := obj(c)
 			cat := fmt.Sprintf("%s/contributions/%d", base, j)
+			if contributionIDs[str(co["contribution_id"])] {
+				*errs = append(*errs, cat+fmt.Sprintf(": duplicate contribution_id %q", str(co["contribution_id"])))
+			}
+			contributionIDs[str(co["contribution_id"])] = true
 			ids[str(co["contribution_id"])] = true
 			seat := str(co["seat_id"])
 			member, known := seatMember[seat]
@@ -292,8 +300,13 @@ func checkSession(s map[string]any, at string, errs *[]string) {
 		add(": status %q does not match the run set, which derives %q", str(s["status"]), want)
 	}
 
+	outcomeIDs := map[string]bool{}
 	for i, o := range arr(s["outcomes"]) {
 		oo := obj(o)
+		if outcomeIDs[str(oo["outcome_id"])] {
+			add("/outcomes/%d: duplicate outcome_id %q", i, str(oo["outcome_id"]))
+		}
+		outcomeIDs[str(oo["outcome_id"])] = true
 		ids, ok := runIDs[str(oo["run_id"])]
 		if !ok {
 			add("/outcomes/%d: unknown run_id %q", i, str(oo["run_id"]))
