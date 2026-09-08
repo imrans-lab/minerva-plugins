@@ -133,3 +133,45 @@ class TestExportReusesTheEvaluatedPart:
         )
         assert not reply["ok"]
         assert reply["error"]["kind"] == "translate"
+
+
+def test_named_bindings_share_build_and_edits_invalidate(tmp_path, translations):
+    source = "bottom = cube(10,10,2)\ndoor = sphere(3)\nassembly = bottom + door\n"
+    assert methods._evaluate({"source": source})["ok"]
+    translations[0] = 0
+    for name in ("bottom", "door", "bottom"):
+        target = tmp_path / (name + ".stl")
+        reply = methods._export({"source": source, "part": name, "source_version": 3,
+                                 "format": "stl", "path": str(target)})
+        assert reply["ok"], reply
+        assert reply["result"]["part"] == name
+        assert reply["result"]["source_version"] == 3
+        assert reply["result"]["reused_evaluation"]
+        assert target.stat().st_size > 84
+    assert translations[0] == 0
+    assert _triangles(str(tmp_path / "bottom.stl")) == 12
+    assert _triangles(str(tmp_path / "door.stl")) > 12
+    before = (tmp_path / "door.stl").read_bytes()
+    edited = source.replace("sphere(3)", "cube(6,6,6)")
+    reply = methods._export({"source": edited, "part": "door", "source_version": 4,
+                             "format": "stl", "path": str(tmp_path / "door.stl")})
+    assert reply["ok"], reply
+    assert translations[0] == 1
+    assert not reply["result"]["reused_evaluation"]
+    assert (tmp_path / "door.stl").read_bytes() != before
+    refused = methods._export({"source": source, "part": "missing", "format": "stl",
+                               "path": str(tmp_path / "missing.stl")})
+    assert not refused["ok"] and not (tmp_path / "missing.stl").exists()
+
+
+def test_named_export_refusal_never_borrows_assembly_defects(tmp_path, monkeypatch):
+    from mcad.mesh_export import MeshNotSolid
+    source = "door = cube(2,2,2)\nassembly = sphere(4)\n"
+    assert methods._evaluate({"source": source})["ok"]
+    def refuse(*args, **kwargs):
+        raise MeshNotSolid(RuntimeError("mesh is invalid"), node_name=kwargs["node_name"])
+    monkeypatch.setattr(evaluator, "export_built", refuse)
+    reply = methods._export({"source": source, "part": "door", "format": "3mf", "path": str(tmp_path / "door.3mf")})
+    assert not reply["ok"]
+    assert reply["error"]["details"]["shape_name"] == "door"
+    assert reply["error"]["details"]["counts_from"] == "unavailable"

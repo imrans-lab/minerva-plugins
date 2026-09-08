@@ -233,10 +233,21 @@ func _seat_support(
 	datum: Vector3,
 	mask: int,
 	reference_scope: String,
-	include_solid: bool
+	include_solid: bool,
+	head_profile: Dictionary = {}
 ) -> Dictionary:
 	var radius := (head_radius + shank_radius) * 0.5
+	var radii: Array = [radius]
 	var ring := _ring_points(direction, radius)
+	if head_profile.get("head_kind", "flat") == "countersunk":
+		# Two radial samples distinguish a cone from a recessed flat shelf
+		# that happens to intersect one ring at the expected cone height.
+		ring = [Vector3.ZERO]
+		radii = []
+		for fraction in [0.333333, 0.666667]:
+			var sampled_radius := lerpf(shank_radius, head_radius, fraction)
+			radii.append(sampled_radius)
+			ring.append_array(_ring_offsets(direction, sampled_radius))
 	# A hit counts as the seat only within SEAT_TOLERANCE_MM of the plane
 	# along the axis — a depth question, answered with a depth tolerance.
 	# Anything further is a different surface, and how far it sits is
@@ -263,12 +274,12 @@ func _seat_support(
 		if hit.is_empty():
 			continue
 		var t: float = (hit["position"] as Vector3 - datum).dot(direction)
-		var gap := t - seat_t
+		var gap := t - seat_t - _head_drop(head_profile, head_radius, (ring[index] as Vector3).length())
 		if worst_gap == null or gap > float(worst_gap):
 			worst_gap = gap
 		if absf(gap) <= SEAT_TOLERANCE_MM:
 			landed += 1
-	return {"landed": landed, "rays": rays, "radius_mm": radius, "gap_mm": worst_gap}
+	return {"landed": landed, "rays": rays, "radius_mm": radius, "radii_mm": radii, "gap_mm": worst_gap}
 
 
 ## The offsets of ONE ring: the axis point, then `radius` all the way round
@@ -372,3 +383,13 @@ func _reference_ray(
 	if not bool(hit.get("hit", false)):
 		return {}
 	return hit
+
+
+## Axial depth of the bearing surface below the head's outer plane. A cone
+## is a profile, never a wider flat-seat tolerance. Length is measured from
+## that outer plane for a countersunk screw.
+func _head_drop(profile: Dictionary, head_radius: float, radius: float) -> float:
+	if profile.get("head_kind", "flat") != "countersunk":
+		return 0.0
+	var shank_radius := float(profile.get("dia_mm", 0.0)) * 0.5
+	return maxf(0.0, head_radius - maxf(radius, shank_radius)) / tan(deg_to_rad(float(profile.get("head_angle_deg", 90.0))) * 0.5)

@@ -9,7 +9,7 @@ Round 2 Unit A adds a real `validate` implementation.
 Round 3 Unit A adds real `evaluate` and `list_edges` implementations.
 Round 4 adds `export` (STL binary / 3MF / STEP AP214) atop the existing
 ``mcad.evaluator`` helpers — ``export_built`` when the part is already in the
-cache the last evaluation left, ``export_source`` when it has to be built.
+cache the last evaluation left, evaluating source when it has to be built.
 The remaining stub is `deviation`.
 
 `clearance` lives in its own module (``mcad_worker.clearance``) and is
@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
+from collections import OrderedDict
 import traceback
 from pathlib import Path
 from typing import Any, Optional, Tuple
@@ -49,6 +51,9 @@ _last_program: Optional[Tuple[int, dict]] = None
 # Keyed by SHA-256, not hash(): two sources colliding in a 64-bit hash would
 # write one document's geometry into the other's file with no signal at all.
 _last_shape: Optional[Tuple[str, str, Any]] = None
+# A few recently evaluated documents, including their final named solids.
+_shape_documents: OrderedDict[str, tuple[str, dict[str, Any]]] = OrderedDict()
+_MAX_SHAPE_DOCUMENTS = 4
 
 
 def _digest(source: str) -> str:
@@ -79,6 +84,7 @@ def reset_caches() -> None:
     global _last_program, _last_shape
     _last_program = None
     _last_shape = None
+    _shape_documents.clear()
 
 
 # Best-effort OCCT version string, resolved once at module import.
@@ -167,7 +173,7 @@ def _phrase_defects(defects: dict) -> str:
     return ", ".join(parts)
 
 
-def _mesh_invalid_error(exc: Exception, source: str) -> dict:
+def _mesh_invalid_error(exc: Exception, source: str, part: str = "") -> dict:
     """The reply for a 3MF the writer refused, naming the defect that stands.
 
     The 3MF writer validates its own triangulation and says only "3mf mesh is
@@ -178,6 +184,11 @@ def _mesh_invalid_error(exc: Exception, source: str) -> dict:
     """
     defects, shape_name, body_count = _defects_for_source(source)
     evaluated = _last_program is not None and _last_program[0] == hash(source)
+    if part and part != shape_name:
+        # A named export may select another binding from the same document.
+        # Assembly diagnostics cannot be attributed to that part's mesh.
+        defects, shape_name, body_count = {}, part, 0
+        evaluated = False
     sites: dict = {}
     if evaluated:
         sites = _last_program[1].get("mesh_defect_sites") or {}
@@ -435,6 +446,10 @@ def _evaluate(params: dict) -> dict:
     # shape in place rather than caching a None an export would trip over.
     if result.shape is not None:
         _last_shape = (_digest(source), result.shape_name, result.shape)
+        _shape_documents[_digest(source)] = (result.shape_name, result.bindings)
+        _shape_documents.move_to_end(_digest(source))
+        while len(_shape_documents) > _MAX_SHAPE_DOCUMENTS:
+            _shape_documents.popitem(last=False)
     if summary_only:
         return {"ok": True, "result": _summarise(result_dict)}
     return {"ok": True, "result": result_dict}
@@ -565,7 +580,7 @@ def _export(params: dict) -> dict:
 
     try:
         from mcad.build_trace import BuildFailure
-        from mcad.evaluator import ExportError, export_built, export_source
+        from mcad.evaluator import ExportError, export_built
         from mcad.lexer import LexError
         from mcad.mesh_export import MeshNotSolid
         from mcad.parser import ParseError
@@ -579,19 +594,23 @@ def _export(params: dict) -> dict:
             },
         }
 
-    # The part the last evaluation built, when it was built from THIS source.
-    # Reusing it is the difference between an export that costs a file write
-    # and one that re-runs every boolean in the document; the digest is what
-    # keeps an edited buffer off the cached shape.
-    cached = _last_shape
-    reused = cached is not None and cached[0] == _digest(source)
-
+    part = params.get("part", "")
+    if not isinstance(part, str) or (part and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", part)):
+        return {"ok": False, "error": {"kind": "internal", "message": "part must be a DSL binding name"}}
+    digest = _digest(source)
+    cached = _shape_documents.get(digest)
+    reused = cached is not None
+    if cached is None:
+        evaluated = _evaluate({"source": source})
+        if not evaluated["ok"]:
+            return evaluated
+        cached = _shape_documents.get(digest)
+    name = part or (cached[0] if cached else "")
+    if cached is None or name not in cached[1]:
+        return {"ok": False, "error": {"kind": "translate", "message": f"No 3D solid binding {name!r} to export"}}
+    _shape_documents.move_to_end(digest)
     try:
-        if reused:
-            written_path = export_built(cached[2], format=fmt, path=path,
-                                        node_name=cached[1])
-        else:
-            written_path = export_source(source, format=fmt, path=path)
+        written_path = export_built(cached[1][name], format=fmt, path=path, node_name=name)
     except LexError as exc:
         # Lex errors aren't wrapped by ExportError (which only catches
         # ParseError/TranslatorError); surface as parse kind so callers
@@ -618,7 +637,7 @@ def _export(params: dict) -> dict:
             },
         }
     except MeshNotSolid as exc:
-        return _mesh_invalid_error(exc, source)
+        return _mesh_invalid_error(exc, source, name)
     except ExportError as exc:
         cause = exc.__cause__
         if isinstance(cause, ParseError):
@@ -652,7 +671,7 @@ def _export(params: dict) -> dict:
     try:
         bytes_written = os.path.getsize(written_path)
     except OSError:
-        # File should exist (export_source already wrote it); if stat fails
+        # File should exist (export_built already wrote it); if stat fails
         # we still report ok=True with bytes_written=0 rather than spuriously
         # failing the export call.
         pass
@@ -667,6 +686,9 @@ def _export(params: dict) -> dict:
             # this call. A reader watching an export get slow can tell the two
             # apart without guessing.
             "reused_evaluation": reused,
+            "part": name,
+            "source_digest": digest,
+            "source_version": params.get("source_version"),
         },
     }
 

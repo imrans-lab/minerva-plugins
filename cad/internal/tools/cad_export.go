@@ -7,19 +7,8 @@
 // also the IPC channel name). The worker method is the bare verb "export"
 // — see worker/mcad_worker/methods.py:_export.
 //
-// AN EXPORT THAT MUST BUILD RUNS DETACHED. The worker reuses the part the
-// panel's last evaluation built when the source matches, and that export is
-// a file write. When it does not match — the buffer was edited and not yet
-// evaluated — the export translates the whole DSL, which on a lofted shell of
-// ~60 booleans is minutes: far past the window an MCP client gives a tool
-// call, and past the point where the plugin's own stdio loop may sit blocked
-// (main.go dispatches one request at a time, so a handler that waits for the
-// worker also stops the panel's evaluations being read). So the handler waits
-// only exportFirstReply and then answers "running"; the work carries on in a
-// goroutine and the SAME call, made again with the same source, format and
-// path, collects it. The job key is the request itself — there is no ticket
-// to carry, which is what lets a caller wait on a slow export without the
-// host learning a new argument.
+// Exports run detached and are collected by job_id; legacy repeated requests
+// still join the same in-flight job. Completed handles are stable for 15 minutes.
 package tools
 
 import (
@@ -29,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/imrans-lab/minerva-plugins/shared/bridge"
@@ -37,41 +27,29 @@ import (
 // Export is the MCP tool spec for cad.export.
 var Export = ToolSpec{
 	Name: "cad.export",
-	Description: "Export the last 3D part produced by .mcad source to a file. " +
-		"Returns {path, bytes_written, format, reused_evaluation}. " +
-		"Supported formats: \"stl\" (binary STL — build123d default), " +
-		"\"step\" or \"stp\" (STEP AP214 — OCCT default schema), " +
-		"\"3mf\" (build123d Mesher), " +
-		"\"glb\" (minimal binary glTF, one node named after the part, written " +
-		"in the glTF frame of metres and Y-up so mesh(\"that.glb\") mounts it back " +
-		"at the same size and pose). " +
-		"Path is absolute as-is; ~-prefixed paths are expanded; bare relative " +
-		"paths resolve against the user's home directory. " +
-		"Source the panel has already evaluated is exported from the part that " +
-		"evaluation built (reused_evaluation true) and costs only the file write. " +
-		"Source that must be built runs detached: if it is still building after " +
-		"about 20 s the call answers kind=running with elapsed_ms and nothing is " +
-		"written yet — call cad.export AGAIN with the same source, format and path " +
-		"to collect the finished export. " +
-		"Errors are returned as data: kind=running (still building, ask again), " +
-		"kind=parse|translate (bad DSL), " +
-		"kind=mesh_invalid (3MF only — the part is not a closed manifold solid; " +
-		"the message names the defect class and count from the last evaluation, " +
-		"and STL/STEP still export it), " +
-		"kind=io (disk write failed), kind=internal (bad params).",
+	Description: "Export .mcad source, optionally a named solid binding. Formats: stl, step, stp, 3mf, glb. " +
+		"Returns path, bytes_written, reused_evaluation, source_digest and source_version. " +
+		"Slow work returns status=pending and job_id without error. Collect with job_id only; " +
+		"wait_ms (0..20000) bounds waiting. Handles retain completed or failed results for 15 minutes; " +
+		"repeated collection never rebuilds or rewrites. Source, part, format and path are pinned at start. " +
+		"Legacy repeated source/format/path requests join an in-flight export. Paths resolve against home.",
 	InputSchema: json.RawMessage(`{
 		"type": "object",
 		"properties": {
-			"source": {"type": "string", "description": ".mcad DSL source code"},
-			"format": {"type": "string", "enum": ["stl", "step", "stp", "3mf", "glb"], "description": "Output format. STL is binary. GLB is the only one mesh() can read back."},
-			"path": {"type": "string", "description": "Absolute, ~-prefixed, or bare relative path. Bare relative resolves against the user's home directory."}
+			"source": {"type": "string"},
+			"part": {"type": "string", "description": "Optional named solid binding; excludes references."},
+			"source_version": {"type": "integer"},
+			"format": {"type": "string", "enum": ["stl", "step", "stp", "3mf", "glb"]},
+			"path": {"type": "string"},
+			"job_id": {"type": "string", "description": "Collect a previous export without resending source."},
+			"wait_ms": {"type": "integer", "minimum": 0, "maximum": 20000}
 		},
-		"required": ["source", "format", "path"]
+		"anyOf": [{"required": ["job_id"]}, {"required": ["source", "format", "path"]}]
 	}`),
 }
 
 // exportFirstReply is how long the verb waits for an export before answering
-// "running". A variable, not a constant, so a test can drive the handover
+// pending. A variable, not a constant, so a test can drive the handover
 // without spending the window waiting for it; nothing in the plugin writes it.
 var exportFirstReply = 20 * time.Second
 
@@ -80,17 +58,22 @@ var exportFirstReply = 20 * time.Second
 const exportJobKeep = 15 * time.Minute
 
 // exportJob is one detached export. done is closed when the worker has
-// answered; result/err are then final and are handed to exactly one collector.
+// answered; result/err are then final and can be read by repeated collectors.
 type exportJob struct {
-	started time.Time
-	done    chan struct{}
-	result  json.RawMessage
-	err     error
+	id       string
+	key      string
+	started  time.Time
+	finished time.Time
+	done     chan struct{}
+	result   json.RawMessage
+	err      error
 }
 
 var (
-	exportMu   sync.Mutex
-	exportJobs = map[string]*exportJob{}
+	exportMu       sync.Mutex
+	exportJobs     = map[string]*exportJob{}
+	exportHandles  = map[string]*exportJob{}
+	exportSequence atomic.Uint64
 )
 
 // HandleExport dispatches an export request to the worker via the bridge.
@@ -108,25 +91,56 @@ func HandleExport(ctx context.Context, w *bridge.Worker, params json.RawMessage)
 func handleExportWith(ctx context.Context, params json.RawMessage,
 	call func(context.Context, json.RawMessage) (json.RawMessage, error)) (json.RawMessage, error) {
 
-	key := exportJobKey(params)
-	job, fresh := beginExportJob(key)
-	if fresh {
-		// context.Background(), NOT ctx: the job outlives the call that
-		// started it by design, and a request-scoped context would cancel the
-		// export the moment this handler answers "running".
-		go func() {
-			job.result, job.err = call(context.Background(), params)
-			close(job.done)
-		}()
+	var args struct {
+		JobID  string `json:"job_id"`
+		WaitMS *int   `json:"wait_ms"`
 	}
-
+	if err := json.Unmarshal(params, &args); err != nil {
+		return nil, &bridge.WorkerError{Kind: "internal", Message: "invalid export arguments"}
+	}
+	wait := exportFirstReply
+	if args.WaitMS != nil {
+		if *args.WaitMS < 0 || *args.WaitMS > 20000 {
+			return nil, &bridge.WorkerError{Kind: "internal", Message: "wait_ms must be 0..20000"}
+		}
+		wait = time.Duration(*args.WaitMS) * time.Millisecond
+	}
+	var job *exportJob
+	if args.JobID != "" {
+		exportMu.Lock()
+		sweepExportJobsLocked()
+		job = exportHandles[args.JobID]
+		exportMu.Unlock()
+		if job == nil {
+			return nil, &bridge.WorkerError{Kind: "unknown_job", Message: "unknown or expired export job"}
+		}
+	} else {
+		key := exportJobKey(params)
+		var fresh bool
+		job, fresh = beginExportJob(key)
+		if fresh {
+			pinned := append(json.RawMessage(nil), params...)
+			go func() {
+				job.result, job.err = call(context.Background(), pinned)
+				job.finished = time.Now()
+				close(job.done)
+			}()
+		}
+	}
+	// A completed handle always wins over a zero-duration polling timer.
 	select {
 	case <-job.done:
-		return collectExportJob(key, job)
+		return collectExportJob(job.key, job)
+	default:
+	}
+	select {
+	case <-job.done:
+		return collectExportJob(job.key, job)
 	case <-ctx.Done():
 		return nil, &bridge.WorkerError{Kind: "cancelled", Message: ctx.Err().Error()}
-	case <-time.After(exportFirstReply):
-		return nil, exportRunningError(job)
+	case <-time.After(wait):
+		return json.Marshal(map[string]any{"status": "pending", "job_id": job.id,
+			"elapsed_ms": time.Since(job.started).Milliseconds()})
 	}
 }
 
@@ -135,9 +149,11 @@ func handleExportWith(ctx context.Context, params json.RawMessage,
 // caller collect a running one by simply asking again.
 func exportJobKey(params json.RawMessage) string {
 	var a struct {
-		Source string `json:"source"`
-		Format string `json:"format"`
-		Path   string `json:"path"`
+		Source  string `json:"source"`
+		Part    string `json:"part"`
+		Version *int   `json:"source_version"`
+		Format  string `json:"format"`
+		Path    string `json:"path"`
 	}
 	sum := sha256.New()
 	if err := json.Unmarshal(params, &a); err != nil {
@@ -145,7 +161,8 @@ func exportJobKey(params json.RawMessage) string {
 		// two such calls still share one (fast) job.
 		sum.Write(params)
 	} else {
-		fmt.Fprintf(sum, "%q\n%q\n%q\n", a.Source, a.Format, a.Path)
+		encoded, _ := json.Marshal(a)
+		sum.Write(encoded)
 	}
 	return hex.EncodeToString(sum.Sum(nil))
 }
@@ -160,43 +177,40 @@ func beginExportJob(key string) (*exportJob, bool) {
 	if job, ok := exportJobs[key]; ok {
 		return job, false
 	}
-	job := &exportJob{started: time.Now(), done: make(chan struct{})}
+	job := &exportJob{id: fmt.Sprintf("export-%d-%d", time.Now().UnixNano(), exportSequence.Add(1)), key: key, started: time.Now(), done: make(chan struct{})}
+	exportHandles[job.id] = job
 	exportJobs[key] = job
 	return job, true
 }
 
-// collectExportJob hands back a finished job's answer and drops it from the
-// table. An export is spent on collection: asking again writes the file
-// again, which is what a caller who asks again means.
+// Collection releases the legacy request key so another start can write again.
+// The handle keeps the immutable result until expiry, without another write.
 func collectExportJob(key string, job *exportJob) (json.RawMessage, error) {
 	exportMu.Lock()
 	if current, ok := exportJobs[key]; ok && current == job {
 		delete(exportJobs, key)
 	}
 	exportMu.Unlock()
-	return job.result, job.err
-}
-
-// exportRunningError is the answer for an export still being built. It is an
-// error envelope, not a result: NOTHING has been written yet, and a reply
-// shaped like a success would report a path with no file behind it.
-func exportRunningError(job *exportJob) error {
-	waited := time.Since(job.started)
-	elapsed, _ := json.Marshal(waited.Milliseconds())
-	return &bridge.WorkerError{
-		Kind: "running",
-		Message: fmt.Sprintf(
-			"the export is still building after %.1f s — this source has not "+
-				"been evaluated, so the whole DSL is being translated, which on "+
-				"a large lofted shell is minutes of geometry. Nothing has been "+
-				"written yet and nothing has failed: call cad.export again with "+
-				"the same source, format and path to collect the file when it lands.",
-			waited.Seconds()),
-		Extra: map[string]json.RawMessage{
-			"status":     json.RawMessage(`"running"`),
-			"elapsed_ms": json.RawMessage(elapsed),
-		},
+	if job.err != nil {
+		if we, ok := job.err.(*bridge.WorkerError); ok {
+			copyError := *we
+			copyError.Extra = map[string]json.RawMessage{}
+			for k, v := range we.Extra {
+				copyError.Extra[k] = v
+			}
+			copyError.Extra["job_id"], _ = json.Marshal(job.id)
+			copyError.Extra["status"] = json.RawMessage(`"failed"`)
+			return nil, &copyError
+		}
+		return nil, job.err
 	}
+	var result map[string]any
+	if err := json.Unmarshal(job.result, &result); err != nil {
+		return nil, err
+	}
+	result["job_id"] = job.id
+	result["status"] = "completed"
+	return json.Marshal(result)
 }
 
 // sweepExportJobsLocked drops FINISHED jobs nobody collected. Caller holds
@@ -205,11 +219,14 @@ func exportRunningError(job *exportJob) error {
 // beside the first, which is the one thing this table exists to prevent.
 func sweepExportJobsLocked() {
 	now := time.Now()
-	for key, job := range exportJobs {
+	for id, job := range exportHandles {
 		select {
 		case <-job.done:
-			if now.Sub(job.started) > exportJobKeep {
-				delete(exportJobs, key)
+			if now.Sub(job.finished) > exportJobKeep {
+				delete(exportHandles, id)
+				if exportJobs[job.key] == job {
+					delete(exportJobs, job.key)
+				}
 			}
 		default:
 		}

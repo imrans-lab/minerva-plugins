@@ -63,6 +63,8 @@ class EvaluationResult:
     # part of the reply: it is here so a caller that already paid to build the
     # part can export it without translating the DSL a second time.
     shape: Any = None
+    # Final solid bindings share the already-built geometry; never serialized.
+    bindings: dict[str, Any] = field(default_factory=dict)
 
 
 def body_count_of(shape: Any) -> int:
@@ -160,6 +162,8 @@ def evaluate_source(
         body_count=body_count_of(shape),
         references=references,
         shape=shape,
+        bindings={name: value for name, value in translator.env.items()
+                  if translator.is_part(value)},
     )
 
 

@@ -73,6 +73,7 @@ custom_minimum_size = Vector2(300, 225)
 stretch = true
 
 [node name="SubViewport" type="SubViewport" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/TopView"]
+own_world_3d = true
 size = Vector2i(400, 300)
 
 [node name="OrbitCamera" type="Camera3D" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/TopView/SubViewport"]
@@ -118,6 +119,7 @@ custom_minimum_size = Vector2(300, 225)
 stretch = true
 
 [node name="SubViewport" type="SubViewport" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/FrontView"]
+own_world_3d = true
 size = Vector2i(400, 300)
 
 [node name="OrbitCamera" type="Camera3D" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/FrontView/SubViewport"]
@@ -163,6 +165,7 @@ custom_minimum_size = Vector2(300, 225)
 stretch = true
 
 [node name="SubViewport" type="SubViewport" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/RightView"]
+own_world_3d = true
 size = Vector2i(400, 300)
 
 [node name="OrbitCamera" type="Camera3D" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/RightView/SubViewport"]
@@ -208,6 +211,7 @@ custom_minimum_size = Vector2(300, 225)
 stretch = true
 
 [node name="SubViewport" type="SubViewport" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/IsoView"]
+own_world_3d = true
 size = Vector2i(400, 300)
 
 [node name="OrbitCamera" type="Camera3D" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/IsoView/SubViewport"]
@@ -312,6 +316,7 @@ custom_minimum_size = Vector2(300, 300)
 stretch = true
 
 [node name="SubViewport" type="SubViewport" parent="ResponsiveContainer/NarrowLayout/SingleView"]
+own_world_3d = true
 size = Vector2i(400, 300)
 
 [node name="OrbitCamera" type="Camera3D" parent="ResponsiveContainer/NarrowLayout/SingleView/SubViewport"]

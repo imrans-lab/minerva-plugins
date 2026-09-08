@@ -518,7 +518,7 @@ func _one_screw(
 				+ "the evaluated solid anywhere along its axis, so there is "
 				+ "nothing for the head to sit on; check the screw is coming "
 				+ "in from the side the counterbore or the skin is on")
-		seat_t = float(found)
+		seat_t = float(found) - _head_drop(screw, head_dia * 0.5, (head_dia + dia) * 0.25)
 	else:
 		# The plate's head-side face: half its thickness short of the hole's
 		# centre. A hole record with no thickness in it has NO seat — and
@@ -532,7 +532,7 @@ func _one_screw(
 				"the hole record carries neither depth_mm nor extent_mm, so "
 				+ "there is no seat plane to measure the screw from; "
 				+ "minerva_cad_find_holes reports depth_mm on a verified hole")
-		seat_t = -thickness * 0.5
+		seat_t = -thickness * 0.5 - _head_drop(screw, head_dia * 0.5, float(hole.get("dia_mm", dia)) * 0.5)
 	var bore_entry_t := (bore_start - hole_centre).dot(direction)
 	var bore_exit_t := (bore_end - hole_centre).dot(direction)
 	if bore_exit_t < bore_entry_t:
@@ -640,15 +640,18 @@ func _one_screw(
 		# seat — an annular bridge outside the shank and inside the head —
 		# is invisible to the only fan wide enough to meet it. The solid face
 		# the seat plane lies in is the one hit that is the screw arriving.
+		# The conical approach and bearing check use the same axial tolerance
+		# around the stated profile, so an accepted seat is not its own blocker.
+		var head_tolerance := SEAT_TOLERANCE_MM if screw.get("head_kind", "flat") == "countersunk" else PATH_END_EPSILON_MM
 		head = _fan_clear(
 			gauge, state, solid_state, checks, origin, direction,
-			head_dia * 0.5, start_t, seat_t - PATH_END_EPSILON_MM,
-			hole_centre, mask, reference_scope, {"seat_t": seat_t}
+			head_dia * 0.5, start_t, seat_t - head_tolerance,
+			hole_centre, mask, reference_scope, {"seat_t": seat_t, "head_profile": screw}
 		)
 		seat = _seat_support(
 			gauge, state, solid_state, checks, origin, direction,
 			head_dia * 0.5, dia * 0.5, seat_t, hole_centre, mask,
-			reference_scope, seat_on == SEAT_ON_SOLID
+			reference_scope, seat_on == SEAT_ON_SOLID, screw
 		)
 
 	_path_rays += int(shank["rays"]) + int(head["rays"])
@@ -669,6 +672,9 @@ func _one_screw(
 	var engagement_ok := extent_certain and bore_fit == "thread" \
 		and engagement - engagement_bound >= engagement_required
 	var head_seat_clear := bool(head["clear"])
+	var head_support_ok := head_dia <= 0.0 or int(seat["landed"]) > 0
+	if screw.get("head_kind", "flat") == "countersunk":
+		head_support_ok = int(seat["rays"]) > 0 and seat["landed"] == seat["rays"]
 	# BOTTOMING. The fan's bore span runs to the tip, so a floor it met is a
 	# floor the tip would reach: the screw runs out of bore before the head
 	# reaches its seat. Reported with the numbers — where the tip ends, where
@@ -708,6 +714,9 @@ func _one_screw(
 		"engagement_required_mm": engagement_required,
 		"engagement_ok": engagement_ok,
 		"head_seat_clear": head_seat_clear,
+		"head_support_ok": head_support_ok,
+		"head_support_included_in_verdict": true,
+		"seat_kind": screw.get("head_kind", "flat"),
 		"screw_tip_mm": tip_t,
 		"bore_floor_mm": shank["floor_t"],
 		"bottoming": bottoming,
@@ -729,19 +738,19 @@ func _one_screw(
 			/ maxf(1.0, float(seat["rays"]))
 		row["head_seat_rays"] = int(seat["rays"])
 		row["head_seat_radius_mm"] = float(seat["radius_mm"])
+		row["head_seat_radii_mm"] = seat["radii_mm"]
 		# The measured number behind the fraction: how far below the seat
 		# plane the surface the ring met actually sits, at its worst.
 		row["head_seat_gap_mm"] = seat["gap_mm"]
 		row["head_seat_tolerance_mm"] = SEAT_TOLERANCE_MM
-		row["head_seat_rule"] = ("circumference coverage at one radius, not "
-			+ "bearing area: the fraction of a single ring of rays at "
-			+ "%.3f mm from the axis that met %s material within "
-			+ "%s mm of the seat plane along the axis, so an annular void "
-			+ "inside that ring is not seen; head_seat_gap_mm is the furthest "
-			+ "below the seat any of them found a surface") \
-			% [float(seat["radius_mm"]),
-				"the evaluated solid's" if seat_on == SEAT_ON_SOLID
-					else "reference", SEAT_TOLERANCE_MM]
+		var ring_rule := "one radius" if seat["radii_mm"].size() == 1 else "two radii"
+		row["head_seat_rule"] = ("circumference coverage at %s, not bearing area: "
+			+ "rays at %s mm from the axis must meet %s material within %.3f mm "
+			+ "of the stated bearing profile. Gaps between sampled rings are not seen. "
+			+ "Flat heads require some sampled support; countersunk heads require both "
+			+ "rings to match the cone. Partial support is reported, not load-rated.") 			% [ring_rule, str(seat["radii_mm"]),
+				"solid" if seat_on == SEAT_ON_SOLID else "reference", SEAT_TOLERANCE_MM]
+
 		if not head_seat_clear:
 			row["head_obstructions"] = head["obstructions"]
 	if bore.get("source", "b_rep") == "b_rep":
@@ -756,7 +765,7 @@ func _one_screw(
 	var coaxiality_ok := (not bool(zone.get("graded", false))) \
 		or bool(zone.get("pass", false))
 	row["pass"] = coaxiality_ok \
-		and bool(shank["clear"]) and engagement_ok and head_seat_clear \
+		and bool(shank["clear"]) and engagement_ok and head_seat_clear and head_support_ok \
 		and not bottoming
 	row["why"] = _why(row)
 	return row
@@ -865,6 +874,8 @@ func _why(row: Dictionary) -> String:
 			+ "long to seat") % [float(row.get("screw_tip_mm", 0.0)),
 				float(row.get("bore_floor_mm", 0.0)),
 				float(row.get("bottoming_by_mm", 0.0))]
+	if not bool(row.get("head_support_ok", true)):
+		return "the head lacks the required sampled support on its stated bearing profile"
 	if not bool(row.get("head_seat_clear", true)):
 		var over: Array = row.get("head_obstructions", []) as Array
 		if not over.is_empty():

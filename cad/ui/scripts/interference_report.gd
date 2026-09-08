@@ -390,7 +390,7 @@ func _report(pairs: Dictionary) -> Dictionary:
 		# under expected_contacts with what was measured for it — but that
 		# measure is not an upper bound, so an exclusion makes the verdict
 		# advisory; one it could not excuse is back in.
-		"pass": out.is_empty() and _undecided.is_empty() and excluded == 0,
+		"pass": out.is_empty() and _undecided.is_empty() and excluded == 0 and not _coverage_limited,
 		"count": out.size(),
 		"point_count": total,
 		"pairs": out,
@@ -456,6 +456,14 @@ func _report(pairs: Dictionary) -> Dictionary:
 				+ "measured overlap that is a lower-bound chord, not a proven "
 				+ "depth; nothing else was found, and that is advisory rather "
 				+ "than a certified pass — not a failure") % excluded
+	if _coverage_limited:
+		report["pass_reason"] = str(report.get("pass_reason", "")) + (" Collision coverage is incomplete: %s" % "; ".join(_limits))
+		report["advisory"] = out.is_empty()
+	report["coverage"] = {"complete": not _coverage_limited,
+		"edges_reaching": _edges_reaching, "edges_cast": _edges_cast,
+		"edges_uncast": maxi(0, _edges_reaching - _edges_cast), "limits": _limits}
+	report["verdict"] = "fail" if not out.is_empty() else ("pass" if report["pass"] else "advisory")
+
 	return report
 
 

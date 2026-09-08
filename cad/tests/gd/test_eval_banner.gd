@@ -87,7 +87,14 @@ func _run() -> void:
 	_attach_document(rig, "part = cube(10, 10, 10)\n")
 
 	# ── An evaluation that finds interference reports it, stamped ──────────
-	await _answer_next(rig, _worker_answer(POST_MIN, POST_MAX))
+	var worker := _worker_answer(POST_MIN, POST_MAX)
+	# Deliberately different from the panel outline result: the wire must
+	# forward the worker's paired counts/sites rather than splice derivations.
+	worker["result"]["mesh_defects"] = {"degenerate_faces": 1}
+	worker["result"]["mesh_defect_sites"] = {"degenerate_faces": {"count": 1}}
+	await _answer_next(rig, worker)
+	var evaluation := _last_eval(panel)
+	check("worker defect counts and sites reach last_eval together", evaluation.get("mesh_defects") == worker["result"]["mesh_defects"] and evaluation.get("mesh_defect_sites") == worker["result"]["mesh_defect_sites"] and evaluation.get("mesh_defects_source") == "worker_tessellation", str(evaluation))
 	var first: Dictionary = _banner(panel)
 	check("interference: the evaluation that found it says so on screen",
 			bool(first.get("visible", false))
@@ -122,6 +129,7 @@ func _run() -> void:
 	# ── THE ACCEPTANCE TEST: the next evaluation is not dismissed in advance ─
 	(rig["buffer"] as Object).apply_edit("part = cube(11, 10, 10)\n")
 	await _answer_next(rig, _worker_answer(POST_MIN, POST_MAX))
+	check("an empty worker defect report clears both fields", _last_eval(panel).get("mesh_defects") == {} and _last_eval(panel).get("mesh_defect_sites") == {}, str(_last_eval(panel)))
 	var second: Dictionary = _banner(panel)
 	check("later evaluation: a NEW report about the SAME fault shows itself — "
 			+ "the closed one did not dismiss the evaluations after it",
@@ -206,6 +214,8 @@ func _worker_answer(low: Vector3, high: Vector3) -> Dictionary:
 		"ok": true,
 		"result": {
 			"shape_name": "part",
+			"mesh_defects": {},
+			"mesh_defect_sites": {},
 			"body_count": 1,
 			"mesh": _box_mesh(low, high),
 			"edges": [],

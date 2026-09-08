@@ -244,7 +244,7 @@ func _fan_clear(
 	# not "something is in the way" but "the screw is too long for this bore".
 	var floor_from_t := float(expected.get("bore_exit_t", INF)) - BORE_WALL_TOLERANCE_MM
 	var floor_t: Variant = null
-	var far_end := maxf(to_t, bore_to_t)
+	var far_end := maxf(to_t, bore_to_t) + _head_drop(expected.get("head_profile", {}), radius, 0.0)
 	# Long enough to carry every ray from where it starts to the far end of
 	# the span, measured from the ORIGIN: the caller may begin the span well
 	# inside the ray's travel (a shank seated on the solid starts at the seat
@@ -255,6 +255,7 @@ func _fan_clear(
 	var see_solid := not expected.is_empty()
 	for index in range(rays.size()):
 		var offset: Vector3 = rays[index]
+		var ray_to_t := to_t + _head_drop(expected.get("head_profile", {}), radius, offset.length())
 		var start: Vector3 = origin + offset
 		var finish: Vector3 = start + direction * travel
 		for hit in _crossings(gauge, state, solid_state, checks, start, finish,
@@ -262,7 +263,7 @@ func _fan_clear(
 			var crossing: Dictionary = hit
 			var t: float = (crossing["point"] as Vector3 - datum).dot(direction)
 			var span := ""
-			if t >= from_t and t <= to_t:
+			if t >= from_t and t <= ray_to_t:
 				span = "approach"
 				if bool(crossing.get("solid", false)) \
 						and _is_the_screw_arriving(crossing["point"], t, expected):
@@ -666,6 +667,10 @@ func _pair(bores: Array, holes: Array, screw: Dictionary, args: Dictionary) -> D
 			"hole": hole, "axis": axis.normalized(), "centre": centre,
 		})
 
+	# Only auto-pairing collapses steps. Explicit indices still address every
+	# original hole record, and the response exposes those same indices.
+	var step_owner := _step_owners(prepared_holes) if (args.get("pairs", []) as Array).is_empty() else {}
+
 	var screw_dia := float(screw.get("dia_mm", 0.0))
 	var clearance_dia := _clearance_bore_dia(screw_dia, args)
 	var explicit: Array = args.get("pairs", []) as Array
@@ -673,6 +678,8 @@ func _pair(bores: Array, holes: Array, screw: Dictionary, args: Dictionary) -> D
 	if explicit.is_empty():
 		for b in range(bores.size()):
 			for h in range(prepared_holes.size()):
+				if step_owner.get(h, h) != h:
+					continue
 				var scored := _score(bores[b] as Dictionary,
 					prepared_holes[h] as Dictionary, screw_dia, clearance_dia)
 				if scored.is_empty():
@@ -711,6 +718,9 @@ func _pair(bores: Array, holes: Array, screw: Dictionary, args: Dictionary) -> D
 			continue
 		taken_bores[b] = true
 		taken_holes[h] = true
+		for step in step_owner:
+			if step_owner[step] == h:
+				taken_holes[step] = true
 		var bore: Dictionary = bores[b]
 		var prepared: Dictionary = prepared_holes[h]
 		pairs.append({
@@ -772,6 +782,41 @@ func _pair(bores: Array, holes: Array, screw: Dictionary, args: Dictionary) -> D
 	}
 
 
+## Adjacent cylindrical intervals on the same reference node form one
+## mounting feature. Use the narrowest step to locate the shank and seat.
+## Coaxial holes across air gaps or in different nodes remain separate.
+func _step_owners(prepared: Array) -> Dictionary:
+	var owners := {}
+	for i in range(prepared.size()):
+		owners[i] = i
+	for i in range(prepared.size()):
+		for j in range(i):
+			var a: Dictionary = prepared[i]
+			var b: Dictionary = prepared[j]
+			var ah: Dictionary = a["hole"]
+			var bh: Dictionary = b["hole"]
+			if str(ah.get("reference", "")).is_empty() or ah.get("reference") != bh.get("reference") or ah.get("node") != bh.get("node"):
+				continue
+			var axis: Vector3 = a["axis"]
+			if absf(axis.dot(b["axis"])) < cos(deg_to_rad(AGREEMENT_ANGLE_DEG)):
+				continue
+			var delta: Vector3 = b["centre"] - a["centre"]
+			var along := delta.dot(axis)
+			if (delta - along * axis).length() > AGREEMENT_CENTRE_MM:
+				continue
+			var ae := float(ah.get("extent_mm", ah.get("depth_mm", 0.0)))
+			var be := float(bh.get("extent_mm", bh.get("depth_mm", 0.0)))
+			if ae <= 0.0 or be <= 0.0 or absf(absf(along) - (ae + be) * 0.5) > SEAT_TOLERANCE_MM:
+				continue
+			var left: int = owners[i]
+			var right: int = owners[j]
+			var owner := left if float(prepared[left]["hole"].get("dia_mm", 0.0)) < float(prepared[right]["hole"].get("dia_mm", 0.0)) else right
+			for k in owners:
+				if owners[k] == left or owners[k] == right:
+					owners[k] = owner
+	return owners
+
+
 ## How well one bore lines up with one hole, or {} when it is not a candidate.
 ## `fit` says what the bore is FOR and `fit_rank` orders the three kinds; see
 ## _fit_of.
@@ -831,6 +876,10 @@ func _screw_from(args: Dictionary) -> Dictionary:
 			+ "the reference plate the hole is in), 'solid' (on the evaluated "
 			+ "solid — a counterbore in a tray floor, a lid's outer skin) or "
 			+ "'offset' with seat_offset_mm; '%s' is none of those") % seat}
+	var head_kind := str(raw.get("head_kind", "flat"))
+	var head_angle := float(raw.get("head_angle_deg", 90.0))
+	if head_kind not in ["flat", "countersunk"] or not is_finite(head_angle) or head_angle <= 0.0 or head_angle >= 180.0:
+		return {"error": "head_kind must be flat or countersunk; head_angle_deg must be between 0 and 180"}
 	var offset := float(raw.get("seat_offset_mm", 0.0))
 	if seat == SEAT_AT_OFFSET and not is_finite(offset):
 		return {"error": "screw.seat 'offset' needs a finite seat_offset_mm: "
@@ -842,6 +891,8 @@ func _screw_from(args: Dictionary) -> Dictionary:
 		"length_mm": length,
 		"head_dia_mm": head,
 		"head_dia_assumed": assumed,
+		"head_kind": head_kind,
+		"head_angle_deg": head_angle,
 		"seat": seat,
 		"seat_offset_mm": offset,
 	}

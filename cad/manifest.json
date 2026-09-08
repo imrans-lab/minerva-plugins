@@ -1,7 +1,7 @@
 {
   "id": "cad",
   "name": "CAD",
-  "version": "0.3.9",
+  "version": "0.3.10",
   "host_api_version": "1",
   "release_targets": ["linux-x86_64", "macos-universal", "windows-x86_64"],
   "backend": {
@@ -230,6 +230,8 @@
               "properties": {
                 "dia_mm": {"type": "number"},
                 "length_mm": {"type": "number"},
+                "head_kind": {"type": "string", "enum": ["flat", "countersunk"], "description": "Bearing profile; flat by default. Countersunk length_mm is measured from the outer head plane."},
+                "head_angle_deg": {"type": "number", "description": "Included countersunk head angle; default 90 degrees."},
                 "head_dia_mm": {"type": "number"},
                 "seat": {"type": "string", "enum": ["reference", "solid", "offset"]},
                 "seat_offset_mm": {"type": "number"},
@@ -251,6 +253,8 @@
               "length_mm": {
                 "type": "number"
               },
+              "head_kind": {"type": "string", "enum": ["flat", "countersunk"], "description": "Bearing profile; flat by default. Countersunk length_mm is measured from the outer head plane."},
+              "head_angle_deg": {"type": "number", "description": "Included countersunk head angle; default 90 degrees."},
               "head_dia_mm": {
                 "type": "number"
               },
@@ -350,6 +354,8 @@
               "properties": {
                 "dia_mm": {"type": "number"},
                 "length_mm": {"type": "number"},
+                "head_kind": {"type": "string", "enum": ["flat", "countersunk"], "description": "Bearing profile; flat by default. Countersunk length_mm is measured from the outer head plane."},
+                "head_angle_deg": {"type": "number", "description": "Included countersunk head angle; default 90 degrees."},
                 "head_dia_mm": {"type": "number"},
                 "seat": {"type": "string", "enum": ["reference", "solid", "offset"]},
                 "seat_offset_mm": {"type": "number"},
@@ -371,6 +377,8 @@
               "length_mm": {
                 "type": "number"
               },
+              "head_kind": {"type": "string", "enum": ["flat", "countersunk"], "description": "Bearing profile; flat by default. Countersunk length_mm is measured from the outer head plane."},
+              "head_angle_deg": {"type": "number", "description": "Included countersunk head angle; default 90 degrees."},
               "head_dia_mm": {
                 "type": "number"
               },

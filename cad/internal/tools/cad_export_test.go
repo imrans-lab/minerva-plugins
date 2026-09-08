@@ -3,11 +3,10 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"github.com/imrans-lab/minerva-plugins/shared/bridge"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/imrans-lab/minerva-plugins/shared/bridge"
 )
 
 // ORACLE for this file: the worker call counter. A heavy export must be asked
@@ -21,6 +20,7 @@ func resetExportJobs(t *testing.T) {
 	t.Helper()
 	exportMu.Lock()
 	exportJobs = map[string]*exportJob{}
+	exportHandles = map[string]*exportJob{}
 	exportMu.Unlock()
 }
 
@@ -28,22 +28,18 @@ func exportArgs(path string) json.RawMessage {
 	return json.RawMessage(`{"source":"part = box(10,10,10)\n","format":"stl","path":"` + path + `"}`)
 }
 
-// assertRunning asserts the reply is the "still building" envelope: no result
-// and a running error that says how long it has been going.
+// Pending is data, with a durable handle, not a worker failure.
 func assertRunning(t *testing.T, res json.RawMessage, err error) {
 	t.Helper()
-	if res != nil {
-		t.Fatalf("a running export must write nothing and return no result; got %s", res)
+	if err != nil {
+		t.Fatal(err)
 	}
-	we, ok := err.(*bridge.WorkerError)
-	if !ok {
-		t.Fatalf("expected a *bridge.WorkerError, got %T (%v)", err, err)
+	var r map[string]any
+	if err := json.Unmarshal(res, &r); err != nil {
+		t.Fatal(err)
 	}
-	if we.Kind != "running" {
-		t.Fatalf("expected kind=running, got kind=%q message=%q", we.Kind, we.Message)
-	}
-	if _, has := we.Extra["elapsed_ms"]; !has {
-		t.Fatalf("a running reply must say how long it has been building; extra=%v", we.Extra)
+	if r["status"] != "pending" || r["job_id"] == "" || r["elapsed_ms"] == nil {
+		t.Fatalf("bad pending reply: %s", res)
 	}
 }
 
@@ -143,5 +139,54 @@ func TestExportFailureReachesTheCaller(t *testing.T) {
 	we, ok := err.(*bridge.WorkerError)
 	if !ok || we.Kind != "translate" {
 		t.Fatalf("expected the worker's translate error, got %v", err)
+	}
+	var id string
+	if err := json.Unmarshal(we.Extra["job_id"], &id); err != nil {
+		t.Fatal(err)
+	}
+	poll, _ := json.Marshal(map[string]any{"job_id": id})
+	_, again := handleExportWith(context.Background(), poll, boom)
+	if saved, ok := again.(*bridge.WorkerError); !ok || saved.Kind != "translate" {
+		t.Fatalf("failure did not remain collectable: %v", again)
+	}
+	exportMu.Lock()
+	exportHandles[id].finished = time.Now().Add(-exportJobKeep - time.Second)
+	exportMu.Unlock()
+	_, expired := handleExportWith(context.Background(), poll, boom)
+	if refusal, ok := expired.(*bridge.WorkerError); !ok || refusal.Kind != "unknown_job" {
+		t.Fatalf("expired handle reused: %v", expired)
+	}
+}
+
+func TestExportHandleCollectionIsStable(t *testing.T) {
+	resetExportJobs(t)
+	release := make(chan struct{})
+	calls := 0
+	slow := func(_ context.Context, _ json.RawMessage) (json.RawMessage, error) {
+		calls++
+		<-release
+		return json.RawMessage(`{"path":"/tmp/job.stl","bytes_written":12}`), nil
+	}
+	args := json.RawMessage(`{"source":"a=cube(2)\n","part":"a","format":"stl","path":"/tmp/job.stl","source_version":4,"wait_ms":0}`)
+	pending, err := handleExportWith(context.Background(), args, slow)
+	assertRunning(t, pending, err)
+	var r map[string]any
+	json.Unmarshal(pending, &r)
+	poll, _ := json.Marshal(map[string]any{"job_id": r["job_id"], "wait_ms": 0})
+	pending, err = handleExportWith(context.Background(), poll, slow)
+	assertRunning(t, pending, err)
+	close(release)
+	collect, _ := json.Marshal(map[string]any{"job_id": r["job_id"], "wait_ms": 20000})
+	first, err := handleExportWith(context.Background(), collect, slow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := handleExportWith(context.Background(), poll, slow)
+	if err != nil || string(first) != string(second) || calls != 1 {
+		t.Fatalf("collection changed or rewrote: %s %s %v calls=%d", first, second, err, calls)
+	}
+	_, err = handleExportWith(context.Background(), json.RawMessage(`{"job_id":"absent"}`), slow)
+	if err == nil {
+		t.Fatal("unknown handle accepted")
 	}
 }

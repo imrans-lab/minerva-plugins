@@ -214,9 +214,17 @@ func build(bodies: Array, digest: String) -> int:
 		var mesh: Mesh = body.get("mesh", null)
 		if mesh == null:
 			continue
-		var shape := mesh.create_trimesh_shape()
-		if shape == null:
+		# glTF stores metres. Build the collider in world millimetres before
+		# physics constructs its triangle acceleration structure; a 1000x
+		# shape-owner scale leaves tiny local triangles below ray tolerances.
+		var xform: Transform3D = body.get("transform", Transform3D.IDENTITY)
+		var faces := mesh.get_faces()
+		if faces.is_empty():
 			continue
+		for i in range(faces.size()):
+			faces[i] = xform * faces[i]
+		var shape := ConcavePolygonShape3D.new()
+		shape.set_faces(faces)
 		# Without backface collision a gauge grows straight through the wall of
 		# the hole it sits in and reports an unbounded radius.
 		shape.backface_collision = true
@@ -226,11 +234,9 @@ func build(bodies: Array, digest: String) -> int:
 		# reference; only the bare path is an identity a caller can also type.
 		if not reference.is_empty() and node_name.begins_with(reference + "/"):
 			node_name = node_name.substr(reference.length() + 1)
-		var xform: Transform3D = body.get("transform", Transform3D.IDENTITY)
 		var collider := _new_body(reference, node_name)
 		var owner_id := collider.create_shape_owner(collider)
 		collider.shape_owner_add_shape(owner_id, shape)
-		collider.shape_owner_set_transform(owner_id, xform)
 		var box := xform * mesh.get_aabb()
 		_bounds = box if not have_bounds else _bounds.merge(box)
 		have_bounds = true

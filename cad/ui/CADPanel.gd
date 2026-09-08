@@ -879,20 +879,22 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 		"request_id": request_id,
 		"ts": Time.get_unix_time_from_system(),
 	}
-	# Holes, slivers and doubled faces in the tessellated solid, counted by the
-	# outline pass that just walked it. Reported only when there are any: a
-	# clean mesh has nothing to say, and a solid that renders as porous should
-	# say so in numbers rather than leave the panes to be doubted.
-	var defects: Dictionary = _mesh_defects()
-	if not defects.is_empty():
-		_last_eval_result["mesh_defects"] = defects
-	# WHERE they are. The worker located them on the same tessellation it sent
-	# here: non-manifold edges by world position (capped), degenerate faces as a
-	# capped spread sample with the note that slivers on curved faces are not
-	# defects. A count on its own names no feature to fix.
-	var defect_sites: Variant = eval_result.get("mesh_defect_sites", {})
-	if defect_sites is Dictionary and not (defect_sites as Dictionary).is_empty():
-		_last_eval_result["mesh_defect_sites"] = defect_sites
+	# Worker counts and sites describe one tessellation using one derivation.
+	# Outline diagnostics have a different weld/sliver policy and remain
+	# labelled separately; an empty worker count is authoritative too.
+	var outline_defects: Dictionary = _mesh_defects()
+	var worker_counts = eval_result.get("mesh_defects")
+	if worker_counts is Dictionary:
+		_last_eval_result["mesh_defects"] = worker_counts.duplicate(true)
+		_last_eval_result["mesh_defects_source"] = "worker_tessellation"
+		var sites = eval_result.get("mesh_defect_sites", {})
+		if sites is Dictionary:
+			_last_eval_result["mesh_defect_sites"] = sites.duplicate(true)
+		if outline_defects != worker_counts:
+			_last_eval_result["outline_mesh_defects"] = outline_defects
+	else:
+		_last_eval_result["mesh_defects"] = outline_defects
+		_last_eval_result["mesh_defects_source"] = "panel_outline_legacy_fallback"
 	# Render succeeded — clear any error banner left by a prior failed evaluate.
 	_hide_eval_error()
 	# A reference that could not be loaded — or that was too big to outline —

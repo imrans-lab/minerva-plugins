@@ -15,10 +15,9 @@ extends RefCounted
 ## ortho_silhouette.gd — keyed on the pane camera's transform — is not
 ## invalidated by a capture that had nothing to do with it.
 ##
-## HOW IT SEES THE SAME SCENE. The panes do not own their World3D: all four
-## SubViewports (and the panel's window) share one, so an offscreen SubViewport
-## pointed at that world holds the same solid, the same references and the same
-## lighting. It is mounted, drawn, read and freed inside the one call.
+## Each live pane owns its World3D because it mounts its own mesh copy.
+## The offscreen viewport shares only the requested pane's world, including
+## its references and lighting; other panes and documents remain isolated.
 ##
 ## WHAT IT CANNOT DO. A pane showing a DIRECTION (Top/Front/Right/…) draws its
 ## picture as a 2-D outline in a Control inside the pane, over a blueprint fill
@@ -358,8 +357,7 @@ static func _render(panel, source: Camera3D, box: AABB, margin: float) -> Dictio
 
 	var offscreen := SubViewport.new()
 	offscreen.size = size
-	# The panes share the panel window's World3D; naming it explicitly keeps
-	# this pointed at the scene the pane draws even if that ever changes.
+	# Share the requested pane's isolated scene, not the host window's world.
 	offscreen.world_3d = pane.find_world_3d()
 	offscreen.transparent_bg = pane.transparent_bg
 	offscreen.msaa_3d = pane.msaa_3d

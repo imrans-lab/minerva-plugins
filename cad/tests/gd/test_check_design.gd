@@ -30,6 +30,7 @@ const PartCache := preload("res://../../minerva-plugins/cad/ui/scripts/part_cach
 ## The resolver the cache is filled through, driven directly for the case
 ## where the document moves while the worker is evaluating a binding.
 const PartScope := preload("res://../../minerva-plugins/cad/ui/scripts/part_scope.gd")
+const InterferenceReport = preload("res://../../minerva-plugins/cad/ui/scripts/interference_report.gd")
 const DesignCheck := preload("res://../../minerva-plugins/cad/ui/scripts/design_check.gd")
 
 ## The gap this design has to keep, in millimetres, and the pinch that fails it.
@@ -63,6 +64,7 @@ func check(label: String, ok: bool, detail: String = "") -> void:
 
 
 func _run() -> void:
+	await _check_collision_coverage()
 	await _check_the_three_faults_are_the_three_rows()
 	await _check_a_clean_design_with_declared_contacts_passes()
 	await _check_an_undecidable_node_is_not_a_clean_answer()
@@ -1119,3 +1121,27 @@ class _FeatureStandIn extends RefCounted:
 	func features_for_async(_key: String, _parts: Array, _angle: float,
 			_tree: SceneTree) -> Dictionary:
 		return {"candidates": [], "elapsed_ms": 0}
+
+
+func _check_collision_coverage() -> void:
+	var reporter = InterferenceReport.new()
+	var report: Dictionary = reporter._report({})
+	check("complete clean collision coverage passes", report["pass"] and report["coverage"]["complete"], str(report))
+	reporter._coverage_limited = true
+	reporter._edges_reaching = 61103
+	reporter._edges_cast = 60000
+	reporter._limits = PackedStringArray(["1103 edges uncast"])
+	report = reporter._report({})
+	check("uncast collision edges with no findings are advisory", not report["pass"] and report["verdict"] == "advisory" and report["coverage"]["edges_uncast"] == 1103, str(report))
+	var panel := _panel()
+	panel.interference = report
+	panel.clearance = _clearance_report([_gap(2.0)])
+	var folded: Dictionary = await PanelTools.handle(panel, "minerva_cad_check_design", {"required_mm":1.0})
+	check("design fold preserves incomplete-coverage uncertainty", folded.get("verdict") == "advisory", str(folded))
+	panel.free()
+	report = reporter._report({"hit":{"reference":"board","node":"Body","points":[],"point_count":1,"penetration_mm":1.0,"note":""}})
+	check("a found collision still fails when coverage is incomplete", report["verdict"] == "fail" and not report["pass"], str(report))
+	reporter._coverage_limited = false
+	reporter._limits = PackedStringArray(["rim classification budget exhausted"])
+	report = reporter._report({})
+	check("a rim classification limit alone does not withhold clean coverage", report["pass"] and report["coverage"]["complete"], str(report))

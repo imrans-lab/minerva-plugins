@@ -805,7 +805,7 @@ test_editor_addressing.gd assertions=40
 # + 1 the banner being anchored along the panel's bottom, away from every
 # control. The interference is real: a board written out as an STL, mounted by
 # the panel's own evaluation path, with a post driven through it.
-test_eval_banner.gd assertions=9
+test_eval_banner.gd assertions=11
 
 # minerva_cad_check_design: interference, fasteners and clearance run one after
 # another and folded into one verdict carrying only the failing rows. A
@@ -841,7 +841,7 @@ test_eval_banner.gd assertions=9
 # a missing key was read as; and a worker TIMEOUT on a part is not cached, so
 # the next call reaches the worker again instead of replaying "did not
 # evaluate" for the life of the document.
-test_check_design.gd assertions=39
+test_check_design.gd assertions=44
 
 # minerva_cad_snapshot_fit: a capture framed on the evaluated solid, a named
 # reference or a world box, rendered from a camera of its own so the pane the
@@ -858,7 +858,7 @@ test_check_design.gd assertions=39
 # + 1 an ortho pane refused rather than answered with a render of the world
 # + 2 the pane camera identical field by field after a fitted capture, and the
 # capture saying no frame was drawn instead of waiting for one that never comes.
-test_snapshot_fit.gd assertions=11
+test_snapshot_fit.gd assertions=14
 
 # minerva_cad_snapshot_posed: a capture from a pose the CALLER states —
 # view='-z' or {yaw_deg, pitch_deg} — rendered in a private world of mirrored
@@ -888,3 +888,6 @@ test_snapshot_fit.gd assertions=11
 # colour, which the forced path tells from a real frame and refuses with
 # drawn:false).
 test_snapshot_posed.gd assertions=22
+
+# Stepped mounting holes, metre-scale seat physics and countersunk head profiles.
+test_fastener_mounting.gd assertions=12

@@ -88,6 +88,8 @@ func _run() -> void:
 	await process_frame
 	await process_frame
 
+	await _check_world_isolation(panel)
+
 	# The scene, pushed the way an evaluation pushes it: update_mesh auto-frames
 	# each pane, so the pane cameras end up exactly where the owner finds them.
 	var body := AABB(BODY_MIN, BODY_SIZE)
@@ -211,6 +213,31 @@ func _run() -> void:
 	await process_frame
 	panel.free()
 	await process_frame
+	await process_frame
+
+
+func _check_world_isolation(panel: Node) -> void:
+	var other := _panel()
+	var worlds: Dictionary = {}
+	var isolated := true
+	for doc in [panel, other]:
+		for path in doc._MESH_ROOT_PATHS:
+			var mesh_root: Node3D = doc.get_node(path)
+			var world := mesh_root.get_world_3d()
+			isolated = isolated and world != root.find_world_3d() and not worlds.has(world)
+			worlds[world] = true
+	check("two documents isolate all ten pane mesh copies from each other and the host", isolated)
+	other.hide()
+	panel._apply_width_class(&"sm")
+	await process_frame
+	var narrow: Node3D = panel.get_node(panel._MESH_ROOT_PATHS[4])
+	check("hiding another document and switching layout keeps the narrow pane's world", worlds.has(narrow.get_world_3d()))
+	other.free()
+	other = _panel()
+	var reopened: Node3D = other.get_node(other._MESH_ROOT_PATHS[3])
+	check("a reopened document gets a fresh world without changing existing panes", not worlds.has(reopened.get_world_3d()) and worlds.has(narrow.get_world_3d()))
+	other.free()
+	panel._apply_width_class(&"lg")
 	await process_frame
 
 
