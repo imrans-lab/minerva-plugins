@@ -163,6 +163,12 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 
 static func _dispatch(panel, tool_name: String, args: Dictionary) -> Dictionary:
 	match tool_name:
+		"minerva_cad_build":
+			match str(args.get("action", "status")):
+				"status": return panel.build_status()
+				"build_latest": return panel.build_latest()
+				"set_mode": return panel.set_build_mode(str(args.get("mode", "")))
+			return {"success": false, "error": "Unknown build action"}
 		"minerva_cad_view_state":
 			return _view_state(panel, args)
 		"minerva_cad_references":

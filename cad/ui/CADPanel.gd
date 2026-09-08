@@ -104,6 +104,17 @@ var _eval_buffer_version: int = -1
 ## colliders. -1 for a panel that has painted nothing.
 var _painted_buffer_version: int = -1
 
+var _build := preload("scripts/build_controls.gd").new(self)
+
+func build_status() -> Dictionary:
+	return _build.state()
+
+func set_build_mode(mode: String) -> Dictionary:
+	return _build.set_mode(mode)
+
+func build_latest() -> Dictionary:
+	return _build.build_latest()
+
 ## Everything a note needs to know about the document this tab is showing:
 ## the DSL source, the file it came from, the last evaluation's verdict, the
 ## mesh the worker returned and the mesh() specs it named. One accessor because
@@ -112,6 +123,7 @@ func get_document_state() -> Dictionary:
 	return {
 		"source": _current_source(),
 		"path": _document_path,
+		"build_mode": _build.mode,
 		"last_eval": _last_eval_result,
 		"mesh": _last_mesh_data,
 		"references": _last_references,
@@ -131,7 +143,8 @@ func adopt_restored_document(document_path: String, source: String, references: 
 	if _annotation_host != null and _annotation_host.has_method("set_document_source"):
 		_annotation_host.set_document_source(document_path, source)
 	_mount_references(references)
-	if not source.strip_edges().is_empty():
+	_build.refresh()
+	if _build.mode == "automatic" and not source.strip_edges().is_empty():
 		_evaluate_with_request_id(source)
 
 ## Send one request to the plugin backend over a declared IPC channel and
@@ -179,6 +192,7 @@ func call_backend_until(channel: String, args: Dictionary,
 
 func _on_panel_loaded(ctx: Dictionary) -> void:
 	_ctx = ctx
+	_build.wire()
 
 	var ed: Variant = ctx.get("editor", null)
 	if ed != null and "tab_title" in ed and _annotation_host != null:
@@ -227,7 +241,7 @@ func receive(channel: String, payload: Dictionary) -> void:
 			# something as soon as the buffer attaches. Empty/whitespace
 			# buffers are skipped — the worker would emit a parse warning,
 			# producing a toast on every fresh-empty .mcad open.
-			if not text.strip_edges().is_empty():
+			if _build.mode == "automatic" and not text.strip_edges().is_empty():
 				_evaluate_document_open(text)
 		"text_changed":
 			_buffer_version = int(payload.get("version", 0))
@@ -247,8 +261,10 @@ func receive(channel: String, payload: Dictionary) -> void:
 			_buffer_version = -1
 			_eval_buffer_version = -1
 			_painted_buffer_version = -1
+			_build.has_painted = false
 			_pending_dsl_text = ""
 			_open_eval_text = ""
+	_build.refresh()
 
 
 ## Issue a fresh cad.evaluate with a unique request_id, cancelling any prior
@@ -266,6 +282,9 @@ func _evaluate_with_request_id(text: String) -> void:
 ## that is already being evaluated is skipped rather than costing the worker a
 ## second full evaluation of the same document.
 func _evaluate_document_open(text: String) -> void:
+	if _build.mode == "manual":
+		_build.refresh()
+		return
 	if text == _open_eval_text:
 		return
 	_open_eval_text = text
@@ -287,6 +306,9 @@ func _cancel_inflight_eval_if_any() -> void:
 ## resets the timer; the timer fires _on_eval_debounce_timeout once the user
 ## stops typing for _EVAL_DEBOUNCE_SEC seconds.
 func _start_eval_debounce() -> void:
+	if _build.mode == "manual":
+		_build.refresh()
+		return
 	if _eval_debounce_timer == null:
 		_eval_debounce_timer = Timer.new()
 		_eval_debounce_timer.one_shot = true
@@ -388,6 +410,7 @@ func _last_eval_for_mcp() -> Dictionary:
 	var out: Dictionary = _EvalReplyScript.last_eval_for_mcp(_last_eval_result)
 	if _eval_banner != null:
 		out["banner"] = _eval_banner.state_for_mcp()
+	out["build"] = _build.state()
 	return out
 
 
@@ -405,6 +428,7 @@ func _on_panel_save_request() -> Dictionary:
 	# TODO(later): include annotations + camera states.
 	return {
 		"version": 1,
+		"build_mode": _build.mode,
 		"source": _pending_dsl_text,
 		"last_eval": _last_eval_for_mcp(),
 	}
@@ -424,6 +448,10 @@ func _on_panel_apply_sync(document: Dictionary) -> Dictionary:
 	_pending_dsl_text = src
 	if _annotation_host != null and _annotation_host.has_method("set_document_source"):
 		_annotation_host.set_document_source(_buffer_path, src)
+
+	if _build.mode == "manual":
+		_build.refresh()
+		return {"ok": true, "last_eval": _last_eval_for_mcp()}
 
 	if src.strip_edges().is_empty():
 		_eval_buffer_version = _buffer_version
@@ -531,6 +559,11 @@ func evaluation_freshness() -> Dictionary:
 		"stale": false,
 		"stale_reason": "",
 	}
+	if _build.mode == "manual" and _build.state().build_required:
+		out["stale"] = true
+		out["stale_reason"] = "Source differs from the displayed model. Call minerva_cad_build with action=build_latest, then await evaluation."
+		return out
+
 	# A REFUSED EVALUATION IS A STALE PANEL. It painted nothing, so the
 	# colliders are still the previous evaluation's while every version number
 	# in the document has moved past them.
@@ -571,6 +604,8 @@ func _evaluation_is_unsettled() -> bool:
 
 
 func _on_panel_load_request(document: Dictionary) -> void:
+	if document.has("build_mode"):
+		set_build_mode(str(document.build_mode))
 	# Two load shapes are accepted:
 	#  1. {source: "<DSL text>"} — in-memory DSL, used for anonymous editors
 	#     created via minerva_create_plugin_editor + minerva_doc_write. No disk
@@ -588,8 +623,9 @@ func _on_panel_load_request(document: Dictionary) -> void:
 		# panel's source-of-truth for annotations etc.
 		if _annotation_host != null and _annotation_host.has_method("set_document_source"):
 			_annotation_host.set_document_source(_buffer_path, src)
-		if not src.strip_edges().is_empty():
+		if _build.mode == "automatic" and not src.strip_edges().is_empty():
 			_evaluate_with_request_id(src)
+		_build.refresh()
 		return
 
 	# Round 3: live `.mcad` → CAD panel pipeline. The host loads the file path
@@ -700,6 +736,7 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 	# evaluation is of the text standing now, whatever the buffer becomes while
 	# the worker is out.
 	_eval_buffer_version = _buffer_version
+	_build.dispatched_source = dsl_text
 	# Held apart from the member: the member moves again the moment a newer
 	# evaluate dispatches, and the paint below must stamp the version THIS run
 	# was of.
@@ -840,6 +877,8 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 	# The geometry every measurement verb reaches is now this run's, so the
 	# freshness stamp moves here and nowhere else.
 	_painted_buffer_version = dispatched_version
+	_build.painted_source = dsl_text
+	_build.has_painted = true
 	_edge_registry = edges
 	# Mirror into host so MCP introspection tools can read without reaching into the panel.
 	if _annotation_host != null:
@@ -931,6 +970,7 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 ## The evaluation the message belongs to is _last_eval_result, which every
 ## caller has already written before it gets here.
 func _show_eval_error(message: String) -> void:
+	_build.refresh()
 	if _eval_banner != null:
 		_eval_banner.show_for_eval(message, _last_eval_result)
 
@@ -940,6 +980,7 @@ func _show_eval_error(message: String) -> void:
 ## Save-As rebinds the attached buffer in place rather than re-attaching it, so
 ## the path is read from the buffer here, not from an attach event.
 func _hide_eval_error() -> void:
+	_build.refresh()
 	if _eval_banner == null:
 		return
 	if not _import_notice.is_empty():

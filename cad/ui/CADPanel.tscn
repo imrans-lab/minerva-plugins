@@ -267,6 +267,26 @@ custom_minimum_size = Vector2(220, 0)
 size_flags_horizontal = 0
 size_flags_vertical = 3
 
+[node name="BuildControls" type="VBoxContainer" parent="ResponsiveContainer/WideLayout/WideSidebar"]
+layout_mode = 2
+
+[node name="Mode" type="OptionButton" parent="ResponsiveContainer/WideLayout/WideSidebar/BuildControls"]
+layout_mode = 2
+selected = 0
+item_count = 2
+popup/item_0/text = "Automatic builds"
+popup/item_0/id = 0
+popup/item_1/text = "Manual builds"
+popup/item_1/id = 1
+
+[node name="Build" type="Button" parent="ResponsiveContainer/WideLayout/WideSidebar/BuildControls"]
+layout_mode = 2
+text = "Build latest"
+
+[node name="Status" type="Label" parent="ResponsiveContainer/WideLayout/WideSidebar/BuildControls"]
+layout_mode = 2
+text = "Build required"
+
 [node name="ImportMeshButton" type="Button" parent="ResponsiveContainer/WideLayout/WideSidebar"]
 layout_mode = 2
 text = "Import mesh…"
@@ -302,6 +322,26 @@ visible = false
 layout_mode = 2
 size_flags_horizontal = 3
 size_flags_vertical = 3
+
+[node name="BuildControls" type="VBoxContainer" parent="ResponsiveContainer/NarrowLayout"]
+layout_mode = 2
+
+[node name="Mode" type="OptionButton" parent="ResponsiveContainer/NarrowLayout/BuildControls"]
+layout_mode = 2
+selected = 0
+item_count = 2
+popup/item_0/text = "Automatic builds"
+popup/item_0/id = 0
+popup/item_1/text = "Manual builds"
+popup/item_1/id = 1
+
+[node name="Build" type="Button" parent="ResponsiveContainer/NarrowLayout/BuildControls"]
+layout_mode = 2
+text = "Build latest"
+
+[node name="Status" type="Label" parent="ResponsiveContainer/NarrowLayout/BuildControls"]
+layout_mode = 2
+text = "Build required"
 
 [node name="ProjectionRow" type="HBoxContainer" parent="ResponsiveContainer/NarrowLayout"]
 layout_mode = 2

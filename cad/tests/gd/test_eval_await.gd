@@ -89,6 +89,7 @@ func _run() -> void:
 		document.store_string(SOURCE)
 		document.close()
 
+	await _test_manual_builds()
 	await _test_pending_wait_contract()
 	await _test_a_slow_answer_is_still_painted()
 	await _test_one_open_is_one_evaluation()
@@ -584,6 +585,64 @@ func _test_a_measurement_outrun_by_an_evaluation_is_stamped_stale() -> void:
 					== int(before["source_version"]),
 			"before = %s after = %s reply = %s" % [str(before), str(after),
 				str(reply)])
+	_teardown(rig)
+
+
+func _test_manual_builds() -> void:
+	var rig := _make_rig("cad_manual_build")
+	if rig.is_empty():
+		return
+	var panel: Node = rig.panel
+	await PanelTools.handle(panel, "minerva_cad_build", {"action": "set_mode", "mode": "manual"})
+	_attach_document(rig, SOURCE)
+	check("manual open synchronizes without compiling", _evaluations(rig.dispatched).is_empty()
+		and panel.get_document_state().source == SOURCE, str(panel.build_status()))
+	rig.buffer.apply_edit(EDITED_SOURCE)
+	var applied: Dictionary = await panel._on_panel_apply_sync({"source": EDITED_SOURCE})
+	await create_timer(0.3).timeout
+	await PanelTools.handle(panel, "minerva_cad_await_eval", {"timeout_ms": 50})
+	check("manual edits and awaits never compile", _evaluations(rig.dispatched).is_empty()
+		and applied.ok and applied.last_eval.build.build_required, str(applied))
+	var button: Button = panel.get_node("ResponsiveContainer/WideLayout/WideSidebar/BuildControls/Build")
+	button.pressed.emit()
+	await PanelTools.handle(panel, "minerva_cad_build", {"action": "build_latest"})
+	var evals := _evaluations(rig.dispatched)
+	check("GUI build and repeated MCP build join one latest snapshot", evals.size() == 1
+		and evals[0].payload.source == EDITED_SOURCE, str(evals))
+	rig.buffer.apply_edit(SOURCE)
+	_reply(rig, str(evals[0].reply_id), _worker_answer())
+	await process_frame
+	check("an in-flight manual build paints its snapshot but stays stale after an edit",
+		panel.build_status().build_required and panel.evaluation_freshness().stale
+		and _status(panel) == "ok", str(panel.build_status()))
+	panel.build_latest()
+	evals = _evaluations(rig.dispatched)
+	_reply(rig, str(evals[-1].reply_id), _worker_answer())
+	await process_frame
+	check("explicit rebuild catches up", not panel.build_status().build_required
+		and panel.build_status().status == "current", str(panel.build_status()))
+	panel.set_build_mode("automatic")
+	rig.buffer.apply_edit(EDITED_SOURCE)
+	panel.set_build_mode("manual")
+	await create_timer(0.3).timeout
+	check("switching to manual cancels queued debounce", _evaluations(rig.dispatched).size() == 2,
+		str(_evaluations(rig.dispatched)))
+	panel.set_build_mode("automatic")
+	await create_timer(0.3).timeout
+	evals = _evaluations(rig.dispatched)
+	check("switching back to automatic builds pending edits", evals.size() == 3, str(evals))
+	_reply(rig, str(evals[-1].reply_id), _worker_answer())
+	await process_frame
+	panel.set_build_mode("manual")
+	var note_script = load("res://../../minerva-plugins/cad/ui/scripts/cad_note.gd")
+	var note: Dictionary = note_script.build_payload(panel)
+	check("panel and note persist manual policy outside the DSL",
+		panel._on_panel_save_request().build_mode == "manual" and note.build_mode == "manual",
+		str(note.get("build_mode")))
+	var before_restore: int = _evaluations(rig.dispatched).size()
+	check("restoring a manual note does not compile",
+		note_script.restore(note, panel) and _evaluations(rig.dispatched).size() == before_restore,
+		str(panel.build_status()))
 	_teardown(rig)
 
 

@@ -597,7 +597,7 @@
     },
     {
       "name": "minerva_cad_await_eval",
-      "description": "Wait until the CAD panel's evaluation has SETTLED, and return the status it painted. An edit that reaches the panel through the shared text buffer — minerva_doc_edit on the text tab, or the user typing — starts a quarter-second debounce and then a worker round-trip, and neither has finished when the edit tool returns: a minerva_cad_get_mesh_info or check_* call made straight afterwards measures the geometry the edit REPLACED, with nothing in its reply to say so. Call this in between. Returns {timed_out, waited_ms, timeout_ms, last_eval:{status, ts, shape_name, body_count, vertex_count, edge_count, interference (a status line), banner, error_kind, error_message}}; status is empty / pending / ok / error / cancelled / timeout. 'banner' is the one line the panel is SHOWING the user — {visible, dismissed, stamp, eval, text} — stamped with the evaluation it came from; dismissed true means the user closed that report, which closes only that one: the next evaluation reports again. timed_out true is not a failure — the evaluation is still running, nothing was cancelled, and asking again resumes the wait. minerva_doc_write is already synchronous with the worker and does not need this. The reply carries source_version, buffer_version, evaluated_at and stale, so a caller can see in one field whether the panel has caught up with the document; the check verbs refuse to measure while it has not.",
+      "description": "Wait until the CAD panel's evaluation has SETTLED, and return the status it painted. An edit that reaches the panel through the shared text buffer — minerva_doc_edit on the text tab, or the user typing — starts a quarter-second debounce and then a worker round-trip, and neither has finished when the edit tool returns: a minerva_cad_get_mesh_info or check_* call made straight afterwards measures the geometry the edit REPLACED, with nothing in its reply to say so. Call this in between. Returns {timed_out, waited_ms, timeout_ms, last_eval:{status, ts, shape_name, body_count, vertex_count, edge_count, interference (a status line), banner, error_kind, error_message}}; status is empty / pending / ok / error / cancelled / timeout. 'banner' is the one line the panel is SHOWING the user — {visible, dismissed, stamp, eval, text} — stamped with the evaluation it came from; dismissed true means the user closed that report, which closes only that one: the next evaluation reports again. timed_out true is not a failure — the evaluation is still running, nothing was cancelled, and asking again resumes the wait. minerva_doc_write is already synchronous with the worker and does not need this. The reply carries source_version, buffer_version, evaluated_at and stale, so a caller can see in one field whether the panel has caught up with the document; the check verbs refuse to measure while it has not. In Manual build mode, waiting never initiates compilation: use minerva_cad_build action=build_latest first. Timed-out waits return status=pending independently of the displayed model.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
@@ -606,6 +606,38 @@
           "timeout_ms": {"type": "integer", "description": "How long to wait, in milliseconds. Default 30000, capped at 300000. A timeout returns the status the panel is showing rather than an error."}
         },
         "required": ["editor_name"]
+      }
+    },
+    {
+      "name": "minerva_cad_build",
+      "description": "Control CAD compilation independently of shared source edits. Automatic (default) builds after debounce. Manual retains last successful geometry until build_latest; edits continue syncing. status never compiles. build_latest starts or joins the current source snapshot; use minerva_cad_await_eval to await it. Mode persists in panel/note state, not DSL.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "status",
+              "build_latest",
+              "set_mode"
+            ],
+            "default": "status"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "automatic",
+              "manual"
+            ]
+          }
+        },
+        "required": [
+          "editor_name"
+        ]
       }
     }
   ],
@@ -740,7 +772,8 @@
           "ui/scripts/reference_verbs.gd",
           "ui/scripts/rim_contact.gd",
           "ui/scripts/stl_reader.gd",
-          "ui/tools/cad_edge_number_tool.gd"
+          "ui/tools/cad_edge_number_tool.gd",
+        "ui/scripts/build_controls.gd"
         ],
         "file_extensions": [
           ".mcad"

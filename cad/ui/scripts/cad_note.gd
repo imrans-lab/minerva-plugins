@@ -96,6 +96,7 @@ static func build_payload(panel: Node) -> Dictionary:
 		"version": VERSION,
 		"source": _source_of(panel),
 		"document_path": _document_path_of(panel),
+		"build_mode": str(_state_of(panel).get("build_mode", "automatic")),
 		"cameras": cameras_of(panel),
 		# The mesh() specs the last evaluation named, verbatim: name, path,
 		# pose matrix, units and up. Carried so the reopened tab can mount its
@@ -176,6 +177,8 @@ static func restore(payload: Dictionary, panel: Node) -> bool:
 	# pane, and this is what puts the user's view back afterwards.
 	panel.set_meta(PENDING_CAMERA_META, cameras)
 
+	if panel.has_method("set_build_mode"):
+		panel.set_build_mode(str(payload.get("build_mode", "automatic")))
 	panel.adopt_restored_document(
 		str(payload.get("document_path", "")),
 		str(payload.get("source", "")),
