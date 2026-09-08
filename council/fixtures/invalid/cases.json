@@ -1,0 +1,82 @@
+[
+  {
+    "file": "definition_future_schema_version.json",
+    "record": "council_definition",
+    "expect": "schema_version"
+  },
+  {
+    "file": "definition_carries_a_question.json",
+    "record": "council_definition",
+    "expect": "additional property"
+  },
+  {
+    "file": "definition_two_chairs.json",
+    "record": "council_definition",
+    "expect": "exactly one chair"
+  },
+  {
+    "file": "definition_seat_without_member.json",
+    "record": "council_definition",
+    "expect": "unknown member_id"
+  },
+  {
+    "file": "definition_grounding_wrong_revision.json",
+    "record": "council_definition",
+    "expect": "unknown source revision"
+  },
+  {
+    "file": "definition_source_hash_drift.json",
+    "record": "council_definition",
+    "expect": "content_hash"
+  },
+  {
+    "file": "definition_inline_payload_too_large.json",
+    "record": "council_definition",
+    "expect": "inline payload"
+  },
+  {
+    "file": "session_inference_with_citation.json",
+    "record": "council_session",
+    "expect": "inference"
+  },
+  {
+    "file": "session_citation_unknown_anchor.json",
+    "record": "council_session",
+    "expect": "unknown anchor"
+  },
+  {
+    "file": "session_contribution_wrong_member_revision.json",
+    "record": "council_session",
+    "expect": "member_revision"
+  },
+  {
+    "file": "session_duplicate_request_id.json",
+    "record": "council_session",
+    "expect": "request_id"
+  },
+  {
+    "file": "session_complete_without_synthesis.json",
+    "record": "council_session",
+    "expect": "synthesis"
+  },
+  {
+    "file": "session_without_chat_binding.json",
+    "record": "council_session",
+    "expect": "chat_binding"
+  },
+  {
+    "file": "request_mutation_without_base_revision.json",
+    "record": "council_envelope",
+    "expect": "base_revision"
+  },
+  {
+    "file": "request_unknown_command.json",
+    "record": "council_envelope",
+    "expect": "enum"
+  },
+  {
+    "file": "snapshot_outcome_unknown_run.json",
+    "record": "council_project_snapshot",
+    "expect": "unknown run_id"
+  }
+]

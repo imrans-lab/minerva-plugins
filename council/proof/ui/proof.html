@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Council wrapper proof</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; font: 15px/1.5 ui-serif, Georgia, serif; background: #f7f4ef; color: #22201d; padding: 24px; }
+  @media (prefers-color-scheme: dark) { body { background: #171614; color: #e8e4dc; } }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.sub { margin: 0 0 20px; opacity: .7; font-size: 13px; }
+  button { font: inherit; padding: 6px 14px; margin-right: 8px; cursor: pointer; }
+  pre { background: rgba(127,127,127,.12); padding: 12px; border-radius: 6px; overflow-x: auto; font: 12px/1.5 ui-monospace, monospace; }
+</style>
+</head>
+<body>
+<h1>Council wrapper proof</h1>
+<p class="sub">This page is rendered by a CefTexture owned by a native plugin scene panel. Everything below travels over Council's own envelope, not the host webview broker.</p>
+
+<button id="read">snapshot.get</button>
+<button id="write">definition.upsert</button>
+<button id="stale">stale write (base_revision 1)</button>
+
+<pre id="log">ready</pre>
+
+<script>
+  var revision = null;
+  var log = document.getElementById('log');
+  function show(label, envelope) {
+    revision = envelope.snapshot_revision;
+    log.textContent = label + '\n' + JSON.stringify(envelope, null, 2);
+  }
+
+  document.getElementById('read').onclick = function () {
+    council.call('snapshot.get', {}).then(function (r) { show('reply', r); });
+  };
+
+  document.getElementById('write').onclick = function () {
+    council.call('definition.upsert', {
+      definition: {
+        schema_version: 1,
+        record_kind: 'council_definition',
+        definition_id: 'def-proof',
+        definition_revision: 1,
+        name: 'Proof council',
+        members: [{ member_id: 'mem-chair', member_revision: 1, kind: 'assistant', display_name: 'Chair', grounding: [] }],
+        seats: [{ seat_id: 'seat-chair', member_id: 'mem-chair', responsibility: 'Synthesise.', role: 'chair' }],
+        sources: [],
+        deliberation: { max_members_per_round: 4, independent_initial_round: true, preserve_disagreement: true, per_member_timeout_seconds: 120 }
+      }
+    }, revision).then(function (r) { show('reply', r); });
+  };
+
+  document.getElementById('stale').onclick = function () {
+    council.call('definition.upsert', { definition: {} }, 1).then(function (r) { show('reply (expect stale_revision once the revision has moved)', r); });
+  };
+
+  council.onEvent(function (e) { show('event', e); });
+  council.call('snapshot.get', {}).then(function (r) { show('reply', r); });
+</script>
+</body>
+</html>

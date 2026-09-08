@@ -1,0 +1,342 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "session.schema.json",
+  "title": "Council session",
+  "description": "One question considered by one council inside one project. A session pins the definition it consulted by embedding a snapshot, so later edits to the council never rewrite what was actually asked of whom. The session is project-owned durable state; the backend's live execution state is derived from it and the browser's copy is a view.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "$ref": "common.schema.json#/$defs/SchemaVersion"
+    },
+    "record_kind": {
+      "const": "council_session"
+    },
+    "session_id": {
+      "$ref": "common.schema.json#/$defs/Id"
+    },
+    "session_revision": {
+      "$ref": "common.schema.json#/$defs/Revision"
+    },
+    "definition_snapshot": {
+      "$ref": "council_definition.schema.json",
+      "description": "A copy of the definition as it stood when the session was created. Reading it needs no lookup, and a deleted or edited council leaves the session intact."
+    },
+    "chat_binding": {
+      "$ref": "#/$defs/ChatBinding"
+    },
+    "question": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8000
+    },
+    "context_snapshot": {
+      "$ref": "common.schema.json#/$defs/PayloadRef",
+      "description": "The selected context handed to Council at consultation time, captured once. Every initial member call in a run receives exactly these bytes."
+    },
+    "status": {
+      "$ref": "#/$defs/SessionStatus"
+    },
+    "runs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Run"
+      }
+    },
+    "outcomes": {
+      "type": "array",
+      "description": "Conclusions the user chose to retain. The note is the durable artifact; this is the link back to the contribution it came from.",
+      "items": {
+        "$ref": "#/$defs/Outcome"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "record_kind",
+    "session_id",
+    "session_revision",
+    "definition_snapshot",
+    "chat_binding",
+    "question",
+    "status",
+    "runs",
+    "outcomes"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "SessionStatus": {
+      "type": "string",
+      "enum": [
+        "draft",
+        "running",
+        "partial",
+        "complete",
+        "cancelled",
+        "failed"
+      ],
+      "description": "draft: created, nothing run. running: a run is in flight. partial: a run finished with at least one member failed or cancelled. complete: a run produced a synthesis. cancelled/failed: terminal for the last run; the session can still take a new run. Reopening never advances this on its own."
+    },
+    "ChatBinding": {
+      "type": "object",
+      "description": "The explicit, persisted association between this session and a native chat. Council routes replies by this binding alone; it never infers a destination from whichever tab happens to be focused.",
+      "properties": {
+        "chat_id": {
+          "$ref": "common.schema.json#/$defs/Id"
+        },
+        "origin_message_id": {
+          "$ref": "common.schema.json#/$defs/Id",
+          "description": "The user turn that opened the consultation, when the session began from chat."
+        },
+        "bound_at": {
+          "$ref": "common.schema.json#/$defs/Timestamp"
+        },
+        "missing": {
+          "type": "boolean",
+          "description": "Set when the chat could not be resolved on the last attempt. The session stays usable and read-only replies are held rather than posted somewhere else."
+        }
+      },
+      "required": [
+        "chat_id",
+        "bound_at"
+      ],
+      "additionalProperties": false
+    },
+    "Run": {
+      "type": "object",
+      "description": "One bounded execution: an independent member round plus chair synthesis, or a focused follow-up. request_id makes the run idempotent — a repeated start command with the same request_id returns the existing run instead of spending tokens again.",
+      "properties": {
+        "run_id": {
+          "$ref": "common.schema.json#/$defs/Id"
+        },
+        "request_id": {
+          "$ref": "common.schema.json#/$defs/Id"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "initial_round",
+            "follow_up",
+            "retry"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "running",
+            "partial",
+            "complete",
+            "cancelled",
+            "failed"
+          ]
+        },
+        "started_at": {
+          "$ref": "common.schema.json#/$defs/Timestamp"
+        },
+        "ended_at": {
+          "$ref": "common.schema.json#/$defs/Timestamp"
+        },
+        "prompt": {
+          "type": "string",
+          "maxLength": 8000,
+          "description": "For a follow-up, the focused question. For an initial round, empty: the session question is used."
+        },
+        "addressed_seat_id": {
+          "$ref": "common.schema.json#/$defs/Id",
+          "description": "Present on a follow-up aimed at one seat."
+        },
+        "contributions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Contribution"
+          }
+        },
+        "synthesis": {
+          "$ref": "#/$defs/Contribution",
+          "description": "The chair's answer. This is the text the chat provider returns; it is not a second transcript."
+        },
+        "failure": {
+          "$ref": "#/$defs/Failure"
+        }
+      },
+      "required": [
+        "run_id",
+        "request_id",
+        "kind",
+        "status",
+        "started_at",
+        "contributions"
+      ],
+      "additionalProperties": false
+    },
+    "Contribution": {
+      "type": "object",
+      "description": "One member's answer within one run, attributed to the exact member and source revisions it was produced from. A reply that arrives after the run left 'running' is recorded as 'stale' and never overwrites newer state.",
+      "properties": {
+        "contribution_id": {
+          "$ref": "common.schema.json#/$defs/Id"
+        },
+        "seat_id": {
+          "$ref": "common.schema.json#/$defs/Id"
+        },
+        "member_id": {
+          "$ref": "common.schema.json#/$defs/Id"
+        },
+        "member_revision": {
+          "$ref": "common.schema.json#/$defs/Revision"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "running",
+            "complete",
+            "failed",
+            "cancelled",
+            "stale"
+          ]
+        },
+        "model_id": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "The host model that actually answered, recorded so a result is never attributed to a model that did not produce it."
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 100000
+        },
+        "claims": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Claim"
+          }
+        },
+        "failure": {
+          "$ref": "#/$defs/Failure"
+        }
+      },
+      "required": [
+        "contribution_id",
+        "seat_id",
+        "member_id",
+        "member_revision",
+        "status",
+        "claims"
+      ],
+      "additionalProperties": false
+    },
+    "Claim": {
+      "type": "object",
+      "description": "One assertion with its support label. 'source' requires at least one citation; 'inference' and 'unknown' must not carry one, so an interpretation can never be displayed as something a source said.",
+      "properties": {
+        "claim_id": {
+          "$ref": "common.schema.json#/$defs/Id"
+        },
+        "support": {
+          "$ref": "common.schema.json#/$defs/ClaimSupport"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8000
+        },
+        "citations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Citation"
+          }
+        }
+      },
+      "required": [
+        "claim_id",
+        "support",
+        "text",
+        "citations"
+      ],
+      "additionalProperties": false
+    },
+    "Citation": {
+      "type": "object",
+      "properties": {
+        "source_id": {
+          "$ref": "common.schema.json#/$defs/Id"
+        },
+        "source_revision": {
+          "$ref": "common.schema.json#/$defs/Revision"
+        },
+        "anchor_id": {
+          "$ref": "common.schema.json#/$defs/Id"
+        }
+      },
+      "required": [
+        "source_id",
+        "source_revision",
+        "anchor_id"
+      ],
+      "additionalProperties": false
+    },
+    "Outcome": {
+      "type": "object",
+      "properties": {
+        "outcome_id": {
+          "$ref": "common.schema.json#/$defs/Id"
+        },
+        "run_id": {
+          "$ref": "common.schema.json#/$defs/Id"
+        },
+        "contribution_id": {
+          "$ref": "common.schema.json#/$defs/Id"
+        },
+        "note": {
+          "$ref": "common.schema.json#/$defs/ArtifactRef"
+        },
+        "retained_at": {
+          "$ref": "common.schema.json#/$defs/Timestamp"
+        }
+      },
+      "required": [
+        "outcome_id",
+        "run_id",
+        "contribution_id",
+        "note",
+        "retained_at"
+      ],
+      "additionalProperties": false
+    },
+    "Failure": {
+      "type": "object",
+      "description": "A visible failure state. 'retryable' drives whether the UI offers an explicit retry; nothing retries on its own.",
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "model_unavailable",
+            "model_error",
+            "timeout",
+            "cancelled",
+            "interrupted",
+            "missing_source",
+            "missing_chat",
+            "stale_revision",
+            "payload_too_large",
+            "internal"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

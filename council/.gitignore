@@ -1,0 +1,5 @@
+# Build outputs of the wrapper proof's stub backend. The manifest's artifact is
+# council-proof-plugin; `go build ./...` also drops a binary named after the
+# package directory. Neither is ever checked in.
+proof/proof
+proof/council-proof-plugin
