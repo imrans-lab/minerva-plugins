@@ -1,5 +1,40 @@
 package contract
 
+// DeriveSessionStatus computes a session's status from its runs. It is the one
+// derivation: nothing sets a session status directly, so starting a run,
+// cancelling one, and demoting an interrupted one cannot disagree about what
+// the session as a whole is doing.
+//
+// The rules follow the state model. A session with no runs is a draft. A
+// session with any run still pending or running is running. Otherwise the last
+// run decides, and a failed run is read as "partial" when members were actually
+// dispatched — some member failed or was cancelled — and as "failed" only when
+// the round never got as far as consulting anybody.
+func DeriveSessionStatus(session map[string]any) string {
+	runs := arr(session["runs"])
+	if len(runs) == 0 {
+		return "draft"
+	}
+	for _, r := range runs {
+		switch str(obj(r)["status"]) {
+		case "pending", "running":
+			return "running"
+		}
+	}
+	last := obj(runs[len(runs)-1])
+	switch status := str(last["status"]); status {
+	case "failed":
+		if len(arr(last["contributions"])) > 0 {
+			return "partial"
+		}
+		return "failed"
+	case "complete", "partial", "cancelled":
+		return status
+	default:
+		return "partial"
+	}
+}
+
 // RehydrateOnLoad prepares a snapshot that has just come back from project
 // restore for use by a freshly started backend.
 //
@@ -33,13 +68,11 @@ func RehydrateOnLoad(snapshot map[string]any) int {
 			run["failure"] = interruptedFailure()
 			demoted++
 		}
-		// A session left "running" is demoted whether or not a demotable run
-		// was found. The status describes the session, not the runs: a session
-		// whose runs are all already terminal is still not running, and leaving
-		// it saying so would show the user work that nothing is doing.
-		if str(session["status"]) == "running" {
-			session["status"] = "partial"
-		}
+		// The session status is re-derived whether or not a demotable run was
+		// found: the status describes the run set, and a session left saying
+		// "running" over runs that are all terminal would show the user work
+		// that nothing is doing.
+		session["status"] = DeriveSessionStatus(session)
 	}
 	return demoted
 }

@@ -215,8 +215,12 @@ func TestInterruptedRunsAreNotResumed(t *testing.T) {
 	if got := str(run["status"]); got != "failed" {
 		t.Errorf("run status = %q, want failed", got)
 	}
-	if got := str(session["status"]); got != "partial" {
-		t.Errorf("session status = %q, want partial", got)
+	// The session status is derived from the run set, and run-2 — cancelled —
+	// is the most recent run. Per the state model a resting session reports the
+	// outcome of its last run, so demoting the older run-1 leaves the session
+	// reading "cancelled". run-1 itself still reports the interruption.
+	if got := str(session["status"]); got != "cancelled" {
+		t.Errorf("session status = %q, want cancelled", got)
 	}
 	for i, c := range arr(run["contributions"]) {
 		if s := str(obj(c)["status"]); s == "pending" || s == "running" {
@@ -241,14 +245,14 @@ func TestInterruptedRunsAreNotResumed(t *testing.T) {
 	}
 
 	// A session can be left saying "running" with every run already terminal.
-	// The status describes the session, so it is demoted even though there is
-	// nothing to demote it for.
+	// The status is re-derived from the runs, so it is corrected even though
+	// there is nothing to demote it for.
 	session["status"] = "running"
 	if n := RehydrateOnLoad(snapshot); n != 0 {
 		t.Errorf("expected no demotable runs, got %d", n)
 	}
-	if got := str(session["status"]); got != "partial" {
-		t.Errorf("session with no live runs left in state %q, want partial", got)
+	if got := str(session["status"]); got != "cancelled" {
+		t.Errorf("session with no live runs left in state %q, want cancelled", got)
 	}
 }
 

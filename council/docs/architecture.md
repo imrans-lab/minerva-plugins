@@ -173,6 +173,11 @@ Five schemas, one record family.
 
 ### 2.1 Identity and revision, in full
 
+"Owner" in this table means the **durable** owner: who is answerable for the
+value surviving a restart. It is not who executes the write. The backend applies
+every mutation, advances `snapshot_revision` and returns it; the wrapper
+persists the snapshot that comes back and is otherwise a view (see §3).
+
 | Identity | Owner | Advances when | Read by |
 |---|---|---|---|
 | `snapshot_revision` | the wrapper (native panel) | any accepted mutation | every request's `base_revision`, every reply |
@@ -244,10 +249,11 @@ Three rules follow, and they are the ones that keep the model honest:
    in flight. A page reload loses nothing.
 2. **The backend is derived.** Anything it holds that must outlive the process
    has already been written into the snapshot.
-3. **Nothing is shown as saved before it is in the snapshot.** The wrapper
-   applies a mutation, bumps `snapshot_revision`, emits `content_changed` (which
-   marks the tab dirty at `Editor.gd:2095-2096`), and only then replies. The
-   reply carries the new revision, which is what the page renders.
+3. **Nothing is shown as saved before it is in the snapshot.** The backend
+   applies a mutation, advances `snapshot_revision` and replies; the wrapper
+   persists the snapshot it gets back and emits `content_changed` (which marks
+   the tab dirty at `Editor.gd:2095-2096`). The reply carries the new revision,
+   which is what the page renders.
 
 ### 3.1 Why `__panel_state` and not `project_state`
 
