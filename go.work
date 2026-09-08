@@ -4,7 +4,6 @@ use (
 	./cad
 	./codetools
 	./council
-	./council/proof
 	./nametag-maker
 	./pcb
 	./presentation

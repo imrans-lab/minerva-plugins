@@ -6,7 +6,8 @@
   "oneOf": [
     { "$ref": "#/$defs/Request" },
     { "$ref": "#/$defs/Reply" },
-    { "$ref": "#/$defs/Event" }
+    { "$ref": "#/$defs/Event" },
+    { "$ref": "#/$defs/Ready" }
   ],
   "$defs": {
     "Command": {
@@ -61,18 +62,29 @@
     },
     "Event": {
       "type": "object",
-      "description": "One-way push from the backend towards the view. An event never carries authority: it announces that the snapshot moved, and the view re-reads what it needs.",
+      "description": "One-way push towards the view. An event never carries authority: it announces that something moved, and the view re-reads what it needs. Most events originate in the backend; the two council.*_changed events about the surface itself originate in the native wrapper, which is the only participant that can see the host's theme and focus.",
       "properties": {
         "schema_version": { "$ref": "common.schema.json#/$defs/SchemaVersion" },
         "envelope": { "const": "event" },
         "event": {
           "type": "string",
-          "enum": ["council.snapshot_changed", "council.run_progress", "council.contribution_ready", "council.run_finished", "council.compatibility"]
+          "enum": ["council.snapshot_changed", "council.run_progress", "council.contribution_ready", "council.run_finished", "council.compatibility", "council.theme_changed", "council.focus_changed"],
+          "description": "council.theme_changed carries {dark, background, text, font_size} read off the panel's own inherited theme; council.focus_changed carries {focused}. Both are the wrapper's, not the engine's, and neither says anything about the record."
         },
         "snapshot_revision": { "$ref": "common.schema.json#/$defs/Revision" },
         "payload": { "type": "object" }
       },
       "required": ["schema_version", "envelope", "event", "snapshot_revision", "payload"],
+      "additionalProperties": false
+    },
+    "Ready": {
+      "type": "object",
+      "description": "The page announcing that its injected bridge exists. It is the only envelope that travels page-to-wrapper without being a request, and it exists because an eval() into a document that has no window.council yet is silently lost: until this arrives the wrapper queues everything it would push. A page reload announces again and is re-primed. It never reaches the backend.",
+      "properties": {
+        "schema_version": { "$ref": "common.schema.json#/$defs/SchemaVersion" },
+        "envelope": { "const": "ready" }
+      },
+      "required": ["schema_version", "envelope"],
       "additionalProperties": false
     }
   }

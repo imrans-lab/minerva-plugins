@@ -1,0 +1,20 @@
+# Host files council's suites cannot run without, as paths relative to the
+# Minerva checkout root, checked by scripts/run-gd-tests.sh before Godot starts.
+# src/project.godot is required for every plugin and is checked unconditionally
+# by the runner, so it is not repeated here.
+#
+# A Minerva SHA bump that moves or drops one of these fails by name instead of
+# as a parse error inside the suite.
+#
+# test_council_panel.gd mounts the panel through the host's own scene-panel
+# path and drives the broker that registers it.
+src/Scripts/Services/Plugins/PluginScenePanelHost.gd
+src/Scripts/Services/Plugins/PluginScenePanelBroker.gd
+#
+# The manifest is parsed by the host's real parser, and the IPC helper the
+# broker attaches is the one the panel awaits its replies on.
+src/Scripts/Services/Plugins/PluginDefinition.gd
+src/Scripts/Services/Plugins/MinervaIPC.gd
+#
+# Section 6 speaks to the real backend over the host's own stdio transport.
+src/Scripts/Services/MCP/MCPServerConnection.gd

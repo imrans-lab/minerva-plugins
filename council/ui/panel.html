@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Council</title>
+<!--
+  Council's panel surface.
+
+  This is the wiring, not the production design: assembling a council,
+  inspecting disagreement, and the reading-room visual direction are separate
+  work. What this page has to be right about is the protocol — every read goes
+  through council.call, every mutation carries the revision it was written
+  against, an event only says "re-read", and nothing here holds state that is
+  not in the record.
+-->
+<style>
+  :root {
+    --bg: #f7f4ef;
+    --fg: #22201d;
+    --muted: rgba(34, 32, 29, .62);
+    --line: rgba(34, 32, 29, .14);
+    --accent: #7a5c2e;
+  }
+  html[data-dark="true"] {
+    --bg: #171614;
+    --fg: #e8e4dc;
+    --muted: rgba(232, 228, 220, .62);
+    --line: rgba(232, 228, 220, .16);
+    --accent: #d8b877;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px 26px 32px;
+    background: var(--bg); color: var(--fg);
+    font: 15px/1.55 ui-serif, Georgia, "Times New Roman", serif;
+  }
+  h1 { font-size: 15px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 18px; font-weight: 600; }
+  h2 { font-size: 21px; margin: 0 0 6px; font-weight: 600; }
+  .meta { color: var(--muted); font-size: 13px; margin: 0 0 20px; }
+  .bar { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 20px; }
+  button {
+    font: inherit; font-size: 13px; padding: 6px 13px; cursor: pointer;
+    color: var(--fg); background: transparent;
+    border: 1px solid var(--line); border-radius: 5px;
+  }
+  button:hover { border-color: var(--accent); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  section { border-top: 1px solid var(--line); padding: 16px 0; }
+  .empty { color: var(--muted); font-style: italic; }
+  .status { display: inline-block; font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .contribution { border-left: 2px solid var(--line); padding: 2px 0 2px 12px; margin: 12px 0; }
+  .contribution.selected { border-left-color: var(--accent); }
+  .who { font-size: 12px; color: var(--muted); }
+  .say { white-space: pre-wrap; }
+  #message { margin: 0 0 16px; font-size: 13px; color: var(--accent); min-height: 18px; }
+  ul { margin: 6px 0 0; padding-left: 18px; }
+</style>
+</head>
+<body>
+<h1>Council</h1>
+<div class="bar">
+  <button id="reread">Re-read</button>
+  <button id="handoff">Send selected to the bound chat</button>
+</div>
+<p id="message" role="status" aria-live="polite"></p>
+<div id="body"><p class="empty">Reading the council…</p></div>
+
+<script>
+(function () {
+  var revision = null;
+  var snapshot = null;
+  var selection = {};
+  var sessionId = "";
+
+  var body = document.getElementById('body');
+  var message = document.getElementById('message');
+
+  function say(text) { message.textContent = text || ''; }
+
+  function esc(value) {
+    return String(value === undefined || value === null ? '' : value)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  // Every reply carries the revision it was produced against; the page keeps it
+  // only to stamp the next mutation, never as a source of truth.
+  function accept(reply) {
+    if (reply && reply.snapshot_revision !== undefined) { revision = reply.snapshot_revision; }
+    if (reply && reply.ok === false) { say(reply.error ? reply.error.message : 'Refused.'); }
+    return reply;
+  }
+
+  function reread() {
+    return council.call('snapshot.get', {}).then(accept).then(function (reply) {
+      if (!reply.ok) { return; }
+      snapshot = reply.payload.snapshot;
+      var view = snapshot.view || {};
+      sessionId = view.selected_session_id || lastSessionId();
+      render();
+    });
+  }
+
+  function lastSessionId() {
+    var sessions = (snapshot && snapshot.sessions) || [];
+    return sessions.length ? sessions[sessions.length - 1].session_id : "";
+  }
+
+  function currentSession() {
+    var sessions = (snapshot && snapshot.sessions) || [];
+    for (var i = 0; i < sessions.length; i++) {
+      if (sessions[i].session_id === sessionId) { return sessions[i]; }
+    }
+    return null;
+  }
+
+  function render() {
+    var sessions = (snapshot && snapshot.sessions) || [];
+    var councils = (snapshot && snapshot.definitions) || [];
+    var html = '';
+
+    if (!councils.length && !sessions.length) {
+      html += '<p class="empty">This project has no council yet. Ask Council to assemble one, '
+           +  'or open a council you exported earlier.</p>';
+    }
+
+    if (councils.length) {
+      html += '<section><h2>Councils</h2><ul>';
+      councils.forEach(function (d) {
+        html += '<li>' + esc(d.name) + ' — ' + ((d.seats || []).length) + ' seat(s), rev '
+             +  esc(d.definition_revision) + '</li>';
+      });
+      html += '</ul></section>';
+    }
+
+    if (sessions.length) {
+      html += '<section><h2>Sessions</h2><ul>';
+      sessions.forEach(function (s) {
+        html += '<li><button data-session="' + esc(s.session_id) + '">'
+             +  esc(s.question || s.session_id) + '</button> '
+             +  '<span class="status">' + esc(s.status) + '</span></li>';
+      });
+      html += '</ul></section>';
+    }
+
+    var session = currentSession();
+    if (session) {
+      var binding = session.chat_binding || {};
+      html += '<section><h2>' + esc(session.question) + '</h2>'
+           +  '<p class="meta"><span class="status">' + esc(session.status) + '</span> · chat '
+           +  esc(binding.chat_id || 'not bound')
+           +  (binding.missing ? ' (missing)' : '') + '</p>';
+      (session.runs || []).forEach(function (run) {
+        var parts = (run.contributions || []).slice();
+        if (run.synthesis) { parts.push(run.synthesis); }
+        parts.forEach(function (c) {
+          html += '<div class="contribution' + (selection[c.contribution_id] ? ' selected' : '') + '">'
+               +  '<div class="who"><label><input type="checkbox" data-pick="' + esc(c.contribution_id) + '"'
+               +  (selection[c.contribution_id] ? ' checked' : '') + '> '
+               +  esc(c.seat_id) + ' · ' + esc(c.status)
+               +  (c.model_id ? ' · ' + esc(c.model_id) : '') + '</label></div>'
+               +  '<div class="say">' + esc(c.text || (c.failure ? c.failure.message : '')) + '</div></div>';
+        });
+        if (run.failure) {
+          html += '<p class="meta">' + esc(run.failure.message)
+               +  (run.failure.retryable ? ' — this can be retried.' : '') + '</p>';
+        }
+      });
+      html += '</section>';
+    }
+
+    html += '<p class="meta">revision ' + esc(revision) + '</p>';
+    body.innerHTML = html;
+
+    body.querySelectorAll('[data-session]').forEach(function (el) {
+      el.onclick = function () { select(el.getAttribute('data-session')); };
+    });
+    body.querySelectorAll('[data-pick]').forEach(function (el) {
+      el.onchange = function () {
+        var id = el.getAttribute('data-pick');
+        if (el.checked) { selection[id] = true; } else { delete selection[id]; }
+        render();
+      };
+    });
+  }
+
+  // Which session is open is user intent, and the wrapper persists it. It is
+  // the one thing the page asks to have written down that is not a council.
+  function select(id) {
+    sessionId = id;
+    selection = {};
+    render();
+    council.call('wrapper.set_view', { view: { selected_session_id: id, pane: 'session' } })
+      .then(accept);
+  }
+
+  document.getElementById('reread').onclick = function () { say(''); reread(); };
+
+  document.getElementById('handoff').onclick = function () {
+    var picked = Object.keys(selection);
+    council.call('wrapper.chat_handoff', {
+      session_id: sessionId,
+      contribution_ids: picked
+    }).then(accept).then(function (reply) {
+      if (reply.ok) { say('Sent ' + reply.payload.characters + ' characters to chat ' + reply.payload.chat_id + '.'); }
+    });
+  };
+
+  council.onEvent(function (event) {
+    if (event.event === 'council.theme_changed') {
+      document.documentElement.setAttribute('data-dark', String(!!event.payload.dark));
+      return;
+    }
+    if (event.event === 'council.focus_changed') {
+      document.documentElement.setAttribute('data-focused', String(!!event.payload.focused));
+      return;
+    }
+    // Everything else says the record moved. The page re-reads rather than
+    // trusting the payload it was handed.
+    reread();
+  });
+
+  council.call('wrapper.describe', {}).then(accept).then(function (reply) {
+    if (reply.ok && reply.payload.unreadable) { say(reply.payload.unreadable_reason); }
+  });
+  reread();
+})();
+</script>
+</body>
+</html>

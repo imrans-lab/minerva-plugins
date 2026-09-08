@@ -87,13 +87,21 @@ inside a panel that receives the full hook set dispatched by
 `invoke_restore_from_note:350`, `invoke_render_for_llm:380`,
 `invoke_inject_toggle:404`, `invoke_unload:451`).
 
-`council/proof/` is that proof: manifest, scene, wrapper script, injected
-bridge, a page that drives the envelope, and a near-empty backend so the plugin
-is installable. It demonstrates exactly two things — that an HTML surface
-renders inside a native panel, and that the panel's lifecycle hooks fire — and
-deliberately nothing else. It applies no commands and edits no record, because
-that is the engine's job (§3). Both scripts pass
-`godot --headless --check-only`.
+`council/ui/` is that panel, and it is the production one: `CouncilPanel.tscn`
+(the surface, its SubViewport and the notice label as scene nodes rather than
+generated UI), `council_panel.gd` (the hooks and the page protocol),
+`council_record.gd` (what the held record is, and what happens to a document the
+panel cannot read), `council_backend.gd` (the hop to the engine, the transport
+budget, and the lease that keeps two panels apart — §5.4), and
+`council_bridge.gd` (the JavaScript injected into the page). The wrapper applies
+no command and edits no record; that is the engine's job (§3). The scripts pass
+`godot --headless --check-only`; `council/tests/gd/test_council_panel.gd`
+exercises the whole panel through the host's own mount path.
+
+The exploratory `council/proof/` plugin that first established this shape has
+been deleted: it existed to answer the question above, the production panel now
+answers it, and a second installable Council plugin declaring a second panel is
+a thing to install by mistake.
 
 ### 1.3 Three host behaviours the wrapper must copy, not discover
 
@@ -369,13 +377,13 @@ are exact.
 | Hook | Council's contract | Error case |
 |---|---|---|
 | `_on_panel_loaded(ctx: Dictionary) -> void` | mounts the CEF surface from `ctx.data_directory`; `ctx` shape at `PluginScenePanelHost.gd:657-685` | `CefTexture` missing, page file missing, `user://` unwritable → an explanatory label, never a blank panel |
-| `_on_panel_save_request() -> Dictionary` | returns the held record verbatim | none: it cannot fail. A non-Dictionary return is refused by the host at `Editor.gd:1733` |
-| `_on_panel_load_request(document) -> void` | strips the host's `file_path` / `raw_text` keys, checks `record_kind` + `schema_version`, replaces the record, tells the page to re-read. Does **not** demote or re-derive — the engine does that on `Load` (§4.3) | the file-open path passes `{"file_path": path}` merged with the parsed JSON, or `raw_text` for a non-JSON file (`Editor.gd:1271-1279`). An empty, non-JSON or unrecognised document opens an empty council, never a half-recognised one |
+| `_on_panel_save_request() -> Dictionary` | returns the held record verbatim, or `{"_bytes": …}` for a document Council could not read | none: it cannot fail. A non-Dictionary return is refused by the host at `Editor.gd:1733`. The same dictionary feeds two writes — the tab's file and the project's `__panel_state` — so it has to be right for both |
+| `_on_panel_load_request(document) -> void` | strips the host's `file_path` / `raw_text` keys, checks `record_kind` + `schema_version`, replaces the record, tells the page to re-read. Does **not** demote or re-derive — the engine does that on `Load` (§4.3) | the file-open path passes `{"file_path": path}` merged with the parsed JSON, or `raw_text` for a non-JSON file (`Editor.gd:1271-1279`). An empty document opens an empty council. An unrecognised one — not JSON, not a council, or a newer schema — is **kept byte-for-byte** and handed back on save, with the panel saying why it will not edit it; it is never replaced by an empty council and never half-recognised |
 | `_on_panel_create_note_request(ctx) -> Dictionary` | `{kind: "plugin_data", plugin_id, panel_name, payload: <snapshot>, preview_alt_text: <one line>}`; accepted shapes at `Editor.gd:2298-2334` | omitting the hook degrades to a screenshot note (`Editor.gd:2289`). The host backfills a missing preview image (`Editor.gd:2272-2278`) |
 | `_on_panel_restore_from_note(payload: Dictionary) -> bool` | `false` unless `record_kind == "council_project_snapshot"` and `schema_version == 1` | `false` → the host toasts and leaves the panel blank (`src/Scripts/UI/Controls/Note.gd:733`). Must not be a coroutine |
 | `_on_panel_render_for_llm(ctx) -> Array` | one `{"type":"text","text":…}` part | **no production caller today** — implemented for the day there is one |
 | `receive(channel: String, payload: Dictionary) -> void` | raw event name, or the literal `"state"` | unknown channel → forwarded to the page as an event; the page re-reads |
-| `_on_panel_unload() -> void` | disconnects `ipc_message`, removes the staged page file | none |
+| `_on_panel_unload() -> void` | disconnects `ipc_message`, removes the staged page file, gives up the backend lease (§5.5) | none |
 | `signal request(channel, payload, reply_id)` | the backend hop, via `PluginScenePanelBroker.handle_scene_request` (`PluginScenePanelBroker.gd:740`) | channel not in `ui.ipc_messages` → refused by the broker |
 
 ### 5.2 Page ↔ wrapper protocol
@@ -409,9 +417,35 @@ Envelope shapes are in `envelope.schema.json`. Rules:
 - A message over `InlineLimit` (32768 UTF-16 code units) is **refused with a
   `payload_too_large` reply**, not dropped. A dropped message leaves the page's
   Promise pending forever, which is indistinguishable from a hung panel.
-- The wrapper answers reads from the record it holds and relays everything else.
-  It applies no command itself: `base_revision` checking, mutation, derivation
-  and revision minting all belong to the one engine in the backend (§3).
+- The wrapper answers `snapshot.get` from the record it holds — that record is
+  the durable one, and a council must still be readable when the backend is
+  stopped — and relays every other schema command. It applies none of them:
+  `base_revision` checking, mutation, derivation and revision minting all belong
+  to the one engine in the backend (§3). After an accepted mutation the wrapper
+  reads the acknowledged snapshot back with `minerva_council_export_snapshot`
+  and persists that, because a command reply carries its own payload and not the
+  record.
+- Commands named `wrapper.*` are the wrapper's own and never reach the engine.
+  They touch the host rather than the record: `wrapper.describe` (panel identity,
+  theme, and whether the open document is one Council can edit),
+  `wrapper.set_view` (the user's selected session and pane — the one field the
+  wrapper writes, which advances no revision because no engine derives anything
+  from it), and `wrapper.chat_handoff` (§5.3).
+- A document the wrapper does not recognise is **kept, not replaced**. Its bytes
+  are handed straight back on save — under the host's `_bytes` raw-write key for
+  the file, and as a base64 sibling for the project, because `__panel_state`
+  goes through `JSON.stringify`, which turns a `PackedByteArray` into a quoted
+  string of its `str()` form and not into bytes. The panel says in words why it
+  will not edit the document, and every command that would change a council is
+  refused while it is open. The alternative — opening an
+  empty council over an unrecognised file — destroys that file on the next
+  Ctrl+S, because the same hook feeds the file write and the project's
+  `__panel_state`.
+- The page announces itself with an `envelope: "ready"` message as soon as its
+  bridge exists (the `Ready` variant in `envelope.schema.json`); anything the
+  wrapper would push before that is queued. An
+  `eval` into a document that has no `window.council` yet is simply lost, and a
+  lost event looks exactly like a panel that never updates.
 
 Error codes are the `Failure.code` enum in `session.schema.json`:
 `model_unavailable`, `model_error`, `timeout`, `cancelled`, `interrupted`,
@@ -469,6 +503,16 @@ the acknowledgement. Consequences Council must design for, and does:
   token (`PluginProvider.gd:81-83`, `:177-186`), so a late Council reply cannot
   overwrite a newer chat turn.
 
+**Sending a selection from the panel to that chat** is the `wrapper.chat_handoff`
+operation (§5.2). It reads `chat_id` from the session's own `chat_binding` in the
+record, refuses with `missing_chat` when there is none, and delivers the text
+through `capability:mcp.proxy:minerva_send_message`, whose `chat_id` is a
+parameter — there is no host call in this path that could learn which tab is
+focused, and no fallback that would guess. Sending starts a turn in that chat, so
+it is always a user action. The text is built by the same derivation
+`_on_panel_render_for_llm` uses, so what the user sends and what a provider reads
+can never be two different summaries.
+
 The other direction — bringing a question and selected context *to* Council from
 elsewhere — is an MCP tool on Council's backend taking an explicit `session_id`
 (or creating one and returning it). Never an implicit destination.
@@ -494,6 +538,63 @@ substance in a text note and uses the caption to identify the session.
 
 If Minerva later wires `invoke_render_for_llm` into the chat-injection path,
 Council's existing hook supplies the full text with no plugin change.
+
+### 5.5 Two panels, one backend store
+
+One plugin process serves every open Council tab, and its engine holds exactly
+one working snapshot (`Store.snapshot`, replaced wholesale by `Load`). Two
+panels showing two projects therefore share it, and nothing in the backend can
+tell them apart — the durable record lives in the panel, not in the backend.
+
+So a panel may only speak to the engine while the engine is loaded with *that*
+panel's record. One exchange is: take the process-wide lease, seed the engine
+with this panel's record if it is not already the holder, send the command, read
+the acknowledged snapshot back, release. The lease makes an exchange atomic
+against every other panel; the seed makes "the engine holds my record" a fact
+rather than a hope.
+
+Four things give the claim up, and each of them is a way it could otherwise
+become a fiction:
+
+- **A failed exchange** clears the holder, so the next one re-seeds instead of
+  trusting a working copy nobody can name.
+- **A refusal produced against a revision that is not the one we seeded** does
+  too. The backend can restart underneath a mounted panel — `auto_reload`
+  rebuilds the binary and the host restarts the process while every tab stays
+  open — leaving the engine with an empty store and the panel still named as its
+  holder. Without this the seed is skipped forever, mutations loop on
+  `stale_revision`, and relayed reads answer from an empty council.
+- **Adopting a different document** — a file opened, a project restored, a note
+  reopened — because the engine is still holding the one this panel had a moment
+  ago, and the holder still names this panel. This forgets the *seed* only and
+  leaves the lease alone: the host's own restore order runs the file load and its
+  rehydrate first and the project restore a frame later, so this fires while the
+  panel's own exchange is very often still in flight, and releasing there would
+  hand a running exchange's lease to somebody else. The exchange in flight is
+  handled instead by a **document epoch**: it captures the epoch before its await
+  and, if a load moved it, reports `stale_revision` rather than adopting a
+  snapshot of the document that has just been replaced.
+- **Unloading**, which also *releases*, because a queued exchange must not wait
+  on a tab that no longer exists.
+
+Only the holder may release: an exchange that resumes after its claim was taken
+over must not clear or hand off somebody else's lease. And a lease whose taker is
+a panel the host no longer has registered — a tab closed mid-exchange abandons
+that coroutine, so its release never runs — is reclaimed by the next exchange
+rather than waited behind forever.
+
+The lease is one object per process, held in engine-level metadata rather than a
+`static var`: a static lives on the script resource, and a plugin hot reload
+replaces that resource while panels mounted before it keep the old one — two
+scripts, two sets of statics, two panels each certain the engine is theirs.
+
+**Size is measured where it is enforced.** The host caps a scene request at
+`JSON.stringify(payload).length()` of the whole argument dictionary
+(`PluginScenePanelBroker.gd:883`), which includes the keys the wrapper wraps a
+snapshot or an envelope in. A record that fits 65536 on its own can fail once it
+is inside `{"snapshot": …}`, so the wrapper measures the message that will
+actually travel and refuses it with `payload_too_large` — a refusal the page can
+render, rather than a message the broker drops.
 
 ---
 
@@ -578,15 +679,17 @@ run from the previous snapshot cannot apply: the run id is not present, and
 |---|---|---|
 | formatting | `gofmt -l .` (in `council/`) | clean |
 | static analysis | `GOWORK=off go vet ./...` | clean |
-| build | `GOWORK=off go build ./...` (in `council/` and `council/proof/`) | clean |
+| build | `go build ./...` (in `council/`) | clean |
 | contract tests | `GOWORK=off go test ./internal/contract/` | 5 tests, over 8 valid and 16 invalid fixtures |
-| GDScript syntax | `godot --headless --check-only -s <file>` on both wrapper scripts | clean |
+| GDScript syntax | `godot --headless --check-only -s <file>` on every `ui/*.gd` | clean |
+| panel suite | `council/scripts/run-gd-tests.sh <minerva>` | authored, never executed — see `tests/gd/EXPECTED_SUITES` |
 
-`council/` is outside the repo's `go.work`, so Go commands there need
-`GOWORK=off` (or a `use ./council` entry once the plugin is added to the
-workspace).
+`council` is a `use` entry in the repo's `go.work`, so Go commands there need
+no `GOWORK=off`.
 
-Not verified here, and honestly out of reach for a task that may not launch
-Minerva: that the wrapper actually renders in a live CEF panel. That is T03's
-first job, and `council/proof/` exists so it can be done by installing one
-directory.
+Still not verified by any of the above: that the panel actually renders in a
+live CEF surface, that a real Minerva install mounts it, and that the tabs,
+menus and keyboard around it keep working. None of that is reachable from a
+task that must not launch Minerva. `docs/t03-live-check.md` is the checklist for
+doing it on the owner's machine, and it is the gate this document's §1 answer
+finally rests on.

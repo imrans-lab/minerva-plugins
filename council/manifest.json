@@ -101,9 +101,52 @@
       "name": "minerva_council_status"
     }
   ],
-  "capabilities": [],
+  "ui": {
+    "ipc_messages": [
+      "minerva_council_command",
+      "minerva_council_load_snapshot",
+      "minerva_council_export_snapshot",
+      "capability:mcp.proxy:minerva_send_message"
+    ],
+    "panels": [
+      {
+        "name": "council_panel",
+        "kind": "godot_scene",
+        "entry_scene": "ui/CouncilPanel.tscn",
+        "scripts": [
+          "ui/council_panel.gd",
+          "ui/council_record.gd",
+          "ui/council_backend.gd",
+          "ui/council_bridge.gd"
+        ],
+        "ipc_channels": [
+          "minerva_council_command",
+          "minerva_council_load_snapshot",
+          "minerva_council_export_snapshot",
+          "capability:mcp.proxy:minerva_send_message"
+        ],
+        "file_extensions": [
+          ".mcouncil"
+        ],
+        "save_mode": "host_owned"
+      }
+    ]
+  },
+  "editor_items": [
+    {
+      "id": "new_mcouncil",
+      "name": "New Council",
+      "panel": "council_panel",
+      "default_filename": "untitled.mcouncil"
+    }
+  ],
+  "capabilities": [
+    "host_owned_save"
+  ],
   "permissions": {
-    "host_capabilities": [],
+    "host_capabilities": [
+      "mcp.proxy:minerva_send_message"
+    ],
     "network": {
       "mode": "none"
     },

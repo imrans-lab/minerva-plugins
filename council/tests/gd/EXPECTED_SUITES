@@ -1,0 +1,27 @@
+# Manifest of the gd test suites scripts/run-gd-tests.sh MUST find under
+# council/tests/gd/. Line format (v2, shared with cad/tests/gd/EXPECTED_SUITES
+# and pcb/tests/gd/EXPECTED_SUITES):
+#
+#     <filename> [assertions=N] [real-worker]
+#
+# A suite going missing (deleted, renamed, moved off the glob) or appearing
+# unregistered is a loud, named pre-flight failure in both directions.
+#
+# The assertion count is pinned from the first run that got through every
+# section with the backend up: setup 3, section 1 four, section 2 three,
+# section 3 seventeen (five assertions over each of three documents, plus two
+# after the loop), section 4 six, section 5 seven, section 6 seventeen.
+#
+# SETUP THIS SUITE NEEDS beyond the runner's own: section 6 drives the REAL
+# backend over stdio, so council-plugin must be built first —
+#     (cd council && go build -o council-plugin ./)
+# and the Minerva checkout needs its `terminal` GDExtension built, like every
+# other suite that starts a real plugin subprocess. Without the binary the
+# section fails by name; it does not skip.
+
+# The native panel end to end: mounted through the real PluginScenePanelHost
+# from the real manifest, saved and reloaded byte-for-byte, round-tripped
+# through a plugin_data note, an unreadable document preserved rather than
+# replaced, the host envelope measured against the host's own cap, and two
+# panels in two projects kept apart against one backend store.
+test_council_panel.gd assertions=57
