@@ -439,13 +439,7 @@ static func _render(panel, box: AABB, pose: Dictionary, section: Dictionary,
 			+ "been evaluated into it"}
 
 	var world := World3D.new()
-	var host_world: World3D = panel.get_viewport().find_world_3d() \
-		if panel.get_viewport() != null else null
-	if host_world != null:
-		# The panes' lighting is ambient sky only (WorldEnvironment in each
-		# SubViewport, one shared Environment): carrying it over is the whole
-		# of matching how the panes look.
-		world.environment = host_world.environment
+	world.environment = _source_environment(source_root)
 
 	var offscreen := SubViewport.new()
 	offscreen.size = size
@@ -545,9 +539,8 @@ static func _is_one_colour(image: Image) -> bool:
 	return true
 
 
-## The MeshRoot to mirror: the first one holding a visible solid, so an ortho
-## pane's emptied MeshRoot is never the one that is copied. Falling back to the
-## first that exists is what makes a references-only document renderable.
+## Pick a shaded pane by presentation mode, independently of whether the
+## document contains a generated solid or only imported references.
 static func _mesh_root(panel) -> Node3D:
 	var fallback: Node3D = null
 	for path in _PanelMeasurement.MESH_ROOT_PATHS:
@@ -556,10 +549,22 @@ static func _mesh_root(panel) -> Node3D:
 			continue
 		if fallback == null:
 			fallback = root
-		var solid := _solid_instance(root)
-		if solid != null and solid.mesh != null and solid.visible:
+		var camera := root.get_viewport().get_camera_3d()
+		if camera != null and camera.projection == Camera3D.PROJECTION_PERSPECTIVE:
 			return root
 	return fallback
+
+
+## Each pane owns its world. The host viewport's environment is unrelated.
+static func _source_environment(source_root: Node3D) -> Environment:
+	var viewport := source_root.get_viewport()
+	if viewport == null:
+		return null
+	var camera := viewport.get_camera_3d()
+	if camera != null and camera.environment != null:
+		return camera.environment
+	var world := viewport.find_world_3d()
+	return world.environment if world != null else null
 
 
 ## The MeshRoot's own solid instance, or null on a stand-in that has none.

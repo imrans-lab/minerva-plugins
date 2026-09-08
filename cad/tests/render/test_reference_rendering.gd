@@ -13,7 +13,7 @@ func _init() -> void:
 	await process_frame
 	await run_checks()
 	print("=== Results: %d passed, %d failed ===" % [passed, failed])
-	quit(0 if failed == 0 and passed == 9 else 1)
+	quit(0 if failed == 0 and passed == 14 else 1)
 
 func check(label: String, ok: bool) -> void:
 	if ok:
@@ -83,5 +83,35 @@ func run_checks() -> void:
 			with_reference.save_png("user://" + pane + ".png")
 		layer.visible = true
 		await settle()
+	var posed = load("res://../../minerva-plugins/cad/ui/scripts/posed_capture.gd")
+	var iso_root: Node3D = panel.get_node(GRID + "/IsoView/SubViewport/MeshRoot")
+	check("reference-only posed capture selects a shaded pane", posed._mesh_root(panel) == iso_root)
+	check("posed capture inherits the pane world, not the host world",
+		posed._source_environment(iso_root) == iso_root.get_viewport().find_world_3d().environment)
+	var bounds: AABB = panel._reference_report.world_aabb
+	var capture: Dictionary = await posed._render(panel, bounds,
+		posed.resolve_pose({"view": "iso"}), {}, Vector2i(320,240), 0.1)
+	check("reference-only posed capture produces a nonblank image",
+		capture.has("image") and not posed._is_one_colour(capture.image))
+	if capture.has("image"):
+		capture.image.save_png("user://posed-reference.png")
+	var host_world := root.find_world_3d()
+	var saved_environment := host_world.environment
+	var unrelated := Environment.new()
+	unrelated.background_mode = Environment.BG_COLOR
+	unrelated.background_color = Color.MAGENTA
+	unrelated.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	unrelated.ambient_light_energy = 0.0
+	host_world.environment = unrelated
+	var changed_host: Dictionary = await posed._render(panel, bounds,
+		posed.resolve_pose({"view": "iso"}), {}, Vector2i(320,240), 0.1)
+	host_world.environment = saved_environment
+	check("host lighting cannot change the posed CAD pixels",
+		capture.has("image") and changed_host.has("image") and
+		capture.image.get_data() == changed_host.image.get_data())
+	panel.get_node(GRID + "/TopView/SubViewport").get_camera_3d().projection = Camera3D.PROJECTION_PERSPECTIVE
+	iso_root.get_viewport().get_camera_3d().projection = Camera3D.PROJECTION_ORTHOGONAL
+	check("posed source follows pane mode rather than a fixed slot",
+		posed._mesh_root(panel) == panel.get_node(GRID + "/TopView/SubViewport/MeshRoot"))
 	panel.free()
 	await process_frame
