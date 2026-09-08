@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Council prototype - self check</title>
+<!--
+  Drives the prototype in an iframe and checks the behaviours that a screenshot
+  cannot show: Back restoring pane, scroll and focus; a late answer not moving
+  the paragraph you are reading; a citation opening the right span; a missing
+  source saying so; a follow-up running; a retry running; a stale write refused.
+
+  Run it in a browser, or headless:
+    google-chrome --headless=new --allow-file-access-from-files \
+      --virtual-time-budget=90000 --dump-dom file://<dir>/selftest.html | grep RESULT
+
+  The file:// flag is for this harness only. The prototype itself needs nothing.
+-->
+<style>
+  body { font: 14px/1.5 ui-monospace, monospace; margin: 16px; background: #f4efe6; color: #221f1b; }
+  iframe { width: 460px; height: 620px; border: 1px solid #ccc; float: right; }
+  .pass::before { content: "PASS  "; color: #2c6e3f; }
+  .fail::before { content: "FAIL  "; color: #a33; }
+  li { margin: 2px 0; }
+</style>
+</head>
+<body>
+<iframe id="frame" title="prototype under test"></iframe>
+<h1 id="result">running…</h1>
+<ol id="log"></ol>
+<script>
+(function () {
+  'use strict';
+
+  var frame = document.getElementById('frame');
+  var log = document.getElementById('log');
+  var results = [];
+
+  function record(ok, name, detail) {
+    results.push({ ok: ok, name: name });
+    var li = document.createElement('li');
+    li.className = ok ? 'pass' : 'fail';
+    li.textContent = name + (ok || !detail ? '' : ' — ' + detail);
+    log.appendChild(li);
+  }
+
+  function check(name, ok, detail) { record(!!ok, name, detail); }
+
+  function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  function until(fn, budget) {
+    var deadline = budget || 20000;
+    return new Promise(function (resolve, reject) {
+      var spent = 0;
+      (function tick() {
+        var value;
+        try { value = fn(); } catch (e) { value = null; }
+        if (value) { return resolve(value); }
+        spent += 60;
+        if (spent > deadline) { return reject(new Error('timed out')); }
+        setTimeout(tick, 60);
+      })();
+    });
+  }
+
+  function open(query) {
+    return new Promise(function (resolve) {
+      frame.onload = function () {
+        var w = frame.contentWindow;
+        until(function () { return q(w, '#revision').textContent && w; })
+          .then(function () { resolve(w); });
+      };
+      frame.src = 'index.html?' + query;
+    });
+  }
+
+  function q(w, sel) { return w.document.querySelector(sel); }
+
+  function press(w, key) {
+    w.document.dispatchEvent(new w.KeyboardEvent('keydown', { key: key, bubbles: true }));
+  }
+
+  function offsetOf(w, key) {
+    var scroller = q(w, '#reading');
+    var node = scroller.querySelector('[data-anchor="' + key + '"]');
+    if (!node) { return null; }
+    return node.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+  }
+
+  function run() {
+    var w;
+    return open('scenario=ordinary')
+
+      .then(function (win) {
+        w = win;
+        var contributions = w.document.querySelectorAll('#reading .contribution');
+        check('a finished round renders every contribution and the synthesis',
+          contributions.length === 3 && !!q(w, '#reading .synthesis'),
+          contributions.length + ' contributions');
+
+        var interactive = w.document.querySelectorAll('#reading [data-open-source], #reading [data-follow-up], #reading [data-compare]');
+        var native = Array.prototype.every.call(interactive, function (n) {
+          return n.tagName === 'BUTTON' && !n.hasAttribute('disabled');
+        });
+        check('every control in the reading column is a real button, so Enter and Space work',
+          interactive.length > 0 && native);
+
+        // Back: pane, scroll position and the control you used all come back.
+        var trigger = q(w, '#reading [data-open-source]');
+        trigger.focus(); // focusing scrolls, exactly as tabbing to it would
+        window.__scrollBefore = q(w, '#reading').scrollTop;
+        window.__anchorBefore = trigger.getAttribute('data-anchor');
+        trigger.click();
+        return until(function () { return q(w, '#detail #detail-title'); });
+      })
+
+      .then(function () {
+        var quoted = q(w, '#detail .quoted');
+        check('a citation opens the source with its own span marked',
+          !!q(w, '#detail mark') && !!quoted
+          && q(w, '#detail mark').textContent.trim() === quoted.textContent.trim());
+        check('opening a detail moves focus into it',
+          w.document.activeElement === q(w, '#detail #detail-title'));
+
+        press(w, 'Escape');
+        return until(function () { return !q(w, '#detail #detail-title'); });
+      })
+
+      .then(function () {
+        check('Escape is Back and restores the scroll position',
+          Math.abs(q(w, '#reading').scrollTop - window.__scrollBefore) < 3,
+          'scrollTop ' + q(w, '#reading').scrollTop + ' wanted ' + window.__scrollBefore);
+        check('Back returns focus to the control that opened the detail',
+          w.document.activeElement && w.document.activeElement.hasAttribute('data-open-source'));
+
+        // A source captured as a reference only must say so, not show an excerpt.
+        return open('scenario=ordinary&pane=sources&detail=source:src.ledger:1:');
+      })
+
+      .then(function (win) {
+        w = win;
+        check('a source with no captured material says so instead of quoting',
+          /not available/i.test(q(w, '#detail').textContent) && !q(w, '#detail .excerpt'));
+
+        // Comparison lines two answers up and names the shared source.
+        return open('scenario=ordinary&detail=compare:c.capital.1,c.narrow.1');
+      })
+
+      .then(function (win) {
+        w = win;
+        var columns = w.document.querySelectorAll('#detail .column');
+        check('comparison shows both answers with their support labels', columns.length === 2);
+        check('comparison says what the two seats share',
+          /cite no source in common|Both seats cite/.test(q(w, '#detail').textContent));
+
+        return open('scenario=partial');
+      })
+
+      .then(function (win) {
+        w = win;
+        check('a timed-out seat is visible and offers an explicit retry',
+          !!q(w, '#reading [data-retry-seat]') || !!q(w, '#reading [data-retry-run]'));
+        var retry = q(w, '#reading [data-retry-run]');
+        retry.click();
+        return until(function () {
+          return /running/i.test(q(w, '#question-meta').textContent);
+        }).then(function () {
+          return until(function () { return /complete/i.test(q(w, '#question-meta').textContent); });
+        });
+      })
+
+      .then(function () {
+        check('retry runs the failed seat again and the session settles complete', true);
+
+        // A write against an old revision is refused, not merged.
+        w.councilMockControl.staleNext = true;
+        var followUp = q(w, '#reading [data-follow-up]');
+        followUp.click();
+        return until(function () { return q(w, '#detail #follow-up-text'); });
+      })
+
+      .then(function () {
+        q(w, '#detail #follow-up-text').value = 'Does the answer change if the cloth is one we stock?';
+        q(w, '#detail [data-send-follow-up]').click();
+        return until(function () { return /moved while you were reading/i.test(q(w, '#message').textContent); });
+      })
+
+      .then(function () {
+        check('a change written against an old revision is refused in words the reader can act on', true);
+
+        // Now for real: the follow-up asks one seat and leaves the rest alone.
+        var before = w.document.querySelectorAll('#reading section[data-anchor^="run:"]').length;
+        q(w, '#detail [data-send-follow-up]').click();
+        return until(function () {
+          return w.document.querySelectorAll('#reading section[data-anchor^="run:"]').length > before;
+        }).then(function () {
+          return until(function () { return /follow-up/i.test(q(w, '#reading').textContent); });
+        });
+      })
+
+      .then(function () {
+        check('a follow-up opens its own run without re-running the council', true);
+
+        return open('scenario=late');
+      })
+
+      .then(function (win) {
+        w = win;
+        var scroller = q(w, '#reading');
+        scroller.scrollTop = 320;
+        return until(function () { return offsetOf(w, 'run:run.1') !== null; })
+          .then(function () {
+            var before = offsetOf(w, 'run:run.1');
+            var seen = w.document.querySelectorAll('#reading .contribution').length;
+            return until(function () {
+              return w.document.querySelectorAll('#reading .say').length > seen;
+            }, 30000).then(function () {
+              var after = offsetOf(w, 'run:run.1');
+              check('a late answer does not move the block you were reading',
+                before !== null && after !== null && Math.abs(after - before) < 2,
+                'moved by ' + (after - before) + 'px');
+              check('a late answer is announced rather than scrolled to',
+                /answered/i.test(q(w, '#announcer').textContent));
+            });
+          });
+      })
+
+      .then(function () {
+        return until(function () { return /revised after the follow-up/i.test(q(w, '#reading').textContent); }, 30000);
+      })
+
+      .then(function () {
+        check('the synthesis is reissued as revised once the late answer lands', true);
+        check('the late-human walkthrough is labelled as demo data',
+          /Demo data/.test(q(w, '#reading').textContent));
+
+        return open('scenario=empty');
+      })
+
+      .then(function (win) {
+        w = win;
+        check('an empty project explains itself and offers exactly one next step',
+          /no council yet/i.test(q(w, '#reading').textContent) && !!q(w, '#reading [data-goto-pane]'));
+
+        // Assembling a council, all the way from nothing to a running round.
+        q(w, '#reading [data-goto-pane]').click();
+        return until(function () { return q(w, '#reading [data-create-council]'); })
+          .then(function () {
+            q(w, '#reading [data-create-council]').click();
+            return until(function () { return q(w, '#reading [data-seat-member]'); });
+          })
+          .then(function () {
+            check('a council starts as a chair plus a library of unseated members',
+              w.document.querySelectorAll('#reading [data-seat-member]').length >= 3);
+            var unseated = w.document.querySelectorAll('#reading [data-seat-member]').length;
+            q(w, '#reading [data-seat-member]').click();
+            return until(function () {
+              return w.document.querySelectorAll('#reading [data-seat-member]').length === unseated - 1;
+            }).then(function () {
+              var left = w.document.querySelectorAll('#reading [data-seat-member]').length;
+              q(w, '#reading [data-seat-member]').click();
+              return until(function () {
+                return w.document.querySelectorAll('#reading [data-seat-member]').length === left - 1;
+              });
+            });
+          })
+          .then(function () {
+            check('seating a member advances the definition revision',
+              /rev [2-9]/.test(q(w, '#council-name').textContent),
+              q(w, '#council-name').textContent);
+            q(w, '#reading [data-ask]').click();
+            return until(function () { return q(w, '#detail #question-text'); });
+          })
+          .then(function () {
+            q(w, '#detail #question-text').value = 'Should the shop take on repair work over the winter?';
+            q(w, '#detail [data-send-question]').click();
+            return until(function () { return /Should the shop take on repair work/.test(q(w, '#question').textContent); });
+          })
+          .then(function () {
+            return until(function () {
+              return w.document.querySelectorAll('#reading .contribution').length >= 2;
+            }, 40000);
+          })
+          .then(function () {
+            check('a new question opens one round holding every seated advisor',
+              w.document.querySelectorAll('#reading .contribution').length === 2,
+              w.document.querySelectorAll('#reading .contribution').length + ' seats in the round');
+            return until(function () { return /complete/i.test(q(w, '#question-meta').textContent); }, 40000);
+          })
+          .then(function () {
+            check('the assembled council answers and the chair synthesises', !!q(w, '#reading .synthesis'));
+            return open('scenario=unreadable');
+          });
+      })
+
+      .then(function (win) {
+        w = win;
+        check('an unreadable document says why it will not be edited',
+          /not a Council record/i.test(q(w, '#message').textContent));
+      })
+
+      .catch(function (error) {
+        record(false, 'the run stopped early', error.message);
+      })
+
+      .then(function () {
+        var passed = results.filter(function (r) { return r.ok; }).length;
+        var line = 'RESULT ' + passed + '/' + results.length + ' passed';
+        document.getElementById('result').textContent = line;
+        document.title = line + (passed === results.length ? '' : ' :: '
+          + results.filter(function (r) { return !r.ok; }).map(function (r) { return r.name; }).join(' | '));
+      });
+  }
+
+  run();
+})();
+</script>
+</body>
+</html>

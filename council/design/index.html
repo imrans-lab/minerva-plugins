@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Council — design prototype</title>
+<!--
+  An executable prototype of the Council panel: the reading-room direction, the
+  three moments (assembling a council, inspecting a disagreement and its source,
+  receiving a late contribution), and the states that surround them.
+
+  It runs from file:// with no server, no build and no network. window.council is
+  a mock that mimics the wrapper bridge in council/ui/council_bridge.gd; this page
+  is deliberately NOT wired to it. Nothing here is production code - it is the
+  argument the production panel is built from.
+
+  Open with ?scenario=<key> to start in a state; the scaffolding strip at the
+  bottom lists them. ?theme=dark, ?motion=reduce, ?pane= and ?detail= are for
+  screenshots and walkthroughs.
+-->
+<link rel="stylesheet" href="styles/reading-room.css">
+</head>
+<body>
+
+<div class="panel" id="panel">
+
+  <header class="masthead">
+    <p class="council-name" id="council-name"></p>
+    <h1 class="question" id="question"></h1>
+    <p class="question-meta" id="question-meta"></p>
+  </header>
+
+  <nav class="panes" id="panes" aria-label="Council panes">
+    <button type="button" data-pane="session" aria-selected="true">Session</button>
+    <button type="button" data-pane="members" aria-selected="false">Members</button>
+    <button type="button" data-pane="sources" aria-selected="false">Sources</button>
+  </nav>
+
+  <div class="stage" id="stage" data-detail="closed">
+    <main class="reading" id="reading" tabindex="-1"></main>
+    <aside class="detail" id="detail" aria-label="Detail"></aside>
+    <button type="button" class="action primary arrival" id="arrival" hidden></button>
+  </div>
+
+  <div class="footrail">
+    <span id="message" role="status" aria-live="polite"></span>
+    <span style="margin-left:auto" id="revision"></span>
+  </div>
+
+  <div class="scaffold" id="scaffold"></div>
+</div>
+
+<p class="visually-hidden" id="announcer" role="status" aria-live="polite"></p>
+
+<script src="js/sample-data.js"></script>
+<script src="js/scenarios.js"></script>
+<script src="js/mock-bridge.js"></script>
+<script src="js/views.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
