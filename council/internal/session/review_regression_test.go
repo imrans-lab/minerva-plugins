@@ -168,3 +168,26 @@ func TestHumanChairRefusesAutomatedRound(t *testing.T) {
 		t.Fatalf("human chair not refused: %+v %v", reply, err)
 	}
 }
+
+func TestReopenPreservesDivergentEqualRevisionContent(t *testing.T) {
+	s := reviewStore(t)
+	incoming := s.Export()
+	sessions := arr(incoming["sessions"])
+	obj(sessions[0])["question"] = "A question edited in a copied document"
+	raw, _ := json.Marshal(incoming)
+	report, err := s.Reopen(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Recovered {
+		t.Fatal("divergent content was discarded as recovery")
+	}
+	if got := str(obj(arr(s.Export()["sessions"])[0])["question"]); got != "A question edited in a copied document" {
+		t.Fatalf("incoming edit lost: %q", got)
+	}
+	raw, _ = json.Marshal(s.Export())
+	report, err = s.Reopen(raw)
+	if err != nil || !report.Recovered {
+		t.Fatalf("identical reopen did not recover: %+v %v", report, err)
+	}
+}

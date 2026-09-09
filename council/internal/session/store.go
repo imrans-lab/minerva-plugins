@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -61,6 +62,7 @@ type Store struct {
 	chatPending map[string]string
 	chatCouncil map[string]string
 	chatSeq     int
+	chatActive  map[*chatScope]struct{}
 
 	// live holds one handle per run this engine is executing, keyed by
 	// (session_id, run_id) — a run id is only unique within its session, so the
@@ -229,6 +231,8 @@ func (s *Store) load(raw []byte, allowRecovery bool) (LoadReport, error) {
 	// for the old document must never write into the one taking its place.
 	s.cancelLive()
 	s.generation++
+	clear(s.chatPending)
+	clear(s.chatCouncil)
 
 	demoted := contract.RehydrateOnLoad(next)
 	// Demotion rewrites run and session statuses, so the document that comes
@@ -266,13 +270,13 @@ func (s *Store) recoverable(incoming map[string]any) bool {
 	if project == "" || project != str(incoming["project_id"]) {
 		return false
 	}
-	// Strictly BEHIND, not "not ahead": a panel can persist the revision
-	// run.start minted and close before the first contribution lands, since a
-	// contribution commits its own revision as it arrives (round.go). Equal
-	// revision plus descendancy is the same document at the same point, and
-	// replacing there would cancel the live round and demote it "interrupted" —
-	// the exact loss this rule exists to prevent.
-	if s.revision() < int(num(incoming["snapshot_revision"])) {
+	// At equal revision, only identical content is evidence of the same state.
+	// A copied document can keep IDs and revision while its content diverges.
+	incomingRevision := int(num(incoming["snapshot_revision"]))
+	if s.revision() == incomingRevision {
+		return reflect.DeepEqual(s.snapshot, incoming)
+	}
+	if s.revision() < incomingRevision {
 		return false
 	}
 	// Descendancy: everything the incoming record knows about, the resident one
@@ -363,7 +367,11 @@ func (s *Store) Status() map[string]any {
 // to. Every other failure, including a refused command, comes back as a
 // well-formed reply carrying a Failure the view can render.
 func (s *Store) Dispatch(raw []byte) (Reply, error) {
-	reply, cmd, req, err := s.dispatchLocked(raw)
+	return s.dispatchGuarded(raw, nil)
+}
+
+func (s *Store) dispatchGuarded(raw []byte, guard func(*Request) *Failure) (Reply, error) {
+	reply, cmd, req, err := s.dispatchLockedGuarded(raw, guard)
 	// A command with an "after" stage has only been set up so far. The stage
 	// that waits — for the members to answer, or for somebody else's run —
 	// happens here, with the lock released. That is one half of what makes a
@@ -379,6 +387,10 @@ func (s *Store) Dispatch(raw []byte) (Reply, error) {
 // snapshot, holding the engine lock for exactly that and no longer. It returns
 // the command it dispatched so Dispatch can run any deferred stage afterwards.
 func (s *Store) dispatchLocked(raw []byte) (Reply, command, *Request, error) {
+	return s.dispatchLockedGuarded(raw, nil)
+}
+
+func (s *Store) dispatchLockedGuarded(raw []byte, guard func(*Request) *Failure) (Reply, command, *Request, error) {
 	var probe struct {
 		RequestID string `json:"request_id"`
 	}
@@ -411,6 +423,11 @@ func (s *Store) dispatchLocked(raw []byte) (Reply, command, *Request, error) {
 		return Reply{}, command{}, nil, err
 	}
 	req.generation = s.generation
+	if guard != nil {
+		if failure := guard(&req); failure != nil {
+			return errReply(req.RequestID, s.revision(), failure), command{}, &req, nil
+		}
+	}
 	if req.Envelope != "request" {
 		return errReply(req.RequestID, s.revision(), fail(CodeInternal,
 			fmt.Sprintf("the backend answers requests; it was sent a %q envelope", req.Envelope), false)), command{}, nil, nil

@@ -96,6 +96,18 @@ type ChatTurnResult struct {
 // receives; a round that outruns it keeps running and the answer says so rather
 // than timing out silently.
 func (s *Store) ChatTurnFor(turn ChatTurn, wait time.Duration) ChatTurnResult {
+	scope := s.beginChat(strings.TrimSpace(turn.ChatID), false)
+	defer scope.close()
+	result := scope.turn(turn, wait)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if scope.generation != s.generation {
+		return ChatTurnResult{Reply: chatErrorf("The Council document changed during this turn. Ask again in the intended document.")}
+	}
+	return result
+}
+
+func (s *chatScope) turn(turn ChatTurn, wait time.Duration) ChatTurnResult {
 	chatID := strings.TrimSpace(turn.ChatID)
 	if !idPattern.MatchString(chatID) {
 		return ChatTurnResult{Reply: chatErrorf(
@@ -151,7 +163,10 @@ const maxQuestionBytes = 8000
 // user's turn by the time it arrives (PluginProvider.gd:270-286), so this is
 // tolerant by design: a cancel for a chat with no run, or for a run that has
 // already stopped, is a success that moves nothing.
-func (s *Store) ChatCancelFor(chatID string) ChatReply {
+func (store *Store) ChatCancelFor(chatID string) ChatReply {
+	chatID = strings.TrimSpace(chatID)
+	s := store.beginChat(chatID, true)
+	defer s.close()
 	route := s.routeChat(strings.TrimSpace(chatID))
 	if route.foreign || !route.hasLive {
 		// A cancel is fire-and-forget and never reaches the user, so a chat
@@ -177,7 +192,7 @@ func (s *Store) ChatCancelFor(chatID string) ChatReply {
 
 // chatOpenSession starts a consultation in a chat that has none. definitionID
 // may be empty, in which case the council is chosen — or asked for.
-func (s *Store) chatOpenSession(chatID, definitionID, question string, wait time.Duration) ChatTurnResult {
+func (s *chatScope) chatOpenSession(chatID, definitionID, question string, wait time.Duration) ChatTurnResult {
 	definitionID, options, refusal := s.chooseCouncil(chatID, definitionID)
 	if refusal != "" {
 		return ChatTurnResult{Reply: chatErrorf("%s", refusal)}
@@ -222,7 +237,7 @@ func (s *Store) chatOpenSession(chatID, definitionID, question string, wait time
 // chatFollowUp continues an existing consultation. The whole advisory bench is
 // consulted again unless the user aimed the question at somebody, which is what
 // the panel's "Ask about this" does with a claim id.
-func (s *Store) chatFollowUp(chatID, sessionID, prompt string, wait time.Duration) ChatTurnResult {
+func (s *chatScope) chatFollowUp(chatID, sessionID, prompt string, wait time.Duration) ChatTurnResult {
 	return s.chatRound(chatID, sessionID, map[string]any{
 		"session_id": sessionID,
 		"kind":       "follow_up",
@@ -238,7 +253,7 @@ func (s *Store) chatFollowUp(chatID, sessionID, prompt string, wait time.Duratio
 // spending, and Council starts nothing the user did not ask for twice. The
 // reply says so plainly, because a question silently dropped is worse than one
 // visibly deferred.
-func (s *Store) chatAwait(chatID string, active chatRun, unsent string, wait time.Duration) ChatTurnResult {
+func (s *chatScope) chatAwait(chatID string, active chatRun, unsent string, wait time.Duration) ChatTurnResult {
 	seconds := waitSecondsFor(wait)
 	reply := s.chatCommand("run.await", map[string]any{
 		"session_id": active.sessionID,
@@ -267,7 +282,7 @@ func (s *Store) chatAwait(chatID string, active chatRun, unsent string, wait tim
 
 // chatSelectCouncil handles "/council <definition_id>": the option a user
 // clicked when Council asked which council should take their question.
-func (s *Store) chatSelectCouncil(chatID, definitionID string, wait time.Duration) ChatTurnResult {
+func (s *chatScope) chatSelectCouncil(chatID, definitionID string, wait time.Duration) ChatTurnResult {
 	if definitionID == "" {
 		return ChatTurnResult{Reply: chatErrorf("That choice named no council.")}
 	}
@@ -298,7 +313,7 @@ func (s *Store) chatSelectCouncil(chatID, definitionID string, wait time.Duratio
 // another one, that session loses its binding and keeps everything else; the
 // engine enforces that in session.bind_chat and the snapshot invariants refuse
 // a document where it is not true.
-func (s *Store) chatSelectSession(chatID, sessionID string) ChatReply {
+func (s *chatScope) chatSelectSession(chatID, sessionID string) ChatReply {
 	if sessionID == "" {
 		return chatErrorf("That choice named no session.")
 	}
@@ -322,7 +337,7 @@ func (s *Store) chatSelectSession(chatID, sessionID string) ChatReply {
 // ---------------------------------------------------------------------------
 
 // chatRound starts a round and renders it as a provider reply.
-func (s *Store) chatRound(chatID, sessionID string, payload map[string]any, wait time.Duration) ChatTurnResult {
+func (s *chatScope) chatRound(chatID, sessionID string, payload map[string]any, wait time.Duration) ChatTurnResult {
 	seconds := waitSecondsFor(wait)
 	reply := s.chatCommand("run.start", payload, true, &seconds)
 	if !reply.OK {
@@ -633,9 +648,12 @@ func (s *Store) mintSessionID() string {
 	})
 }
 
-func (s *Store) noteChat(chatID string) {
+func (s *chatScope) noteChat(chatID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.generation != s.Store.generation || s.cancelled {
+		return
+	}
 	s.chatProject[chatID] = s.projectID()
 	s.pruneChatRoutes()
 }
@@ -670,9 +688,12 @@ func (s *Store) pruneChatRoutes() {
 	}
 }
 
-func (s *Store) rememberQuestion(chatID, question string) {
+func (s *chatScope) rememberQuestion(chatID, question string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.generation != s.Store.generation || s.cancelled {
+		return
+	}
 	s.chatPending[chatID] = question
 }
 
@@ -682,15 +703,21 @@ func (s *Store) recallQuestion(chatID string) string {
 	return s.chatPending[chatID]
 }
 
-func (s *Store) forgetQuestion(chatID string) {
+func (s *chatScope) forgetQuestion(chatID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.generation != s.Store.generation || s.cancelled {
+		return
+	}
 	delete(s.chatPending, chatID)
 }
 
-func (s *Store) rememberCouncil(chatID, definitionID string) {
+func (s *chatScope) rememberCouncil(chatID, definitionID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.generation != s.Store.generation || s.cancelled {
+		return
+	}
 	s.chatCouncil[chatID] = definitionID
 }
 
@@ -709,7 +736,7 @@ func (s *Store) rememberCouncil(chatID, definitionID string) {
 // race with a panel writing at the same moment. That is retried once — the
 // second read is after the other writer committed — and a second loss is
 // reported rather than looped.
-func (s *Store) chatCommand(command string, payload map[string]any, mutating bool, wait *int) Reply {
+func (s *chatScope) chatCommand(command string, payload map[string]any, mutating bool, wait *int) Reply {
 	var last Reply
 	for attempt := 0; attempt < 2; attempt++ {
 		request := map[string]any{
@@ -729,7 +756,7 @@ func (s *Store) chatCommand(command string, payload map[string]any, mutating boo
 		if err != nil {
 			return errReply("chat", 0, fail(CodeInternal, "could not build the command: "+err.Error(), false))
 		}
-		reply, err := s.Dispatch(raw)
+		reply, err := s.dispatchGuarded(raw, s.guard)
 		if err != nil {
 			return errReply("chat", 0, fail(CodeInternal, err.Error(), false))
 		}

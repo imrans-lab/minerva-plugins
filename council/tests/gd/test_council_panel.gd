@@ -902,7 +902,7 @@ func _section_9_recovering_a_closed_panel() -> void:
 		"command": "snapshot.get", "payload": {}})
 	var lagging: Dictionary = _panel_a._on_panel_save_request()
 	check("a lagging copy opened while another panel holds the document is replaced, not merged",
-			_chat_of(lagging, "ses-closing") == ""
+			_chat_of(lagging, "ses-closing") == _chat_of(before, "ses-closing")
 			and int(lagging.get("snapshot_revision", 0)) == int(before.get("snapshot_revision", 0)),
 			"binding %s at revision %d" % [_chat_of(lagging, "ses-closing"),
 				int(lagging.get("snapshot_revision", 0))])
@@ -947,7 +947,7 @@ func _saved_mid_run() -> Dictionary:
 			contribution["status"] = "running"
 			contribution.erase("failure")
 			contribution.erase("text")
-			contribution.erase("claims")
+			contribution["claims"] = []
 	# Status is derived from the run set, and a run in flight makes the session
 	# running. Writing anything else would be a record the engine refuses.
 	session["status"] = "running"

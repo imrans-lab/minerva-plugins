@@ -423,19 +423,20 @@ mode on the tool rather than a change to what loading means:
 `minerva_council_load_snapshot` takes `mode: "replace"` (the default — hold
 exactly this document, stop whatever is running) and `mode: "reopen"`, which the
 panel sends because a seed *is* a panel coming back to its own record. In reopen
-mode the engine keeps what it is already holding when all three of these are
+mode the engine keeps what it is already holding when all of these are
 true, and replaces it otherwise:
 
 1. the resident document has the **same `project_id`** as the incoming one;
 2. its `snapshot_revision` is **at least as high** — equal counts, because a
    panel can persist the revision `run.start` minted and close before the first
    contribution commits one of its own; and
-3. every session and run the incoming record names is **still present** in it.
+3. every session and run the incoming record names is **still present** in it; and
+4. at **equal revision**, the entire snapshot content is identical. Different
+   content at the same revision is a replacement, even when all IDs match.
 
-The third is the descendancy test. The engine only ever advances a record it was
-seeded with, so a resident satisfying all three is a later state of the same
-document at the same point or further on; one that has *diverged* — a session or a run the resident never had —
-is a different history, and the caller's record wins.
+The third is a history compatibility check, not proof of ancestry. It detects
+missing sessions or runs. The fourth prevents silently discarding edits to a
+copy that retained its revision. Older copies remain subject to the policy below.
 
 **The residual, stated honestly: a LAGGING file copy is indistinguishable from
 the same document reopened.** Copy a `.mcouncil` into a second project, work in
@@ -800,7 +801,11 @@ Every chat-driven step is an ordinary protocol command run through `Dispatch` �
 `session.create`, `run.start`, `run.cancel`, `session.bind_chat`. A chat turn
 therefore gets the same schema validation, idempotency ledger, revision check
 and bounded waiting as a turn driven from the panel, and there is one engine
-rather than two.
+rather than two. A chat turn pins its commands to the document load generation;
+revision retries cannot cross a document replacement. Cancellation marks active
+turn scopes as well as cancelling committed runs, so it also stops setup before
+`run.start`. The dispatcher checks for an already-live round under its mutation
+lock to prevent overlapping turns from starting duplicate consultations.
 
 ### 5.3.3 Model choice is explicit, never the host's default route
 

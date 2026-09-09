@@ -13,10 +13,8 @@
 # after the loop), section 4 six, section 5 seven, section 6 nineteen,
 # section 7 five, section 8 eight, section 9 six.
 #
-# Sections 7-9 are PREDICTED, not observed: they were authored without being
-# run, and each opens with a guard assertion that fires INSTEAD of its own
-# assertions when the backend binary is missing. A first run that ends at 78 has
-# them; one that ends lower has hit a guard, and the guard names which.
+# All 78 assertions were observed against the real host and backend.
+# A lower count means a setup guard fired rather than exercising its section.
 #
 # SETUP THIS SUITE NEEDS beyond the runner's own: section 6 drives the REAL
 # backend over stdio, so council-plugin must be built first —
