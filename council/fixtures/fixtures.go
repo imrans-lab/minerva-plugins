@@ -5,5 +5,10 @@ package fixtures
 
 import "embed"
 
-//go:embed *.json invalid/*.json
+// The .mcouncil entry is the populated example document: the same record kind
+// as the .json snapshots, carrying the extension the panel opens, so the live
+// check can point a person at a file Minerva will actually open and the
+// contract tests still hold it to the schemas.
+//
+//go:embed *.json invalid/*.json *.mcouncil
 var FS embed.FS

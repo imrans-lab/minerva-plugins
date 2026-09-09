@@ -5,7 +5,9 @@ import (
 	"io"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,17 +16,27 @@ import (
 	"github.com/ipeerbhai/plugins/council/internal/session"
 )
 
-// fakeHost drives the real serve loop over a pair of pipes, one request at a
-// time, the way Minerva drives the process over stdin/stdout. It is the only
-// test double here: the protocol needs a peer, and everything on this side of
-// the pipe — the loop, the registry, the engine, the schemas — is production
-// code.
+// fakeHost drives the real serve loop over a pair of pipes, the way Minerva
+// drives the process over stdin/stdout. It is the only test double here: the
+// protocol needs a peer, and everything on this side of the pipe — the loop,
+// the registry, the engine, the schemas — is production code.
+//
+// It routes replies by id rather than reading them in order, because the loop
+// it drives answers several requests at once: a Council round is a long
+// tools/call, and the reads and cancels that make it bearable are answered
+// while it runs. A harness that assumed one reply per request would be
+// asserting a property the backend no longer has.
 type fakeHost struct {
 	t    *testing.T
 	enc  *json.Encoder
-	dec  *json.Decoder
 	in   *io.PipeWriter
 	done chan error
+
+	mu      sync.Mutex
+	waiting map[string]chan map[string]any
+	// unaddressed carries the replies that answer no request of ours: the
+	// null-id errors a malformed line draws.
+	unaddressed chan map[string]any
 }
 
 func newFakeHost(t *testing.T, store *session.Store) *fakeHost {
@@ -33,49 +45,119 @@ func newFakeHost(t *testing.T, store *session.Store) *fakeHost {
 	outR, outW := io.Pipe()
 	done := make(chan error, 1)
 	go func() {
-		err := serve(inR, outW, newRegistry(store))
+		err := serve(inR, outW, newRegistry(store), nil)
 		_ = outW.Close()
 		done <- err
 	}()
-	return &fakeHost{t: t, enc: json.NewEncoder(inW), dec: json.NewDecoder(outR), in: inW, done: done}
+	h := &fakeHost{
+		t:           t,
+		enc:         json.NewEncoder(inW),
+		in:          inW,
+		done:        done,
+		waiting:     map[string]chan map[string]any{},
+		unaddressed: make(chan map[string]any, 8),
+	}
+	go h.route(json.NewDecoder(outR))
+	return h
+}
+
+// route reads every response the backend writes and hands it to whoever is
+// waiting on its id.
+func (h *fakeHost) route(dec *json.Decoder) {
+	for {
+		var response map[string]any
+		if err := dec.Decode(&response); err != nil {
+			h.mu.Lock()
+			for id, waiter := range h.waiting {
+				close(waiter)
+				delete(h.waiting, id)
+			}
+			h.mu.Unlock()
+			return
+		}
+		key := ""
+		if raw, ok := response["id"].(float64); ok {
+			key = strconv.Itoa(int(raw))
+		}
+		h.mu.Lock()
+		waiter, found := h.waiting[key]
+		delete(h.waiting, key)
+		h.mu.Unlock()
+		if found {
+			waiter <- response
+			continue
+		}
+		select {
+		case h.unaddressed <- response:
+		default:
+		}
+	}
+}
+
+// await blocks for one reply, with a bound so a lost reply fails as itself
+// rather than as the whole suite timing out.
+func (h *fakeHost) await(waiter chan map[string]any, what string) map[string]any {
+	h.t.Helper()
+	select {
+	case response, open := <-waiter:
+		if !open {
+			h.t.Fatalf("%s: the backend closed its stream without answering", what)
+		}
+		return response
+	case <-time.After(60 * time.Second):
+		h.t.Fatalf("%s: no reply within 60s", what)
+		return nil
+	}
 }
 
 // rpc sends one JSON-RPC request and returns the response it draws.
 func (h *fakeHost) rpc(id int, method string, params map[string]any) map[string]any {
 	h.t.Helper()
+	waiter := make(chan map[string]any, 1)
+	h.mu.Lock()
+	h.waiting[strconv.Itoa(id)] = waiter
+	h.mu.Unlock()
+
 	msg := map[string]any{"jsonrpc": "2.0", "id": id, "method": method}
 	if params != nil {
 		msg["params"] = params
 	}
-	if err := h.enc.Encode(msg); err != nil {
+	h.mu.Lock()
+	err := h.enc.Encode(msg)
+	h.mu.Unlock()
+	if err != nil {
 		h.t.Fatalf("%s: write: %v", method, err)
 	}
-	var response map[string]any
-	if err := h.dec.Decode(&response); err != nil {
-		h.t.Fatalf("%s: read: %v", method, err)
-	}
-	return response
+	return h.await(waiter, method)
 }
 
 // notify sends a notification, which draws no reply.
 func (h *fakeHost) notify(method string) {
 	h.t.Helper()
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if err := h.enc.Encode(map[string]any{"jsonrpc": "2.0", "method": method}); err != nil {
 		h.t.Fatalf("%s: write: %v", method, err)
 	}
 }
 
-// writeRaw sends a line that is not valid JSON, to exercise the parse-error path.
+// writeRaw sends a line that is not valid JSON, to exercise the parse-error
+// path. Its answer carries a null id and so addresses no request of ours.
 func (h *fakeHost) writeRaw(line string) map[string]any {
 	h.t.Helper()
-	if _, err := h.in.Write([]byte(line + "\n")); err != nil {
+	h.mu.Lock()
+	_, err := h.in.Write([]byte(line + "\n"))
+	h.mu.Unlock()
+	if err != nil {
 		h.t.Fatalf("write raw: %v", err)
 	}
-	var response map[string]any
-	if err := h.dec.Decode(&response); err != nil {
-		h.t.Fatalf("read after raw line: %v", err)
+	select {
+	case response := <-h.unaddressed:
+		return response
+	case <-time.After(60 * time.Second):
+		h.t.Fatal("no reply to a malformed line within 60s")
+		return nil
 	}
-	return response
 }
 
 // call runs a tools/call and decodes the JSON body the tool returned, together
@@ -257,6 +339,24 @@ func TestStdioProtocolEndToEnd(t *testing.T) {
 	if runID == "" {
 		t.Fatalf("run.start returned no run_id: %v", started)
 	}
+	// run.start consults the members before it answers, and this Store has no
+	// chat host bound. The oracle is the record's own failure enum: a backend
+	// with no route to a model says model_unavailable against the seat, and the
+	// run rests failed rather than hanging or claiming an answer.
+	if got, _ := started["payload"].(map[string]any)["status"].(string); got != "failed" {
+		t.Fatalf("with no host bound the round must rest failed, got %q: %v", got, started["payload"])
+	}
+	startedContributions, _ := started["payload"].(map[string]any)["contributions"].([]any)
+	if len(startedContributions) != 1 {
+		t.Fatalf("the follow-up consults one seat, got %v", startedContributions)
+	}
+	firstFailure, _ := startedContributions[0].(map[string]any)["failure"].(map[string]any)
+	if code, _ := firstFailure["code"].(string); code != session.CodeModelUnavailable {
+		t.Fatalf("an unbound backend must report model_unavailable, got %v", firstFailure)
+	}
+	if _, present := started["payload"].(map[string]any)["synthesis"]; present {
+		t.Fatalf("nobody answered, so there is nothing to synthesise: %v", started["payload"])
+	}
 
 	replayed := host.command(7, schemas, map[string]any{
 		"request_id":    "req-run",
@@ -375,8 +475,14 @@ func TestStdioProtocolEndToEnd(t *testing.T) {
 	}
 
 	// --- reload: work left in flight is demoted, never resumed ------------
-	restoredFrom := int(snapshot["snapshot_revision"].(float64))
-	reloaded, isError := host.call(14, "minerva_council_load_snapshot", map[string]any{"snapshot": snapshot})
+	// The run above reached rest inside the command that started it, so nothing
+	// in the exported document is in flight. An interrupted document is what a
+	// killed process leaves behind — a run still saying "running" — and the
+	// engine never persists one, so the test builds it from the record it just
+	// exported. It is a valid council_project_snapshot; that is the point.
+	interrupted := interruptedCopy(t, snapshot)
+	restoredFrom := int(interrupted["snapshot_revision"].(float64))
+	reloaded, isError := host.call(14, "minerva_council_load_snapshot", map[string]any{"snapshot": interrupted})
 	if isError {
 		t.Fatalf("load: %v", reloaded)
 	}
@@ -400,8 +506,53 @@ func TestStdioProtocolEndToEnd(t *testing.T) {
 		t.Fatalf("a session whose run was interrupted must read partial, got %q", got)
 	}
 
+	// --- the shipped populated document loads through the real backend ----
+	// This is the fixture the owner's live check opens. Loading it here proves
+	// the same file the panel is pointed at is one this engine accepts, and the
+	// round trip proves the architecture's corollary: a valid record loads
+	// UNCHANGED and at the same revision, because with the derivation invariant
+	// in force there is nothing left for rehydration to fix.
+	var populated map[string]any
+	if err := json.Unmarshal(readFixture(t, "workshop_complete.mcouncil"), &populated); err != nil {
+		t.Fatalf("the populated fixture is not JSON: %v", err)
+	}
+	loadedPopulated, isError := host.call(16, "minerva_council_load_snapshot", map[string]any{"snapshot": populated})
+	if isError {
+		t.Fatalf("the populated .mcouncil fixture did not load: %v", loadedPopulated)
+	}
+	if demoted, _ := loadedPopulated["runs_demoted"].(float64); demoted != 0 {
+		t.Fatalf("nothing in the populated fixture is in flight, so nothing may be demoted: %v", loadedPopulated)
+	}
+	if got, _ := loadedPopulated["snapshot_revision"].(float64); int(got) != int(populated["snapshot_revision"].(float64)) {
+		t.Fatalf("a valid document must load at its own revision: %v vs %v", got, populated["snapshot_revision"])
+	}
+	if got, _ := loadedPopulated["sessions"].(float64); int(got) != 1 {
+		t.Fatalf("the populated fixture holds one session, the backend read %v", loadedPopulated["sessions"])
+	}
+	roundTripped, isError := host.call(17, "minerva_council_export_snapshot", map[string]any{})
+	if isError {
+		t.Fatalf("export after loading the populated fixture: %v", roundTripped)
+	}
+	if !reflect.DeepEqual(roundTripped["snapshot"], any(populated)) {
+		t.Fatal("the populated fixture did not survive load/export unchanged")
+	}
+	populatedStatus, isError := host.call(18, "minerva_council_status", map[string]any{})
+	if isError {
+		t.Fatalf("status after loading the populated fixture: %v", populatedStatus)
+	}
+	populatedSessions, _ := populatedStatus["sessions"].([]any)
+	if len(populatedSessions) != 1 {
+		t.Fatalf("expected one session, got %v", populatedSessions)
+	}
+	// The fixture's last run completed, so the derivation says complete. A
+	// fixture whose stored status disagreed would already have been refused by
+	// the load above; this checks the value a person will see in the panel.
+	if got, _ := populatedSessions[0].(map[string]any)["status"].(string); got != "complete" {
+		t.Fatalf("the populated fixture's session must read complete, got %q", got)
+	}
+
 	// --- shutdown ---------------------------------------------------------
-	shutdown := host.rpc(16, "shutdown", nil)
+	shutdown := host.rpc(19, "shutdown", nil)
 	if result, _ := shutdown["result"].(map[string]any); result == nil {
 		t.Fatalf("shutdown: %v", shutdown)
 	}
@@ -497,4 +648,53 @@ func TestManifestMatchesTheToolRegistry(t *testing.T) {
 			t.Fatalf("%s: manifest and registry input schemas differ", declared.Name)
 		}
 	}
+}
+
+// readFixture reads one shipped example. The fixtures are the worked examples
+// the architecture document points at, so a test that uses one is testing the
+// thing a reader was told to expect.
+func readFixture(t *testing.T, name string) []byte {
+	t.Helper()
+	raw, err := fixtures.FS.ReadFile(name)
+	if err != nil {
+		t.Fatalf("read fixture %s: %v", name, err)
+	}
+	return raw
+}
+
+// interruptedCopy returns the document a killed process leaves behind: a run
+// still claiming to be running, with the session status the derivation gives
+// for it. It is built by hand because the engine never writes one — a run
+// reaches rest inside the command that started it — and the interruption rule
+// has to be tested against the state it exists for.
+func interruptedCopy(t *testing.T, snapshot map[string]any) map[string]any {
+	t.Helper()
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var copied map[string]any
+	if err := json.Unmarshal(raw, &copied); err != nil {
+		t.Fatal(err)
+	}
+	sessions, _ := copied["sessions"].([]any)
+	if len(sessions) == 0 {
+		t.Fatal("no session to interrupt")
+	}
+	interruptedSession, _ := sessions[0].(map[string]any)
+	runs, _ := interruptedSession["runs"].([]any)
+	if len(runs) == 0 {
+		t.Fatal("no run to interrupt")
+	}
+	run, _ := runs[len(runs)-1].(map[string]any)
+	run["status"] = "running"
+	delete(run, "failure")
+	delete(run, "ended_at")
+	for _, c := range run["contributions"].([]any) {
+		contribution, _ := c.(map[string]any)
+		contribution["status"] = "running"
+		delete(contribution, "failure")
+	}
+	interruptedSession["status"] = "running"
+	return copied
 }

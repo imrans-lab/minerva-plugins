@@ -194,8 +194,8 @@ persists the snapshot that comes back and is otherwise a view (see §3).
 |---|---|---|---|
 | `snapshot_revision` | the wrapper (native panel) | any accepted mutation | every request's `base_revision`, every reply |
 | `definition_id` + `definition_revision` | the wrapper | a council's members, seats, sources or rules change | exports; a session's embedded snapshot |
-| `member_id` + `member_revision` | the wrapper | scope, limitations or grounding change | every contribution, so an old answer is never re-attributed |
-| `source_id` + `source_revision` | the wrapper | new material is captured — never an edit in place | grounding refs and citations |
+| `member_id` + `member_revision` | the wrapper | kind, attribution, scope, limitations or grounding change — `member.upsert` and `member.adopt_source` mint it, so a cosmetic rename does not | every contribution, so an old answer is never re-attributed |
+| `source_id` + `source_revision` | the wrapper | new material is captured — never an edit in place; `source.capture` mints the next revision number | grounding refs and citations |
 | `anchor_id` | the wrapper, within a source revision | never; a new capture gets new anchors | citations |
 | `session_id` + `session_revision` | the wrapper | any change to that session | the panel view |
 | `run_id` | the backend, echoed into the snapshot | never | contributions, outcomes |
@@ -211,8 +211,9 @@ responsibility cannot rename a person.
 
 ### 2.2 Invariants the schemas cannot state
 
-Enforced in `internal/contract/invariants.go` and exercised by the sixteen
-records in `fixtures/invalid/`, each of which fails for its one named reason:
+Enforced in `internal/contract/invariants.go` and exercised by the records
+indexed in `fixtures/invalid/cases.json`, each of which fails for the one reason
+that index names:
 
 - A council has **exactly one chair**.
 - Every seat names a member that exists; every grounding ref names a
@@ -220,7 +221,15 @@ records in `fixtures/invalid/`, each of which fails for its one named reason:
 - Ids are unique within their scope; anchors are unique within a source
   revision.
 - A captured payload still hashes to its `content_hash` and matches its
-  `byte_length`; an anchor's `[start, end)` really contains its quote.
+  `byte_length`; an anchor's `[start, end)` really contains its quote; and the
+  `content_hash` **on the source** describes the payload it holds. The source
+  carries the hash as well as the payload so that an inventory entry whose
+  content did not travel still says which bytes it stood for.
+- **A simulant is grounded, a functional advisor is not obliged to be.** Only a
+  simulant may carry `represents`, and a simulant must carry grounding, a scope
+  and its known gaps: interpreting a named author with nothing behind it is the
+  one thing this record must not be able to say. A `human` member — the local
+  user — carries neither grounding nor a model hint.
 - A payload carries **exactly one** of `inline` or `blob_handle`, and `inline`
   only under `InlineLimit`.
 - A `source` claim cites at least one anchor; an `inference` or `unknown` claim
@@ -401,7 +410,8 @@ council.onEvent(cb)
 Envelope shapes are in `envelope.schema.json`. Rules:
 
 - Mutating commands (`definition.upsert`, `definition.import`, `source.upsert`,
-  `session.create`, `session.bind_chat`, `run.start`, `run.cancel`, `run.retry`,
+  `source.capture`, `member.upsert`, `member.adopt_source`, `session.create`,
+  `session.bind_chat`, `run.start`, `run.cancel`, `run.retry`,
   `outcome.retain`) **must** carry `base_revision`; read commands
   (`snapshot.get`, `source.fetch`, `definition.export`) must not.
 - `base_revision != snapshot_revision` → `ok: false`, error `stale_revision`,
@@ -596,6 +606,114 @@ is inside `{"snapshot": …}`, so the wrapper measures the message that will
 actually travel and refuses it with `payload_too_large` — a refusal the page can
 render, rather than a message the broker drops.
 
+### 5.6 The round engine, and the one call it makes
+
+**How Council reaches a model.** The backend writes a JSON-RPC *request* to its
+own stdout — `{"method": "minerva/capability", "id": …, "params": {"capability":
+"host.providers.chat", "args": {…}}}` — and the host answers on its stdin,
+correlated by `id`. The JSON-RPC `result` holds a second envelope,
+`{"success": true, "result": {…}}` on success and a flat
+`{"success": false, "error_code", "error_message"}` on refusal. The grant is
+`permissions.host_capabilities: ["host.providers.chat"]` in the manifest.
+`hostchat.go` is the whole of that transport, and `session.ChatHost` is the one
+method the engine sees through it, which is what lets a deterministic fake stand
+in for a live model in tests without standing in for anything else.
+
+**One reader, routing by shape.** `serve` starts the single goroutine that reads
+stdin for the life of the process and classifies each line the only way JSON-RPC
+allows: a message carrying a `method` is a request and goes to the protocol
+loop; one carrying an `id` and no method is a response and goes to whichever
+capability exchange is waiting on that id. Two readers on one `bufio.Reader`
+would each swallow bytes the other was waiting for, and a handler that read
+stdin directly would swallow the very requests it is meant to leave room for.
+All writing goes through one `stdoutWriter` with one lock, because several
+replies are now in flight and two encoders interleaving would emit lines that
+are not messages.
+
+An exchange registers a channel under its id before it writes, so it can be
+**abandoned**: waiting on a channel can be given up when a member's context
+expires, and waiting on a `Read` cannot. Giving up costs nothing — the entry is
+removed, and a reply that arrives afterwards finds nothing waiting and is
+dropped by the reader. There is no desynced state to recover from, because
+nothing was ever swallowed.
+
+**Several requests at once, deliberately.** The host runs any number of requests
+in flight; panel IPC, MCP tool dispatch and a provider's cancel are independent
+coroutines, and the host's own stdout drain already routes capability replies by
+id. Council matches that on both sides. Each `tools/call` handler runs on its own
+goroutine, so a read, a `run.await` or a `run.cancel` is answered while a round
+is running — answering them in order would mean answering none of them until the
+round finished. And exchanges do not serialise, so a round may run as many
+concurrent calls as `max_concurrent_members` allows.
+
+An adapter that can carry fewer is expected to say so through
+`session.ConcurrencyLimiter`, and the engine clamps its own semaphore to it.
+That is not a nicety: a member's timeout is armed when it takes a semaphore
+slot, so one left queueing inside an adapter would spend its whole allowance
+waiting and expire without ever having been asked.
+
+**Bounded replies.** The host gives a tool call 120 seconds by default, so a
+reply held past that is a reply nobody receives. `run.start` and `run.retry`
+therefore set the round going and answer within the envelope's `wait_seconds`
+(1–90, default 20, schema-validated) with the run's id and its status so far; a
+round that outruns the wait keeps going on its own goroutine and the caller
+reads it with `run.await` — bounded by the same field, so there is one answer to
+"how long may the backend hold a reply" rather than two that can drift.
+
+**Where a round runs.** `run.start` and `run.retry` create the pending run under
+the engine lock, hand it to a background goroutine, and wait for it with the
+lock **released**. Nothing else would work: a round that held the lock would
+make every read and every cancel wait on a model, however concurrent the
+protocol loop was. The mechanism is one field on the command table, `after`, and
+it is the only place in the engine where a command has a second stage.
+
+**What a member is sent.** `prompt.go` is the only builder, and it is never
+handed another member's answer on an initial call — that is how
+`independent_initial_round` is enforced rather than promised. A member gets the
+question, the session's context snapshot, and the source revisions **its own**
+`grounding` pins, with the anchor ids it may cite. A follow-up adds the focused
+prompt and, when it names a claim, that claim — which is always this member's
+own, because a follow-up about an argument is routed to whoever made it. Only
+the chair sees the bench.
+
+A seat held by a `human` member is never consulted: nothing prompts the local
+user, and their view reaches a council as context or as a captured source.
+
+**What comes back.** Members answer in a small JSON shape; a reply that is not
+in it is still kept as the answer with no claims. A `source` claim keeps only
+the citations that resolve inside that member's own grounding, and a claim left
+with none becomes `unknown` — an interpretation is never displayed as something
+a source said, and dropping the label is the only way to keep that true without
+dropping the assertion. `model_id` and `usage` are recorded from the reply, so
+an answer is never attributed to a model that did not produce it and a cost is
+never estimated.
+
+**What the chair is told, and what it cannot leave out.** Synthesis runs over
+the results that exist. When a member is missing, the engine appends its own
+`unknown` claim to the synthesis naming the seats that did not answer — written
+after the model's reply is read, so a chair that wrote around the gap still
+produces a labelled partial. A round with no answers at all is `failed` and
+carries no synthesis.
+
+**Limits are data.** `max_members_per_round`, `max_concurrent_members`,
+`max_prompt_bytes`, `run_budget_seconds`, `max_rounds_per_session` and
+`per_member_timeout_seconds` live on `deliberation` in the council definition,
+where the schema validates them and an export carries them. A run may **narrow**
+any of the four per-call limits through `run.start`'s `limits`, and never widen
+one; the narrowing is stored on the run, because a round is planned from the
+record and a limit that lived only in the request would be gone by the time it
+mattered. `max_rounds_per_session` is the ceiling that makes "nothing loops"
+more than a claim about control flow: the engine starts nothing on its own, and
+a client that did could still only reach that many runs.
+
+**Superseding.** Each executing run holds a `runControl`, and its *pointer* is
+the identity a landing result is checked against. A cancelled run, a document
+replaced by `Load`, or a second attempt at the same seat all leave a reply with
+nowhere to land. A reply that arrives after its own run left `running` is
+recorded `stale` with full attribution and changes nothing else (§4.2), keeping
+any failure already recorded against that seat; a reply whose control is gone is
+dropped without touching the snapshot at all.
+
 ---
 
 ## 6. Sources, payload size, and missing references
@@ -603,7 +721,23 @@ render, rather than a message the broker drops.
 - A source revision is a **capture**, never an edit. Changing the material
   creates a new `source_revision`; the old one stays so a past contribution can
   still be inspected against what it actually read. Re-grounding a member is an
-  explicit act that selects new revisions and advances `member_revision`.
+  explicit act — the `member.adopt_source` command — that selects a revision and
+  advances `member_revision`. Nothing adopts on a member's behalf: a new capture
+  appears beside the old one and every member keeps reading what it was grounded
+  in until somebody says otherwise.
+- **Capturing is `source.capture`, and it derives.** The caller supplies the
+  text and the quotes it wants anchored; the engine computes `content_hash` and
+  `byte_length` and locates each quote, refusing one that appears nowhere or
+  twice. The page never computes a hash or an offset, because two implementations
+  of the same derivation eventually disagree and the disagreement shows up as a
+  citation pointing at the wrong sentence. `source.upsert` remains for a caller
+  that has already built the record — a blob-carried payload, for instance.
+- **A missing reference is repaired, not re-created.** An inventory entry
+  carries the `content_hash` of the material that did not travel, so
+  `source.capture` naming that revision accepts text that hashes to it, fills in
+  the payload and recovers the anchor spans, and refuses anything else as
+  different material that has to be captured as its own revision. That is why
+  the hash lives on the source and not only inside the payload.
 - **The v0.1 ceiling is the whole record.** v0.1 moves an entire snapshot across
   the host's pluginIPC hop in one message, and that hop is capped at 65536
   (`PluginWebviewBroker.gd:42`; see §1.5 for how it is measured). So the ceiling
@@ -637,8 +771,8 @@ render, rather than a message the broker drops.
 
 ## 7. Export, import, and project switch
 
-`contract.ExportDefinition(definition, includeContent)` produces the portable
-form. It:
+`contract.ExportDefinition(definition, includeContent, selected)` produces the
+portable form. It:
 
 - takes the definition only — a session has no way to be included, because
   `council_definition.schema.json` is a closed object with nowhere to put a
@@ -649,10 +783,27 @@ form. It:
   hash, anchors — whether or not the content travels, so an import can name
   exactly what it could not find instead of presenting an ungrounded member as
   grounded;
+- **includes content per source, not all-or-nothing.** `include_source_ids`
+  names the sources whose captured bytes travel; absent means every source,
+  present-and-empty means none. A council usually mixes material the user is
+  happy to share with notes they are not, and a single switch would make the
+  cautious choice cost the whole grounding. The reply reports which sources
+  travelled and which were withheld, so the panel can show what is leaving the
+  project rather than assert it;
 - does not mutate the in-project definition, which keeps its note links.
 
-`TestDefinitionExportCarriesNoSessionData` asserts all of this, including a
-field-name sweep for every session-side key.
+`definition.import` names every source that arrived without content, and
+`source.capture` against that revision is how the receiving project repairs one
+(§6).
+
+`TestDefinitionExportCarriesNoSessionData` asserts all of this. Its sweep is
+derived from the schemas rather than from a list: every property name declared
+by `session.schema.json` or `project_snapshot.schema.json` and not by
+`council_definition.schema.json` or `common.schema.json` is a key an export may
+not contain, so a field added to a session extends the test on its own.
+`TestGroundedMemberLifecycleOverTheProtocol` runs the same claim end to end over
+the live protocol, sweeping the exported bytes for project A's question, session
+id, chat id, note ids and unselected material.
 
 **Project switch.** The wrapper's snapshot belongs to the project that loaded
 it. On `_on_panel_load_request` the whole snapshot is replaced and the
@@ -680,7 +831,7 @@ run from the previous snapshot cannot apply: the run id is not present, and
 | formatting | `gofmt -l .` (in `council/`) | clean |
 | static analysis | `GOWORK=off go vet ./...` | clean |
 | build | `go build ./...` (in `council/`) | clean |
-| contract tests | `GOWORK=off go test ./internal/contract/` | 5 tests, over 8 valid and 16 invalid fixtures |
+| contract tests | `GOWORK=off go test ./internal/contract/` | 5 tests, over 10 valid and 19 invalid fixtures (the populated `.mcouncil` is one of them) |
 | GDScript syntax | `godot --headless --check-only -s <file>` on every `ui/*.gd` | clean |
 | panel suite | `council/scripts/run-gd-tests.sh <minerva>` | authored, never executed — see `tests/gd/EXPECTED_SUITES` |
 

@@ -18,15 +18,19 @@
         "definition.export",
         "definition.import",
         "source.upsert",
+        "source.capture",
         "source.fetch",
+        "member.upsert",
+        "member.adopt_source",
         "session.create",
         "session.bind_chat",
         "run.start",
+        "run.await",
         "run.cancel",
         "run.retry",
         "outcome.retain"
       ],
-      "description": "snapshot.get and source.fetch and definition.export are reads: they omit base_revision and never advance the snapshot. Everything else mutates."
+      "description": "snapshot.get, source.fetch, definition.export and run.await are reads: they omit base_revision and never advance the snapshot. Everything else mutates. run.start consults the members and returns only once the run has reached a resting state, so a caller that wants the answer needs nothing else; run.await is for the second viewer of a run somebody else started. source.upsert takes a source record the caller has already built; source.capture takes the raw text instead and derives the hash and the excerpt spans, so the page and the engine cannot disagree about them. member.upsert edits an identity without touching the seat that holds it, and member.adopt_source is the explicit act of moving a member onto a newer capture."
     },
     "Request": {
       "type": "object",
@@ -38,6 +42,12 @@
         "base_revision": {
           "$ref": "common.schema.json#/$defs/Revision",
           "description": "Required on a mutating command. Must equal the current snapshot_revision or the reply is a stale_revision error carrying the current snapshot."
+        },
+        "wait_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 90,
+          "description": "How long the backend may hold this reply before answering with the state so far. It applies to the commands that wait — run.start, run.retry and run.await — and is ignored by the rest. The ceiling is well under the host's own 120 s tool-call timeout, because a reply the host has stopped waiting for is a reply nobody receives; a round that outlives it keeps running and is read with run.await."
         },
         "payload": { "type": "object" }
       },

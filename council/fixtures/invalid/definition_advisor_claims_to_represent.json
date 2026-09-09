@@ -11,6 +11,7 @@
       "member_revision": 1,
       "kind": "assistant",
       "display_name": "Chair",
+      "represents": "R. Okonkwo",
       "scope": "Runs the round, reports where members disagree, and never adds a position of its own.",
       "limitations": "Has no grounding of its own; everything it reports must trace to a member contribution.",
       "grounding": []
@@ -107,6 +108,5 @@
     "max_prompt_bytes": 16384,
     "run_budget_seconds": 300,
     "max_rounds_per_session": 12
-  },
-  "question": "what should we do?"
+  }
 }

@@ -31,6 +31,18 @@ type Store struct {
 	ledger   map[string]Reply
 	seq      map[string]int
 
+	// chat is the route to a host model. It is refusing by default, so a Store
+	// nobody bound a transport to reports model_unavailable rather than hanging.
+	chat ChatHost
+
+	// live holds one handle per run this engine is executing, keyed by
+	// (session_id, run_id) — a run id is only unique within its session, so the
+	// id alone would let two sessions share a handle. A result landing from a
+	// model call is checked against the handle it was started with: an entry
+	// that is gone, or replaced, means the run it belongs to is no longer the
+	// current one and the reply has nowhere to go.
+	live map[string]*runControl
+
 	// now returns the timestamp written into new records. Injectable so a test
 	// can assert an exact record rather than matching a wall clock.
 	now func() string
@@ -47,6 +59,8 @@ func New() (*Store, error) {
 		snapshot: emptySnapshot(),
 		ledger:   map[string]Reply{},
 		seq:      map[string]int{},
+		chat:     unavailableChatHost{},
+		live:     map[string]*runControl{},
 		now:      func() string { return time.Now().UTC().Format("2006-01-02T15:04:05Z") },
 	}, nil
 }
@@ -108,6 +122,11 @@ func (s *Store) Load(raw []byte) (LoadReport, error) {
 	if err := checkSnapshotBudget(next); err != nil {
 		return LoadReport{}, err
 	}
+	// The document these runs belong to is being replaced. Stop the calls, and
+	// drop the handles so anything already in flight lands on nothing: a reply
+	// for the old document must never write into the one taking its place.
+	s.cancelLive()
+
 	demoted := contract.RehydrateOnLoad(next)
 	// Demotion rewrites run and session statuses, so the document that comes
 	// out of load is not the one that went in. It gets its own revision:
@@ -195,14 +214,30 @@ func (s *Store) Status() map[string]any {
 // to. Every other failure, including a refused command, comes back as a
 // well-formed reply carrying a Failure the view can render.
 func (s *Store) Dispatch(raw []byte) (Reply, error) {
+	reply, cmd, req, err := s.dispatchLocked(raw)
+	// A command with an "after" stage has only been set up so far. The stage
+	// that waits — for the members to answer, or for somebody else's run —
+	// happens here, with the lock released. That is one half of what makes a
+	// cancel or a read arriving mid-round answerable; the other half is the
+	// protocol loop, which dispatches each tool call on its own goroutine.
+	if err != nil || !reply.OK || reply.Replayed || cmd.after == nil {
+		return reply, err
+	}
+	return cmd.after(s, req, reply.Payload), nil
+}
+
+// dispatchLocked validates one envelope and applies its command against the
+// snapshot, holding the engine lock for exactly that and no longer. It returns
+// the command it dispatched so Dispatch can run any deferred stage afterwards.
+func (s *Store) dispatchLocked(raw []byte) (Reply, command, *Request, error) {
 	var probe struct {
 		RequestID string `json:"request_id"`
 	}
 	if err := json.Unmarshal(raw, &probe); err != nil {
-		return Reply{}, fmt.Errorf("request is not a JSON object: %w", err)
+		return Reply{}, command{}, nil, fmt.Errorf("request is not a JSON object: %w", err)
 	}
 	if !idPattern.MatchString(probe.RequestID) {
-		return Reply{}, fmt.Errorf("request carries no usable request_id; a reply has nowhere to be addressed")
+		return Reply{}, command{}, nil, fmt.Errorf("request carries no usable request_id; a reply has nowhere to be addressed")
 	}
 
 	s.mu.Lock()
@@ -211,7 +246,7 @@ func (s *Store) Dispatch(raw []byte) (Reply, error) {
 	if len(raw) > MaxEnvelopeBytes {
 		return errReply(probe.RequestID, s.revision(), fail(CodePayloadTooLarge,
 			fmt.Sprintf("request of %d bytes exceeds the %d byte transport budget; carry the content as a blob handle instead", len(raw), MaxEnvelopeBytes),
-			false)), nil
+			false)), command{}, nil, nil
 	}
 
 	// The schema and its invariants decide what a well-formed request is:
@@ -219,16 +254,16 @@ func (s *Store) Dispatch(raw []byte) (Reply, error) {
 	// command carries base_revision while a read does not.
 	if errs := s.registry.ValidateRecord("council_envelope", raw); len(errs) > 0 {
 		return errReply(probe.RequestID, s.revision(), fail(CodeInternal,
-			"request does not satisfy the Council envelope contract: "+joinErrs(errs), false)), nil
+			"request does not satisfy the Council envelope contract: "+joinErrs(errs), false)), command{}, nil, nil
 	}
 
 	var req Request
 	if err := json.Unmarshal(raw, &req); err != nil {
-		return Reply{}, err
+		return Reply{}, command{}, nil, err
 	}
 	if req.Envelope != "request" {
 		return errReply(req.RequestID, s.revision(), fail(CodeInternal,
-			fmt.Sprintf("the backend answers requests; it was sent a %q envelope", req.Envelope), false)), nil
+			fmt.Sprintf("the backend answers requests; it was sent a %q envelope", req.Envelope), false)), command{}, nil, nil
 	}
 
 	// A repeated request_id returns the stored reply unchanged. The command is
@@ -238,13 +273,13 @@ func (s *Store) Dispatch(raw []byte) (Reply, error) {
 	// written for.
 	if stored, ok := s.ledger[req.RequestID]; ok {
 		stored.Replayed = true
-		return stored, nil
+		return stored, command{}, &req, nil
 	}
 
 	cmd, known := commands[req.Command]
 	if !known {
 		return errReply(req.RequestID, s.revision(), fail(CodeInternal,
-			fmt.Sprintf("command %q is in the schema but has no handler in this build", req.Command), false)), nil
+			fmt.Sprintf("command %q is in the schema but has no handler in this build", req.Command), false)), command{}, nil, nil
 	}
 
 	// base_revision is the classification, not a second table here: the envelope
@@ -254,57 +289,78 @@ func (s *Store) Dispatch(raw []byte) (Reply, error) {
 		if *req.BaseRevision != s.revision() {
 			return errReply(req.RequestID, s.revision(), fail(CodeStaleRevision,
 				fmt.Sprintf("base_revision %d is behind the current snapshot revision %d; re-read and retry.", *req.BaseRevision, s.revision()),
-				true)), nil
+				true)), command{}, nil, nil
 		}
-		return s.applyMutation(&req, cmd), nil
+		return s.applyMutation(&req, cmd), cmd, &req, nil
 	}
 
 	payload, f := cmd.apply(s, s.snapshot, &req)
 	if f != nil {
-		return errReply(req.RequestID, s.revision(), f), nil
+		return errReply(req.RequestID, s.revision(), f), command{}, nil, nil
 	}
 	// A read is not recorded in the ledger: replaying it would return a view of
 	// a revision that has since moved, which is worse than reading again.
-	return okReply(req.RequestID, s.revision(), payload), nil
+	return okReply(req.RequestID, s.revision(), payload), cmd, &req, nil
 }
 
-// applyMutation runs a command against a copy, advances the revision, and
-// commits only if the whole snapshot still satisfies the contract. A command
-// that would produce an invalid record leaves the snapshot untouched and the
-// caller is told which invariant refused it.
-func (s *Store) applyMutation(req *Request, cmd command) Reply {
-	next := deepCopy(s.snapshot)
-	payload, f := cmd.apply(s, next, req)
-	if f != nil {
-		return errReply(req.RequestID, s.revision(), f)
-	}
-	// changed=false is how an already-satisfied command (cancelling a run that
-	// has already stopped) reports success without moving the revision, so a
-	// fire-and-forget cancel cannot invalidate every other view.
-	if changed, ok := payload["changed"].(bool); ok && !changed {
-		reply := okReply(req.RequestID, s.revision(), payload)
-		s.ledger[req.RequestID] = reply
-		return reply
-	}
+// unchanged is the sentinel a mutation returns when the command it carried was
+// already satisfied. It is not a failure: nothing is written and the revision
+// does not move, which is how a fire-and-forget cancel for a run that has
+// already stopped reports success without invalidating every other view.
+var unchanged = &Failure{Code: CodeInternal, Message: "the command was already satisfied", Retryable: false}
 
+// commit applies one mutation to a COPY of the snapshot, advances the revision,
+// and installs the result only if the whole document still satisfies the
+// contract. A mutation that would produce an invalid record leaves the snapshot
+// untouched and the caller is told which invariant refused it.
+//
+// It is the single write path. Both a protocol command and a model result
+// landing mid-round go through it, so neither can install a snapshot the other
+// would have been refused for. The caller holds the lock.
+func (s *Store) commit(mutate func(snap map[string]any) *Failure) *Failure {
+	next := deepCopy(s.snapshot)
+	if f := mutate(next); f != nil {
+		return f
+	}
 	next["snapshot_revision"] = float64(s.revision() + 1)
 	raw, err := json.Marshal(next)
 	if err != nil {
-		return errReply(req.RequestID, s.revision(), fail(CodeInternal, "could not serialise the resulting snapshot: "+err.Error(), false))
+		return fail(CodeInternal, "could not serialise the resulting snapshot: "+err.Error(), false)
 	}
 	if errs := s.registry.ValidateRecord("council_project_snapshot", raw); len(errs) > 0 {
-		return errReply(req.RequestID, s.revision(), fail(CodeInternal,
-			"the command was refused because the resulting snapshot would break the contract: "+joinErrs(errs), false))
+		return fail(CodeInternal,
+			"the change was refused because the resulting snapshot would break the contract: "+joinErrs(errs), false)
 	}
 	var canonical map[string]any
 	if err := json.Unmarshal(raw, &canonical); err != nil {
-		return errReply(req.RequestID, s.revision(), fail(CodeInternal, "could not re-read the resulting snapshot: "+err.Error(), false))
+		return fail(CodeInternal, "could not re-read the resulting snapshot: "+err.Error(), false)
 	}
 	if err := checkSnapshotBudget(canonical); err != nil {
-		return errReply(req.RequestID, s.revision(), fail(CodePayloadTooLarge, err.Error(), false))
+		return fail(CodePayloadTooLarge, err.Error(), false)
 	}
 	s.snapshot = canonical
+	return nil
+}
 
+// applyMutation runs one protocol command through the write path and builds the
+// reply, remembering it against the request_id so a retry after a lost reply
+// cannot apply the command twice.
+func (s *Store) applyMutation(req *Request, cmd command) Reply {
+	var payload map[string]any
+	f := s.commit(func(next map[string]any) *Failure {
+		var refused *Failure
+		payload, refused = cmd.apply(s, next, req)
+		if refused != nil {
+			return refused
+		}
+		if changed, ok := payload["changed"].(bool); ok && !changed {
+			return unchanged
+		}
+		return nil
+	})
+	if f != nil && f != unchanged {
+		return errReply(req.RequestID, s.revision(), f)
+	}
 	reply := okReply(req.RequestID, s.revision(), payload)
 	// Only a successful mutation is remembered, for the life of the process.
 	s.ledger[req.RequestID] = reply

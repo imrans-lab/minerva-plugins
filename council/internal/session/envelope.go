@@ -10,7 +10,11 @@
 // demoted on load rather than resumed.
 package session
 
-import "github.com/ipeerbhai/plugins/council/internal/contract"
+import (
+	"time"
+
+	"github.com/ipeerbhai/plugins/council/internal/contract"
+)
 
 // SchemaVersion is the one wire/record format version this build speaks. A
 // record or envelope carrying anything else is refused rather than guessed at.
@@ -38,6 +42,19 @@ const (
 	CodeInternal         = "internal"
 )
 
+// DefaultWaitSeconds is how long a waiting command holds its reply when the
+// caller did not say. MaxWaitSeconds is the ceiling the schema enforces.
+//
+// Both are well under the host's own tool-call timeout, which is 120 s by
+// default. A backend that held a reply past it would be answering a caller that
+// had already given up, so a round that runs longer than this is not waited
+// out: the command answers with the run's id and current status, the round goes
+// on in the background, and run.await reads it.
+const (
+	DefaultWaitSeconds = 20
+	MaxWaitSeconds     = 90
+)
+
 // Request is one inbound protocol envelope. base_revision is a pointer because
 // its absence is meaningful: a read command must not carry one and a mutating
 // command must.
@@ -47,7 +64,22 @@ type Request struct {
 	RequestID     string         `json:"request_id"`
 	Command       string         `json:"command"`
 	BaseRevision  *int           `json:"base_revision,omitempty"`
+	WaitSeconds   *int           `json:"wait_seconds,omitempty"`
 	Payload       map[string]any `json:"payload"`
+}
+
+// waitFor reads how long this request may be held, clamped to the ceiling the
+// schema already enforces so a build with an older schema still cannot exceed
+// what the host will wait for.
+func (r *Request) waitFor() time.Duration {
+	seconds := DefaultWaitSeconds
+	if r.WaitSeconds != nil && *r.WaitSeconds > 0 {
+		seconds = *r.WaitSeconds
+	}
+	if seconds > MaxWaitSeconds {
+		seconds = MaxWaitSeconds
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 // Reply is one outbound protocol envelope. Every reply carries the

@@ -76,7 +76,7 @@
       "author": "R. Okonkwo",
       "locator": "note: Workshop capacity essay",
       "captured_at": "2026-09-01T14:03:00Z",
-      "content_hash": "sha256:0e6baff9ffd389510802b77b3b4a35ed53508fe66c469c40754be669ee08af46",
+      "content_hash": "sha256:7a5aa234c4d5fb0530c312d4af424e04345f481d2a062e791a73000a0c79c5b7",
       "artifact": {
         "kind": "note",
         "ref": "note-capacity-essay",
@@ -107,6 +107,5 @@
     "max_prompt_bytes": 16384,
     "run_budget_seconds": 300,
     "max_rounds_per_session": 12
-  },
-  "question": "what should we do?"
+  }
 }

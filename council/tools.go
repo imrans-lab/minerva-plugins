@@ -92,18 +92,22 @@ func newRegistry(store *session.Store) *registry {
 	r.register(toolSpec{
 		Name: "minerva_council_command",
 		Description: "Apply one Council protocol command and return the reply envelope. The arguments ARE the request envelope: {request_id, command, base_revision, payload}. " +
-			"Mutating commands (definition.upsert, definition.import, source.upsert, session.create, session.bind_chat, run.start, run.cancel, run.retry, outcome.retain) must carry base_revision equal to the current snapshot_revision; " +
-			"read commands (snapshot.get, source.fetch, definition.export) must not carry it. A repeated request_id returns the stored reply with replayed:true and applies nothing a second time. " +
+			"Mutating commands (definition.upsert, definition.import, source.upsert, source.capture, member.upsert, member.adopt_source, session.create, session.bind_chat, run.start, run.cancel, run.retry, outcome.retain) must carry base_revision equal to the current snapshot_revision; " +
+			"read commands (snapshot.get, source.fetch, definition.export, run.await) must not carry it. A repeated request_id returns the stored reply with replayed:true and applies nothing a second time. " +
 			"Every reply carries the snapshot_revision it was produced against; a failure carries {code, message, retryable}. " +
-			"source.fetch returns the NEWEST capture of a source when payload.source_revision is omitted; pass a source_revision to read the exact capture a past contribution was grounded in.",
+			"source.fetch returns the NEWEST capture of a source when payload.source_revision is omitted; pass a source_revision to read the exact capture a past contribution was grounded in." +
+			" source.capture derives a source revision's hash and excerpt spans from the raw text so the page and the engine cannot disagree about them, and repairs an inventory entry in place when the text hashes to the revision's recorded content_hash. member.upsert edits an identity and mints member_revision itself, advancing it only when kind, represents, scope, limitations or grounding change; it never touches seats. member.adopt_source is the explicit act of moving a member onto another capture, which leaves every past run reading what it actually read. definition.export takes include_content and an optional include_source_ids selection, and reports which sources' content travelled." +
+			" run.start CONSULTS THE MEMBERS: it sets the round going and answers within a bounded wait (the envelope's optional wait_seconds, 1-90, default 20) with the run_id and the run's status so far, plus every contribution's status, model and usage and the chair's synthesis if it is already there. A round that outruns the wait keeps going; read it with run.await, which takes the same wait_seconds, and stop it with run.cancel. Each initial member is sent the same context snapshot and its own pinned grounding and never another member's answer. run.start's payload takes seat_ids (who is consulted), kind, prompt, addressed_seat_id or addressed_claim_id (a follow-up to a member or to one argument, routed to whoever made it, and consulting that seat alone), model_overrides keyed by seat_id, and limits, which may only NARROW the council's own max_concurrent_members, max_prompt_bytes, per_member_timeout_seconds and run_budget_seconds. run.cancel stops a run that is still running and suppresses what is in flight: a reply landing afterwards is recorded stale and moves nothing. run.retry starts a fresh run over the seats that did not answer, narrowable with seat_ids; nothing ever retries or resumes on its own.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
 				"request_id": {"type": "string", "description": "Caller-minted idempotency key. Repeating one returns the stored reply."},
 				"command": {"type": "string", "enum": [
 					"snapshot.get", "definition.upsert", "definition.export", "definition.import",
-					"source.upsert", "source.fetch", "session.create", "session.bind_chat",
-					"run.start", "run.cancel", "run.retry", "outcome.retain"
+					"source.upsert", "source.capture", "source.fetch",
+					"member.upsert", "member.adopt_source",
+					"session.create", "session.bind_chat",
+					"run.start", "run.await", "run.cancel", "run.retry", "outcome.retain"
 				]},
 				"base_revision": {"type": "integer", "description": "The snapshot_revision this command was written against. Required by every mutating command, refused on a read."},
 				"payload": {"type": "object", "description": "Command arguments. See the Council architecture document for the shape each command takes."}

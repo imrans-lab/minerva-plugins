@@ -1,0 +1,520 @@
+{
+  "schema_version": 1,
+  "record_kind": "council_project_snapshot",
+  "snapshot_revision": 31,
+  "definitions": [
+    {
+      "schema_version": 1,
+      "record_kind": "council_definition",
+      "definition_id": "def-workshop-economics",
+      "definition_revision": 6,
+      "name": "Workshop Economics",
+      "purpose": "Decide whether a one-person workshop should take on a larger recurring order, and say plainly what the decision costs.",
+      "members": [
+        {
+          "member_id": "mem-chair",
+          "member_revision": 1,
+          "kind": "assistant",
+          "display_name": "Chair",
+          "scope": "Runs the round, reports where members disagree, and never adds a position of its own.",
+          "limitations": "Has no grounding of its own; everything it reports must trace to a member contribution.",
+          "grounding": []
+        },
+        {
+          "member_id": "mem-costing",
+          "member_revision": 1,
+          "kind": "assistant",
+          "display_name": "Unit costing",
+          "scope": "Arithmetic on price, volume and the hours a job consumes. A functional advisor: it represents nobody.",
+          "limitations": "Knows only the numbers it is given. Establishes nothing about the customer, the market, or what the operator wants.",
+          "grounding": []
+        },
+        {
+          "member_id": "mem-okonkwo",
+          "member_revision": 3,
+          "kind": "simulant",
+          "display_name": "Okonkwo (capacity writing)",
+          "represents": "R. Okonkwo, author of the fictional essay and letter written for this fixture",
+          "scope": "Capacity and pricing for a single-operator workshop, as argued in one essay and one later correction.",
+          "limitations": "Two short pieces on capacity. Establishes nothing about hiring, financing, this shop's customers, or this author's views on anything else.",
+          "grounding": [
+            {
+              "source_id": "src-capacity-essay",
+              "source_revision": 2
+            },
+            {
+              "source_id": "src-capacity-letter",
+              "source_revision": 1
+            }
+          ]
+        }
+      ],
+      "seats": [
+        {
+          "seat_id": "seat-chair",
+          "member_id": "mem-chair",
+          "responsibility": "Synthesise the round and preserve disagreement.",
+          "role": "chair"
+        },
+        {
+          "seat_id": "seat-costing",
+          "member_id": "mem-costing",
+          "responsibility": "Say what the order does to the numbers.",
+          "role": "advisor",
+          "relevance_tags": [
+            "pricing"
+          ]
+        },
+        {
+          "seat_id": "seat-capacity",
+          "member_id": "mem-okonkwo",
+          "responsibility": "Argue the capacity consequences from the captured writing.",
+          "role": "advisor",
+          "relevance_tags": [
+            "pricing",
+            "capacity"
+          ]
+        }
+      ],
+      "sources": [
+        {
+          "source_id": "src-capacity-essay",
+          "source_revision": 2,
+          "title": "What a bench can actually hold (fixture essay)",
+          "author": "R. Okonkwo",
+          "locator": "note: Workshop capacity essay",
+          "captured_at": "2026-09-01T14:03:00Z",
+          "content_hash": "sha256:0e6baff9ffd389510802b77b3b4a35ed53508fe66c469c40754be669ee08af46",
+          "artifact": {
+            "kind": "note",
+            "ref": "note-capacity-essay",
+            "label": "Workshop capacity essay"
+          },
+          "payload": {
+            "content_type": "text/markdown",
+            "byte_length": 243,
+            "content_hash": "sha256:0e6baff9ffd389510802b77b3b4a35ed53508fe66c469c40754be669ee08af46",
+            "inline": "A bench has one throughput, and every promise made against it is a promise against the same hours. A recurring order is not extra work; it is the removal of the freedom to say no. Price it as the loss of that freedom, not as a volume discount."
+          },
+          "anchors": [
+            {
+              "anchor_id": "anc-freedom",
+              "quote": "A recurring order is not extra work; it is the removal of the freedom to say no.",
+              "start": 99,
+              "end": 179
+            }
+          ]
+        },
+        {
+          "source_id": "src-capacity-letter",
+          "source_revision": 1,
+          "title": "A correction to the capacity essay (fixture letter)",
+          "author": "R. Okonkwo",
+          "locator": "note: Capacity essay \u2014 the author's correction",
+          "captured_at": "2026-09-02T08:40:00Z",
+          "content_hash": "sha256:6ff4a539ac770a5d9f41e6ddbc9d5bedd1808583a830076813f3a8a38823ad55",
+          "artifact": {
+            "kind": "note",
+            "ref": "note-capacity-letter",
+            "label": "Capacity essay \u2014 the author's correction"
+          },
+          "payload": {
+            "content_type": "text/markdown",
+            "byte_length": 318,
+            "content_hash": "sha256:6ff4a539ac770a5d9f41e6ddbc9d5bedd1808583a830076813f3a8a38823ad55",
+            "inline": "Two years after the essay I would add one correction. The number that matters is not the month's total but the worst week inside it, because a bench that clears fifty units in an easy week and thirty in a hard one has a capacity of thirty. Quote against the hard week or you are quoting against a bench you do not own."
+          },
+          "anchors": [
+            {
+              "anchor_id": "anc-hard-week",
+              "quote": "Quote against the hard week or you are quoting against a bench you do not own.",
+              "start": 240,
+              "end": 318
+            }
+          ]
+        }
+      ],
+      "deliberation": {
+        "max_members_per_round": 4,
+        "max_concurrent_members": 2,
+        "max_prompt_bytes": 16384,
+        "run_budget_seconds": 300,
+        "max_rounds_per_session": 12,
+        "independent_initial_round": true,
+        "preserve_disagreement": true,
+        "per_member_timeout_seconds": 120
+      }
+    }
+  ],
+  "sessions": [
+    {
+      "schema_version": 1,
+      "record_kind": "council_session",
+      "session_id": "ses-recurring-order",
+      "session_revision": 14,
+      "definition_snapshot": {
+        "schema_version": 1,
+        "record_kind": "council_definition",
+        "definition_id": "def-workshop-economics",
+        "definition_revision": 6,
+        "name": "Workshop Economics",
+        "purpose": "Decide whether a one-person workshop should take on a larger recurring order, and say plainly what the decision costs.",
+        "members": [
+          {
+            "member_id": "mem-chair",
+            "member_revision": 1,
+            "kind": "assistant",
+            "display_name": "Chair",
+            "scope": "Runs the round, reports where members disagree, and never adds a position of its own.",
+            "limitations": "Has no grounding of its own; everything it reports must trace to a member contribution.",
+            "grounding": []
+          },
+          {
+            "member_id": "mem-costing",
+            "member_revision": 1,
+            "kind": "assistant",
+            "display_name": "Unit costing",
+            "scope": "Arithmetic on price, volume and the hours a job consumes. A functional advisor: it represents nobody.",
+            "limitations": "Knows only the numbers it is given. Establishes nothing about the customer, the market, or what the operator wants.",
+            "grounding": []
+          },
+          {
+            "member_id": "mem-okonkwo",
+            "member_revision": 3,
+            "kind": "simulant",
+            "display_name": "Okonkwo (capacity writing)",
+            "represents": "R. Okonkwo, author of the fictional essay and letter written for this fixture",
+            "scope": "Capacity and pricing for a single-operator workshop, as argued in one essay and one later correction.",
+            "limitations": "Two short pieces on capacity. Establishes nothing about hiring, financing, this shop's customers, or this author's views on anything else.",
+            "grounding": [
+              {
+                "source_id": "src-capacity-essay",
+                "source_revision": 2
+              },
+              {
+                "source_id": "src-capacity-letter",
+                "source_revision": 1
+              }
+            ]
+          }
+        ],
+        "seats": [
+          {
+            "seat_id": "seat-chair",
+            "member_id": "mem-chair",
+            "responsibility": "Synthesise the round and preserve disagreement.",
+            "role": "chair"
+          },
+          {
+            "seat_id": "seat-costing",
+            "member_id": "mem-costing",
+            "responsibility": "Say what the order does to the numbers.",
+            "role": "advisor",
+            "relevance_tags": [
+              "pricing"
+            ]
+          },
+          {
+            "seat_id": "seat-capacity",
+            "member_id": "mem-okonkwo",
+            "responsibility": "Argue the capacity consequences from the captured writing.",
+            "role": "advisor",
+            "relevance_tags": [
+              "pricing",
+              "capacity"
+            ]
+          }
+        ],
+        "sources": [
+          {
+            "source_id": "src-capacity-essay",
+            "source_revision": 2,
+            "title": "What a bench can actually hold (fixture essay)",
+            "author": "R. Okonkwo",
+            "locator": "note: Workshop capacity essay",
+            "captured_at": "2026-09-01T14:03:00Z",
+            "content_hash": "sha256:0e6baff9ffd389510802b77b3b4a35ed53508fe66c469c40754be669ee08af46",
+            "artifact": {
+              "kind": "note",
+              "ref": "note-capacity-essay",
+              "label": "Workshop capacity essay"
+            },
+            "payload": {
+              "content_type": "text/markdown",
+              "byte_length": 243,
+              "content_hash": "sha256:0e6baff9ffd389510802b77b3b4a35ed53508fe66c469c40754be669ee08af46",
+              "inline": "A bench has one throughput, and every promise made against it is a promise against the same hours. A recurring order is not extra work; it is the removal of the freedom to say no. Price it as the loss of that freedom, not as a volume discount."
+            },
+            "anchors": [
+              {
+                "anchor_id": "anc-freedom",
+                "quote": "A recurring order is not extra work; it is the removal of the freedom to say no.",
+                "start": 99,
+                "end": 179
+              }
+            ]
+          },
+          {
+            "source_id": "src-capacity-letter",
+            "source_revision": 1,
+            "title": "A correction to the capacity essay (fixture letter)",
+            "author": "R. Okonkwo",
+            "locator": "note: Capacity essay \u2014 the author's correction",
+            "captured_at": "2026-09-02T08:40:00Z",
+            "content_hash": "sha256:6ff4a539ac770a5d9f41e6ddbc9d5bedd1808583a830076813f3a8a38823ad55",
+            "artifact": {
+              "kind": "note",
+              "ref": "note-capacity-letter",
+              "label": "Capacity essay \u2014 the author's correction"
+            },
+            "payload": {
+              "content_type": "text/markdown",
+              "byte_length": 318,
+              "content_hash": "sha256:6ff4a539ac770a5d9f41e6ddbc9d5bedd1808583a830076813f3a8a38823ad55",
+              "inline": "Two years after the essay I would add one correction. The number that matters is not the month's total but the worst week inside it, because a bench that clears fifty units in an easy week and thirty in a hard one has a capacity of thirty. Quote against the hard week or you are quoting against a bench you do not own."
+            },
+            "anchors": [
+              {
+                "anchor_id": "anc-hard-week",
+                "quote": "Quote against the hard week or you are quoting against a bench you do not own.",
+                "start": 240,
+                "end": 318
+              }
+            ]
+          }
+        ],
+        "deliberation": {
+          "max_members_per_round": 4,
+          "max_concurrent_members": 2,
+          "max_prompt_bytes": 16384,
+          "run_budget_seconds": 300,
+          "max_rounds_per_session": 12,
+          "independent_initial_round": true,
+          "preserve_disagreement": true,
+          "per_member_timeout_seconds": 120
+        }
+      },
+      "chat_binding": {
+        "chat_id": "chat-0192ab",
+        "origin_message_id": "msg-0004",
+        "bound_at": "2026-09-08T09:12:44Z"
+      },
+      "question": "Should the workshop take the recurring 40-unit order at 0.7x price?",
+      "context_snapshot": {
+        "content_type": "text/plain",
+        "byte_length": 210,
+        "content_hash": "sha256:245476750cd4f559065eab75c62e85e2fc50ea1fef95ba1417dd3ee838db844d",
+        "inline": "Order under consideration: 40 units a month for a year, at 0.7x the current unit price. Observed: the bench cleared 52 units last month with two late evenings, and 31 units in the week the jig was being re-set."
+      },
+      "status": "complete",
+      "runs": [
+        {
+          "run_id": "run-1",
+          "request_id": "req-round-1",
+          "kind": "initial_round",
+          "status": "partial",
+          "started_at": "2026-09-08T09:12:45Z",
+          "ended_at": "2026-09-08T09:14:45Z",
+          "contributions": [
+            {
+              "contribution_id": "con-1",
+              "seat_id": "seat-costing",
+              "member_id": "mem-costing",
+              "member_revision": 1,
+              "status": "complete",
+              "model_id": "claude-sonnet-4-6",
+              "text": "At 0.7x the order pays for 28 units of revenue while consuming 40 units of bench time, so it is only worth taking if the freed capacity has no better use.",
+              "claims": [
+                {
+                  "claim_id": "clm-1",
+                  "support": "inference",
+                  "text": "Forty units at 0.7x earns what twenty-eight units earn at full price, so the order costs twelve units of margin a month before anything else is counted.",
+                  "citations": []
+                },
+                {
+                  "claim_id": "clm-2",
+                  "support": "inference",
+                  "text": "A year of it removes 480 units of bench time from everything else the shop might take.",
+                  "citations": []
+                },
+                {
+                  "claim_id": "clm-3",
+                  "support": "unknown",
+                  "text": "Whether the shop has better uses for those hours is not in the material given to me.",
+                  "citations": []
+                }
+              ],
+              "usage": {
+                "prompt_tokens": 1180,
+                "completion_tokens": 210
+              }
+            },
+            {
+              "contribution_id": "con-2",
+              "seat_id": "seat-capacity",
+              "member_id": "mem-okonkwo",
+              "member_revision": 3,
+              "status": "failed",
+              "claims": [],
+              "failure": {
+                "code": "timeout",
+                "message": "seat-capacity did not answer inside this council's time limit.",
+                "retryable": true
+              }
+            }
+          ],
+          "synthesis": {
+            "contribution_id": "con-3",
+            "seat_id": "seat-chair",
+            "member_id": "mem-chair",
+            "member_revision": 1,
+            "status": "complete",
+            "model_id": "claude-sonnet-4-6",
+            "text": "One member answered. On the numbers alone the order costs twelve units of margin a month and 480 units of bench time over the year, and whether that is worth paying depends on what else those hours could have done \u2014 which nobody in this round could say.",
+            "claims": [
+              {
+                "claim_id": "clm-4",
+                "support": "inference",
+                "text": "Unit costing's position is that the order is only worth taking if the capacity it consumes has no better use.",
+                "citations": []
+              },
+              {
+                "claim_id": "clm-5",
+                "support": "unknown",
+                "text": "This round is partial: 1 of 2 consulted members did not answer, so anything they would have contributed is not established here. seat-capacity: seat-capacity did not answer inside this council's time limit.",
+                "citations": []
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 2140,
+              "completion_tokens": 260
+            }
+          },
+          "failure": {
+            "code": "timeout",
+            "message": "The round was synthesised without every member. seat-capacity: seat-capacity did not answer inside this council's time limit.",
+            "retryable": true
+          }
+        },
+        {
+          "run_id": "run-2",
+          "request_id": "req-round-1-retry",
+          "kind": "retry",
+          "status": "complete",
+          "started_at": "2026-09-08T09:16:02Z",
+          "ended_at": "2026-09-08T09:16:58Z",
+          "contributions": [
+            {
+              "contribution_id": "con-4",
+              "seat_id": "seat-capacity",
+              "member_id": "mem-okonkwo",
+              "member_revision": 3,
+              "status": "complete",
+              "model_id": "claude-sonnet-4-6",
+              "text": "Price the order against the worst week, not the average one, and price it as the sale of your right to refuse the next job.",
+              "claims": [
+                {
+                  "claim_id": "clm-6",
+                  "support": "source",
+                  "text": "A recurring order is not additional work; it removes the freedom to decline, and that is what is being sold.",
+                  "citations": [
+                    {
+                      "source_id": "src-capacity-essay",
+                      "source_revision": 2,
+                      "anchor_id": "anc-freedom"
+                    }
+                  ]
+                },
+                {
+                  "claim_id": "clm-7",
+                  "support": "source",
+                  "text": "Capacity is what the hard week clears, not what the easy week clears, so a quote built on the month's total is built on a bench the shop does not have.",
+                  "citations": [
+                    {
+                      "source_id": "src-capacity-letter",
+                      "source_revision": 1,
+                      "anchor_id": "anc-hard-week"
+                    }
+                  ]
+                },
+                {
+                  "claim_id": "clm-8",
+                  "support": "inference",
+                  "text": "The observed 31-unit week is the number this order should be quoted against, which puts 40 units a month above the shop's real capacity.",
+                  "citations": []
+                },
+                {
+                  "claim_id": "clm-9",
+                  "support": "unknown",
+                  "text": "Nothing in the captured writing says what a fair premium for that lost freedom would be.",
+                  "citations": []
+                }
+              ],
+              "usage": {
+                "prompt_tokens": 2260,
+                "completion_tokens": 320
+              }
+            }
+          ],
+          "synthesis": {
+            "contribution_id": "con-5",
+            "seat_id": "seat-chair",
+            "member_id": "mem-chair",
+            "member_revision": 1,
+            "status": "complete",
+            "model_id": "claude-sonnet-4-6",
+            "text": "The retried seat answers that the order should be quoted against the shop's worst week \u2014 31 units \u2014 and priced as the sale of the right to refuse work, which puts 40 units a month above real capacity. This does not agree with the earlier costing answer, which treated the month's total as the capacity and made the decision turn only on margin; the disagreement is about which number describes the bench, and it is not resolved here.",
+            "claims": [
+              {
+                "claim_id": "clm-10",
+                "support": "source",
+                "text": "The capacity member's position rests on the captured claim that a recurring order removes the freedom to decline.",
+                "citations": [
+                  {
+                    "source_id": "src-capacity-essay",
+                    "source_revision": 2,
+                    "anchor_id": "anc-freedom"
+                  }
+                ]
+              },
+              {
+                "claim_id": "clm-11",
+                "support": "inference",
+                "text": "The two members disagree about what the bench's capacity is: the month's total, or the worst week inside it.",
+                "citations": []
+              },
+              {
+                "claim_id": "clm-12",
+                "support": "unknown",
+                "text": "What premium would compensate for the lost freedom is established by nothing either member was given.",
+                "citations": []
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 2480,
+              "completion_tokens": 300
+            }
+          }
+        }
+      ],
+      "outcomes": [
+        {
+          "outcome_id": "out-1",
+          "run_id": "run-2",
+          "contribution_id": "con-5",
+          "note": {
+            "kind": "note",
+            "ref": "note-recurring-order-decision",
+            "label": "Recurring order \u2014 what the council said"
+          },
+          "retained_at": "2026-09-08T09:20:11Z"
+        }
+      ]
+    }
+  ],
+  "view": {
+    "selected_session_id": "ses-recurring-order",
+    "selected_definition_id": "def-workshop-economics",
+    "pane": "session"
+  }
+}

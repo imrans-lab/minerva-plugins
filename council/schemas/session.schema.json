@@ -145,6 +145,17 @@
           "$ref": "common.schema.json#/$defs/Id",
           "description": "Present on a follow-up aimed at one seat."
         },
+        "addressed_claim_id": {
+          "$ref": "common.schema.json#/$defs/Id",
+          "description": "Present on a follow-up aimed at one argument. The claim names the seat that made it, so a follow-up about an argument is routed to its author and never to the bench at large; addressed_seat_id then holds that seat."
+        },
+        "limits": {
+          "$ref": "#/$defs/RunLimits"
+        },
+        "model_overrides": {
+          "type": "object",
+          "description": "Host model ids chosen for this run, keyed by seat_id. Present only where the caller overrode the member's own model_hint. The keys are the council's seats rather than a fixed set, so the shape is an open map; an entry naming a seat this run did not consult is simply unused."
+        },
         "contributions": {
           "type": "array",
           "items": {
@@ -167,6 +178,29 @@
         "started_at",
         "contributions"
       ],
+      "additionalProperties": false
+    },
+    "RunLimits": {
+      "type": "object",
+      "description": "What THIS run was allowed to spend, where it asked for less than the council permits. A run may narrow a limit and never widen one, so the council's deliberation rules remain the ceiling and this record says how far inside it the run stayed. An absent field means the council's own value applied.",
+      "properties": {
+        "max_concurrent_members": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_prompt_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "per_member_timeout_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "run_budget_seconds": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
       "additionalProperties": false
     },
     "Contribution": {
@@ -212,6 +246,9 @@
             "$ref": "#/$defs/Claim"
           }
         },
+        "usage": {
+          "$ref": "#/$defs/Usage"
+        },
         "failure": {
           "$ref": "#/$defs/Failure"
         }
@@ -253,6 +290,25 @@
         "support",
         "text",
         "citations"
+      ],
+      "additionalProperties": false
+    },
+    "Usage": {
+      "type": "object",
+      "description": "What the call this contribution came from actually consumed, as the host reported it. Recorded rather than estimated: an absent Usage means the host said nothing, which is different from a call that cost nothing.",
+      "properties": {
+        "prompt_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "completion_tokens": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "prompt_tokens",
+        "completion_tokens"
       ],
       "additionalProperties": false
     },

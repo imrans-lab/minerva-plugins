@@ -12,7 +12,20 @@ import (
 // the host's 64 KiB pluginIPC request cap, which leaves room for the envelope
 // and for the cap being counted in UTF-16 code units rather than bytes.
 // Anything larger travels as a blob handle and is fetched separately.
+//
+// It is also the ceiling on the longest free-text fields — a contribution's
+// text, a captured excerpt — because a single field that could fill the hop
+// would make a snapshot unmovable.
 const InlineLimit = 32768
+
+// ClaimTextLimit is the ceiling on one claim, one question and one focused
+// prompt. It is smaller than InlineLimit on purpose: those are single
+// assertions and single sentences, not documents, and a schema ceiling nothing
+// in the engine agreed with would be a ceiling the engine discovered by being
+// refused. The engine truncates to this value before it writes, and the schema
+// carries the same number — asserted in the contract tests, never maintained
+// twice.
+const ClaimTextLimit = 8000
 
 // CheckInvariants applies the cross-field rules the JSON Schemas cannot state:
 // that references resolve, that revisions agree, that a captured payload still
@@ -99,6 +112,14 @@ func checkDefinition(def map[string]any, at string, errs *[]string) {
 		var hasInline bool
 		if p, ok := so["payload"].(map[string]any); ok {
 			inline, hasInline = checkPayload(p, fmt.Sprintf("%s/sources/%d/payload", at, i), errs)
+			// The source carries the hash so that an inventory entry still
+			// names its material after the payload is stripped for export.
+			// The two copies describe the same capture, so they agree or the
+			// record is claiming to hold something it does not.
+			if got := str(p["content_hash"]); got != str(so["content_hash"]) {
+				add("/sources/%d: the source's content_hash %s does not describe the payload present, which hashes to %s; a different capture is a new source_revision",
+					i, str(so["content_hash"]), got)
+			}
 		}
 		for j, a := range arr(so["anchors"]) {
 			ao := obj(a)
@@ -124,6 +145,7 @@ func checkDefinition(def map[string]any, at string, errs *[]string) {
 
 	for i, m := range members {
 		mo := obj(m)
+		checkMemberKind(mo, i, add)
 		for j, g := range arr(mo["grounding"]) {
 			go_ := obj(g)
 			sid, srev := str(go_["source_id"]), num(go_["source_revision"])
@@ -135,6 +157,39 @@ func checkDefinition(def map[string]any, at string, errs *[]string) {
 			if _, ok := byRev[srev]; !ok {
 				add("/members/%d/grounding/%d: unknown source revision %s@%v", i, j, sid, srev)
 			}
+		}
+	}
+}
+
+// checkMemberKind holds the line between a functional advisor and a
+// source-grounded simulant. Both are members and both answer in a round, but
+// only a simulant claims to interpret a named author, and that claim is only
+// honest when there is captured material behind it and the gaps are stated. A
+// human member is the local user: nothing prompts them, so they have neither
+// grounding nor a model.
+func checkMemberKind(mo map[string]any, i int, add func(string, ...any)) {
+	kind := str(mo["kind"])
+	represents := strings.TrimSpace(str(mo["represents"]))
+	if kind != "simulant" && represents != "" {
+		add("/members/%d: only a simulant interprets a named author; a %q member must not carry represents", i, kind)
+	}
+	switch kind {
+	case "simulant":
+		if len(arr(mo["grounding"])) == 0 {
+			add("/members/%d: a simulant speaks only from captured material and this one is grounded in nothing; ground it or make it an assistant", i)
+		}
+		if strings.TrimSpace(str(mo["scope"])) == "" {
+			add("/members/%d: a simulant must state the narrow scope it can speak to", i)
+		}
+		if strings.TrimSpace(str(mo["limitations"])) == "" {
+			add("/members/%d: a simulant must state what its grounding does NOT establish", i)
+		}
+	case "human":
+		if len(arr(mo["grounding"])) > 0 {
+			add("/members/%d: a human member is the local user and speaks for themselves; grounding belongs to a simulant", i)
+		}
+		if strings.TrimSpace(str(mo["model_hint"])) != "" {
+			add("/members/%d: a human member is not answered by a model, so a model_hint has nothing to select", i)
 		}
 	}
 }
@@ -207,6 +262,24 @@ func checkSession(s map[string]any, at string, errs *[]string) {
 		}
 	}
 
+	// Claim identity is session-wide, because a follow-up names one argument by
+	// its claim id and has to reach the member that made it. The map is built
+	// before the runs are walked so a run may address a claim from any round.
+	claimSeat := map[string]string{}
+	for i, r := range arr(s["runs"]) {
+		ro := obj(r)
+		for _, c := range append(append([]any{}, arr(ro["contributions"])...), synthesisList(ro)...) {
+			co := obj(c)
+			for _, x := range arr(co["claims"]) {
+				id := str(obj(x)["claim_id"])
+				if _, duplicate := claimSeat[id]; duplicate {
+					add("/runs/%d: claim_id %q is used twice; a follow-up naming it would not know which argument it meant", i, id)
+				}
+				claimSeat[id] = str(co["seat_id"])
+			}
+		}
+	}
+
 	requests := map[string]bool{}
 	runIDs := map[string]map[string]bool{} // run -> contribution ids
 	contributionIDs := map[string]bool{}
@@ -228,6 +301,19 @@ func checkSession(s map[string]any, at string, errs *[]string) {
 		}
 		if str(ro["kind"]) == "follow_up" && str(ro["addressed_seat_id"]) == "" && str(ro["prompt"]) == "" {
 			add("/runs/%d: a follow-up must name either a seat or a prompt", i)
+		}
+		// A follow-up about an argument is answered by the member that made it.
+		// If the run could name a different seat, one member would be recorded
+		// as answering for another's reasoning.
+		if claimID := str(ro["addressed_claim_id"]); claimID != "" {
+			seat, known := claimSeat[claimID]
+			switch {
+			case !known:
+				add("/runs/%d: addressed_claim_id %q is not a claim made in this session", i, claimID)
+			case str(ro["addressed_seat_id"]) != seat:
+				add("/runs/%d: claim %q was made by seat %q, so this follow-up must address that seat and not %q",
+					i, claimID, seat, str(ro["addressed_seat_id"]))
+			}
 		}
 
 		if _, duplicate := runIDs[str(ro["run_id"])]; duplicate {
@@ -355,7 +441,9 @@ func checkSnapshot(p map[string]any, errs *[]string) {
 // mutatingCommands are the envelope commands that advance the snapshot and so
 // must carry the base_revision they were written against.
 var mutatingCommands = map[string]bool{
-	"definition.upsert": true, "definition.import": true, "source.upsert": true,
+	"definition.upsert": true, "definition.import": true,
+	"source.upsert": true, "source.capture": true,
+	"member.upsert": true, "member.adopt_source": true,
 	"session.create": true, "session.bind_chat": true,
 	"run.start": true, "run.cancel": true, "run.retry": true, "outcome.retain": true,
 }
@@ -405,3 +493,13 @@ func arr(v any) []any          { a, _ := v.([]any); return a }
 func obj(v any) map[string]any { m, _ := v.(map[string]any); return m }
 func str(v any) string         { s, _ := v.(string); return s }
 func num(v any) float64        { f, _ := v.(float64); return f }
+
+// synthesisList wraps a run's synthesis so it can be walked beside the member
+// contributions. The chair's answer is a Contribution and its claims are as
+// citable and as addressable as anybody's.
+func synthesisList(run map[string]any) []any {
+	if synthesis, ok := run["synthesis"].(map[string]any); ok {
+		return []any{synthesis}
+	}
+	return nil
+}

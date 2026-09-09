@@ -87,16 +87,13 @@ wrong, the whole application stops responding, not just the tab.
       and a caption naming the session.
 - [ ] Open that note: a Council tab reopens carrying the same content.
 
-## Chat handoff
+## Chat handoff — the empty half
 
-Needs a session with a recorded `chat_binding`, which arrives with T06/T07. Once
-one exists:
+- [ ] On a council with no session at all, **Send selected to the bound chat**
+      reports that there is no session and sends nothing.
 
-- [ ] Select one or more contributions, press **Send selected to the bound
-      chat**. The message lands in the chat named by the session's binding —
-      confirm it is that chat, not whichever chat tab was open.
-- [ ] With a session that has no binding, the same action reports that the
-      session is not bound to a chat and sends nothing.
+The populated half of this check is in the fixture section below, where a
+session with a recorded `chat_binding` exists.
 
 ## Two projects at once
 
@@ -104,6 +101,122 @@ one exists:
       something in each, save both, and reopen both. Each holds only its own
       content. (`tests/gd/test_council_panel.gd` section 6 asserts this against
       the backend store; this line is the same question with a person driving.)
+
+## A populated document — the checks the empty panel could not reach
+
+The first live pass could not exercise persistence, notes or restart, because
+nothing in the UI creates a session yet and there was no populated file to open.
+`council/fixtures/workshop_complete.mcouncil` is that file. It holds one council
+(a chair, a functional advisor, and a simulant grounded in two captured pieces of
+fixture writing), one session, and two runs: an initial round that lost a member
+to a timeout, and a retry that completed. Its session status is **complete**.
+
+Work on a **copy**, so a failed step leaves the shipped fixture intact:
+
+```
+cp <plugins>/council/fixtures/workshop_complete.mcouncil ~/council-live.mcouncil
+```
+
+### Open it
+
+- [ ] Open `~/council-live.mcouncil` from the editor's file-open. A Council tab
+      opens — **not** the empty-project sentence, and **not** the "this is not a
+      Council document" notice.
+- [ ] The question reads *"Should the workshop take the recurring 40-unit order
+      at 0.7x price?"*
+- [ ] The roster shows three names: **Chair**, **Unit costing** (labelled
+      Assistant), **Okonkwo (capacity writing)** (labelled Simulant). The
+      simulant shows what it represents and its stated limitations near the
+      name, not buried.
+- [ ] The session reads as finished, not running. Nothing is spinning, and no
+      progress indicator is left over.
+- [ ] Two runs are visible. The first is marked partial and says a member did
+      not answer; the second is marked complete. If the panel shows only the
+      latest run, the older one must still be reachable, not lost.
+- [ ] The sources view lists two sources by "R. Okonkwo" and shows their
+      excerpts. A claim marked as coming from a source can be followed to the
+      excerpt it cites; claims marked as inference or as unknown show **no**
+      source link.
+
+### Ctrl+S and reopen — the persistence check
+
+- [ ] Press Ctrl+S. Nothing visibly changes and no error appears.
+- [ ] In a terminal:
+      `python3 -m json.tool ~/council-live.mcouncil | head -5` — it is formatted
+      JSON whose `record_kind` is `council_project_snapshot`.
+- [ ] Close the tab, reopen `~/council-live.mcouncil`: the same question, the
+      same three names, the same two runs, the same synthesis text.
+- [ ] Nothing gained a "failed" or "interrupted" badge on reopening. A document
+      with no work in flight must come back exactly as it was; a run that
+      suddenly reads interrupted here is a defect, not a state.
+
+### Note create and restore
+
+- [ ] With the document open, use the panel's **create note** action. A note
+      appears with a preview image and a one-line caption naming this session.
+- [ ] Before creating it, switch the panel from the Session view to the Sources
+      view. That writes `view.pane` as `sources` where the file on disk still
+      says `session`, so the restored copy is distinguishable from the file.
+- [ ] Close the Council tab. Open the note and use its reopen action: a Council
+      tab comes back carrying the same session, the same two runs and the same
+      synthesis.
+- [ ] The restored tab is a Council panel, not a screenshot and not a blank
+      panel with a toast.
+
+### Restart
+
+- [ ] With `~/council-live.mcouncil` open, save the project. Quit Minerva
+      completely. Restart it and reopen the project.
+- [ ] The Council tab comes back with the populated session, and with the pane
+      you last had selected.
+- [ ] Press Ctrl+S once more and run
+      `python3 -m json.tool ~/council-live.mcouncil >/dev/null` — it is still
+      valid JSON.
+- [ ] Compare it with the shipped fixture, normalising numbers on both sides.
+      Godot's `JSON.stringify` writes every integral number as a float, so a
+      plain `diff` reports `31` against `31.0` on every revision and byte count
+      and tells you nothing:
+
+      ```
+      norm() { python3 -c 'import json,sys
+      def f(x):
+          if isinstance(x,float) and x.is_integer(): return int(x)
+          if isinstance(x,dict): return {k:f(v) for k,v in x.items()}
+          if isinstance(x,list): return [f(v) for v in x]
+          return x
+      print(json.dumps(f(json.load(open(sys.argv[1]))),indent=2,sort_keys=True))' "$1"; }
+      diff <(norm ~/council-live.mcouncil) <(norm <plugins>/council/fixtures/workshop_complete.mcouncil)
+      ```
+
+      Expected differences: the `view` block (you switched pane), and
+      `snapshot_revision` / `session_revision` if the panel wrote anything. A
+      changed run, contribution, synthesis or source is a defect.
+
+### The backend, and the unreadable file, against a populated document
+
+- [ ] Stop the Council plugin, then open `~/council-live.mcouncil` again. It
+      still renders — the record is the panel's, not the backend's — and any
+      command reports that the backend is not running while saying the council
+      is safe.
+- [ ] Start the plugin again and reopen: commands work, and the content is
+      unchanged.
+- [ ] Copy the fixture to `~/broken.mcouncil` and then **truncate it**:
+      `head -c 400 ~/council-live.mcouncil > ~/broken.mcouncil`. Open it. The
+      panel says it is not a Council document it can edit, and does not offer to
+      edit it.
+- [ ] Press Ctrl+S on it and run `cmp ~/broken.mcouncil <(head -c 400 ~/council-live.mcouncil)` — no difference.
+      A half-written document must come back byte-for-byte, not be replaced by
+      an empty council.
+
+### Chat handoff, now that a bound session exists
+
+The fixture's session records `chat_binding.chat_id = "chat-0192ab"`, which is
+almost certainly not a chat on your machine.
+
+- [ ] Select a contribution and use **Send selected to the bound chat**. The
+      expected result is a clear report that the bound chat could not be found —
+      naming the binding — and **nothing sent to whichever chat tab is open.**
+      A message landing in the focused chat is the failure this check exists for.
 
 ## What to record
 
