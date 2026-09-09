@@ -51,6 +51,7 @@ BUILTIN_FUNCTIONS: dict[str, frozenset[str]] = {
     "instance": frozenset({"id", "definition", "source", "accuracy"}),
     "assembly": frozenset(),
     "configuration": frozenset({"physical", "include"}),
+    "edges": frozenset({"parallel", "face_normal", "outer", "above_z", "below_z", "tolerance", "angle_deg", "expected"}),
     "mesh": frozenset({"units", "up"}),
     "translate": frozenset(),
     "rotate": frozenset(),

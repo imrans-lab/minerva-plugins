@@ -755,6 +755,13 @@ class Translator:
             return self._assembly_call(node)
         if node.name == "configuration":
             return self._assembly_call(node)
+        if node.name == "edges":
+            from .edge_rules import select_edges
+            try:
+                return select_edges(*(self._eval_expr(v) for v in node.args),
+                    **{key: self._eval_expr(v) for key, v in node.kwargs.items()})
+            except (TypeError, ValueError) as exc:
+                raise TranslatorError(str(exc)) from exc
         if node.name == "rect":
             return self._make_rect(node)
         if node.name == "circle":
@@ -1497,6 +1504,12 @@ class Translator:
         Empty list → TranslatorError. Non-int / non-list-of-int → TranslatorError.
         """
         value = self._eval_expr(edge_num_node)
+
+        from .edge_rules import EdgeSelection
+        if isinstance(value, EdgeSelection):
+            if value.shape is not shape:
+                raise TranslatorError("edge selection belongs to a different or superseded shape; select edges again")
+            return list(value.edges)
 
         if isinstance(value, (list, tuple)):
             if len(value) == 0:
