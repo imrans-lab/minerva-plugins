@@ -46,6 +46,23 @@ const READ_LOCALLY := "snapshot.get"
 ## The characters an Id may contain after its first (common.schema.json).
 const ID_SAFE_CHARACTERS := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-"
 
+## Where Council's own view preferences live.
+##
+## They are NOT in the record. Text size is one reader's eyesight, not project
+## data: carrying it in the snapshot would advance a revision for a preference,
+## push it through the project file into another machine, and put it in an
+## exported council. `view` could not hold it in any case — the snapshot schema
+## closes that object to the session and pane the user last had open.
+const PREFERENCES_PATH := "user://council_ui_preferences.json"
+
+## The text sizes this wrapper will store. It is the AUTHORITY, not a mirror:
+## `wrapper.describe` hands the list to the page, which offers only the sizes it
+## and the wrapper both know. Two independently maintained lists in two languages
+## would drift silently — a page step the wrapper refuses is a control that does
+## nothing, and a wrapper size the page has no step for is a stored value nobody
+## can reach.
+const TEXT_SCALES := [0.85, 1.0, 1.12, 1.28, 1.45, 1.7]
+
 @onready var _surface: SubViewportContainer = $Surface
 @onready var _browser: SubViewport = $Surface/Browser
 @onready var _notice: Label = $Notice
@@ -55,6 +72,13 @@ var _record: CouncilRecord = CouncilRecord.new()
 var _backend: CouncilBackend = null
 var _cef: Control = null
 var _page_path: String = ""
+
+## True while a density change is waiting for the end of the frame. See
+## _schedule_oversampling().
+var _oversampling_queued: bool = false
+
+## Council's own view preferences, read from disk once and written on change.
+var _preferences: Dictionary = {}
 
 ## Outbound envelopes wait here until the page says its bridge is up. Without
 ## the gate an event pushed during mounting is evaluated into a document that
@@ -283,15 +307,37 @@ func _mount_page() -> void:
 	# host UI-scale change (which reflows control sizes) or a move to another
 	# display all land here. The host's own CEF editor hooks `resized` for
 	# exactly this.
-	if not resized.is_connected(_apply_oversampling):
-		resized.connect(_apply_oversampling)
+	if not resized.is_connected(_schedule_oversampling):
+		resized.connect(_schedule_oversampling)
 	cef.set("url", "file://" + ProjectSettings.globalize_path(_page_path))
+
+
+## Coalesce a burst of `resized` into ONE density change.
+##
+## A host UI-scale change does not resize this control once. The scale is applied
+## to the root, every container re-lays-out, and `resized` fires several times
+## while the new size settles — each one previously reapplying the oversampling
+## override, which is a page-wide relayout in CEF. What the user saw was the text
+## growing and then shrinking back rather than settling at the size they chose.
+## Deferring to the end of the frame collapses the burst: the last size wins and
+## the page reflows once.
+func _schedule_oversampling() -> void:
+	if _oversampling_queued:
+		return
+	_oversampling_queued = true
+	_apply_oversampling.call_deferred()
 
 
 ## Render the page at physical pixel density. The SubViewport's target is sized
 ## in logical pixels, so without this the page renders small and is bitmap-
 ## upscaled by the host's UI zoom and the display's HiDPI backing.
+##
+## It deliberately does NOT decide how large Council's text is. Density and type
+## size are different questions: this one keeps the page crisp at whatever scale
+## Minerva is drawn at, and the reader's own text size is a Council preference
+## the page applies (`wrapper.set_preference`).
 func _apply_oversampling() -> void:
+	_oversampling_queued = false
 	var tree := get_tree()
 	if tree == null or _browser == null:
 		return
@@ -337,7 +383,14 @@ func theme_description() -> Dictionary:
 
 ## Focus follows the surface. CefTexture handles the focus notifications itself
 ## once it has focus, so the panel's job is to hand it over on a click and to
-## tell the page, which draws its own focus ring.
+## tell the page whether the surface holds it.
+##
+## The page records that on its root element as `data-focused` and draws nothing
+## from it today: focus rings there are per-control `:focus-visible`, which the
+## browser already knows about without being told. The event is still sent
+## because only the wrapper can know it — a browser inside an unfocused Godot
+## control still believes it has focus — and a page that wants to mute itself
+## when the tab is not current has the fact waiting for it.
 func _on_surface_focus_changed(focused: bool) -> void:
 	if focused and _cef != null and is_instance_valid(_cef):
 		_cef.grab_focus()
@@ -450,8 +503,9 @@ func _record_for_epoch(epoch: int) -> Dictionary:
 
 
 ## The wrapper's own operations. None of them changes a council: they describe
-## the panel, hand a selection to the host, or write `view`, which is user intent
-## no engine derives anything from and which advances no revision.
+## the panel, hand a selection to the host, read Minerva's enabled models, store
+## Council's own view preferences, or write `view` — user intent no engine
+## derives anything from, which advances no revision.
 func _wrapper_command(command: String, message: Dictionary, request_id: String,
 		revision: int) -> Dictionary:
 	var payload: Dictionary = message.get("payload", {})
@@ -465,6 +519,7 @@ func _wrapper_command(command: String, message: Dictionary, request_id: String,
 				"unreadable_reason": _record.unreadable_reason(),
 				"theme": theme_description(),
 				"max_message_code_units": MAX_MESSAGE_CODE_UNITS,
+				"text_scales": TEXT_SCALES,
 			})
 		"wrapper.set_view":
 			var view: Variant = payload.get("view", {})
@@ -477,6 +532,12 @@ func _wrapper_command(command: String, message: Dictionary, request_id: String,
 			return _ok(request_id, revision, {"view": view})
 		"wrapper.chat_handoff":
 			return await _chat_handoff(payload, request_id, revision)
+		"wrapper.get_preferences":
+			return _ok(request_id, revision, _read_preferences())
+		"wrapper.set_preference":
+			return _ok(request_id, revision, _write_preferences(payload))
+		"wrapper.models":
+			return await _models(request_id, revision)
 	return _err(request_id, revision, "internal",
 		"'%s' is not an operation this panel performs." % command, false)
 
@@ -512,6 +573,64 @@ func _chat_handoff(payload: Dictionary, request_id: String, revision: int) -> Di
 		return _err(request_id, revision, str(sent.get("code", "internal")),
 			str(sent.get("message", "")), bool(sent.get("retryable", false)))
 	return _ok(request_id, revision, {"chat_id": chat_id, "characters": text.length()})
+
+
+## Council's view preferences, as the page reads them.
+##
+## Read from disk on first use and held after that: the page asks once per mount
+## and a preference file that is unreadable — absent, from a newer build, or
+## corrupt — is answered as "no preference stored", never as a failure. Text size
+## is not worth refusing to open a council over.
+func _read_preferences() -> Dictionary:
+	if _preferences.is_empty() and FileAccess.file_exists(PREFERENCES_PATH):
+		var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(PREFERENCES_PATH))
+		if parsed is Dictionary:
+			_preferences = parsed
+	var out := {}
+	var scale := float(_preferences.get("text_scale", 0.0))
+	if TEXT_SCALES.has(scale):
+		out["text_scale"] = scale
+	return out
+
+
+## Store one preference. Only values this build offers are stored, so a page from
+## a different build — or a request that arrived with something else entirely —
+## cannot leave a size behind that no control can reach.
+func _write_preferences(payload: Dictionary) -> Dictionary:
+	var scale := float(payload.get("text_scale", 0.0))
+	if not TEXT_SCALES.has(scale):
+		return {"stored": false, "reason": "%s is not one of Council's text sizes." % str(scale)}
+	_preferences["text_scale"] = scale
+	var file := FileAccess.open(PREFERENCES_PATH, FileAccess.WRITE)
+	if file == null:
+		# The size is already applied in the page; only its persistence failed.
+		return {"stored": false, "reason": "Council could not write its preferences file."}
+	file.store_string(JSON.stringify(_preferences))
+	file.close()
+	return {"stored": true, "text_scale": scale}
+
+
+## The models Minerva has enabled, for the page's model controls.
+##
+## It is a wrapper command rather than a protocol one because it is not about the
+## record: the catalogue is the HOST's state, the engine only reads it to refuse
+## a hint it cannot see, and no revision moves. The hop is a plain tool call with
+## no lease and no seeding — nothing here touches the snapshot, so an exchange
+## running in another tab is not delayed by it.
+func _models(request_id: String, revision: int) -> Dictionary:
+	if _backend == null:
+		return _err(request_id, revision, "internal",
+			"This panel is not mounted, so it cannot read Minerva's model list.", false)
+	var answered: Dictionary = await _backend.models()
+	if not bool(answered.get("ok", false)):
+		return _err(request_id, revision, str(answered.get("code", "internal")),
+			str(answered.get("message", "")), bool(answered.get("retryable", true)))
+	var body: Dictionary = answered.get("body", {})
+	return _ok(request_id, revision, {
+		"models": body.get("models", []),
+		"known": bool(body.get("known", false)),
+		"refresh_error": str(body.get("refresh_error", "")),
+	})
 
 
 func _ok(request_id: String, revision: int, payload: Dictionary) -> Dictionary:

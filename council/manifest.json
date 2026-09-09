@@ -168,6 +168,7 @@
       "minerva_council_command",
       "minerva_council_load_snapshot",
       "minerva_council_export_snapshot",
+      "minerva_council_models",
       "capability:mcp.proxy:minerva_send_message"
     ],
     "panels": [
@@ -185,6 +186,7 @@
           "minerva_council_command",
           "minerva_council_load_snapshot",
           "minerva_council_export_snapshot",
+          "minerva_council_models",
           "capability:mcp.proxy:minerva_send_message"
         ],
         "file_extensions": [

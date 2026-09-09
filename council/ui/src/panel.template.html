@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Council</title>
+<!--
+  GENERATED FILE — do not edit ui/panel.html by hand.
+
+  It is built from ui/src by `node ui/build.mjs`; the sources are the ones to
+  change, and the build is a concatenation with no toolchain, no dependencies
+  and no network. Everything the page needs is inlined here because CefTexture
+  loads one URL and the wrapper stages exactly this file to disk (§5.2).
+
+  What this page is: a view. The record lives in the wrapper, every read goes
+  through council.call, every mutation carries the revision it was written
+  against, an event only says "re-read", and nothing here holds state that is
+  not in the record or in flight.
+
+  What it never does: build markup. Every value that came from the record, a
+  model or an imported council enters the document as a text node
+  (src/js/dom.js), so a source excerpt or a member's answer has no path to the
+  HTML parser.
+-->
+<style>
+/* @include styles/reading-room.css */
+</style>
+</head>
+<body>
+
+<div class="panel" id="panel">
+
+  <header class="masthead">
+    <p class="council-name" id="council-name"></p>
+    <h1 class="question" id="question"></h1>
+    <p class="question-meta" id="question-meta"></p>
+  </header>
+
+  <nav class="panes" id="panes" aria-label="Council panes">
+    <button type="button" data-pane="session" aria-current="page">Session</button>
+    <button type="button" data-pane="members">Members</button>
+    <button type="button" data-pane="sources">Sources</button>
+  </nav>
+
+  <div class="stage" id="stage" data-detail="closed">
+    <main class="reading" id="reading" tabindex="-1"></main>
+    <aside class="detail" id="detail" aria-label="Detail"></aside>
+    <button type="button" class="action primary arrival" id="arrival" hidden></button>
+  </div>
+
+  <div class="footrail">
+    <button type="button" class="action quiet" id="handoff">Send picked answers to the bound chat</button>
+    <span id="message" role="status" aria-live="polite"></span>
+    <span class="spacer"></span>
+    <span class="sizer" id="sizer" role="group" aria-labelledby="text-size-label"></span>
+    <span id="revision"></span>
+  </div>
+
+</div>
+
+<p class="visually-hidden" id="announcer" role="status" aria-live="polite"></p>
+
+<script>
+/* @include js/dom.js */
+</script>
+<script>
+/* @include js/record.js */
+</script>
+<script>
+/* @include js/bridge.js */
+</script>
+<script>
+/* @include js/prefs.js */
+</script>
+<script>
+/* @include js/views/parts.js */
+</script>
+<script>
+/* @include js/views/session.js */
+</script>
+<script>
+/* @include js/views/members.js */
+</script>
+<script>
+/* @include js/views/sources.js */
+</script>
+<script>
+/* @include js/views/detail.js */
+</script>
+<script>
+/* @include js/app.js */
+</script>
+</body>
+</html>

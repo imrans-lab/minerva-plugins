@@ -1,0 +1,693 @@
+/*
+  Reading-room direction for the Council panel.
+
+  Warm paper, charcoal ink, one earth accent used only where it means something:
+  the current question, a source-backed claim, a citation, and focus. Type does
+  the work colour usually does — the question is set large in a serif and
+  everything administrative is small sans caps — so the panel reads as a page
+  rather than a dashboard.
+
+  No font files and no icon set: system serif and sans stacks only, and the few
+  glyphs used are text. Nothing here loads from a network, which is what lets
+  the whole sheet be inlined into panel.html and rendered from a file:// URL.
+
+  TEXT SIZE. Every type size is in rem, and the root font size is
+  `--text-scale x 16px`. That one variable is Council's own persisted text-size
+  preference (js/prefs.js): moving it resizes the entire panel — labels, status
+  pills and the question included — rather than the body copy alone. Layout
+  padding stays in px so a larger text size buys larger text and not a larger
+  frame.
+*/
+
+:root {
+  color-scheme: light;
+
+  --paper:      #f4efe6;
+  --surface:    #fbf8f2;
+  --surface-2:  #efe9dd;
+  --ink:        #221f1b;
+  --ink-soft:   #4a443b;
+  --muted:      #746c5f;
+  --line:       #ddd4c4;
+  --line-soft:  #e8e1d4;
+  --accent:     #8a5320;
+  --accent-ink: #6f4218;
+  --accent-wash:#f0e2cf;
+  --alarm:      #8d3a2a;
+  --alarm-wash: #f2ded8;
+
+  --serif: ui-serif, "Iowan Old Style", Palatino, "Palatino Linotype", "Book Antiqua", Georgia, serif;
+  --sans:  ui-sans-serif, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+
+  --measure: 62ch;
+  --radius: 6px;
+  --speed: 160ms;
+
+  /* Replaced at runtime from the stored preference. The default is deliberately
+     above browser-normal: this is continuous prose read at an editor pane's
+     width, so it opens at a reading size rather than at a UI size. */
+  --text-scale: 1.12;
+}
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+
+  --paper:      #16150f;
+  --surface:    #1d1b16;
+  --surface-2:  #262319;
+  --ink:        #eee7d9;
+  --ink-soft:   #d6cebe;
+  --muted:      #9c9384;
+  --line:       #3a352a;
+  --line-soft:  #2c2820;
+  --accent:     #d8a862;
+  --accent-ink: #eac68c;
+  --accent-wash:#2f2718;
+  --alarm:      #e0947f;
+  --alarm-wash: #33211c;
+}
+
+* { box-sizing: border-box; }
+
+html {
+  height: 100%;
+  font-size: calc(var(--text-scale) * 16px);
+}
+
+body {
+  height: 100%;
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 0.97rem/1.62 var(--serif);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ------------------------------------------------------------------ shell */
+
+.panel {
+  /* The panel, not the window, is the responsive unit: a Minerva editor pane is
+     a cell in a variable grid, so its width has nothing to do with the window's.
+     Container queries are the only correct measure here, and the CEF this
+     Minerva ships reports Chromium 146, well past the 105 that introduced them. */
+  container: panel / inline-size;
+  height: 100%;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.masthead {
+  padding: 18px 20px 12px;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--surface);
+}
+
+.masthead .council-name {
+  font: 600 0.69rem/1 var(--sans);
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 10px;
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.question {
+  overflow-wrap: break-word;
+  /* cqi, not vw: the question is sized by the panel it sits in. The bounds are
+     in rem so the text-size preference moves them with everything else. */
+  font: 400 clamp(1.25rem, 4.6cqi, 1.7rem)/1.28 var(--serif);
+  margin: 0;
+  color: var(--ink);
+  max-width: var(--measure);
+  text-wrap: pretty;
+}
+
+.question-meta {
+  margin: 9px 0 0;
+  font: 400 0.78rem/1.5 var(--sans);
+  color: var(--muted);
+  display: flex;
+  gap: 8px 14px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+/* -------------------------------------------------------------- pane tabs */
+
+.panes {
+  display: flex;
+  gap: 2px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.panes button {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  font: 600 0.75rem/1 var(--sans);
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  padding: 12px 12px 10px;
+  cursor: pointer;
+}
+
+/* aria-current, not aria-selected: these are plain buttons. aria-selected is
+   only mapped on a tab role, and taking that role would owe the pattern a
+   roving tabindex and arrow-key handling for no gain across three panes. */
+.panes button[aria-current="page"] {
+  color: var(--accent-ink);
+  border-bottom-color: var(--accent);
+}
+
+.panes button:hover { color: var(--ink); }
+
+/* -------------------------------------------------------------- the stage */
+
+.stage {
+  position: relative;
+  min-height: 0;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.reading, .detail {
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 18px 20px 40px;
+  scroll-behavior: auto;
+}
+
+.reading > * { max-width: min(var(--measure), 100%); }
+
+/* Narrow: a detail view covers the reading column and Back returns to it. */
+.detail {
+  display: none;
+  background: var(--paper);
+}
+
+.stage[data-detail="open"] .detail { display: block; }
+
+@container panel (max-width: 899px) {
+  .stage[data-detail="open"] .reading { display: none; }
+}
+
+@container panel (min-width: 900px) {
+  .stage { grid-template-columns: minmax(340px, 1fr) minmax(360px, 1.05fr); }
+  .detail {
+    display: block;
+    border-left: 1px solid var(--line);
+    background: var(--surface);
+  }
+  .back-row { display: none; }
+  .detail .resting { color: var(--muted); font-style: italic; }
+}
+
+/* -------------------------------------------------------------- foot rail */
+
+.footrail {
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+  padding: 8px 14px;
+  display: flex;
+  gap: 8px 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  font: 400 0.75rem/1.4 var(--sans);
+  color: var(--muted);
+}
+
+.footrail .spacer { margin-left: auto; }
+
+/* A refusal stays until it is acknowledged or acted on; a plain note does not
+   need dismissing and shows no button. */
+.footrail .refusal {
+  color: var(--alarm);
+  font-weight: 600;
+}
+
+.sizer { display: flex; gap: 2px; align-items: center; }
+
+.sizer button {
+  appearance: none;
+  font: 600 0.75rem/1 var(--sans);
+  min-width: 26px;
+  padding: 5px 6px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.sizer button:hover { border-color: var(--accent); }
+.sizer button[disabled] { opacity: .45; cursor: default; }
+
+/* ---------------------------------------------------------------- buttons */
+
+button { font-family: var(--sans); }
+
+.action {
+  appearance: none;
+  font: 500 0.81rem/1 var(--sans);
+  padding: 8px 13px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  cursor: pointer;
+  transition: border-color var(--speed), background var(--speed);
+}
+
+.action:hover { border-color: var(--accent); }
+
+.action.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fdf8f0;
+}
+
+html[data-theme="dark"] .action.primary { color: #1a1710; }
+
+.action.quiet { border-color: transparent; background: transparent; color: var(--muted); }
+.action.quiet:hover { color: var(--ink); }
+
+.action[disabled] { opacity: .5; cursor: default; }
+
+.link {
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  /* A button centres its text by default, which reads as a mistake when a
+     citation wraps onto a second line in a narrow pane. */
+  text-align: left;
+  color: var(--accent-ink);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+/* -------------------------------------------------------------- identities */
+
+.who {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.who .name {
+  font: 600 0.875rem/1.3 var(--sans);
+  color: var(--ink);
+}
+
+.kind {
+  font: 600 0.625rem/1 var(--sans);
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  padding: 4px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.kind[data-kind="human"] { background: var(--ink); border-color: var(--ink); color: var(--paper); }
+.kind[data-kind="assistant"] { background: var(--surface-2); }
+.kind[data-kind="simulant"] { border-style: dashed; }
+
+.seat {
+  font: 400 0.78rem/1.4 var(--sans);
+  color: var(--muted);
+}
+
+/* ------------------------------------------------------------ contributions */
+
+.contribution {
+  border-top: 1px solid var(--line-soft);
+  padding: 18px 0 4px;
+}
+
+.contribution:first-of-type { border-top: 0; }
+
+.contribution .say {
+  margin: 10px 0 0;
+  color: var(--ink-soft);
+}
+
+.contribution .row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 12px 0 4px;
+}
+
+/* Provenance, rendered rather than merely recorded: which model produced an
+   answer, and what it cost. An answer with no model_id shows no line, which is
+   how a hand-entered contribution reads as one. */
+.provenance {
+  margin: 8px 0 0;
+  font: 400 0.72rem/1.5 var(--sans);
+  color: var(--muted);
+  display: flex;
+  gap: 4px 12px;
+  flex-wrap: wrap;
+}
+
+.synthesis {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  margin: 4px 0 22px;
+}
+
+.synthesis h2 {
+  font: 600 0.69rem/1 var(--sans);
+  letter-spacing: .13em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 10px;
+}
+
+.superseded {
+  font: 400 0.78rem/1.5 var(--sans);
+  color: var(--muted);
+  margin: 0 0 18px;
+}
+
+/* -------------------------------------------------------------- claim tags */
+
+.claims { list-style: none; margin: 12px 0 0; padding: 0; }
+
+.claim {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 9px;
+  align-items: start;
+  padding: 7px 0;
+  border-top: 1px dotted var(--line);
+}
+
+.claim .text { font-size: 0.906rem; color: var(--ink-soft); }
+
+.support {
+  font: 600 0.625rem/1.6 var(--sans);
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  padding: 1px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+
+.support[data-support="source"] {
+  background: var(--accent-wash);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+.support[data-support="inference"] { background: transparent; }
+.support[data-support="unknown"] { border-style: dashed; font-style: italic; }
+
+.citations {
+  margin: 5px 0 0;
+  display: flex;
+  gap: 3px 8px;
+  flex-wrap: wrap;
+  align-items: baseline;
+  font-size: 0.84rem;
+}
+
+.cite-source {
+  font: 400 0.72rem/1.5 var(--sans);
+  color: var(--muted);
+  flex-basis: 100%;
+}
+
+.claim-actions { margin-top: 6px; display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* ------------------------------------------------------------------ status */
+
+.status {
+  font: 600 0.625rem/1 var(--sans);
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 8px;
+  white-space: nowrap;
+}
+
+.status[data-status="running"], .status[data-status="pending"] { border-color: var(--accent); color: var(--accent-ink); }
+.status[data-status="failed"], .status[data-status="cancelled"] { border-color: var(--alarm); color: var(--alarm); }
+.status[data-status="stale"] { border-style: dashed; font-style: italic; }
+
+.waiting {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: var(--muted);
+  font: 400 0.84rem/1.5 var(--sans);
+}
+
+.pulse {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--accent);
+  animation: breathe 1.6s ease-in-out infinite;
+}
+
+@keyframes breathe { 0%,100% { opacity: .25; } 50% { opacity: 1; } }
+
+.notice {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--alarm);
+  background: var(--alarm-wash);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin: 0 0 18px;
+  font: 400 0.875rem/1.5 var(--sans);
+  color: var(--ink);
+}
+
+.notice.calm {
+  border-left-color: var(--accent);
+  background: var(--accent-wash);
+}
+
+/* Wins over `.detail h3`, which sets the serif display size for detail titles. */
+.notice h3, .detail .notice h3 {
+  font: 600 0.69rem/1 var(--sans);
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  margin: 0 0 7px;
+  color: var(--muted);
+}
+
+.empty {
+  color: var(--muted);
+  font-style: italic;
+  max-width: 46ch;
+}
+
+/* --------------------------------------------------------------- new-below */
+
+.arrival {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 16px;
+  z-index: 3;
+  box-shadow: 0 3px 14px rgba(0,0,0,.16);
+}
+
+/* ------------------------------------------------------------------ lists */
+
+.roster { list-style: none; margin: 0; padding: 0; }
+
+.roster li { border-top: 1px solid var(--line-soft); }
+.roster li:first-child { border-top: 0; }
+
+.entry {
+  display: block;
+  width: 100%;
+  text-align: left;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  padding: 14px 4px;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+}
+
+.entry:hover { background: var(--surface); }
+.entry .line2 { color: var(--muted); font: 400 0.81rem/1.45 var(--sans); margin-top: 4px; }
+
+/* ------------------------------------------------------------------ detail */
+
+.back-row { margin: 0 0 14px; }
+
+.detail h2, .pane-title {
+  font: 600 0.69rem/1 var(--sans);
+  letter-spacing: .13em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 10px;
+}
+
+.detail h3 { font: 400 1.25rem/1.3 var(--serif); margin: 0 0 6px; }
+
+.excerpt {
+  font: 400 0.875rem/1.68 var(--serif);
+  white-space: pre-wrap;
+  background: var(--surface-2);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin: 12px 0;
+  overflow-wrap: anywhere;
+}
+
+mark {
+  background: var(--accent-wash);
+  color: var(--ink);
+  box-shadow: inset 0 -1px 0 var(--accent);
+  padding: 0 1px;
+}
+
+.field { margin: 0 0 14px; }
+.field dt { font: 600 0.656rem/1 var(--sans); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin: 0 0 4px; }
+.field dd { margin: 0; font-size: 0.906rem; color: var(--ink-soft); overflow-wrap: anywhere; }
+
+/* ----------------------------------------------------------------- compare */
+
+.compare { display: grid; gap: 16px; }
+
+/* Two columns whenever two will fit, one when they will not. No query needed. */
+.compare.two { grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+
+.column {
+  border: 1px solid var(--line);
+  overflow-wrap: anywhere;
+  border-radius: var(--radius);
+  padding: 14px;
+  background: var(--surface);
+  min-width: 0;
+}
+
+/* --------------------------------------------------------------- composer */
+
+.composer textarea,
+.composer input[type="text"] {
+  width: 100%;
+  font: 400 0.94rem/1.55 var(--serif);
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+}
+
+.composer textarea { min-height: 96px; resize: vertical; }
+
+.composer select {
+  font: 400 0.81rem/1.3 var(--sans);
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 7px 9px;
+  max-width: 100%;
+}
+
+.composer label.visible {
+  display: block;
+  font: 600 0.656rem/1 var(--sans);
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 14px 0 5px;
+}
+
+.composer .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+
+.quoted {
+  border-left: 2px solid var(--accent);
+  padding-left: 12px;
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+/* ------------------------------------------------------------- rhythm
+
+   Two steps of vertical separation, so the views can say what a gap means
+   instead of carrying a number. `group` opens a new group inside a scrolling
+   column; `group-tight` separates two parts of one group; `flush` cancels a
+   leading margin where a heading already provided the space. */
+
+.group { margin-top: 24px; }
+.group-tight { margin-top: 16px; }
+.flush { margin-top: 0; }
+
+.row { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* A contribution's header puts the identity and its status at opposite ends. */
+.row.head { justify-content: space-between; margin: 0; }
+
+/* A roster row that is a container rather than a control. */
+.entry.static { cursor: default; }
+.entry.static:hover { background: transparent; }
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px;
+  margin: -1px; padding: 0; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+/* A framed width, for capturing the panel at a size a browser window will not
+   itself take. It sets no layout rule; it only makes the panel's edge visible. */
+html[data-framed] body { background: var(--surface-2); }
+html[data-framed] .panel { box-shadow: 0 0 0 1px var(--line); }
+
+/* -------------------------------------------------------- reduced motion */
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
+}
+
+html[data-motion="reduce"] * {
+  animation-duration: 1ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 1ms !important;
+}
+
+/* Very narrow: the panel is a column of prose, and nothing competes with it. */
+@container panel (max-width: 430px) {
+  .masthead { padding: 14px 15px 10px; }
+  .reading, .detail { padding: 15px 15px 40px; }
+  .panes { padding: 0 8px; }
+  .panes button { padding: 11px 8px 9px; letter-spacing: .06em; }
+  .footrail { padding: 7px 10px; }
+}

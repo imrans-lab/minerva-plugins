@@ -1,0 +1,579 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Council panel — self check</title>
+<!--
+  Drives the PRODUCTION page (ui/tests/panel-replay.html, which is ui/panel.html
+  with a replay bridge injected where council_bridge.gd injects the real one)
+  against envelopes the real backend produced, and checks the behaviour a
+  screenshot cannot show: Back restoring scroll and focus, a late answer not
+  moving the paragraph you are reading, a citation opening its own span, a
+  refusal that stays, an oversized request refused before it travels, and a
+  document full of markup that renders as words and runs nothing.
+
+  Run it in a browser, or headless:
+
+    google-chrome --headless=new --allow-file-access-from-files \
+      --virtual-time-budget=120000 --dump-dom \
+      file://$PWD/council/ui/tests/selftest.html | grep -o '<title>[^<]*'
+
+  The file:// flag is for this harness only; the panel itself needs nothing.
+-->
+<style>
+  body { font: 14px/1.5 ui-monospace, monospace; margin: 16px; background: #f4efe6; color: #221f1b; }
+  iframe { width: 470px; height: 640px; border: 1px solid #ccc; float: right; }
+  .pass::before { content: "PASS  "; color: #2c6e3f; }
+  .fail::before { content: "FAIL  "; color: #a33; }
+  li { margin: 2px 0; }
+</style>
+</head>
+<body>
+<iframe id="frame" title="panel under test"></iframe>
+<h1 id="result">running…</h1>
+<ol id="log"></ol>
+<script>
+(function () {
+  'use strict';
+
+  var frame = document.getElementById('frame');
+  var log = document.getElementById('log');
+  var results = [];
+  var w = null;
+
+  function check(name, ok, detail) {
+    results.push(!!ok);
+    var li = document.createElement('li');
+    li.className = ok ? 'pass' : 'fail';
+    li.textContent = name + (ok || !detail ? '' : ' — ' + detail);
+    log.appendChild(li);
+  }
+
+  function until(fn, budget) {
+    var deadline = budget || 20000;
+    return new Promise(function (resolve, reject) {
+      var spent = 0;
+      (function tick() {
+        var value;
+        try { value = fn(); } catch (e) { value = null; }
+        if (value) { return resolve(value); }
+        spent += 60;
+        if (spent > deadline) { return reject(new Error('timed out waiting for a condition')); }
+        setTimeout(tick, 60);
+      })();
+    });
+  }
+
+  // The panel is the responsive unit, so the FRAME is what has to change size:
+  // a max-width inside an iframe 470px wide is still 470px wide.
+  function open(query, width) {
+    frame.style.width = (width || 470) + 'px';
+    return new Promise(function (resolve) {
+      frame.onload = function () {
+        var win = frame.contentWindow;
+        until(function () {
+          return q(win, '#revision') && q(win, '#revision').textContent.indexOf('revision ') === 0 && win;
+        }).then(function () { w = win; resolve(win); });
+      };
+      frame.src = 'panel-replay.html?' + query;
+    });
+  }
+
+  function q(win, sel) { return win.document.querySelector(sel); }
+  function all(win, sel) { return Array.prototype.slice.call(win.document.querySelectorAll(sel)); }
+  function press(win, init) {
+    win.document.dispatchEvent(new win.KeyboardEvent('keydown', Object.assign({ bubbles: true }, init)));
+  }
+  function offsetOf(win, key) {
+    var scroller = q(win, '#reading');
+    var node = scroller.querySelector('[data-anchor="' + key + '"]');
+    return node ? node.getBoundingClientRect().top - scroller.getBoundingClientRect().top : null;
+  }
+
+  var scrollBefore = 0;
+  var arrivalOffset = 0;
+  var arrivalKey = null;
+  var runOneOffset = 0;
+
+  // The block the panel will pin: the topmost one still visible, which is what
+  // captureAnchor in app.js picks. Asserting against THIS is asserting the
+  // property the code promises — a block a thousand pixels above the viewport is
+  // not the paragraph anybody is reading.
+  function topAnchorKey(win) {
+    var scroller = q(win, '#reading');
+    var frame = scroller.getBoundingClientRect();
+    var nodes = scroller.querySelectorAll('[data-anchor]');
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodes[i].getBoundingClientRect().top - frame.top >= -8) {
+        return nodes[i].getAttribute('data-anchor');
+      }
+    }
+    return null;
+  }
+
+  function inView(win, node) {
+    var scroller = q(win, '#reading');
+    var frame = scroller.getBoundingClientRect();
+    var box = node.getBoundingClientRect();
+    return box.top < frame.bottom && box.bottom > frame.top;
+  }
+
+  function run() {
+    return open('case=complete')
+
+      // ------------------------------------------------ a finished consultation
+      .then(function () {
+        check('a finished round renders the synthesis and every contribution',
+          !!q(w, '#reading .synthesis') && all(w, '#reading .contribution').length >= 3,
+          all(w, '#reading .contribution').length + ' contributions');
+
+        check('the question is the largest thing on the page',
+          parseFloat(w.getComputedStyle(q(w, '#question')).fontSize)
+            > parseFloat(w.getComputedStyle(q(w, '#reading .say')).fontSize));
+
+        var interactive = all(w, '#reading [data-open-source], #reading [data-follow-up], #reading [data-compare]');
+        check('every control in the reading column is a real button',
+          interactive.length > 0 && interactive.every(function (n) {
+            return n.tagName === 'BUTTON' && !n.hasAttribute('disabled');
+          }));
+
+        check('a source-supported claim carries a citation and an inference does not',
+          !!q(w, '#reading .support[data-support="source"]')
+          && !!q(w, '#reading .claim .citations')
+          && all(w, '#reading .claim').some(function (claim) {
+            return claim.querySelector('[data-support="inference"]') && !claim.querySelector('.citations');
+          }));
+
+        check('the model that produced an answer is shown, not just recorded',
+          all(w, '#reading .provenance').some(function (p) {
+            return p.textContent.indexOf('Answered by') === 0;
+          }), (q(w, '#reading .provenance') || {}).textContent);
+
+        check('v0.1 offers no invite control anywhere',
+          w.document.body.textContent.toLowerCase().indexOf('invite') < 0);
+
+        check('the absent keep-as-a-note control is explained where it would be',
+          q(w, '#reading').textContent.indexOf('cannot create a note itself yet') > 0
+            && !q(w, '#reading [data-retain]'));
+
+        // Back must restore the pane, the scroll position and the control used.
+        var trigger = q(w, '#reading [data-open-source]');
+        trigger.focus();
+        scrollBefore = q(w, '#reading').scrollTop;
+        trigger.click();
+        return until(function () { return q(w, '#detail #detail-title'); });
+      })
+
+      .then(function () {
+        var quoted = q(w, '#detail .quoted');
+        check('a citation opens the source with its own span marked',
+          !!q(w, '#detail mark') && !!quoted
+            && q(w, '#detail mark').textContent.trim() === quoted.textContent.trim());
+
+        // Anchor offsets are BYTE offsets into the UTF-8 capture; this page
+        // indexes UTF-16 code units. Checked at the conversion itself, because
+        // the view falls back to searching for the quote and would therefore
+        // still look right with the conversion removed entirely.
+        var margin = w.CouncilRecord;
+        var body = 'The bench\u2019s ceiling \u2014 measured, not guessed \u2014 is what a quote rests on. \ud83e\udeaa\n'
+          + 'The number to quote against is the worst week, not the average one.';
+        var span = margin.byteSpanToUnits(body, 114, 149);
+        check('a byte span is converted to code units before the capture is sliced',
+          !!span && body.slice(span.start, span.end) === 'the worst week, not the average one',
+          span ? JSON.stringify(span) + ' -> ' + JSON.stringify(body.slice(span.start, span.end))
+               : 'no span');
+        check('a byte offset landing inside a character is refused, not guessed',
+          margin.byteSpanToUnits(body, 10, 12) === null);
+        check('opening a detail moves focus into it',
+          w.document.activeElement === q(w, '#detail #detail-title'));
+        check('the source detail does not scroll to the cited span on open',
+          q(w, '#detail').scrollTop === 0);
+
+        press(w, { key: 'Escape' });
+        return until(function () { return !q(w, '#detail #detail-title'); });
+      })
+
+      .then(function () {
+        check('Escape is Back and restores the reading position',
+          Math.abs(q(w, '#reading').scrollTop - scrollBefore) < 3,
+          'scrollTop ' + q(w, '#reading').scrollTop + ' wanted ' + scrollBefore);
+        check('Back returns focus to the control that opened the detail',
+          !!w.document.activeElement && w.document.activeElement.hasAttribute('data-open-source'));
+
+        // Pane switching, and the accessible current-pane marker.
+        q(w, '[data-pane="members"]').click();
+        return until(function () { return q(w, '#reading .roster'); });
+      })
+
+      // ------------------------------------------------------------- members
+      .then(function () {
+        var current = q(w, '.panes button[aria-current="page"]');
+        check('the open pane is marked with aria-current, which needs no tab role',
+          !!current && current.getAttribute('data-pane') === 'members'
+            && !q(w, '.panes button[aria-selected]'));
+
+        check('a member is shown with the word for its kind, never a colour alone',
+          all(w, '#reading .kind').some(function (chip) {
+            return ['Human', 'Assistant', 'Simulant'].indexOf(chip.textContent.trim()) >= 0;
+          }));
+
+        check('the members pane says which model answers for a seat',
+          w.document.querySelector('#reading').textContent.indexOf('Model:') >= 0);
+
+        q(w, '#reading [data-open-member]').click();
+        // The select is rendered at once and filled when the catalogue comes
+        // back, because the page re-reads it every time a chooser opens rather
+        // than trusting one read from boot.
+        return until(function () { return all(w, '#detail #member-model option').length > 1; });
+      })
+
+      .then(function () {
+        var options = all(w, '#detail #member-model option').map(function (o) { return o.value; });
+        check('the host’s enabled models reach the member’s model control',
+          options.indexOf('claude-sonnet-4-6') >= 0 && options.indexOf('gpt-5-mini') >= 0,
+          options.join(','));
+
+        // A request too large for the hop is refused before it travels.
+        q(w, '[data-pane="session"]').click();
+        return until(function () { return q(w, '#reading [data-follow-up]'); });
+      })
+
+      .then(function () {
+        q(w, '#reading [data-follow-up]').click();
+        return until(function () { return q(w, '#detail #follow-up-text'); });
+      })
+
+      .then(function () {
+        var before = w.__councilReplay.calls.length;
+        q(w, '#detail #follow-up-text').value = new Array(40000).join('x');
+        q(w, '#detail [data-send-follow-up]').click();
+        return until(function () { return q(w, '#message .refusal'); }).then(function () {
+          check('an oversized request is refused before it is sent, not dropped',
+            q(w, '#message .refusal').textContent.indexOf('units') > 0
+              && w.__councilReplay.calls.slice(before).every(function (call) {
+                return call.command !== 'run.start';
+              }),
+            w.__councilReplay.calls.slice(before).map(function (c) { return c.command; }).join(','));
+
+          check('a refusal stays until it is acknowledged',
+            !!q(w, '#message [data-dismiss-refusal]'));
+          q(w, '#message [data-dismiss-refusal]').click();
+          check('dismissing a refusal clears it', !q(w, '#message .refusal'));
+          w.CouncilApp.back();
+        });
+      })
+
+      // -------------------------------------- a stale write, and what it says
+      .then(function () {
+        w.__councilReplay.staleNext();
+        return until(function () { return q(w, '#reading [data-follow-up]'); }).then(function () {
+          q(w, '#reading [data-follow-up]').click();
+          return until(function () { return q(w, '#detail #follow-up-text'); });
+        });
+      })
+
+      .then(function () {
+        q(w, '#detail #follow-up-text').value = 'What would change your mind?';
+        q(w, '#detail [data-send-follow-up]').click();
+        return until(function () { return q(w, '#message .refusal'); });
+      })
+
+      .then(function () {
+        check('a write against an old revision is refused, and the page says why',
+          q(w, '#message .refusal').textContent.indexOf('re-read') > 0,
+          q(w, '#message').textContent);
+
+        // ------------------------------------- a half-written follow-up survives
+        // A round delivering answers re-renders the whole panel, and the
+        // composer is the one place holding something that exists nowhere else.
+        w.CouncilApp.back();
+        return until(function () { return q(w, '#reading [data-follow-up]'); });
+      })
+
+      .then(function () {
+        q(w, '#reading [data-follow-up]').click();
+        return until(function () { return q(w, '#detail #follow-up-text'); });
+      })
+
+      .then(function () {
+        var box = q(w, '#detail #follow-up-text');
+        box.value = 'What would change your mind about the worst week?';
+        box.focus();
+        box.setSelectionRange(6, 6);
+        w.__councilReplay.advance('complete');
+        return new Promise(function (resolve) { setTimeout(resolve, 400); });
+      })
+
+      .then(function () {
+        var box = q(w, '#detail #follow-up-text');
+        check('an answer arriving does not discard a half-written follow-up',
+          !!box && box.value === 'What would change your mind about the worst week?',
+          box ? JSON.stringify(box.value) : 'the composer was replaced');
+        check('the cursor stays where it was in the draft',
+          !!box && w.document.activeElement === box && box.selectionStart === 6,
+          box ? 'active=' + w.document.activeElement.id + ' at ' + box.selectionStart : '');
+        w.CouncilApp.back();
+
+        // ------------------------ a late contribution, and the reading position
+        return open('case=partial');
+      })
+
+      .then(function () {
+        check('a partial round shows its failure and offers an explicit retry',
+          !!q(w, '#reading .notice [data-retry-run]'));
+        check('a failed seat is labelled and offers to be asked again',
+          !!q(w, '#reading [data-retry-seat]'));
+
+        var scroller = q(w, '#reading');
+        scroller.scrollTop = Math.floor(scroller.scrollHeight * 0.55);
+        var pinned = topAnchorKey(w);
+        var before = offsetOf(w, pinned);
+        // Starting a round removes the previous round's failure notice from the
+        // top of the pane — a real content change above the reading position,
+        // and the case the anchor exists for.
+        w.__councilReplay.advance('running');
+        return until(function () {
+          return q(w, '#reading .waiting') && offsetOf(w, pinned) !== null;
+        }).then(function () {
+          check('a round that starts while you are reading does not move the block being read',
+            Math.abs(offsetOf(w, pinned) - before) < 2,
+            pinned + ' moved ' + (offsetOf(w, pinned) - before).toFixed(1) + 'px');
+          check('a running seat says it is answering', !!q(w, '#reading .waiting'));
+          check('a running round can be cancelled', !!q(w, '#reading [data-cancel-run]'));
+
+          // Measured BEFORE the answer lands, so the comparison after it has
+          // something to falsify.
+          arrivalKey = topAnchorKey(w);
+          arrivalOffset = offsetOf(w, arrivalKey);
+          runOneOffset = offsetOf(w, 'run:run-1');
+          w.__councilReplay.advance('retried');
+          return until(function () { return !q(w, '#reading .waiting'); });
+        });
+      })
+
+      .then(function () {
+        var moved = offsetOf(w, arrivalKey) - arrivalOffset;
+        var runOneMoved = offsetOf(w, 'run:run-1') - runOneOffset;
+        check('the first round does not shift when a later answer lands below it',
+          Math.abs(runOneMoved) < 2, 'moved ' + runOneMoved.toFixed(1) + 'px');
+        check('an answer landing mid-page does not move the paragraph being read',
+          Math.abs(moved) < 2, arrivalKey + ' moved ' + moved.toFixed(1) + 'px');
+        check('the arrival is announced rather than scrolled to',
+          q(w, '#announcer').textContent.indexOf('answered') > 0,
+          q(w, '#announcer').textContent);
+
+        // The button is offered when the new answer is off screen and withheld
+        // when it is already visible — never a jump either way.
+        // Document order, not :last-of-type — each run is its own parent, so
+        // that pseudo-class matches the last contribution of every section.
+        var contributions = all(w, '#reading .contribution');
+        var landed = contributions[contributions.length - 1];
+        var visible = !!landed && inView(w, landed);
+        check('the arrival button is offered exactly when the answer is off screen',
+          q(w, '#arrival').hidden === !!visible,
+          'hidden=' + q(w, '#arrival').hidden + ' visible=' + visible);
+        check('the reading column was not scrolled to the new answer',
+          Math.abs(moved) < 2, 'moved ' + moved.toFixed(1) + 'px');
+
+        return open('case=inventory&pane=sources');
+      })
+
+      // ----------------------------------------------- material that is absent
+      .then(function () {
+        q(w, '[data-pane="sources"]').click();
+        return until(function () { return q(w, '#reading .roster [data-open-source]'); });
+      })
+
+      .then(function () {
+        check('an inventory says how much of its material is actually held',
+          q(w, '#reading').textContent.indexOf('have their material in this project') > 0);
+        q(w, '#reading [data-open-source]').click();
+        return until(function () { return q(w, '#detail #detail-title'); });
+      })
+
+      .then(function () {
+        check('a source captured as a reference only says so instead of quoting',
+          !!q(w, '#detail .notice') && !q(w, '#detail .excerpt')
+            && q(w, '#detail').textContent.indexOf('cannot check') > 0);
+        check('a withheld source still names the bytes it stood for',
+          q(w, '#detail').textContent.indexOf('sha256:') > 0);
+
+        return open('case=punctuation');
+      })
+
+      // ------------------------------ an anchor after non-ASCII text, end to end
+      .then(function () {
+        q(w, '[data-pane="sources"]').click();
+        return until(function () { return q(w, '#reading .roster [data-open-source]'); });
+      })
+
+      .then(function () {
+        var margin = all(w, '#reading [data-open-source]').filter(function (node) {
+          return node.textContent.indexOf('A margin note') === 0;
+        })[0];
+        check('a capture with punctuation and an emoji is listed like any other', !!margin);
+        if (margin) { margin.click(); }
+        return until(function () { return q(w, '#detail .excerpt'); });
+      })
+
+      .then(function () {
+        var anchor = q(w, '#detail .roster [data-anchor]');
+        check('a capture lists the anchors inside it', !!anchor);
+        if (anchor) { anchor.click(); }
+        return until(function () { return q(w, '#detail mark'); });
+      })
+
+      .then(function () {
+        var mark = q(w, '#detail mark');
+        check('the mark lands on the cited words, not two characters off',
+          mark.textContent === 'the worst week, not the average one',
+          JSON.stringify(mark.textContent));
+        check('the cited span is reported in bytes, which is what the record holds',
+          q(w, '#detail').textContent.indexOf('bytes 114') > 0);
+
+        return open('case=cancelled');
+      })
+
+      .then(function () {
+        check('a cancelled round reads as cancelled',
+          q(w, '#question-meta').textContent.indexOf('cancelled') >= 0,
+          q(w, '#question-meta').textContent);
+
+        return open('case=hostile');
+      })
+
+      // ------------------------------------------------------ the DOM injection
+      .then(function () {
+        // Every text field of this document carries a closing script tag, an
+        // img with an onerror handler and an opening script tag. It was stored
+        // by the real backend, so this is a document Council can genuinely be
+        // handed.
+        var before = w.__councilReplay.calls.length;
+        q(w, '[data-pane="sources"]').click();
+        return until(function () { return q(w, '#reading [data-open-source]'); }).then(function () {
+          var injected = all(w, '#reading [data-open-source]').filter(function (n) {
+            return n.textContent.indexOf('Captured') === 0;
+          })[0];
+          (injected || q(w, '#reading [data-open-source]')).click();
+          return until(function () { return q(w, '#detail #detail-title'); });
+        }).then(function () {
+          check('markup in the record runs nothing',
+            w.__councilInjected === undefined && frame.contentWindow.__councilInjected === undefined);
+          check('markup in the record creates no elements',
+            w.document.querySelectorAll('#reading script, #detail script, #reading img, #detail img').length === 0);
+          check('markup in the record is shown as the words it is',
+            w.document.body.textContent.indexOf('<img src=x onerror=') > 0);
+          check('rendering a hostile document fires no host action',
+            w.__councilReplay.calls.slice(before).every(function (call) {
+              return call.command === 'source.fetch' || call.command === 'wrapper.set_view';
+            }),
+            w.__councilReplay.calls.slice(before).map(function (c) { return c.command; }).join(','));
+        });
+      })
+
+      // ------------------------------------------------------------ text size
+      .then(function () {
+        return open('case=complete');
+      })
+
+      .then(function () {
+        var root = w.document.documentElement;
+        var before = parseFloat(w.getComputedStyle(root).fontSize);
+        q(w, '[data-text-larger]').click();
+        return until(function () {
+          return parseFloat(w.getComputedStyle(root).fontSize) > before;
+        }).then(function () {
+          check('the text-size control makes the whole panel larger, not just the body',
+            parseFloat(w.getComputedStyle(q(w, '#reading .status') || root).fontSize) > 0
+              && parseFloat(w.getComputedStyle(root).fontSize) > before);
+          check('the chosen size is stored as a Council preference',
+            w.__councilReplay.preferences().text_scale > 0,
+            JSON.stringify(w.__councilReplay.preferences()));
+
+          var at = parseFloat(w.getComputedStyle(root).fontSize);
+          press(w, { key: '-', ctrlKey: true });
+          return until(function () { return parseFloat(w.getComputedStyle(root).fontSize) < at; });
+        }).then(function () {
+          check('Ctrl and minus changes Council’s text size, which the host’s own shortcut cannot', true);
+        });
+      })
+
+      // ------------------------------------------------------------ the theme
+      .then(function () {
+        w.__councilReplay.theme(true);
+        return until(function () {
+          return w.document.documentElement.getAttribute('data-theme') === 'dark';
+        }).then(function () {
+          var background = w.getComputedStyle(w.document.body).backgroundColor;
+          check('the wrapper’s theme event switches the panel to dark',
+            background === 'rgb(22, 21, 15)', background);
+          w.__councilReplay.theme(false);
+        });
+      })
+
+      // ------------------------------------------------- narrow versus wide
+      .then(function () { return open('case=complete&w=400', 470); })
+
+      .then(function () {
+        q(w, '#reading [data-open-source]').click();
+        return until(function () { return q(w, '#detail #detail-title'); });
+      })
+
+      .then(function () {
+        check('at 400px a detail covers the reading column and Back is offered',
+          w.getComputedStyle(q(w, '#reading')).display === 'none'
+            && w.getComputedStyle(q(w, '#detail .back-row')).display !== 'none');
+        return open('case=complete', 1120);
+      })
+
+      .then(function () {
+        check('wide, the resting right column carries the council at a glance',
+          q(w, '#detail').textContent.indexOf('Council at a glance') >= 0);
+        q(w, '#reading [data-compare]').click();
+        return until(function () { return q(w, '#detail .compare'); });
+      })
+
+      .then(function () {
+        check('wide, a comparison sits beside the reading column with no Back',
+          w.getComputedStyle(q(w, '#reading')).display !== 'none'
+            && w.getComputedStyle(q(w, '#detail .back-row')).display === 'none');
+        var second = q(w, '#detail [data-compare-add]');
+        if (second) { second.click(); }
+        return until(function () { return all(w, '#detail .compare .column').length === 2; });
+      })
+
+      .then(function () {
+        check('two answers compare side by side with the support each claimed',
+          all(w, '#detail .compare .column').length === 2
+            && all(w, '#detail .compare .support').length > 1);
+        check('the comparison says whether they cite anything in common',
+          q(w, '#detail .superseded').textContent.indexOf('cite') > 0,
+          q(w, '#detail .superseded').textContent);
+      })
+
+      // ---------------------------------------------------- an empty project
+      .then(function () { return open('case=inventory'); })
+
+      .then(function () {
+        check('an unasked council says where a consultation starts, and offers no fake control',
+          q(w, '#reading').textContent.indexOf('choose Council as its provider') > 0
+            && !q(w, '#reading [data-ask]'));
+      })
+
+      .catch(function (error) {
+        check('the harness ran to the end', false, error && error.message);
+      })
+
+      .then(function () {
+        var failed = results.filter(function (ok) { return !ok; }).length;
+        var line = (results.length - failed) + '/' + results.length + ' checks passed';
+        document.getElementById('result').textContent = line;
+        document.title = 'RESULT ' + line;
+      });
+  }
+
+  run();
+})();
+</script>
+</body>
+</html>

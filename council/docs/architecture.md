@@ -531,7 +531,18 @@ Envelope shapes are in `envelope.schema.json`. Rules:
   theme, and whether the open document is one Council can edit),
   `wrapper.set_view` (the user's selected session and pane — the one field the
   wrapper writes, which advances no revision because no engine derives anything
-  from it), and `wrapper.chat_handoff` (§5.3).
+  from it), `wrapper.chat_handoff` (§5.3), `wrapper.models` (Minerva's enabled
+  providers and models, relayed to the backend's `minerva_council_models` tool
+  without taking the store lease, because the catalogue is the host's state and
+  no snapshot is touched), and `wrapper.get_preferences` /
+  `wrapper.set_preference` (Council's own view preferences — today the reader's
+  text size; `wrapper.describe` also carries the list of sizes the wrapper will
+  store, so the page offers only sizes both sides know rather than keeping a
+  second list that can drift). The preferences are stored beside the panel in
+  `user://council_ui_preferences.json` and deliberately NOT in the record: a
+  reader's chosen text size is not project data, must not advance a revision or
+  travel in an exported council, and `ViewState` is closed to
+  `selected_session_id`, `selected_definition_id` and `pane` in any case.
 - A document the wrapper does not recognise is **kept, not replaced**. Its bytes
   are handed straight back on save — under the host's `_bytes` raw-write key for
   the file, and as a base64 sibling for the project, because `__panel_state`

@@ -42,6 +42,12 @@ const COMMAND_CHANNEL := "minerva_council_command"
 const LOAD_CHANNEL := "minerva_council_load_snapshot"
 const EXPORT_CHANNEL := "minerva_council_export_snapshot"
 
+## The host's enabled providers and models. It is the one backend channel that
+## does not touch the record, so it is called WITHOUT the lease: taking it would
+## make a model list wait behind another tab's round for no reason, and there is
+## no snapshot for the two to disagree about.
+const MODELS_CHANNEL := "minerva_council_models"
+
 ## The host capability that delivers a selected context to an explicitly named
 ## chat. `minerva_send_message` takes the chat_id as a parameter, which is the
 ## whole reason Council can use it: there is no path here that could pick a
@@ -166,6 +172,12 @@ func relay(request: Dictionary, record: Dictionary, current_record := Callable()
 
 	_release()
 	return {"reply": reply, "snapshot": carried}
+
+
+## Read Minerva's enabled providers and models. Each call re-reads them from the
+## host, which is what makes it the answer after a user enables a model.
+func models() -> Dictionary:
+	return await _send(MODELS_CHANNEL, {})
 
 
 ## Hand `text` to the chat `chat_id` names. The caller resolves the id from the

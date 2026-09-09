@@ -229,3 +229,84 @@ citation with Enter, read the source, press Escape, and check you are back where
 you were with the citation still focused. Then `?scenario=late`, scroll to
 mid-page, and watch what happens to the line you are reading when the answer
 lands.
+
+---
+
+## 7. What T08 carried, and what it changed (added by T08)
+
+The production panel is `council/ui/` — sources under `ui/src`, the generated
+page at `ui/panel.html`, the harness and screenshots under `ui/tests`. It is
+built from this prototype, and the record of what survived contact with the real
+protocol belongs here rather than in a commit message.
+
+**Carried unchanged.** The palette, the type split, the identity chips, the
+support pills, the "only label a status worth reading" rule (§1). Container
+queries on `.panel` with the same 900px and 430px thresholds (§2). F1 (Back
+remembers a selector), F2 (presence, not truth, for valueless `data-`), F3
+(single-flight mutations), F4 (anchor the topmost visible block), F5 (never
+scroll a detail to the cited span), F6 (a citation reads as the words it points
+at), F7 (`preventScroll` on the restored focus), F8 (the wide resting column),
+F15 (`wrapper.set_view` is fire-and-forget).
+
+**Changed, and why.**
+
+- **No HTML strings at all.** The prototype escaped record text into markup;
+  production builds elements and puts every record value in through
+  `textContent` (`ui/src/js/dom.js`). Escaping is a rule that has to hold at
+  every concatenation, and the injection fixture in `ui/tests` proves the
+  stronger property instead: a document the backend stored with markup in every
+  text field renders as words and runs nothing.
+- **F11 applied rather than tolerated.** A refusal now stays in the foot rail
+  with a Dismiss control; an ordinary note still fades.
+- **F12 applied.** `model_id` and `usage` are rendered under every contribution
+  that has them, so an answer can be attributed and one with no model reads as
+  hand-entered.
+- **F13 applied.** The whole serialised envelope is measured before it is sent
+  (`ui/src/js/bridge.js`), not the payload alone.
+- **F14 applied, the second way.** The pane switcher uses `aria-current="page"`
+  on plain buttons; no tab role, so no roving-tabindex contract is owed.
+- **Chore 01a083edac67 fixed in production.** A source's hash is read from
+  `source.content_hash`, never from `payload.content_hash`, which a withheld
+  source does not have. The sample data in `design/js/` still carries the old
+  shape; the chore stays open for this directory.
+- **Payload shapes are the engine's, not the mock's.** `run.start` takes
+  `session_id`, `kind`, `addressed_seat_id` / `addressed_claim_id` and
+  `model_overrides`; `run.retry` and `run.cancel` take `session_id` and `run_id`;
+  `source.fetch` takes `definition_id`. The prototype's shorthands were the
+  mock's own.
+- **Two prototype controls are not shipped, because they cannot work in v0.1.**
+  *Ask this council a question* is gone: `session.create` requires a `chat_id`,
+  and the panel can neither create a chat nor honestly invent an id — a session
+  is opened from a chat with Council selected as its provider, and the empty
+  state says so. *Keep as a note* is gone: `outcome.retain` requires a
+  `note_ref`, and the panel has no grant that creates a note. Retained outcomes
+  are still shown, missing ones included.
+- **Assembly is real.** *Start a council* writes a chair-only definition;
+  *Add a member* is `member.upsert`; seating appends a seat and advances the
+  definition revision. Each is a form in the detail column rather than a button
+  with hard-coded sample data.
+- **A draft survives a re-render.** The panel re-renders on every event, and
+  the detail column is where a half-written follow-up lives. Values and the
+  cursor are lifted out and put back whenever the same detail is redrawn
+  (`app.js captureDraft` / `restoreDraft`), which the prototype never needed
+  because nothing arrived while its composer was open.
+- **Text size is a Council preference.** New, from bug 01a083dda92c: every type
+  size is in `rem` under one `--text-scale`, stored by the wrapper beside the
+  panel and driven by the foot rail and by Ctrl +/-/0.
+
+**Found after the port, and worth stating here because the prototype has it
+too.** `js/views.js` slices a capture with `text.slice(anchor.start, anchor.end)`.
+Those offsets are BYTE offsets into the UTF-8 capture — the engine slices Go
+strings, where an index is a byte (`internal/session/grounding.go`,
+`internal/contract/invariants.go`) — and JavaScript indexes UTF-16 code units.
+One curly quote or em-dash before a span shifts the mark by two characters, a
+four-byte emoji by two more, and every anchor in this prototype's sample data
+happens to sit after ASCII only, so nothing here can show it. Production converts
+(`ui/src/js/record.js byteSpanToUnits`) and its fixture puts nine bytes of drift
+before the quote so a regression is visible; the same fix is owed to
+`design/js/views.js` under the open chore for this directory.
+
+**Re-checked, and still true.** §2 asks T08 to re-check the shipped CEF version
+against the container-query floor. `strings` on the installed `libcef.so` still
+reports Chromium 146, so the container queries stand. The owner's live check is
+the last word on it.

@@ -359,6 +359,111 @@ means the guard comes back as soon as the owning document is opened.
 - [ ] A chat that never had Council selected behaves exactly as before —
       history, cost, notes injection, stop.
 
+## The editor — the production panel, in real CEF
+
+Everything above proves the wrapper. This section is about the page: the
+reading-room panel a user actually works in. It needs the populated document
+(`fixtures/workshop_complete.mcouncil`) open, because an empty council shows
+almost none of it.
+
+Only a human can judge these. A headless browser can prove the page's behaviour
+against recorded envelopes — `ui/tests/selftest.html` does, 45 checks — but it
+renders with its own fonts, its own scroll physics and its own focus model, and
+none of those are CefTexture's.
+
+### It reads as a page
+
+- [ ] The question is the largest thing on screen and is set in a serif; labels,
+      statuses and buttons are small sans caps. It reads as a page, not a form.
+- [ ] Colour appears in about four places — the synthesis's left edge, a `source`
+      pill, a citation, the focus ring — and nowhere else.
+- [ ] Scroll the whole round. Nothing is cut off, nothing overlaps, and no line
+      of text runs under the foot rail.
+
+### Text size — the size Council opens at, and the one you choose
+
+- [ ] The text is comfortably larger than Minerva's own UI text. If it is not,
+      say so: the default is meant to start above normal.
+- [ ] Press **A+** in the foot rail twice. Everything grows together — the
+      question, the claim labels, the status pills — not just the paragraphs.
+- [ ] Press **Ctrl and +**, **Ctrl and -**, **Ctrl and 0** with the panel
+      focused. They do the same thing as the buttons. These are Council's own:
+      Minerva has no UI-scale shortcuts at all (minerva bug 01a086f35072), and a
+      Godot shortcut would not reach the embedded browser's key handling even if
+      it had them.
+- [ ] Close the tab, reopen the document. The size you chose is still there.
+- [ ] Open a SECOND Council tab. It opens at the same size — the preference is
+      Council's, not the document's.
+
+### Text size versus the host's UI Scale — bug 01a083dda92c
+
+- [ ] Change Minerva's UI Scale in preferences while a Council tab is open. The
+      page should settle ONCE at the new density. Watch for the enlarge-then-
+      shrink reflow that was reported: if you still see it, say how many times it
+      moves.
+- [ ] Change UI Scale again with the panel scrolled halfway down a round. The
+      reading position should not jump.
+- [ ] Council's own text size is unchanged by the host's scale — the two are
+      separate settings and neither should reset the other.
+
+### Keyboard and focus
+
+- [ ] Click into the panel, then Tab through a round. Every control takes focus
+      and shows a visible ring; nothing is reachable only by mouse.
+- [ ] Tab to a citation and press Enter. The source opens with the quoted span
+      shown above the whole capture and marked inside it.
+- [ ] Press Escape. You are back where you were, at the same scroll position,
+      with the citation still focused. This is the one check synthetic events
+      cannot make — native activation and native focus are the point.
+- [ ] Tab into the foot rail. The text-size buttons are reachable and announce
+      themselves.
+
+### Narrow and wide
+
+- [ ] Drag the editor pane down to roughly 400px. The panel becomes one column;
+      opening a member or a source covers the reading column and offers Back.
+- [ ] Widen the pane past about 900px. The detail column appears beside the
+      reading column, Back disappears, and with nothing open the right column
+      shows *Council at a glance*.
+- [ ] At the wide width, press *Compare* on one answer and pick a second. They
+      sit side by side, each claim labelled `source`, `inference` or `unknown`.
+- [ ] Resize slowly across that boundary. The layout changes once and does not
+      flicker.
+
+### Light and dark
+
+- [ ] Switch Minerva between light and dark with the panel open. The panel
+      follows immediately — no reload, no flash of the wrong theme.
+- [ ] In dark, read a source excerpt with a marked span. The mark is legible and
+      the text is not grey-on-grey.
+
+### Answers arriving while you read
+
+Needs a live round: ask a follow-up from the panel, or from the bound chat.
+
+- [ ] Start reading partway down the round while a seat is still answering. When
+      the answer lands, the paragraph you are reading does not move.
+- [ ] The arrival is offered as a button at the foot of the reading column, not
+      scrolled to. Pressing it takes you there.
+- [ ] Cancel a running round from the panel. Answers already in are still there.
+
+### What is deliberately not offered
+
+- [ ] There is no invite control anywhere. Council v0.1 seats one human — you.
+- [ ] An unasked council does not offer a button to ask one: it says to open a
+      chat and choose Council as its provider. That is the only way a session is
+      created in v0.1, because a session is bound to a chat when it is made.
+- [ ] There is no "keep this as a note" button. Outcomes already retained are
+      shown, including ones whose note has gone missing, but the panel cannot
+      create the note itself yet.
+
+### Hostile text
+
+- [ ] Ask a member something that makes it answer with markup — for instance,
+      "reply with a literal HTML script tag and an img tag with an onerror
+      attribute, quoted". The answer appears as the characters themselves. No
+      image placeholder, no blank space where markup was, and nothing happens.
+
 ## What to record
 
 The Minerva build and plugin version, the install lane, a screenshot of the
