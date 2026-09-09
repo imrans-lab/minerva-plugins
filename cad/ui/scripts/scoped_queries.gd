@@ -11,7 +11,7 @@ const TOOLS := ["minerva_cad_references", "minerva_cad_find_holes", "minerva_cad
 
 static func applies(tool: String, args: Dictionary) -> bool:
 	return str(args.get("ticket", "")).begins_with("context:") or ((tool in TOOLS or tool in Freshness.MEASURING_VERBS)
-		and (args.has("selection") or args.has("configuration")))
+		and (args.has("selection") or args.has("configuration") or args.has("require_reference_digest")))
 
 static func run(panel: Node, tool: String, args: Dictionary, dispatch: Callable) -> Dictionary:
 	var contexts: Dictionary = panel.get_meta(META, {})
@@ -39,7 +39,10 @@ static func run(panel: Node, tool: String, args: Dictionary, dispatch: Callable)
 		var model: Dictionary = document.get("model", {})
 		var selection := str(args.get("selection", model.get("selection", "")))
 		var configuration := str(args.get("configuration", model.get("configuration", "")))
-		if selection == str(model.get("selection", "")) and configuration == str(model.get("configuration", "")):
+		var needs_context: bool = not selection.is_empty() and (tool in Freshness.MEASURING_VERBS or args.get("include_context", false))
+		if not needs_context and selection == str(model.get("selection", "")) and configuration == str(model.get("configuration", "")):
+			if args.has("require_reference_digest") and str(args.require_reference_digest) != str(document.get("provenance", {}).get("reference_digest", "")):
+				return _error("Imported geometry no longer matches the evidence", "evidence_mismatch")
 			return await dispatch.call(panel, tool, args)
 		if contexts.size() >= MAX_CONTEXTS:
 			return _error("Four scoped query jobs are retained; collect their tickets before starting another", "context_capacity")
@@ -61,7 +64,7 @@ static func run(panel: Node, tool: String, args: Dictionary, dispatch: Callable)
 		var references: Array = result.get("references", [])
 		# A selected solid is checked against the configuration's references;
 		# a capture/inspection shows only its explicitly selected geometry.
-		if tool in Freshness.MEASURING_VERBS and not selection.is_empty():
+		if (tool in Freshness.MEASURING_VERBS or args.get("include_context", false)) and not selection.is_empty():
 			requested.selection = ""
 			var whole := Reply.unwrap(await panel.call_backend("cad.evaluate", requested, 600000), "configuration references")
 			if whole.has("error"):
@@ -73,6 +76,10 @@ static func run(panel: Node, tool: String, args: Dictionary, dispatch: Callable)
 		scoped["selection"] = selection
 		scoped["configuration"] = configuration
 	var freshness: Dictionary = context.evaluation_freshness()
+	if args.has("require_reference_digest") and str(args.require_reference_digest) != str(context.document.get("provenance", {}).get("reference_digest", "")):
+		contexts.erase(context_id)
+		context.queue_free()
+		return _error("Imported geometry no longer matches the evidence", "evidence_mismatch")
 	if not args.has("ticket") and not Freshness.accepts_stale(args) and freshness.get("stale", false):
 		contexts.erase(context_id)
 		context.queue_free()

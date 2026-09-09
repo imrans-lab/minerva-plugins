@@ -183,6 +183,8 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 
 static func _dispatch(panel, tool_name: String, args: Dictionary) -> Dictionary:
 	match tool_name:
+		"minerva_cad_validation":
+			return await preload("scripts/validation_run.gd").handle(panel, args, handle)
 		"minerva_cad_model":
 			return await panel._model_views.handle(args)
 		"minerva_cad_build":

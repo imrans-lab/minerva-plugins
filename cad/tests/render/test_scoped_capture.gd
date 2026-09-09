@@ -40,8 +40,23 @@ func _run() -> void:
 	check("private reference-only capture renders pixels", reply.get("success", false) and reply.get("mirrored_instances", 0) > 0, str(reply))
 	var loaded := Image.load_from_file(OS.get_user_data_dir().path_join("scoped-reference-capture.png"))
 	check("capture contains geometry rather than a blank frame", loaded != null and not loaded.is_empty() and not Capture._is_one_colour(loaded), str(reply))
+	panel.request.connect(_capture_answer.bind(rig, references))
+	var contextual: Dictionary = await PanelTools.handle(panel, "minerva_cad_snapshot_posed", {
+		"configuration": "assembled", "selection": "instance:post", "include_context": true, "view": "iso",
+		"require_reference_digest": context.reference_digest.sha256_text(),
+		"fit": "reference:module/board", "max_edge": 320})
+	check("public capture reproduces pinned reference context around selected geometry", contextual.get("success", false)
+		and contextual.get("mirrored_instances", 0) >= 2, str(contextual))
 	check("capture leaves source and active solid unchanged", rig.buffer.text == SOURCE and panel.get_evaluation_state() == before
 		and panel.get_reference_state().is_empty(), str(panel.get_evaluation_state()))
 	context.queue_free()
 	await process_frame
 	_teardown(rig)
+
+func _capture_answer(channel: String, payload: Dictionary, reply_id: String, rig: Dictionary, references: Array) -> void:
+	if channel != "cad.evaluate":
+		return
+	var answer := _worker_answer()
+	answer.result["model"] = {"configuration": "assembled", "selection": payload.get("selection", ""), "physical": true}
+	answer.result["references"] = references if str(payload.get("selection", "")).is_empty() else []
+	_reply.call_deferred(rig, reply_id, answer)

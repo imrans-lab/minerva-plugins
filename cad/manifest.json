@@ -11,6 +11,57 @@
   },
   "tools": [
     {
+      "name": "minerva_cad_validation",
+      "description": "Read a versioned CAD validation specification from disk and run its named checks through the existing engines. Defaults to <CAD source path>.checks.json. Requirements stay in the authored file; full results are retained in a content-addressed evidence file. run joins one identified job; collect uses its ticket; report reads saved evidence (detail=full for all rows). No source or viewport edits.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "inspect",
+              "run",
+              "collect",
+              "cancel",
+              "report"
+            ],
+            "default": "run"
+          },
+          "path": {
+            "type": "string"
+          },
+          "ticket": {
+            "type": "string"
+          },
+          "wait_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 20000
+          },
+          "report_path": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string",
+            "enum": [
+              "summary",
+              "full"
+            ]
+          }
+        },
+        "required": [
+          "editor_name"
+        ]
+      }
+    },
+    {
       "name": "minerva_cad_references",
       "description": "List the foreign mesh files (glTF/GLB or STL placed by the .mcad mesh() primitive) currently mounted in a live CAD editor. LEAN BY DEFAULT: each reference's name, its status, its WORLD bounding box and how many nodes it holds — a listing that stays small on a board of forty-five nodes. detail=\"full\" adds the path the source wrote, the resolved path, the composed 4x4 pose, both frames of every box, the bounding box of every node inside it, and the load statistics (triangle_count, bytes, load_ms, outlines_skipped); reference=<name> answers about one reference instead of all, and a name that is not mounted is an error naming the ones that are. Under detail=\"full\" every box is millimetres in BOTH frames: 'local' is the reference's own converted frame — millimetres, Z-up, with the mesh() pose taken back off (the numbers to write back into the DSL; the file's raw units and axis convention have already been applied) — and 'world' is the posed CAD scene (the numbers to compare against the evaluated solid); the lean row carries the world box only. Every reference the source named appears here whether or not its file could be read: 'status' is ok, missing, unsupported, unreadable, empty, oversize or unresolved, 'reason' names the file and says what went wrong and travels at both detail levels, and a failed reference is drawn in the world as a wireframe marker at its pose. A mesh over the outline budget renders shaded without ortho outlines. Pass emit_dsl=true to get the node boxes back as .mcad KEEP-OUT envelopes in the reply's `dsl` field: one `keepout_<reference>` binding per reference, built as the union of one cube per node at that node's WORLD axis-aligned bounding box grown by clearance_mm on every side, with a comment listing the nodes it covers and the line to subtract (`part = part - keepout_board`). The box is the node's box in its WORLD pose, so a part mounted at an angle keeps the box its rotated silhouette needs and not a tight one \u2014 a keep-out is deliberately generous. nodes=[...] emits only the nodes named (path from the file root, or a bare leaf name); a name no node carries, and a node whose box is flat with clearance_mm 0, are omitted and listed in dsl_omitted. At most 200 node cubes are written: above that the call is an error asking for nodes=. This verb describes the REFERENCES; minerva_cad_get_mesh_info describes the evaluated solid.",
       "executor": "panel",
@@ -378,6 +429,7 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "detail": {"type": "string", "enum": ["summary", "full"], "description": "Full retains each engine response as evidence; summary remains the default."},
           "selection": {"type": "string", "description": "Evaluated binding, instance ID or reference; optional binding:, instance: or reference: namespace. Queries do not change the visible model."},
           "configuration": {"type": "string", "description": "Named assembly configuration; defaults to the displayed configuration. Physical checks refuse presentation-only configurations."},
           "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
@@ -564,6 +616,8 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "include_context": {"type": "boolean", "description": "Also render the selected configuration's reference geometry around a selected solid."},
+          "require_reference_digest": {"type": "string", "description": "Require the imported geometry digest from an evidence report; mismatch refuses the capture."},
           "selection": {"type": "string", "description": "Evaluated binding, instance ID or reference; optional binding:, instance: or reference: namespace. Queries do not change the visible model."},
           "configuration": {"type": "string", "description": "Named assembly configuration; defaults to the displayed configuration. Physical checks refuse presentation-only configurations."},
           "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
@@ -587,6 +641,8 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "include_context": {"type": "boolean", "description": "Also render the selected configuration's reference geometry around a selected solid."},
+          "require_reference_digest": {"type": "string", "description": "Require the imported geometry digest from an evidence report; mismatch refuses the capture."},
           "selection": {"type": "string", "description": "Evaluated binding, instance ID or reference; optional binding:, instance: or reference: namespace. Queries do not change the visible model."},
           "configuration": {"type": "string", "description": "Named assembly configuration; defaults to the displayed configuration. Physical checks refuse presentation-only configurations."},
           "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
@@ -888,6 +944,9 @@
         "ui/scripts/model_views.gd",
           "ui/scripts/query_context.gd",
           "ui/scripts/scoped_queries.gd",
+          "ui/scripts/validation_spec.gd",
+          "ui/scripts/validation_report.gd",
+          "ui/scripts/validation_run.gd",
         "ui/scripts/dependencies.gd",
         "ui/scripts/evaluation_state.gd"
         ],

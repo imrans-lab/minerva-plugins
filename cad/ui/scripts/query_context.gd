@@ -35,11 +35,7 @@ func setup(panel: Node, snapshot: Dictionary, result: Dictionary, references: Ar
 	var holder := Node3D.new()
 	report = library.mount_all(references, str(document.get("path", "")), [holder])
 	holder.free()
-	var identities: Array = []
-	for record: Dictionary in get_reference_status():
-		identities.append([record.get("name", ""), record.get("resolved_path", ""), record.get("stamp", ""),
-			Gauge.transform_identity(record.get("pose", Transform3D.IDENTITY))])
-	reference_digest = JSON.stringify(identities)
+	reference_digest = preload("panel_measurement.gd").reference_digest(get_reference_state())
 	document.provenance["reference_digest"] = reference_digest.sha256_text()
 	initial_freshness["source_version"] = document.get("source_version", -1)
 	gauge = Gauge.new()

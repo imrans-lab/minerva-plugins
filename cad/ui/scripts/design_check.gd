@@ -218,6 +218,7 @@ static func _legs_reply(panel, args: Dictionary, per_part: Callable,
 	var required_mm := float(args.get("required_mm", 0.0))
 
 	var state := {
+		"evidence": {},
 		"notes": [],
 		"checks": {},
 		"counts": {},
@@ -244,14 +245,18 @@ static func _legs_reply(panel, args: Dictionary, per_part: Callable,
 	# legs would read it as a scope they do not have.
 	solid_args.erase("ticket")
 
-	var interference_rows: Array = _fold_interference(
-		await _unbusy(panel, solid_args, per_part, interference), state)
+	var interference_reply: Dictionary = await _unbusy(panel, solid_args, per_part, interference)
+	state.evidence["interference"] = interference_reply
+	var interference_rows: Array = _fold_interference(interference_reply, state)
 	var fastener_rows: Array = await _run_fasteners(
 		panel, solid_args, per_part, fasteners, state)
 
 	var clearance_args := args.duplicate()
 	clearance_args["failing_only"] = true
-	if int(clearance_args.get("limit", 0)) <= 0:
+	if str(args.get("detail", "")) == "full":
+		clearance_args["failing_only"] = false
+		clearance_args["limit"] = 0
+	elif int(clearance_args.get("limit", 0)) <= 0:
 		clearance_args["limit"] = DEFAULT_CLEARANCE_LIMIT
 	var clearance_reply: Dictionary = {}
 	if not handle.is_empty():
@@ -265,6 +270,7 @@ static func _legs_reply(panel, args: Dictionary, per_part: Callable,
 	else:
 		clearance_reply = await _unbusy(panel, clearance_args, per_part, clearance)
 	var clearance_rows: Array = _fold_clearance(clearance_reply, state)
+	state.evidence["clearance"] = clearance_reply
 
 	var failing := interference_rows.size() + clearance_rows.size() \
 		+ fastener_rows.size()
@@ -308,6 +314,8 @@ static func _legs_reply(panel, args: Dictionary, per_part: Callable,
 	if not (state["notes"] as Array).is_empty():
 		out["notes"] = state["notes"]
 	_attach_tickets(out, state["tickets"] as Dictionary, scoped)
+	if str(args.get("detail", "")) == "full":
+		out["evidence"] = state.evidence
 	return out
 
 
@@ -439,8 +447,9 @@ static func _run_fasteners(panel, args: Dictionary, per_part: Callable,
 			+ "screw: {dia_mm, length_mm}, or screws: [{dia_mm, length_mm, "\
 			+ "reference?}] for several sizes, to check the joints too"
 		return []
-	return _fold_fasteners(
-		await _unbusy(panel, args, per_part, fasteners), state)
+	var reply: Dictionary = await _unbusy(panel, args, per_part, fasteners)
+	state.evidence["fasteners"] = reply
+	return _fold_fasteners(reply, state)
 
 
 # ---------------------------------------------------------------------------

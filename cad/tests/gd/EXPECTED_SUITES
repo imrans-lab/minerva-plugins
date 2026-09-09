@@ -903,3 +903,6 @@ test_dependencies.gd assertions=8
 
 # Private queries preserve the editor, selection identity and physical eligibility.
 test_scoped_queries.gd assertions=11
+
+# Authored requirements, persisted evidence, pending jobs and unknown verdicts.
+test_validation_run.gd assertions=11
