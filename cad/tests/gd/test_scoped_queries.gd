@@ -38,6 +38,7 @@ func _run() -> void:
 	var waiting: Dictionary = await scopes.run(panel, "minerva_cad_check_clearance", {
 		"configuration": "assembled", "selection": "instance:post", "_evaluated_document": before}, _ticket_dispatch)
 	check("pending job retains its private context", str(waiting.get("ticket", "")).begins_with("context:")
+		and waiting.tickets.clearance.post == waiting.ticket
 		and panel.get_meta("cad_query_contexts", {}).size() == 1, str(waiting))
 	var collected: Dictionary = await scopes.run(panel, "minerva_cad_check_clearance", {"ticket": waiting.ticket}, _ticket_dispatch)
 	check("ticket collection uses the original context and releases it", collected.get("checked", false)
@@ -48,7 +49,7 @@ func _run() -> void:
 func _ticket_dispatch(_panel: Node, _tool: String, args: Dictionary) -> Dictionary:
 	if args.has("ticket"):
 		return {"checked": true, "status": "done", "unwrapped": args.ticket}
-	return {"checked": false, "status": "running", "ticket": "clearance1"}
+	return {"checked": false, "status": "running", "ticket": "clearance1", "tickets": {"clearance": {"post": "clearance1"}}}
 
 func _answer_query(channel: String, payload: Dictionary, reply_id: String, rig: Dictionary) -> void:
 	var answer := _worker_answer()

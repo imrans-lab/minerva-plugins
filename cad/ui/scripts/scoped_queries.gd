@@ -104,12 +104,24 @@ static func _wrap_tickets(value: Variant, id: String) -> bool:
 		if value.has("ticket") and not str(value.ticket).is_empty():
 			value.ticket = "context:" + id + ":" + str(value.ticket)
 			pending = str(value.get("status", "")) in ["running", "pending"]
+		if value.has("tickets"):
+			value.tickets = _ticket_values(value.tickets, id)
+			pending = pending or (not value.tickets.is_empty() and str(value.get("status", "")) in ["running", "pending"])
 		for child in value.values():
 			pending = _wrap_tickets(child, id) or pending
 	elif value is Array:
 		for child in value:
 			pending = _wrap_tickets(child, id) or pending
 	return pending
+
+## Design checks expose per-part continuation handles as a dictionary of strings.
+static func _ticket_values(value: Variant, id: String) -> Variant:
+	if value is String:
+		return "context:" + id + ":" + value if not value.is_empty() and not value.begins_with("context:") else value
+	if value is Dictionary:
+		for key in value:
+			value[key] = _ticket_values(value[key], id)
+	return value
 
 static func _error(message: String, code: String) -> Dictionary:
 	return {"success": false, "checked": false, "pass": null, "reason": message, "error_code": code}
