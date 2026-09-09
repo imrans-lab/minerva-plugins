@@ -267,30 +267,28 @@ custom_minimum_size = Vector2(220, 0)
 size_flags_horizontal = 0
 size_flags_vertical = 3
 
-[node name="BuildControls" type="VBoxContainer" parent="ResponsiveContainer/WideLayout/WideSidebar"]
+[node name="BuildControls" type="HBoxContainer" parent="ResponsiveContainer/WideLayout/WideSidebar"]
 layout_mode = 2
 
-[node name="Mode" type="OptionButton" parent="ResponsiveContainer/WideLayout/WideSidebar/BuildControls"]
+[node name="Mode" type="Button" parent="ResponsiveContainer/WideLayout/WideSidebar/BuildControls"]
 layout_mode = 2
-selected = 0
-item_count = 2
-popup/item_0/text = "Automatic builds"
-popup/item_0/id = 0
-popup/item_1/text = "Manual builds"
-popup/item_1/id = 1
+custom_minimum_size = Vector2(32, 32)
+toggle_mode = true
+button_pressed = true
+tooltip_text = "Toggle automatic builds"
 
 [node name="Build" type="Button" parent="ResponsiveContainer/WideLayout/WideSidebar/BuildControls"]
 layout_mode = 2
-text = "Build latest"
+custom_minimum_size = Vector2(32, 32)
+tooltip_text = "Build latest"
 
 [node name="Configuration" type="OptionButton" parent="ResponsiveContainer/WideLayout/WideSidebar/BuildControls"]
 layout_mode = 2
 visible = false
 tooltip_text = "Show an assembly configuration from the completed source."
-
-[node name="Status" type="Label" parent="ResponsiveContainer/WideLayout/WideSidebar/BuildControls"]
-layout_mode = 2
-text = "Build required"
+size_flags_horizontal = 3
+fit_to_longest_item = false
+clip_text = true
 
 [node name="ImportMeshButton" type="Button" parent="ResponsiveContainer/WideLayout/WideSidebar"]
 layout_mode = 2
@@ -328,30 +326,28 @@ layout_mode = 2
 size_flags_horizontal = 3
 size_flags_vertical = 3
 
-[node name="BuildControls" type="VBoxContainer" parent="ResponsiveContainer/NarrowLayout"]
+[node name="BuildControls" type="HBoxContainer" parent="ResponsiveContainer/NarrowLayout"]
 layout_mode = 2
 
-[node name="Mode" type="OptionButton" parent="ResponsiveContainer/NarrowLayout/BuildControls"]
+[node name="Mode" type="Button" parent="ResponsiveContainer/NarrowLayout/BuildControls"]
 layout_mode = 2
-selected = 0
-item_count = 2
-popup/item_0/text = "Automatic builds"
-popup/item_0/id = 0
-popup/item_1/text = "Manual builds"
-popup/item_1/id = 1
+custom_minimum_size = Vector2(32, 32)
+toggle_mode = true
+button_pressed = true
+tooltip_text = "Toggle automatic builds"
 
 [node name="Build" type="Button" parent="ResponsiveContainer/NarrowLayout/BuildControls"]
 layout_mode = 2
-text = "Build latest"
+custom_minimum_size = Vector2(32, 32)
+tooltip_text = "Build latest"
 
 [node name="Configuration" type="OptionButton" parent="ResponsiveContainer/NarrowLayout/BuildControls"]
 layout_mode = 2
 visible = false
 tooltip_text = "Show an assembly configuration from the completed source."
-
-[node name="Status" type="Label" parent="ResponsiveContainer/NarrowLayout/BuildControls"]
-layout_mode = 2
-text = "Build required"
+size_flags_horizontal = 3
+fit_to_longest_item = false
+clip_text = true
 
 [node name="ProjectionRow" type="HBoxContainer" parent="ResponsiveContainer/NarrowLayout"]
 layout_mode = 2

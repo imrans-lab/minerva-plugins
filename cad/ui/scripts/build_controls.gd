@@ -11,6 +11,7 @@ var dispatched_source := ""
 var painted_source := ""
 var has_painted := false
 var _owner: WeakRef
+var _icons: Dictionary = {}
 
 func _init(panel: Node) -> void:
 	_owner = weakref(panel)
@@ -21,16 +22,27 @@ func wire() -> void:
 		var row := panel.get_node_or_null(path)
 		if row == null:
 			continue
-		var choice: OptionButton = row.get_node("Mode")
-		if not choice.item_selected.is_connected(_on_mode):
-			choice.item_selected.connect(_on_mode)
+		var choice: Button = row.get_node("Mode")
+		_set_icon(choice, "automatic_build.svg", "Auto")
+		if not choice.toggled.is_connected(_on_mode):
+			choice.toggled.connect(_on_mode)
 		var button: Button = row.get_node("Build")
+		_set_icon(button, "build_latest.svg", "Build")
 		if not button.pressed.is_connected(build_latest):
 			button.pressed.connect(build_latest)
 	refresh()
 
-func _on_mode(index: int) -> void:
-	set_mode("manual" if index == 1 else "automatic")
+func _on_mode(automatic: bool) -> void:
+	set_mode("automatic" if automatic else "manual")
+
+## Plugin assets are outside the host's import database, as in PCB's toolbar.
+func _set_icon(button: Button, filename: String, fallback: String) -> void:
+	if not _icons.has(filename):
+		var path: String = get_script().resource_path.get_base_dir().path_join("../icons/" + filename)
+		var image := Image.load_from_file(ProjectSettings.globalize_path(path))
+		_icons[filename] = ImageTexture.create_from_image(image) if image != null else null
+	button.icon = _icons[filename]
+	button.text = fallback if button.icon == null else ""
 
 func set_mode(value: String) -> Dictionary:
 	if value not in ["automatic", "manual"]:
@@ -78,11 +90,14 @@ func refresh() -> void:
 		var row := panel.get_node_or_null(path)
 		if row == null:
 			continue
-		row.get_node("Mode").select(1 if mode == "manual" else 0)
-		row.get_node("Status").text = {
+		var choice: Button = row.get_node("Mode")
+		choice.set_pressed_no_signal(mode == "automatic")
+		choice.tooltip_text = ("Automatic builds: on. Click for Manual mode.\nEdits compile after a short pause."
+			if mode == "automatic" else "Automatic builds: off (Manual mode).\nClick to enable. Text edits still synchronize.")
+		var status: String = {
 			"current": "Current", "needs_build": "Build required",
 			"building": "Building…", "error": "Build failed",
 		}[current.status]
-		row.get_node("Status").tooltip_text = (
-			"Source edits are synchronized. Build latest to update geometry."
-			if current.build_required else "Geometry matches the current source.")
+		var button: Button = row.get_node("Build")
+		button.tooltip_text = "Build latest — %s\nCompile the current source now." % status
+		button.modulate = Color(1.0, 0.75, 0.35) if current.build_required else Color.WHITE

@@ -593,7 +593,8 @@ func _test_manual_builds() -> void:
 	if rig.is_empty():
 		return
 	var panel: Node = rig.panel
-	await PanelTools.handle(panel, "minerva_cad_build", {"action": "set_mode", "mode": "manual"})
+	var automatic: Button = panel.get_node("ResponsiveContainer/WideLayout/WideSidebar/BuildControls/Mode")
+	automatic.button_pressed = false
 	_attach_document(rig, SOURCE)
 	check("manual open synchronizes without compiling", _evaluations(rig.dispatched).is_empty()
 		and panel.get_document_state().source == SOURCE, str(panel.build_status()))
