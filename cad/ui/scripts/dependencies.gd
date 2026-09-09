@@ -19,6 +19,11 @@ func accept() -> void:
 		_snapshot[path] = str(record.get("stamp", ""))
 		for dependency: String in panel._reference_library.dependency_paths(path):
 			wanted[dependency] = true
+	var document_path: String = str(panel.get_evaluation_state().get("path", ""))
+	var sidecar := document_path + preload("package_files.gd").SUFFIX
+	if not document_path.is_empty() and FileAccess.file_exists(sidecar):
+		_snapshot[sidecar] = panel._reference_library.file_stamp(sidecar)
+		wanted[sidecar] = true
 	changed_paths.clear()
 	for path: String in _watched:
 		if not wanted.has(path):

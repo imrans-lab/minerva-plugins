@@ -58,3 +58,5 @@ debounces a rebuild; Manual mode waits for Build latest. Measurement/export
 boundaries verify content stamps (including glTF side files), catching replacements
 between watcher ticks or with unchanged size/timestamp. Ordinary frame rendering
 and evaluation polling do not repeatedly hash dependency files.
+
+`definition:<id>` selects shared base geometry before instance placement, for reproducible exports. Summary evaluation includes reference poses and the dependency catalog of inactive configurations as well.

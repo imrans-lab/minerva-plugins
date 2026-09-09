@@ -37,7 +37,7 @@ const EVALUATE_CHANNEL: String = "cad.evaluate"
 const EVALUATE_TIMEOUT_MS: int = 600000
 
 ## Explicit namespaces and hierarchical instance IDs, never DSL expressions.
-const NAME_PATTERN: String = "^(binding:|instance:|reference:)?[A-Za-z_][A-Za-z0-9_./-]*$"
+const NAME_PATTERN: String = "^(binding:|definition:|instance:|reference:)?[A-Za-z_][A-Za-z0-9_./-]*$"
 
 
 ## The parts the caller asked about, in order and without repeats. Empty means

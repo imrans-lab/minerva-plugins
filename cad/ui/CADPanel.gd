@@ -44,6 +44,7 @@ var _inflight_request_id: String = ""
 ## the buffer attach — and each delivery would otherwise start its own
 ## evaluation of identical text. Cleared by anything that changes the document.
 var _open_eval_text: String = ""
+var _open_eval_path: String = ""
 
 ## How long one await of a cad.evaluate reply lasts before the panel re-arms it.
 ## MinervaIPC.await_reply is shared substrate: when its limit passes the await
@@ -301,9 +302,10 @@ func _evaluate_document_open(text: String) -> void:
 	if _build.mode == "manual":
 		_build.refresh()
 		return
-	if text == _open_eval_text:
+	if text == _open_eval_text and _document_path == _open_eval_path:
 		return
 	_open_eval_text = text
+	_open_eval_path = _document_path
 	_evaluate_with_request_id(text)
 
 

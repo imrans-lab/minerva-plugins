@@ -121,7 +121,9 @@ static func preflight(panel: Node, args: Dictionary, require_current: bool) -> D
 		return gate.stamp({"success": false, "checked": false,
 			"error": error, "error_code": "evaluation_requirement"}, freshness)
 	if require_current and freshness.get("stale", false) and not gate.accepts_stale(args):
-		return gate.refusal(freshness)
+		var refused: Dictionary = gate.refusal(freshness)
+		refused["success"] = false
+		return refused
 	return {"success": true, "freshness": freshness, "document": document(panel)}
 
 static func finish(panel: Node, reply: Dictionary, before: Dictionary) -> Dictionary:

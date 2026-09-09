@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from collections import OrderedDict
 from typing import Any
 
-from .assembly import Assembly, Instance, evaluate_assembly
+from .assembly import Assembly, Instance, evaluate_assembly, flatten
 from .reference import MeshReference
 
 
@@ -18,6 +18,7 @@ class EvaluatedDocument:
     edge_registries: dict[str, list]
     _scenes: dict[str, tuple] = field(default_factory=dict)
     _renders: OrderedDict[tuple, Any] = field(default_factory=OrderedDict)
+    _dependencies: list[dict] | None = None
 
     @classmethod
     def from_translator(cls, translator):
@@ -45,9 +46,19 @@ class EvaluatedDocument:
         kind, separator, key = selection.partition(":")
         if not separator:
             key, kind = selection, ""
-        if kind not in ("", "binding", "instance", "reference"):
+        if kind not in ("", "binding", "instance", "reference", "definition"):
             raise ValueError(f"unknown selection namespace {kind!r}")
         candidates = []
+        if kind == "definition":
+            root = self.bindings.get(configuration or self.target)
+            if isinstance(root, (Assembly, Instance)):
+                for item in flatten(root):
+                    if item.definition == key:
+                        if isinstance(item.value, MeshReference):
+                            candidates.append((key, None, [item.value.renamed(key).to_dict()], metadata))
+                        else:
+                            candidates.append((key, item.value, [], metadata))
+                        break
         value = self.bindings.get(key)
         if kind in ("", "binding") and value is not None:
             if isinstance(value, (Assembly, Instance)):
@@ -75,7 +86,7 @@ class EvaluatedDocument:
                         candidates.append((key, None, [ref], metadata))
         if len(candidates) != 1:
             state = "ambiguous" if candidates else "unknown"
-            raise ValueError(f"{state} selection {selection!r}; use binding:, instance: or reference: explicitly")
+            raise ValueError(f"{state} selection {selection!r}; use binding:, definition:, instance: or reference: explicitly")
         chosen, solid, refs, selected_model = candidates[0]
         # Selection cannot turn a presentation configuration into a physical
         # one, even when it addresses an ordinary binding outside the assembly.
@@ -83,6 +94,27 @@ class EvaluatedDocument:
         if metadata:
             selected_model["physical"] = bool(metadata.get("physical", True)) and bool(selected_model.get("physical", True))
         return chosen, solid, refs, selected_model
+
+    def dependencies(self) -> list[dict]:
+        """All evaluated reference definitions, including inactive configurations."""
+        if self._dependencies is None:
+            references = list(self.references)
+            seen = set()
+            for value in self.bindings.values():
+                if id(value) in seen:
+                    continue
+                seen.add(id(value))
+                if isinstance(value, MeshReference):
+                    references.append(value.to_dict())
+                elif isinstance(value, (Assembly, Instance)):
+                    references.extend(item.value.to_dict() for item in flatten(value)
+                                      if isinstance(item.value, MeshReference))
+            unique = {}
+            for ref in references:
+                row = {k: ref.get(k, "") for k in ("path", "units", "up")}
+                unique.setdefault(tuple(row.values()), row)
+            self._dependencies = list(unique.values())
+        return self._dependencies
 
     def render(self, selection: str = "", configuration: str = "", *,
                tolerance: float = 0.1, angular_tolerance: float = 0.1):
@@ -108,7 +140,7 @@ class EvaluatedDocument:
             if edges is None or assembly:
                 edges = Translator()._enumerate_edges(shape)
             count = body_count_of(shape)
-        model = {**assembly, "configuration": (configuration or self.target) if assembly else "",
+        model = {**assembly, "dependencies": self.dependencies(), "configuration": (configuration or self.target) if assembly else "",
                  "selection": selection, "configurations": [
                      {"name": n, "physical": v.physical} for n, v in self.bindings.items()
                      if isinstance(v, Assembly)]}

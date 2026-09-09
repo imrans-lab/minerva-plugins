@@ -167,7 +167,7 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 		reply = await scopes.run(panel, tool_name, args, _dispatch)
 	else:
 		reply = await _dispatch(panel, tool_name, args)
-	if tool_name in ["minerva_cad_build", "minerva_cad_model"]:
+	if tool_name in ["minerva_cad_build", "minerva_cad_model", "minerva_cad_package"]:
 		return reply
 	# Read AGAIN: the document can change while a measurement runs. A reply
 	# stamped only with the state before it would say the geometry it
@@ -183,6 +183,8 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 
 static func _dispatch(panel, tool_name: String, args: Dictionary) -> Dictionary:
 	match tool_name:
+		"minerva_cad_package":
+			return await preload("scripts/package_export.gd").handle(panel, args)
 		"minerva_cad_validation":
 			return await preload("scripts/validation_run.gd").handle(panel, args, handle)
 		"minerva_cad_model":

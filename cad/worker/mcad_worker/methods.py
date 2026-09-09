@@ -298,6 +298,7 @@ def _summarise(result: dict) -> dict:
         "face_count": len(mesh.get("faces") or []),
         "edge_count": len(result.get("edges") or []),
         "reference_count": len(result.get("references") or []),
+        "references": result.get("references", []),
         "annotations": result.get("annotations", []),
         "model": result.get("model", {}),
     }

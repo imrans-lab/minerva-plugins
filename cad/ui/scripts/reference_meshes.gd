@@ -128,6 +128,7 @@ var _load_count: int = 0
 ## The two halves, each holding the state its own job needs: the reader the
 ## content stamps, the reporter the records of the last mount.
 var _reader: _Reader = null
+var _package_files := preload("package_files.gd").new()
 var _report: _Report = null
 
 
@@ -161,6 +162,7 @@ func fork() -> RefCounted:
 
 func refresh_stamps() -> void:
 	_reader.clear_stamps()
+	_package_files.clear()
 
 func dependency_paths(path: String) -> Array:
 	var paths: Array = [path]
@@ -190,6 +192,9 @@ func reference_records() -> Array:
 ## Resolve the path a `mesh()` call wrote against the document that wrote it.
 ## Returns {path, warning, error}; `path` is empty when `error` is set.
 func resolve(raw_path: String, document_path: String) -> Dictionary:
+	var packaged: Dictionary = _package_files.resolve(raw_path.strip_edges(), document_path)
+	if not packaged.is_empty():
+		return packaged
 	var out := {"path": "", "warning": "", "error": ""}
 	var raw := raw_path.strip_edges()
 	if raw.is_empty():

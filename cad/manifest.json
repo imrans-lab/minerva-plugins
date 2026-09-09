@@ -11,6 +11,52 @@
   },
   "tools": [
     {
+      "name": "minerva_cad_package",
+      "executor": "panel",
+      "description": "Freeze the completed DSL and all evaluated mesh dependencies into a new portable directory, then export the selected assembly configuration to glTF with instance identities and poses. Uses existing explicit export jobs; start returns a ticket, collect repeats without rebuilding. Reopen model.mcad with its .package.json sidecar; no placement script required. Source/visible model stay unchanged. Failed jobs retain their staging path.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "start",
+              "collect",
+              "cancel",
+              "restore_view"
+            ]
+          },
+          "path": {
+            "type": "string",
+            "description": "New absolute destination directory, required for start."
+          },
+          "configuration": {
+            "type": "string"
+          },
+          "ticket": {
+            "type": "string"
+          },
+          "wait_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 20000
+          },
+          "require_source_digest": {
+            "type": "string"
+          },
+          "require_source_version": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "editor_name"
+        ]
+      }
+    },
+    {
       "name": "minerva_cad_check_motion",
       "executor": "panel",
       "description": "Check a declared translation path for insertion, removal or tool access against explicit solid obstacle selectors. Pass requires every interval certified; budget-limited coverage is unknown. Physical configurations only; mesh bodies and rotations unsupported. path_mm offsets apply to current evaluated placement. Source, rendering and manual build state are preserved.",
@@ -1028,6 +1074,9 @@
           "ui/scripts/validation_spec.gd",
           "ui/scripts/validation_report.gd",
           "ui/scripts/validation_run.gd",
+          "ui/scripts/package_files.gd",
+          "ui/scripts/assembly_export.gd",
+          "ui/scripts/package_export.gd",
         "ui/scripts/dependencies.gd",
         "ui/scripts/evaluation_state.gd"
         ],

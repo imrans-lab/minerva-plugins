@@ -31,3 +31,7 @@ src/Scripts/Services/MCP/Modules/MCPCadTools.gd
 src/Scripts/Services/MCP/Modules/MCPCadEvaluation.gd
 
 src/Scripts/Services/Watcher/FileWatcherService.gd
+
+src/Scripts/Services/MCP/MCPServerConnection.gd
+
+src/Scripts/Services/Plugins/PluginDefinition.gd

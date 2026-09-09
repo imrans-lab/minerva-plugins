@@ -111,3 +111,16 @@ scene=assembly([translate([30,0,0],instance(sub,id="rack"))])
     assert result["bbox"]["max"] == [36, 2, 2]
     assert result["body_count"] == 2
     assert result["model"]["groups"] == [{"id": "rack", "instances": ["rack/one", "rack/two"]}]
+
+
+def test_definition_exports_are_unposed_and_catalog_retains_inactive_dependencies(tmp_path):
+    source = SOURCE.replace('block=cube(2)', 'unused=mesh("spare.glb",units="mm",up="z")\nblock=cube(2)')
+    reply = methods._evaluate({"source": source, "selection":"definition:block", "configuration":"exploded", "summary":True})
+    assert reply["ok"], reply
+    assert reply["result"]["bbox"]["min"] == [0,0,0]
+    assert reply["result"]["model"]["dependencies"] == [{"path":"spare.glb","units":"mm","up":"z"}]
+    exported = methods._export({"source":source,"selection":"definition:block", "configuration":"exploded",
+        "format":"step", "path":str(tmp_path/'definition.step')})
+    assert exported["ok"], exported
+    from build123d import import_step
+    assert import_step(str(tmp_path/'definition.step')).bounding_box().max.X == pytest.approx(2)

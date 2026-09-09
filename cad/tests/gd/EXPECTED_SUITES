@@ -906,3 +906,6 @@ test_scoped_queries.gd assertions=11
 
 # Authored requirements, persisted evidence, pending jobs and unknown verdicts.
 test_validation_run.gd assertions=12
+
+# Actual CAD backend and worker must be built; exercises portable glTF and relocation.
+test_package_export.gd assertions=16
