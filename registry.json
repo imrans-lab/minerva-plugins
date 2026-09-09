@@ -18,14 +18,14 @@
     {
       "id": "cad",
       "name": "CAD",
-      "version": "0.3.12",
-      "manifest_version": "0.3.12",
-      "release_tag": "cad-v0.3.12",
-      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/cad-v0.3.12/cad/manifest.json",
+      "version": "0.3.13",
+      "manifest_version": "0.3.13",
+      "release_tag": "cad-v0.3.13",
+      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/cad-v0.3.13/cad/manifest.json",
       "downloads": {
-        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.3.12/cad-0.3.12-linux-x86_64.tar.gz",
-        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.3.12/cad-0.3.12-macos-universal.tar.gz",
-        "windows-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.3.12/cad-0.3.12-windows-x86_64.tar.gz"
+        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.3.13/cad-0.3.13-linux-x86_64.tar.gz",
+        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.3.13/cad-0.3.13-macos-universal.tar.gz",
+        "windows-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.3.13/cad-0.3.13-windows-x86_64.tar.gz"
       }
     },
     {
