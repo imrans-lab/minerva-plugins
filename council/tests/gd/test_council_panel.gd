@@ -554,6 +554,14 @@ func _section_6_two_projects() -> void:
 			CouncilBackend.lease_holder() == "council_panel#a",
 			CouncilBackend.lease_holder())
 
+	var intended_view := {"selected_session_id": "ses-project-a"}
+	var view_exchange := Exchange.new()
+	view_exchange.start(self, _panel_a, "ses-project-a", "chat-a-view")
+	await _panel_a._wrapper_command("wrapper.set_view", {"payload": {"view": intended_view}}, "set-view", 1)
+	await view_exchange.settle()
+	check("engine refresh preserves the wrapper's current view",
+			_panel_a._on_panel_save_request().get("view", {}) == intended_view)
+	await _bind_chat(_panel_a, "ses-project-a", "chat-a")
 	var bound_b: Dictionary = await _bind_chat(_panel_b, "ses-project-b", "chat-b")
 	check("panel B binds its own session, which re-seeds the one store",
 			bool(bound_b.get("ok", false)), str(bound_b).left(200))
@@ -635,6 +643,9 @@ func _section_6_two_projects() -> void:
 	# adopts a different document. Its answer describes the document that has
 	# gone. It must not be adopted over the new one, and it must not hand off a
 	# lease it is still holding.
+	# Force the overtaken exchange to seed before it can send its command.
+	await _relay(_panel_b, {"schema_version": 1, "envelope": "request",
+		"request_id": "b-before-swap", "command": "snapshot.get", "payload": {}})
 	var overtaken := Exchange.new()
 	overtaken.start(self, _panel_a, "ses-project-c", "chat-c-overtaken")
 	var record_d: Dictionary = _fixture_as_session("ses-project-d", "Project D question")
@@ -647,6 +658,12 @@ func _section_6_two_projects() -> void:
 	check("the overtaken exchange did not overwrite the freshly opened document",
 			_session_ids(_panel_a._on_panel_save_request()) == PackedStringArray(["ses-project-d"]),
 			str(_session_ids(_panel_a._on_panel_save_request())))
+	var after_swap: Dictionary = await _relay(_panel_a, {
+		"schema_version": 1, "envelope": "request", "request_id": "after-seed-swap",
+		"command": "snapshot.get", "payload": {}})
+	check("a seed overtaken by a load cannot answer later reads from the old document",
+			_session_ids(after_swap.get("payload", {}).get("snapshot", {}))
+			== PackedStringArray(["ses-project-d"]), str(after_swap).left(300))
 	var taker := CouncilBackend.lease_taker()
 	check("the lease is free, or held by a panel that is still live",
 			taker == ""

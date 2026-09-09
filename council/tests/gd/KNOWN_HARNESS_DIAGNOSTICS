@@ -10,13 +10,10 @@
 # the suite's" — and each needs its proof written next to it. A pattern added to
 # silence a red run is the same act as deleting the assertion that failed.
 #
-# COUNCIL ALLOWLISTS NOTHING. The suite has never been executed (see
-# EXPECTED_SUITES), so there is no observed diagnostic anyone could claim is the
-# harness's. Every diagnostic therefore fails the suite, which is the right
-# default for a suite whose first run is still ahead of it.
+# COUNCIL ALLOWLISTS NOTHING. The executed suite reports no SCRIPT ERROR
+# or failed-script-load diagnostics. Keep that contract strict.
 #
-# The file cannot simply be left pattern-less: GNU grep reads an EMPTY -f
-# pattern file as matching every line, so an allowlist of only comments would
+# The file cannot simply be left pattern-less: an accidentally blank pattern matches every line, so an allowlist of only comments would
 # filter out all diagnostics and silently disarm the whole check. The single
 # pattern below is deliberately unmatchable — it is a placeholder that keeps the
 # check armed, and the first entry with real evidence replaces it.

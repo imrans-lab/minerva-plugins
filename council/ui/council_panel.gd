@@ -413,7 +413,7 @@ func _relay_to_engine(message: Dictionary) -> Dictionary:
 		return _err(str(message.get("request_id", "")), _record.revision(), "internal",
 			"This panel is not mounted, so it cannot reach the Council backend.", false)
 	var epoch := _document_epoch
-	var outcome: Dictionary = await _backend.relay(message, _record.snapshot())
+	var outcome: Dictionary = await _backend.relay(message, _record.snapshot(), _record_for_epoch.bind(epoch))
 	if epoch != _document_epoch:
 		# A load or a note restore replaced the document while this was in
 		# flight. Its snapshot is the OLD document's, and adopting it would undo
@@ -424,10 +424,20 @@ func _relay_to_engine(message: Dictionary) -> Dictionary:
 			true)
 	var snapshot: Dictionary = outcome.get("snapshot", {})
 	if not snapshot.is_empty() and int(snapshot.get("snapshot_revision", 0)) != _record.revision():
+		# View belongs to the wrapper and may have changed during the exchange.
+		var current := _record.snapshot()
+		if current.has("view"):
+			snapshot["view"] = current["view"]
+		else:
+			snapshot.erase("view")
 		if _record.adopt(snapshot):
 			_refresh_notice()
 			content_changed.emit()
 	return outcome.get("reply", {})
+
+
+func _record_for_epoch(epoch: int) -> Dictionary:
+	return _record.snapshot() if epoch == _document_epoch else {}
 
 
 ## The wrapper's own operations. None of them changes a council: they describe

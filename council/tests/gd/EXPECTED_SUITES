@@ -10,7 +10,7 @@
 # The assertion count is pinned from the first run that got through every
 # section with the backend up: setup 3, section 1 four, section 2 three,
 # section 3 seventeen (five assertions over each of three documents, plus two
-# after the loop), section 4 six, section 5 seven, section 6 seventeen.
+# after the loop), section 4 six, section 5 seven, section 6 nineteen.
 #
 # SETUP THIS SUITE NEEDS beyond the runner's own: section 6 drives the REAL
 # backend over stdio, so council-plugin must be built first —
@@ -24,4 +24,4 @@
 # through a plugin_data note, an unreadable document preserved rather than
 # replaced, the host envelope measured against the host's own cap, and two
 # panels in two projects kept apart against one backend store.
-test_council_panel.gd assertions=57
+test_council_panel.gd assertions=59

@@ -68,6 +68,7 @@ const LEASE_META := "council_backend_lease"
 var _panel: Node = null
 var _panel_key: String = ""
 var _reply_seq: int = 0
+var _seed_generation: int = 0
 
 
 ## One waiting exchange. A signal carrier rather than a poll loop, so the queue
@@ -95,9 +96,17 @@ func _init(panel: Node, panel_key: String) -> void:
 ## or {} when nothing moved>}. The caller persists the snapshot; this class
 ## never keeps one, because a second copy of the record is a second place for it
 ## to be wrong.
-func relay(request: Dictionary, record: Dictionary) -> Dictionary:
+func relay(request: Dictionary, record: Dictionary, current_record := Callable()) -> Dictionary:
 	var request_id := str(request.get("request_id", ""))
 	await _acquire()
+	# A queued exchange must read the durable record after acquiring the store.
+	# Another exchange may have advanced it, or the tab may hold a new document.
+	if current_record.is_valid():
+		record = current_record.call()
+		if record.is_empty():
+			_release()
+			return {"reply": _failure(request_id, 1, "stale_revision",
+				"The panel opened a different council; re-read and try again.", true), "snapshot": {}}
 	var seeded := await _ensure_seeded(record)
 	if not bool(seeded.get("ok", false)):
 		_set_holder("")
@@ -175,7 +184,11 @@ func send_to_chat(chat_id: String, text: String) -> Dictionary:
 func _ensure_seeded(record: Dictionary) -> Dictionary:
 	if _holder() == _panel_key and not _panel_key.is_empty():
 		return {"ok": true, "snapshot": {}}
+	var generation := _seed_generation
 	var loaded := await _send(LOAD_CHANNEL, {"snapshot": record})
+	if generation != _seed_generation:
+		return {"ok": false, "code": "stale_revision", "retryable": true,
+			"message": "The panel opened a different council while the backend was loading it."}
 	if not bool(loaded.get("ok", false)):
 		return loaded
 	var body: Dictionary = loaded.get("body", {})
@@ -207,6 +220,7 @@ func _ensure_seeded(record: Dictionary) -> Dictionary:
 ## panel. The in-flight exchange releases normally when it ends, and a panel
 ## that dies mid-exchange is reclaimed by _acquire().
 func forget_seed() -> void:
+	_seed_generation += 1
 	if _holder() == _panel_key:
 		_set_holder("")
 
