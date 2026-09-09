@@ -130,7 +130,7 @@ static func free_air(
 			"bounded": bool(grown["bounded"]),
 		}
 	var basis: Basis = _Shapes.basis_for_axis(axis)
-	var nearest := bound
+	var nearest_distance := bound
 	var bounded := false
 	for direction in _Shapes.sphere_directions():
 		var reach: float = maxf(0.001, size.x * 0.5) if kind == "sphere" \
@@ -142,9 +142,9 @@ static func free_air(
 		if hit.is_empty():
 			continue
 		bounded = true
-		nearest = minf(nearest,
+		nearest_distance = minf(nearest_distance,
 			maxf(0.0, centre.distance_to(hit["position"] as Vector3) - reach))
-	return {"clearance_mm": nearest, "bounded": bounded}
+	return {"clearance_mm": nearest_distance, "bounded": bounded}
 
 
 ## The nearest surface in any direction from `centre`, or {}. The witness for a

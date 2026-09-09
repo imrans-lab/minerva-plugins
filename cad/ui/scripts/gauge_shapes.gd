@@ -37,8 +37,8 @@ static func is_supported(kind: String) -> bool:
 ## Basis whose Z is `axis`: the frame every gauge shape is built in.
 static func basis_for_axis(axis: Vector3) -> Basis:
 	var z := unit(axis)
-	var reference := Vector3.UP if absf(z.dot(Vector3.UP)) < 0.9 else Vector3.RIGHT
-	var x := reference.cross(z).normalized()
+	var reference_axis := Vector3.UP if absf(z.dot(Vector3.UP)) < 0.9 else Vector3.RIGHT
+	var x := reference_axis.cross(z).normalized()
 	var y := z.cross(x).normalized()
 	return Basis(x, y, z)
 
@@ -84,13 +84,13 @@ static func radials(axis: Vector3) -> Array:
 ## radius, so a floor that only covers part of the pin is still found.
 static func cap_origins(centre: Vector3, axis: Vector3, radius: float) -> Array:
 	var out: Array = [centre]
-	var radials := radials(axis)
+	var radial_directions := radials(axis)
 	for fraction in CAP_RING_FRACTIONS:
 		if float(fraction) <= 0.0:
 			continue
 		var index := 0
-		while index < radials.size():
-			out.append(centre + (radials[index] as Vector3) * radius * float(fraction))
+		while index < radial_directions.size():
+			out.append(centre + (radial_directions[index] as Vector3) * radius * float(fraction))
 			# Every third azimuth: a ring is about catching a partial floor,
 			# not about measuring it.
 			index += 3
