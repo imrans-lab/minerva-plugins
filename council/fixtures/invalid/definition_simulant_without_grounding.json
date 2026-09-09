@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 1,
   "record_kind": "council_definition",
   "definition_id": "def-workshop-economics",
   "definition_revision": 3,
@@ -23,12 +23,7 @@
       "represents": "R. Okonkwo, author of the fictional essay used as this fixture's grounding",
       "scope": "Capacity and pricing for a single-operator workshop, as argued in one essay.",
       "limitations": "One essay on capacity. Establishes nothing about hiring, financing, or this author's views on anything else.",
-      "grounding": [
-        {
-          "source_id": "src-capacity-essay",
-          "source_revision": 2
-        }
-      ],
+      "grounding": [],
       "model_hint": ""
     },
     {

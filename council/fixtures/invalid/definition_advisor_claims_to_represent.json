@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 1,
   "record_kind": "council_definition",
   "definition_id": "def-workshop-economics",
   "definition_revision": 3,
@@ -11,6 +11,7 @@
       "member_revision": 1,
       "kind": "assistant",
       "display_name": "Chair",
+      "represents": "R. Okonkwo",
       "scope": "Runs the round, reports where members disagree, and never adds a position of its own.",
       "limitations": "Has no grounding of its own; everything it reports must trace to a member contribution.",
       "grounding": []

@@ -68,7 +68,7 @@
   "$defs": {
     "Member": {
       "type": "object",
-      "description": "A participant identity. member_revision advances when scope, limitations, or grounding change; a contribution records the revision it was produced from so an old answer is never re-attributed to a newer member.",
+      "description": "A participant identity. member_revision advances when scope, limitations, or grounding change; a contribution records the revision it was produced from so an old answer is never re-attributed to a newer member. A functional advisor and a source-grounded simulant are the same record with different obligations: only a simulant interprets a named author, so only a simulant may carry 'represents', and it must carry grounding, a narrow scope and its known gaps. The invariants hold that line; the schema cannot.",
       "properties": {
         "member_id": {
           "$ref": "common.schema.json#/$defs/Id"
@@ -87,7 +87,7 @@
         "represents": {
           "type": "string",
           "maxLength": 200,
-          "description": "For a simulant, the real author or perspective being interpreted. The simulant and that person remain distinct identities; this field never asserts the person participated."
+          "description": "For a simulant, the real author or perspective being interpreted. The simulant and that person remain distinct identities; this field never asserts the person participated. A member of any other kind must leave it out."
         },
         "scope": {
           "type": "string",
@@ -204,6 +204,10 @@
         "captured_at": {
           "$ref": "common.schema.json#/$defs/Timestamp"
         },
+        "content_hash": {
+          "$ref": "common.schema.json#/$defs/ContentHash",
+          "description": "Hash of the material this revision captured. It lives on the source and not only inside the payload, so an inventory entry whose content was not shared still says exactly which bytes it stood for: an import can report the drift, and material supplied later is accepted only when it hashes to this."
+        },
         "artifact": {
           "$ref": "common.schema.json#/$defs/ArtifactRef"
         },
@@ -223,6 +227,7 @@
         "source_revision",
         "title",
         "captured_at",
+        "content_hash",
         "anchors"
       ],
       "additionalProperties": false

@@ -194,8 +194,8 @@ persists the snapshot that comes back and is otherwise a view (see §3).
 |---|---|---|---|
 | `snapshot_revision` | the wrapper (native panel) | any accepted mutation | every request's `base_revision`, every reply |
 | `definition_id` + `definition_revision` | the wrapper | a council's members, seats, sources or rules change | exports; a session's embedded snapshot |
-| `member_id` + `member_revision` | the wrapper | scope, limitations or grounding change | every contribution, so an old answer is never re-attributed |
-| `source_id` + `source_revision` | the wrapper | new material is captured — never an edit in place | grounding refs and citations |
+| `member_id` + `member_revision` | the wrapper | kind, attribution, scope, limitations or grounding change — `member.upsert` and `member.adopt_source` mint it, so a cosmetic rename does not | every contribution, so an old answer is never re-attributed |
+| `source_id` + `source_revision` | the wrapper | new material is captured — never an edit in place; `source.capture` mints the next revision number | grounding refs and citations |
 | `anchor_id` | the wrapper, within a source revision | never; a new capture gets new anchors | citations |
 | `session_id` + `session_revision` | the wrapper | any change to that session | the panel view |
 | `run_id` | the backend, echoed into the snapshot | never | contributions, outcomes |
@@ -211,8 +211,9 @@ responsibility cannot rename a person.
 
 ### 2.2 Invariants the schemas cannot state
 
-Enforced in `internal/contract/invariants.go` and exercised by the sixteen
-records in `fixtures/invalid/`, each of which fails for its one named reason:
+Enforced in `internal/contract/invariants.go` and exercised by the records
+indexed in `fixtures/invalid/cases.json`, each of which fails for the one reason
+that index names:
 
 - A council has **exactly one chair**.
 - Every seat names a member that exists; every grounding ref names a
@@ -220,7 +221,15 @@ records in `fixtures/invalid/`, each of which fails for its one named reason:
 - Ids are unique within their scope; anchors are unique within a source
   revision.
 - A captured payload still hashes to its `content_hash` and matches its
-  `byte_length`; an anchor's `[start, end)` really contains its quote.
+  `byte_length`; an anchor's `[start, end)` really contains its quote; and the
+  `content_hash` **on the source** describes the payload it holds. The source
+  carries the hash as well as the payload so that an inventory entry whose
+  content did not travel still says which bytes it stood for.
+- **A simulant is grounded, a functional advisor is not obliged to be.** Only a
+  simulant may carry `represents`, and a simulant must carry grounding, a scope
+  and its known gaps: interpreting a named author with nothing behind it is the
+  one thing this record must not be able to say. A `human` member — the local
+  user — carries neither grounding nor a model hint.
 - A payload carries **exactly one** of `inline` or `blob_handle`, and `inline`
   only under `InlineLimit`.
 - A `source` claim cites at least one anchor; an `inference` or `unknown` claim
@@ -401,7 +410,8 @@ council.onEvent(cb)
 Envelope shapes are in `envelope.schema.json`. Rules:
 
 - Mutating commands (`definition.upsert`, `definition.import`, `source.upsert`,
-  `session.create`, `session.bind_chat`, `run.start`, `run.cancel`, `run.retry`,
+  `source.capture`, `member.upsert`, `member.adopt_source`, `session.create`,
+  `session.bind_chat`, `run.start`, `run.cancel`, `run.retry`,
   `outcome.retain`) **must** carry `base_revision`; read commands
   (`snapshot.get`, `source.fetch`, `definition.export`) must not.
 - `base_revision != snapshot_revision` → `ok: false`, error `stale_revision`,
@@ -603,7 +613,23 @@ render, rather than a message the broker drops.
 - A source revision is a **capture**, never an edit. Changing the material
   creates a new `source_revision`; the old one stays so a past contribution can
   still be inspected against what it actually read. Re-grounding a member is an
-  explicit act that selects new revisions and advances `member_revision`.
+  explicit act — the `member.adopt_source` command — that selects a revision and
+  advances `member_revision`. Nothing adopts on a member's behalf: a new capture
+  appears beside the old one and every member keeps reading what it was grounded
+  in until somebody says otherwise.
+- **Capturing is `source.capture`, and it derives.** The caller supplies the
+  text and the quotes it wants anchored; the engine computes `content_hash` and
+  `byte_length` and locates each quote, refusing one that appears nowhere or
+  twice. The page never computes a hash or an offset, because two implementations
+  of the same derivation eventually disagree and the disagreement shows up as a
+  citation pointing at the wrong sentence. `source.upsert` remains for a caller
+  that has already built the record — a blob-carried payload, for instance.
+- **A missing reference is repaired, not re-created.** An inventory entry
+  carries the `content_hash` of the material that did not travel, so
+  `source.capture` naming that revision accepts text that hashes to it, fills in
+  the payload and recovers the anchor spans, and refuses anything else as
+  different material that has to be captured as its own revision. That is why
+  the hash lives on the source and not only inside the payload.
 - **The v0.1 ceiling is the whole record.** v0.1 moves an entire snapshot across
   the host's pluginIPC hop in one message, and that hop is capped at 65536
   (`PluginWebviewBroker.gd:42`; see §1.5 for how it is measured). So the ceiling
@@ -637,8 +663,8 @@ render, rather than a message the broker drops.
 
 ## 7. Export, import, and project switch
 
-`contract.ExportDefinition(definition, includeContent)` produces the portable
-form. It:
+`contract.ExportDefinition(definition, includeContent, selected)` produces the
+portable form. It:
 
 - takes the definition only — a session has no way to be included, because
   `council_definition.schema.json` is a closed object with nowhere to put a
@@ -649,10 +675,27 @@ form. It:
   hash, anchors — whether or not the content travels, so an import can name
   exactly what it could not find instead of presenting an ungrounded member as
   grounded;
+- **includes content per source, not all-or-nothing.** `include_source_ids`
+  names the sources whose captured bytes travel; absent means every source,
+  present-and-empty means none. A council usually mixes material the user is
+  happy to share with notes they are not, and a single switch would make the
+  cautious choice cost the whole grounding. The reply reports which sources
+  travelled and which were withheld, so the panel can show what is leaving the
+  project rather than assert it;
 - does not mutate the in-project definition, which keeps its note links.
 
-`TestDefinitionExportCarriesNoSessionData` asserts all of this, including a
-field-name sweep for every session-side key.
+`definition.import` names every source that arrived without content, and
+`source.capture` against that revision is how the receiving project repairs one
+(§6).
+
+`TestDefinitionExportCarriesNoSessionData` asserts all of this. Its sweep is
+derived from the schemas rather than from a list: every property name declared
+by `session.schema.json` or `project_snapshot.schema.json` and not by
+`council_definition.schema.json` or `common.schema.json` is a key an export may
+not contain, so a field added to a session extends the test on its own.
+`TestGroundedMemberLifecycleOverTheProtocol` runs the same claim end to end over
+the live protocol, sweeping the exported bytes for project A's question, session
+id, chat id, note ids and unselected material.
 
 **Project switch.** The wrapper's snapshot belongs to the project that loaded
 it. On `_on_panel_load_request` the whole snapshot is replaced and the
@@ -680,7 +723,7 @@ run from the previous snapshot cannot apply: the run id is not present, and
 | formatting | `gofmt -l .` (in `council/`) | clean |
 | static analysis | `GOWORK=off go vet ./...` | clean |
 | build | `go build ./...` (in `council/`) | clean |
-| contract tests | `GOWORK=off go test ./internal/contract/` | 5 tests, over 8 valid and 16 invalid fixtures |
+| contract tests | `GOWORK=off go test ./internal/contract/` | 5 tests, over 9 valid and 19 invalid fixtures |
 | GDScript syntax | `godot --headless --check-only -s <file>` on every `ui/*.gd` | clean |
 | panel suite | `council/scripts/run-gd-tests.sh <minerva>` | authored, never executed — see `tests/gd/EXPECTED_SUITES` |
 

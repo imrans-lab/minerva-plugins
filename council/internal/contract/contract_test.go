@@ -3,6 +3,7 @@ package contract
 import (
 	"encoding/json"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -117,11 +118,57 @@ func TestInvalidFixturesAreRejected(t *testing.T) {
 	}
 }
 
+// propertyNames collects every property name a schema document declares, at
+// any depth. It is how the leak test gets its oracle from the schemas instead
+// of from a hand-written list that would go stale the first time a session
+// grows a field.
+func propertyNames(doc map[string]any, into map[string]bool) {
+	for key, value := range doc {
+		if key == "properties" {
+			for name, sub := range obj(value) {
+				into[name] = true
+				propertyNames(obj(sub), into)
+			}
+			continue
+		}
+		switch v := value.(type) {
+		case map[string]any:
+			propertyNames(v, into)
+		case []any:
+			for _, item := range v {
+				propertyNames(obj(item), into)
+			}
+		}
+	}
+}
+
+// recordKeys collects every object key in a decoded record, at any depth. The
+// leak sweep asks which fields an export actually has, so it reads keys and
+// never the values they hold.
+func recordKeys(value any, into map[string]bool) {
+	switch v := value.(type) {
+	case map[string]any:
+		for key, sub := range v {
+			into[key] = true
+			recordKeys(sub, into)
+		}
+	case []any:
+		for _, item := range v {
+			recordKeys(item, into)
+		}
+	}
+}
+
 // TestDefinitionExportCarriesNoSessionData is the leak test for the reuse
 // requirement: exporting a council for use in another project must not carry
-// the first project's question, transcript, notes, or chat. The oracle is the
-// definition schema's closed object set plus a sweep for every field name that
-// only exists on session-side records.
+// the first project's question, transcript, notes, outcomes or chat, and must
+// not carry material the user did not choose to include.
+//
+// The oracle is the schemas themselves. Every property name declared by
+// session.schema.json or project_snapshot.schema.json and NOT declared by
+// council_definition.schema.json or common.schema.json is a session-side or
+// project-side key, and none of them may appear in the export. Adding a field
+// to a session therefore extends this test on its own.
 func TestDefinitionExportCarriesNoSessionData(t *testing.T) {
 	r := registry(t)
 	var snapshot map[string]any
@@ -135,7 +182,7 @@ func TestDefinitionExportCarriesNoSessionData(t *testing.T) {
 	// An export takes the definition, never the session that used it, and
 	// strips this project's artifact identities on the way out.
 	def := obj(obj(sessions[0])["definition_snapshot"])
-	portable, err := ExportDefinition(def, true)
+	portable, included, withheld, err := ExportDefinition(def, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,15 +193,38 @@ func TestDefinitionExportCarriesNoSessionData(t *testing.T) {
 	if errs := r.ValidateRecord("council_definition", exported); len(errs) > 0 {
 		t.Fatalf("the exported definition does not validate:\n  %s", strings.Join(errs, "\n  "))
 	}
-	forbidden := []string{
-		"question", "chat_binding", "chat_id", "origin_message_id",
-		"runs", "run_id", "contribution_id", "synthesis", "outcomes",
-		"artifact", "context_snapshot", "session_id",
+	if len(included) != 1 || len(withheld) != 0 {
+		t.Errorf("a full export must report every source as included, got included=%v withheld=%v", included, withheld)
 	}
-	text := string(exported)
+
+	sessionSide := map[string]bool{}
+	propertyNames(r.docs[schemas.Session], sessionSide)
+	propertyNames(r.docs[schemas.ProjectSnapshot], sessionSide)
+	portableSide := map[string]bool{}
+	propertyNames(r.docs[schemas.CouncilDefinition], portableSide)
+	propertyNames(r.docs[schemas.Common], portableSide)
+
+	forbidden := []string{}
+	for name := range sessionSide {
+		if !portableSide[name] {
+			forbidden = append(forbidden, name)
+		}
+	}
+	sort.Strings(forbidden)
+	if len(forbidden) < 10 {
+		t.Fatalf("the schema sweep found only %d session-side keys (%v); the oracle is not reading the schemas", len(forbidden), forbidden)
+	}
+	// artifact IS a definition property, so the sweep cannot catch it: a note
+	// id is portable-looking and still meaningless in another project.
+	forbidden = append(forbidden, "artifact")
+	// The sweep is over the decoded keys, not over the bytes: a captured source
+	// may itself be text about JSON, and a substring search would read the
+	// user's material as structure.
+	present := map[string]bool{}
+	recordKeys(portable, present)
 	for _, f := range forbidden {
-		if strings.Contains(text, "\""+f+"\":") {
-			t.Errorf("exported definition carries session-side field %q", f)
+		if present[f] {
+			t.Errorf("exported definition carries the project-side field %q", f)
 		}
 	}
 	// The source inventory must survive, or an import cannot report what is
@@ -165,8 +235,11 @@ func TestDefinitionExportCarriesNoSessionData(t *testing.T) {
 	if obj(arr(def["sources"])[0])["artifact"] == nil {
 		t.Error("exporting must not mutate the in-project definition")
 	}
-	// Dropping the content still leaves the inventory behind.
-	lean, err := ExportDefinition(def, false)
+
+	// Dropping the content still leaves the inventory behind — including the
+	// hash, which is what lets the receiving project recognise the material if
+	// it is supplied later.
+	lean, _, leanWithheld, err := ExportDefinition(def, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,12 +250,46 @@ func TestDefinitionExportCarriesNoSessionData(t *testing.T) {
 	if leanSource["title"] == nil || len(arr(leanSource["anchors"])) == 0 {
 		t.Error("a content-free export must still name the source and its anchors")
 	}
+	if str(leanSource["content_hash"]) == "" {
+		t.Error("a content-free export must still say which material it stood for")
+	}
+	if len(leanWithheld) != 1 {
+		t.Errorf("a content-free export must report the source as withheld, got %v", leanWithheld)
+	}
 	leanRaw, err := json.Marshal(lean)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if errs := r.ValidateRecord("council_definition", leanRaw); len(errs) > 0 {
 		t.Fatalf("a content-free export does not validate:\n  %s", strings.Join(errs, "\n  "))
+	}
+
+	// Selection is per source. An empty (but present) selection is the
+	// inventory-only export; an unknown id is refused rather than silently
+	// shipping an export the user believes is grounded.
+	firstSource := str(obj(arr(def["sources"])[0])["source_id"])
+	none, noneIncluded, _, err := ExportDefinition(def, true, []string{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(noneIncluded) != 0 || obj(arr(none["sources"])[0])["payload"] != nil {
+		t.Error("an empty selection must carry no source content")
+	}
+	if _, _, _, err := ExportDefinition(def, true, []string{"src-not-here"}); err == nil {
+		t.Error("a selection naming a source this council does not hold must be refused")
+	}
+	// Naming sources to include while excluding all content is a contradiction,
+	// and answering it by silently withholding the named material is how an
+	// export the user believes is grounded gets shipped.
+	if _, _, _, err := ExportDefinition(def, false, []string{firstSource}); err == nil {
+		t.Error("naming sources to include with include_content false must be refused")
+	}
+	picked, pickedIncluded, _, err := ExportDefinition(def, true, []string{firstSource})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pickedIncluded) != 1 || obj(arr(picked["sources"])[0])["payload"] == nil {
+		t.Errorf("a selected source must carry its content, got included=%v", pickedIncluded)
 	}
 }
 

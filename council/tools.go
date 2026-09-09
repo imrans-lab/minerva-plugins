@@ -92,17 +92,20 @@ func newRegistry(store *session.Store) *registry {
 	r.register(toolSpec{
 		Name: "minerva_council_command",
 		Description: "Apply one Council protocol command and return the reply envelope. The arguments ARE the request envelope: {request_id, command, base_revision, payload}. " +
-			"Mutating commands (definition.upsert, definition.import, source.upsert, session.create, session.bind_chat, run.start, run.cancel, run.retry, outcome.retain) must carry base_revision equal to the current snapshot_revision; " +
+			"Mutating commands (definition.upsert, definition.import, source.upsert, source.capture, member.upsert, member.adopt_source, session.create, session.bind_chat, run.start, run.cancel, run.retry, outcome.retain) must carry base_revision equal to the current snapshot_revision; " +
 			"read commands (snapshot.get, source.fetch, definition.export) must not carry it. A repeated request_id returns the stored reply with replayed:true and applies nothing a second time. " +
 			"Every reply carries the snapshot_revision it was produced against; a failure carries {code, message, retryable}. " +
-			"source.fetch returns the NEWEST capture of a source when payload.source_revision is omitted; pass a source_revision to read the exact capture a past contribution was grounded in.",
+			"source.fetch returns the NEWEST capture of a source when payload.source_revision is omitted; pass a source_revision to read the exact capture a past contribution was grounded in." +
+			" source.capture derives a source revision's hash and excerpt spans from the raw text so the page and the engine cannot disagree about them, and repairs an inventory entry in place when the text hashes to the revision's recorded content_hash. member.upsert edits an identity and mints member_revision itself, advancing it only when kind, represents, scope, limitations or grounding change; it never touches seats. member.adopt_source is the explicit act of moving a member onto another capture, which leaves every past run reading what it actually read. definition.export takes include_content and an optional include_source_ids selection, and reports which sources' content travelled.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
 				"request_id": {"type": "string", "description": "Caller-minted idempotency key. Repeating one returns the stored reply."},
 				"command": {"type": "string", "enum": [
 					"snapshot.get", "definition.upsert", "definition.export", "definition.import",
-					"source.upsert", "source.fetch", "session.create", "session.bind_chat",
+					"source.upsert", "source.capture", "source.fetch",
+					"member.upsert", "member.adopt_source",
+					"session.create", "session.bind_chat",
 					"run.start", "run.cancel", "run.retry", "outcome.retain"
 				]},
 				"base_revision": {"type": "integer", "description": "The snapshot_revision this command was written against. Required by every mutating command, refused on a read."},

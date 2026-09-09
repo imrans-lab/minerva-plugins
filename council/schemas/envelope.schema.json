@@ -18,7 +18,10 @@
         "definition.export",
         "definition.import",
         "source.upsert",
+        "source.capture",
         "source.fetch",
+        "member.upsert",
+        "member.adopt_source",
         "session.create",
         "session.bind_chat",
         "run.start",
@@ -26,7 +29,7 @@
         "run.retry",
         "outcome.retain"
       ],
-      "description": "snapshot.get and source.fetch and definition.export are reads: they omit base_revision and never advance the snapshot. Everything else mutates."
+      "description": "snapshot.get and source.fetch and definition.export are reads: they omit base_revision and never advance the snapshot. Everything else mutates. source.upsert takes a source record the caller has already built; source.capture takes the raw text instead and derives the hash and the excerpt spans, so the page and the engine cannot disagree about them. member.upsert edits an identity without touching the seat that holds it, and member.adopt_source is the explicit act of moving a member onto a newer capture."
     },
     "Request": {
       "type": "object",

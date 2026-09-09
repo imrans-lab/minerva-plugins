@@ -78,5 +78,20 @@
     "file": "snapshot_outcome_unknown_run.json",
     "record": "council_project_snapshot",
     "expect": "unknown run_id"
+  },
+  {
+    "file": "definition_simulant_without_grounding.json",
+    "record": "council_definition",
+    "expect": "simulant"
+  },
+  {
+    "file": "definition_advisor_claims_to_represent.json",
+    "record": "council_definition",
+    "expect": "represents"
+  },
+  {
+    "file": "definition_source_hash_disagrees_with_payload.json",
+    "record": "council_definition",
+    "expect": "does not describe the payload present"
   }
 ]

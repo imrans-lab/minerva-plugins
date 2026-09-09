@@ -23,18 +23,21 @@ type command struct {
 // envelope.schema.json. A command in the schema with no entry here is reported
 // rather than ignored.
 var commands = map[string]command{
-	"snapshot.get":      {cmdSnapshotGet},
-	"source.fetch":      {cmdSourceFetch},
-	"definition.export": {cmdDefinitionExport},
-	"definition.upsert": {cmdDefinitionUpsert},
-	"definition.import": {cmdDefinitionImport},
-	"source.upsert":     {cmdSourceUpsert},
-	"session.create":    {cmdSessionCreate},
-	"session.bind_chat": {cmdSessionBindChat},
-	"run.start":         {cmdRunStart},
-	"run.cancel":        {cmdRunCancel},
-	"run.retry":         {cmdRunRetry},
-	"outcome.retain":    {cmdOutcomeRetain},
+	"snapshot.get":        {cmdSnapshotGet},
+	"source.fetch":        {cmdSourceFetch},
+	"definition.export":   {cmdDefinitionExport},
+	"definition.upsert":   {cmdDefinitionUpsert},
+	"definition.import":   {cmdDefinitionImport},
+	"source.upsert":       {cmdSourceUpsert},
+	"source.capture":      {cmdSourceCapture},
+	"member.upsert":       {cmdMemberUpsert},
+	"member.adopt_source": {cmdMemberAdoptSource},
+	"session.create":      {cmdSessionCreate},
+	"session.bind_chat":   {cmdSessionBindChat},
+	"run.start":           {cmdRunStart},
+	"run.cancel":          {cmdRunCancel},
+	"run.retry":           {cmdRunRetry},
+	"outcome.retain":      {cmdOutcomeRetain},
 }
 
 // ---------------------------------------------------------------------------
@@ -101,11 +104,37 @@ func cmdDefinitionExport(_ *Store, snap map[string]any, req *Request) (map[strin
 		return nil, missingDefinition(defID)
 	}
 	includeContent, _ := req.Payload["include_content"].(bool)
-	exported, err := contract.ExportDefinition(def, includeContent)
+	// include_source_ids is the user's per-source choice. Absent means "every
+	// source", present means exactly these — including present-but-empty, which
+	// is how the panel says "the inventory only". It is distinguished from
+	// absent here, because the difference is the whole point of the field.
+	var selected []string
+	if raw, ok := req.Payload["include_source_ids"].([]any); ok {
+		selected = []string{}
+		for _, x := range raw {
+			selected = append(selected, str(x))
+		}
+	}
+	exported, included, withheld, err := contract.ExportDefinition(def, includeContent, selected)
 	if err != nil {
 		return nil, fail(CodeInternal, "could not build the portable definition: "+err.Error(), false)
 	}
-	return map[string]any{"definition": exported, "include_content": includeContent}, nil
+	return map[string]any{
+		"definition":          exported,
+		"include_content":     includeContent,
+		"included_source_ids": asAny(included),
+		"withheld_source_ids": asAny(withheld),
+	}, nil
+}
+
+// asAny widens a string list for a JSON payload. The reply is decoded JSON
+// everywhere else, so a []string would be the one value in it that is not.
+func asAny(values []string) []any {
+	out := []any{}
+	for _, v := range values {
+		out = append(out, v)
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------

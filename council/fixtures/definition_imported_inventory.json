@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "record_kind": "council_definition",
+  "definition_id": "def-reading-group-imported",
+  "definition_revision": 1,
+  "name": "Reading Group (imported without its material)",
+  "purpose": "Shows what a council looks like after an import whose sources were left behind: the inventory is complete, the material is not, and every citation against it resolves to 'material not available' until someone supplies text that hashes to the recorded capture.",
+  "members": [
+    {
+      "member_id": "mem-chair",
+      "member_revision": 1,
+      "kind": "assistant",
+      "display_name": "Chair",
+      "scope": "Runs the round, reports where members disagree, and never adds a position of its own.",
+      "limitations": "Has no grounding of its own; everything it reports must trace to a member contribution.",
+      "grounding": []
+    },
+    {
+      "member_id": "mem-marginalia",
+      "member_revision": 1,
+      "kind": "simulant",
+      "display_name": "Marginalia (reading notes)",
+      "represents": "T. Vance, author of the fictional reading notes this fixture stands in for",
+      "scope": "How a group should treat a book it has only read once, as argued in one short set of notes.",
+      "limitations": "The notes themselves did not travel with this council. Until the material is supplied, this member is an inventory entry: its citations resolve to 'material not available' and nothing it says can be checked against a source.",
+      "grounding": [
+        {
+          "source_id": "src-reading-notes",
+          "source_revision": 1
+        }
+      ]
+    }
+  ],
+  "seats": [
+    {
+      "seat_id": "seat-chair",
+      "member_id": "mem-chair",
+      "responsibility": "Synthesise the round and preserve disagreement.",
+      "role": "chair"
+    },
+    {
+      "seat_id": "seat-first-reading",
+      "member_id": "mem-marginalia",
+      "responsibility": "Argue what a first reading can and cannot conclude.",
+      "role": "advisor",
+      "relevance_tags": [
+        "reading",
+        "evidence"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "source_id": "src-reading-notes",
+      "source_revision": 1,
+      "title": "Notes on a first reading (fixture text)",
+      "author": "T. Vance",
+      "locator": "pasted excerpt",
+      "captured_at": "2026-09-02T09:41:00Z",
+      "content_hash": "sha256:350be10cd05d7a150880d6a44da43e6d8093f26d02f8230a9f0e5a64921715bb",
+      "anchors": [
+        {
+          "anchor_id": "anc-first-reading",
+          "quote": "What the group owes a book on a first reading is an honest account of what it has not yet understood."
+        }
+      ]
+    }
+  ],
+  "deliberation": {
+    "max_members_per_round": 4,
+    "independent_initial_round": true,
+    "preserve_disagreement": true,
+    "per_member_timeout_seconds": 120
+  }
+}
