@@ -22,7 +22,7 @@ import (
 
 // Clearance is the MCP tool spec for cad.clearance.
 var Clearance = ToolSpec{
-	Name: "cad.clearance",
+	Name:        "cad.clearance",
 	Description: "Minimum distance between the evaluated .mcad solid and each named reference node, exact for the two meshes. Returns {checked, pass, required_mm, tessellation_tolerance_mm, bound, pairs:[{reference,node,min_mm,solid_point_mm,reference_point_mm,pass,interference?}], cache}. Targets whose geometry the worker has not cached come back as missing_keys with checked:false, for the caller to upload and ask again.",
 	InputSchema: json.RawMessage(`{
 		"type": "object",

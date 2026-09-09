@@ -98,9 +98,9 @@ func TestEmitHostNotifyEmptyMessage(t *testing.T) {
 
 func TestWorkerErrorToastLevels(t *testing.T) {
 	cases := []struct {
-		kind          string
-		wantLevel     string
-		wantNonEmpty  bool
+		kind         string
+		wantLevel    string
+		wantNonEmpty bool
 	}{
 		{"crashed", "error", true},
 		{"python", "error", true},
