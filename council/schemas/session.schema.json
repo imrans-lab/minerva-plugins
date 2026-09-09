@@ -82,6 +82,10 @@
         "chat_id": {
           "$ref": "common.schema.json#/$defs/Id"
         },
+        "project_id": {
+          "$ref": "common.schema.json#/$defs/Id",
+          "description": "The project this chat was routed into, stamped from the snapshot's project_id at the moment the binding was made. It travels with the session, so a session moved or imported into another project still says which project's consultation its chat belongs to, and the router refuses to continue it here rather than adopting somebody else's chat."
+        },
         "origin_message_id": {
           "$ref": "common.schema.json#/$defs/Id",
           "description": "The user turn that opened the consultation, when the session began from chat."

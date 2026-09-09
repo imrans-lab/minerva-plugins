@@ -460,7 +460,8 @@ var mutatingCommands = map[string]bool{
 	"source.upsert": true, "source.capture": true,
 	"member.upsert": true, "member.adopt_source": true,
 	"session.create": true, "session.bind_chat": true,
-	"run.start": true, "run.cancel": true, "run.retry": true, "outcome.retain": true,
+	"run.start": true, "run.cancel": true, "run.retry": true,
+	"outcome.retain": true, "outcome.mark_missing": true,
 }
 
 func checkEnvelope(e map[string]any, errs *[]string) {

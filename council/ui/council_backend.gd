@@ -52,7 +52,13 @@ const SEND_MESSAGE_CHANNEL := "capability:mcp.proxy:minerva_send_message"
 ## these calls are local engine work and a wait this long already means the
 ## backend is wedged. A timed-out exchange clears the lease holder, so the state
 ## the next exchange assumes is re-established rather than inherited.
-const HOP_TIMEOUT_MS := 120000
+##
+## Declared in seconds and multiplied up, because the timeout MESSAGE is in
+## seconds: deriving the milliseconds from the seconds keeps one number in the
+## file, where dividing the milliseconds back down would be an integer division
+## whose remainder silently disappears.
+const HOP_TIMEOUT_SECONDS := 120
+const HOP_TIMEOUT_MS := HOP_TIMEOUT_SECONDS * 1000
 
 ## Where the lease lives.
 ##
@@ -178,14 +184,29 @@ func send_to_chat(chat_id: String, text: String) -> Dictionary:
 
 ## Make the engine hold this panel's record. A no-op when it already does.
 ##
-## Load applies the interruption rule, so a record with work that was in flight
-## comes back demoted and at a new revision; that rewritten form is the one the
-## panel must persist, and it is returned here as `snapshot`.
+## Load is where the record can come back different, and there are three ways:
+## the interruption rule demotes work that was in flight when the owning process
+## went away; a migration brings a document written by an older Council up to
+## this build's shape and mints its project identity; and a RECOVERY happens when
+## the engine was already holding a later state of this same document — the round
+## that kept running after the panel closed, whose contributions exist nowhere
+## else. Each of them means the rewritten form is the one the panel must persist,
+## and it is returned here as `snapshot`.
 func _ensure_seeded(record: Dictionary) -> Dictionary:
 	if _holder() == _panel_key and not _panel_key.is_empty():
 		return {"ok": true, "snapshot": {}}
 	var generation := _seed_generation
-	var loaded := await _send(LOAD_CHANNEL, {"snapshot": record})
+	# "reopen" asks the engine to KEEP a later state of this same document rather
+	# than take the copy the panel last persisted — the round that outlived its
+	# tab. It is sent only when the engine holds NOBODY's record, which is what
+	# an unmount, a tab close or a backend restart leaves behind. While another
+	# panel is the holder this is a panel joining a document someone else is
+	# working in, and the engine's test — same project identity, higher revision,
+	# every session and run still present — cannot tell that from a file copy
+	# that merely lags behind (architecture.md §4.3). So it is a plain replace,
+	# and two open panels can never be merged into one another.
+	var mode := "reopen" if _holder().is_empty() else "replace"
+	var loaded := await _send(LOAD_CHANNEL, {"snapshot": record, "mode": mode})
 	if generation != _seed_generation:
 		return {"ok": false, "code": "stale_revision", "retryable": true,
 			"message": "The panel opened a different council while the backend was loading it."}
@@ -196,7 +217,14 @@ func _ensure_seeded(record: Dictionary) -> Dictionary:
 	if not refused.is_empty():
 		return refused
 	_set_holder(_panel_key)
+	# The revision moving is the general signal and each of the three named
+	# reasons implies it; they are read as well so a future load that rewrites a
+	# record without moving the revision still comes back rather than being lost.
+	var reported: Variant = body.get("migrations", [])
+	var migrations: Array = reported if reported is Array else []
 	if int(body.get("runs_demoted", 0)) > 0 \
+			or bool(body.get("recovered", false)) \
+			or not migrations.is_empty() \
 			or int(body.get("snapshot_revision", 0)) != int(record.get("snapshot_revision", 1)):
 		var exported := await _send(EXPORT_CHANNEL, {})
 		if bool(exported.get("ok", false)) and _refusal(exported.get("body", {})).is_empty():
@@ -327,7 +355,7 @@ func _explain_transport_failure(code: String, message: String) -> String:
 			return ("The Council backend is not running, so nothing can be changed right now. "
 				+ "Your council is safe in the project; start the plugin and try again.")
 		"timeout":
-			return "The Council backend did not answer within %d seconds." % (HOP_TIMEOUT_MS / 1000)
+			return "The Council backend did not answer within %d seconds." % HOP_TIMEOUT_SECONDS
 		"permission_denied":
 			return "The host refused this call: %s" % message
 		_:

@@ -10,5 +10,10 @@ import "embed"
 // check can point a person at a file Minerva will actually open and the
 // contract tests still hold it to the schemas.
 //
-//go:embed *.json invalid/*.json *.mcouncil
+// migrations/ holds documents in shapes this build no longer writes. They are
+// not valid against today's schemas — that is the point of them — so they live
+// in their own directory rather than beside the examples the round-trip test
+// sweeps.
+//
+//go:embed *.json invalid/*.json migrations/*.json *.mcouncil
 var FS embed.FS

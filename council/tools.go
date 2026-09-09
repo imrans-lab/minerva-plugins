@@ -135,24 +135,33 @@ func newRegistry(store *session.Store) *registry {
 	r.register(toolSpec{
 		Name: "minerva_council_load_snapshot",
 		Description: "Hand the backend the council_project_snapshot the panel restored, replacing whatever it was working on. " +
+			"Migrates a document written by an older Council up to this build's shape, minting the durable project identity if it has none. " +
 			"Runs the interruption rule: a run that was in flight when its owning process went away is demoted to a visible failed state with an explicit retry, never resumed. " +
-			"Returns {ok, snapshot_revision, definitions, sessions, runs_demoted}.",
+			"In mode \"reopen\" — the panel's own seeding path — it keeps what it is already holding when that is a later state of the same document, which is the round that kept going after the panel closed, and says so with recovered:true. " +
+			"Returns {ok, snapshot_revision, project_id, definitions, sessions, runs_demoted, migrations, recovered}; export the snapshot whenever migrations, recovered or a changed revision says the record moved.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"snapshot": {"type": "object", "description": "A council_project_snapshot record."}
+				"snapshot": {"type": "object", "description": "A council_project_snapshot record."},
+				"mode": {"type": "string", "enum": ["replace", "reopen"], "description": "replace (the default) makes the engine hold exactly this document, stopping anything it was running. reopen is the panel's own seeding path: it is the same, except that a later state of THIS document already in the engine is kept and reported with recovered:true, which is what stops a round that outlived its panel from being thrown away."}
 			},
 			"required": ["snapshot"]
 		}`),
 	}, func(args json.RawMessage) ([]byte, error) {
 		var a struct {
 			Snapshot json.RawMessage `json:"snapshot"`
+			Mode     string          `json:"mode"`
 		}
 		if err := json.Unmarshal(args, &a); err != nil {
 			return nil, fmt.Errorf("parse arguments: %w", err)
 		}
 		if len(a.Snapshot) == 0 {
 			return nil, fmt.Errorf("argument \"snapshot\" is required")
+		}
+		switch a.Mode {
+		case "", "replace", "reopen":
+		default:
+			return nil, fmt.Errorf("mode %q is not one this tool has; it is \"replace\" (the default) or \"reopen\"", a.Mode)
 		}
 		// Opening a document is the natural moment to re-read the host's model
 		// list: it is a host call, so it has to happen with the engine lock
@@ -163,16 +172,23 @@ func newRegistry(store *session.Store) *registry {
 			log.Printf("could not refresh the host's enabled models on load: %v", err)
 		}
 		cancel()
-		report, err := store.Load(a.Snapshot)
+		load := store.Load
+		if a.Mode == "reopen" {
+			load = store.Reopen
+		}
+		report, err := load(a.Snapshot)
 		if err != nil {
 			return nil, err
 		}
 		return json.Marshal(map[string]any{
 			"ok":                true,
 			"snapshot_revision": report.SnapshotRevision,
+			"project_id":        report.ProjectID,
 			"definitions":       report.Definitions,
 			"sessions":          report.Sessions,
 			"runs_demoted":      report.RunsDemoted,
+			"migrations":        report.Migrations,
+			"recovered":         report.Recovered,
 		})
 	})
 

@@ -7,6 +7,10 @@
   "properties": {
     "schema_version": { "$ref": "common.schema.json#/$defs/SchemaVersion" },
     "record_kind": { "const": "council_project_snapshot" },
+    "project_id": {
+      "$ref": "common.schema.json#/$defs/Id",
+      "description": "Durable identity of this document, minted once when it is first loaded and never changed. It is what makes a chat routed against one project recognisable as that project's by a backend process that has never seen the other document, and what tells a reopened panel apart from a panel opening something else. A document written before this field existed is migrated by minting one (internal/contract/migrate.go)."
+    },
     "snapshot_revision": { "$ref": "common.schema.json#/$defs/Revision" },
     "definitions": {
       "type": "array",
@@ -19,7 +23,7 @@
     },
     "view": { "$ref": "#/$defs/ViewState" }
   },
-  "required": ["schema_version", "record_kind", "snapshot_revision", "definitions", "sessions"],
+  "required": ["schema_version", "record_kind", "project_id", "snapshot_revision", "definitions", "sessions"],
   "additionalProperties": false,
   "$defs": {
     "ViewState": {

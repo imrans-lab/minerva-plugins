@@ -588,3 +588,66 @@ func seatIDs(seats []map[string]any) []any {
 	}
 	return out
 }
+
+// cmdOutcomeMarkMissing records that a retained note could not be resolved —
+// the user moved it, deleted it, or it belongs to a project that is not open —
+// or that it has come back.
+//
+// The reference is KEPT either way. A note that cannot be resolved today is a
+// recoverable state, and dropping the link would lose the only record of which
+// contribution the conclusion came from; the flag is what lets the panel show
+// the outcome as unresolved instead of showing a link that silently opens
+// nothing. Resolving the note is the wrapper's job — it is the only side that
+// can ask the host — so this command carries the answer rather than deriving it.
+func cmdOutcomeMarkMissing(_ *Store, snap map[string]any, req *Request) (map[string]any, *Failure) {
+	session, f := requireSession(snap, req)
+	if f != nil {
+		return nil, f
+	}
+	outcomeID, f := need(req.Payload, "outcome_id")
+	if f != nil {
+		return nil, f
+	}
+	outcome, _ := findByID(session["outcomes"], "outcome_id", outcomeID)
+	if outcome == nil {
+		return nil, fail(CodeInternal,
+			fmt.Sprintf("session %q has no outcome %q", str(session["session_id"]), outcomeID), false)
+	}
+	missing, ok := req.Payload["missing"].(bool)
+	if !ok {
+		return nil, fail(CodeInternal, "payload field \"missing\" is required and must be a boolean", false)
+	}
+	note := obj(outcome["note"])
+	if note == nil {
+		return nil, fail(CodeInternal,
+			fmt.Sprintf("outcome %q carries no note reference to mark", outcomeID), false)
+	}
+	if was, _ := note["missing"].(bool); was == missing {
+		// Already saying this. Reported as unchanged so a repeated resolve
+		// attempt does not advance the revision under every other open view.
+		return map[string]any{
+			"session_id":  str(session["session_id"]),
+			"outcome_id":  outcomeID,
+			"missing":     missing,
+			"changed":     false,
+			"note_ref":    str(note["ref"]),
+			"note_kind":   str(note["kind"]),
+			"description": "the note reference already said this",
+		}, nil
+	}
+	if missing {
+		note["missing"] = true
+	} else {
+		delete(note, "missing")
+	}
+	bumpSession(session)
+	return map[string]any{
+		"session_id":       str(session["session_id"]),
+		"session_revision": int(num(session["session_revision"])),
+		"outcome_id":       outcomeID,
+		"missing":          missing,
+		"changed":          true,
+		"note_ref":         str(note["ref"]),
+		"note_kind":        str(note["kind"]),
+	}, nil
+}

@@ -32,22 +32,23 @@ type command struct {
 // envelope.schema.json. A command in the schema with no entry here is reported
 // rather than ignored.
 var commands = map[string]command{
-	"snapshot.get":        {apply: cmdSnapshotGet},
-	"source.fetch":        {apply: cmdSourceFetch},
-	"definition.export":   {apply: cmdDefinitionExport},
-	"definition.upsert":   {apply: cmdDefinitionUpsert},
-	"definition.import":   {apply: cmdDefinitionImport},
-	"source.upsert":       {apply: cmdSourceUpsert},
-	"source.capture":      {apply: cmdSourceCapture},
-	"member.upsert":       {apply: cmdMemberUpsert},
-	"member.adopt_source": {apply: cmdMemberAdoptSource},
-	"session.create":      {apply: cmdSessionCreate},
-	"session.bind_chat":   {apply: cmdSessionBindChat},
-	"run.start":           {apply: cmdRunStart, after: afterRunStart},
-	"run.await":           {apply: cmdRunAwait, after: afterRunAwait},
-	"run.cancel":          {apply: cmdRunCancel},
-	"run.retry":           {apply: cmdRunRetry, after: afterRunStart},
-	"outcome.retain":      {apply: cmdOutcomeRetain},
+	"snapshot.get":         {apply: cmdSnapshotGet},
+	"source.fetch":         {apply: cmdSourceFetch},
+	"definition.export":    {apply: cmdDefinitionExport},
+	"definition.upsert":    {apply: cmdDefinitionUpsert},
+	"definition.import":    {apply: cmdDefinitionImport},
+	"source.upsert":        {apply: cmdSourceUpsert},
+	"source.capture":       {apply: cmdSourceCapture},
+	"member.upsert":        {apply: cmdMemberUpsert},
+	"member.adopt_source":  {apply: cmdMemberAdoptSource},
+	"session.create":       {apply: cmdSessionCreate},
+	"session.bind_chat":    {apply: cmdSessionBindChat},
+	"run.start":            {apply: cmdRunStart, after: afterRunStart},
+	"run.await":            {apply: cmdRunAwait, after: afterRunAwait},
+	"run.cancel":           {apply: cmdRunCancel},
+	"run.retry":            {apply: cmdRunRetry, after: afterRunStart},
+	"outcome.retain":       {apply: cmdOutcomeRetain},
+	"outcome.mark_missing": {apply: cmdOutcomeMarkMissing},
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +258,24 @@ func cmdSourceUpsert(s *Store, snap map[string]any, req *Request) (map[string]an
 // sessions
 // ---------------------------------------------------------------------------
 
+// newChatBinding builds the durable association between a session and a chat.
+//
+// It stamps the project the binding is being made in. That stamp is what lets a
+// later process — one that never saw the other project's document — refuse to
+// continue somebody else's consultation here, and it travels with the session
+// if the session is ever carried into another project (chat.go,
+// architecture.md §5.3.2).
+func newChatBinding(s *Store, snap map[string]any, chatID string, req *Request) map[string]any {
+	binding := map[string]any{"chat_id": chatID, "bound_at": s.now()}
+	if project := str(snap["project_id"]); project != "" {
+		binding["project_id"] = project
+	}
+	if origin := str(req.Payload["origin_message_id"]); origin != "" {
+		binding["origin_message_id"] = origin
+	}
+	return binding
+}
+
 func cmdSessionCreate(s *Store, snap map[string]any, req *Request) (map[string]any, *Failure) {
 	sessionID, f := need(req.Payload, "session_id")
 	if f != nil {
@@ -282,10 +301,7 @@ func cmdSessionCreate(s *Store, snap map[string]any, req *Request) (map[string]a
 		return nil, missingDefinition(defID)
 	}
 
-	binding := map[string]any{"chat_id": chatID, "bound_at": s.now()}
-	if origin := str(req.Payload["origin_message_id"]); origin != "" {
-		binding["origin_message_id"] = origin
-	}
+	binding := newChatBinding(s, snap, chatID, req)
 	// The definition is embedded, not referenced: later edits to the council
 	// must never rewrite what was actually asked of whom.
 	session := map[string]any{
@@ -328,10 +344,7 @@ func cmdSessionBindChat(s *Store, snap map[string]any, req *Request) (map[string
 	if f != nil {
 		return nil, fail(CodeMissingChat, "payload field \"chat_id\" is required", false)
 	}
-	binding := map[string]any{"chat_id": chatID, "bound_at": s.now()}
-	if origin := str(req.Payload["origin_message_id"]); origin != "" {
-		binding["origin_message_id"] = origin
-	}
+	binding := newChatBinding(s, snap, chatID, req)
 	if missing, ok := req.Payload["missing"].(bool); ok {
 		binding["missing"] = missing
 	}

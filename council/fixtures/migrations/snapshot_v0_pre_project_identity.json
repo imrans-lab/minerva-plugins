@@ -1,11 +1,10 @@
 {
-  "schema_version": 1,
+  "schema_version": 0,
   "record_kind": "council_project_snapshot",
-  "project_id": "prj-3d8f4a5b6c7d8e9aa1f3a4b5c6d7e8f9",
   "snapshot_revision": 12,
   "definitions": [
     {
-      "schema_version": 1,
+      "schema_version": 0,
       "record_kind": "council_definition",
       "definition_id": "def-workshop-economics",
       "definition_revision": 3,
@@ -118,12 +117,12 @@
   ],
   "sessions": [
     {
-      "schema_version": 1,
+      "schema_version": 0,
       "record_kind": "council_session",
       "session_id": "ses-recurring-order",
       "session_revision": 7,
       "definition_snapshot": {
-        "schema_version": 1,
+        "schema_version": 0,
         "record_kind": "council_definition",
         "definition_id": "def-workshop-economics",
         "definition_revision": 3,
@@ -352,138 +351,6 @@
           "retained_at": "2026-09-08T09:18:00Z"
         }
       ]
-    },
-    {
-      "schema_version": 1,
-      "record_kind": "council_session",
-      "session_id": "ses-recurring-order-twin",
-      "session_revision": 1,
-      "definition_snapshot": {
-        "schema_version": 1,
-        "record_kind": "council_definition",
-        "definition_id": "def-workshop-economics",
-        "definition_revision": 3,
-        "name": "Workshop Economics",
-        "purpose": "Decide whether a one-person workshop should take on a larger recurring order, and say plainly what the decision costs.",
-        "members": [
-          {
-            "member_id": "mem-chair",
-            "member_revision": 1,
-            "kind": "assistant",
-            "display_name": "Chair",
-            "scope": "Runs the round, reports where members disagree, and never adds a position of its own.",
-            "limitations": "Has no grounding of its own; everything it reports must trace to a member contribution.",
-            "grounding": []
-          },
-          {
-            "member_id": "mem-okonkwo",
-            "member_revision": 2,
-            "kind": "simulant",
-            "display_name": "Okonkwo (workshop essay)",
-            "represents": "R. Okonkwo, author of the fictional essay used as this fixture's grounding",
-            "scope": "Capacity and pricing for a single-operator workshop, as argued in one essay.",
-            "limitations": "One essay on capacity. Establishes nothing about hiring, financing, or this author's views on anything else.",
-            "grounding": [
-              {
-                "source_id": "src-capacity-essay",
-                "source_revision": 2
-              }
-            ],
-            "model_hint": ""
-          },
-          {
-            "member_id": "mem-operator",
-            "member_revision": 1,
-            "kind": "human",
-            "display_name": "Operator (you)",
-            "scope": "The local user, contributing observed facts about the actual shop.",
-            "limitations": "Cannot speak for the customer. Anything about what the customer wants is evidence only if it was observed.",
-            "grounding": []
-          }
-        ],
-        "seats": [
-          {
-            "seat_id": "seat-chair",
-            "member_id": "mem-chair",
-            "responsibility": "Synthesise the round and preserve disagreement.",
-            "role": "chair"
-          },
-          {
-            "seat_id": "seat-capacity",
-            "member_id": "mem-okonkwo",
-            "responsibility": "Argue the capacity and pricing consequences.",
-            "role": "advisor",
-            "relevance_tags": [
-              "pricing",
-              "capacity"
-            ]
-          },
-          {
-            "seat_id": "seat-observed",
-            "member_id": "mem-operator",
-            "responsibility": "Supply observed facts about the shop and correct wrong premises.",
-            "role": "advisor",
-            "relevance_tags": [
-              "evidence"
-            ]
-          }
-        ],
-        "sources": [
-          {
-            "source_id": "src-capacity-essay",
-            "source_revision": 2,
-            "title": "What a bench can actually hold (fixture essay)",
-            "author": "R. Okonkwo",
-            "locator": "note: Workshop capacity essay",
-            "captured_at": "2026-09-01T14:03:00Z",
-            "content_hash": "sha256:0e6baff9ffd389510802b77b3b4a35ed53508fe66c469c40754be669ee08af46",
-            "artifact": {
-              "kind": "note",
-              "ref": "note-capacity-essay",
-              "label": "Workshop capacity essay"
-            },
-            "payload": {
-              "content_type": "text/markdown",
-              "byte_length": 243,
-              "content_hash": "sha256:0e6baff9ffd389510802b77b3b4a35ed53508fe66c469c40754be669ee08af46",
-              "inline": "A bench has one throughput, and every promise made against it is a promise against the same hours. A recurring order is not extra work; it is the removal of the freedom to say no. Price it as the loss of that freedom, not as a volume discount."
-            },
-            "anchors": [
-              {
-                "anchor_id": "anc-freedom",
-                "quote": "A recurring order is not extra work; it is the removal of the freedom to say no.",
-                "start": 99,
-                "end": 179
-              }
-            ]
-          }
-        ],
-        "deliberation": {
-          "max_members_per_round": 4,
-          "independent_initial_round": true,
-          "preserve_disagreement": true,
-          "per_member_timeout_seconds": 120,
-          "max_concurrent_members": 2,
-          "max_prompt_bytes": 16384,
-          "run_budget_seconds": 300,
-          "max_rounds_per_session": 12
-        }
-      },
-      "chat_binding": {
-        "chat_id": "chat-0192ab",
-        "origin_message_id": "msg-0004",
-        "bound_at": "2026-09-08T09:12:44Z"
-      },
-      "question": "Should the workshop take the recurring 40-unit order at 0.7x price?",
-      "context_snapshot": {
-        "content_type": "text/plain",
-        "byte_length": 159,
-        "content_hash": "sha256:f3a1388c0eb44091119e808e91d10a30c197d799db4578c0a5bdb6353361b360",
-        "inline": "Order under consideration: 40 units a month for a year, at 0.7x the current unit price. Observed: the bench cleared 52 units last month with two late evenings."
-      },
-      "status": "draft",
-      "runs": [],
-      "outcomes": []
     }
   ],
   "view": {

@@ -40,23 +40,23 @@ An HTML panel is opened as a plain `Editor.Type.WEBVIEW`:
 
 Every panel lifecycle hook is gated on `Type.PLUGIN_SCENE` with a non-null
 `plugin_scene_root`: dirty tracking (`Editor.gd:1539`), Ctrl+S
-(`Editor.gd:1711`), mark-saved (`Editor.gd:2072`), create-note
+(`Editor.gd:1701-1712`), mark-saved (`Editor.gd:1710`), create-note
 (`Editor.gd:2226`), note refresh (`Editor.gd:2435`), chat-inject toggle
 (`Editor.gd:2494`), unload (`Editor.gd:748`), undo (`Editor.gd:2167`), project
 serialize (`src/Scripts/UI/Controls/vboxEditor.gd:164`, `:494`) and project restore
-(`vboxEditor.gd:769`).
+(`vboxEditor.gd:757-784`).
 
 What a WEBVIEW editor does instead is the damaging part:
 
-- **Save writes the page, not the state.** `Editor.gd:1697` opens the target
+- **Save writes the page, not the state.** `Editor.gd:1701-1709` opens the target
   file and stores `webview_editor.get_html()`. A user who presses Ctrl+S on a
   Council HTML panel would save the markup and lose the council.
-- **A note captures the page, not the state.** `Editor.gd:1807` builds
+- **A note captures the page, not the state.** `Editor.gd:2400-2406` builds
   `Note.create_html_note(tab_title, html)`; `Editor.gd:2427` refreshes it with
   `note.linked_html = html`.
 - **Project serialize emits no panel state.** Only the `PLUGIN_SCENE` branch of
   `vboxEditor.serialize()` writes a `plugin_state` / `__panel_state` entry
-  (`vboxEditor.gd:495-497`, `:521-527`).
+  (`vboxEditor.gd:494-499`, `:518-527`).
 
 An HTML panel's whole contract with the host is
 `PluginWebviewBroker.handle_ipc_message(panel_name, message_type, payload)`
@@ -192,6 +192,7 @@ persists the snapshot that comes back and is otherwise a view (see §3).
 
 | Identity | Owner | Advances when | Read by |
 |---|---|---|---|
+| `project_id` | the wrapper, minted by the engine on the document's first load | **never** — it is the document's identity | the chat router, and the reload rule that tells a reopened document apart from a different one |
 | `snapshot_revision` | the wrapper (native panel) | any accepted mutation | every request's `base_revision`, every reply |
 | `definition_id` + `definition_revision` | the wrapper | a council's members, seats, sources or rules change | exports; a session's embedded snapshot |
 | `member_id` + `member_revision` | the wrapper | kind, attribution, scope, limitations or grounding change — `member.upsert` and `member.adopt_source` mint it, so a cosmetic rename does not | every contribution, so an old answer is never re-attributed |
@@ -251,6 +252,50 @@ that index names:
   comes back at a new `snapshot_revision`, because two different documents must
   never claim the same one.
 
+### 2.3 Versioned migration, and the durable project identity
+
+A stored document is durable state in a user's project, so a build either
+understands its shape or refuses it. `schema_version` is the declaration of that
+shape and `internal/contract/migrate.go` is the ladder that carries an older
+document up to the shape this build speaks. It runs inside `Store.Load` **before
+validation**, because an older document is not expected to satisfy today's
+schema — that is what makes it older.
+
+Two kinds of step, and the difference is worth keeping:
+
+- A **ladder step** moves a document from one `schema_version` to the next and
+  exists forever once written. `v0 → v1` stamps an explicit `schema_version` onto
+  the snapshot and onto every record nested in it, which is the shape Council
+  wrote before the version field was part of the contract
+  (`fixtures/migrations/snapshot_v0_pre_project_identity.json`).
+- A **fixup** runs at the current version and fills in a field introduced without
+  a version bump, where absence is unambiguous. Every fixup is idempotent, so a
+  document that already has the value is left exactly as it is.
+
+A document from a **newer** version is refused, not guessed at, at both ends:
+the engine refuses to load it and the wrapper preserves it byte-for-byte rather
+than opening it (`council_record.gd`).
+
+The one fixup today mints **`project_id`**: the durable identity of one Council
+document, random rather than derived, minted once and never changed. It is what
+makes two other things decidable that the record could not decide before —
+
+- which project owns a chat, after a plugin restart (§5.3.2); and
+- whether a document being handed to the engine is the same document it is
+  already holding, which is the reload rule in §4.3.
+
+**A migration costs a revision**, exactly as a demotion does: the document that
+comes out is not the document that went in, two documents must never claim one
+revision, and the wrapper has to persist the migrated form. A document already
+current migrates nothing and loads at its own revision, so reopening it does not
+dirty the project.
+
+**A copied document keeps its identity**, because the identity is in the bytes.
+Two projects holding a file copy of one council are, to the engine, one
+document; while they are identical that is harmless, and the wrapper's lease
+rule in §4.3 is what stops them from being merged once they diverge — the
+engine's descendancy test alone cannot tell a lagging copy from a reopen.
+
 ---
 
 ## 3. Who owns what
@@ -260,7 +305,7 @@ survives Minerva restarting.
 
 | State | Owner | Where it lives | Durable | Rebuilt from |
 |---|---|---|---|---|
-| Council definitions, sessions, runs, contributions, outcomes, source captures — the durable record | **native wrapper**, which persists it but never edits it | `_snapshot` in the panel; written into the project by `vboxEditor.gd:495-497` as `__panel_state`, and to a `.mcouncil` file by `Editor.gd:1711-1760` | yes | — it *is* the source |
+| Council definitions, sessions, runs, contributions, outcomes, source captures — the durable record | **native wrapper**, which persists it but never edits it | `_snapshot` in the panel; written into the project by `vboxEditor.gd:494-499` as `__panel_state`, and to a `.mcouncil` file by `Editor.gd:1727` → `PluginScenePanelHost.save_file` (`PluginScenePanelHost.gd:239-254`) | yes | — it *is* the source |
 | `snapshot_revision` | **plugin backend** — minted on each accepted mutation, and on a load that had to rewrite the record | the record, persisted by the wrapper | yes | — |
 | The record while a session is open (mutations, derivations, validation) | **plugin backend** — the one engine, `session.Store` | backend process memory | **no** | seeded by `minerva_council_load_snapshot` from the wrapper's persisted record; read back with `minerva_council_export_snapshot` |
 | The idempotency ledger (`request_id` → the reply already produced) | **plugin backend** | backend process memory, cleared by every `Load` | **no** | not rebuilt — it is scoped to one loaded record, so a replay can never return a reply produced against a different snapshot |
@@ -269,7 +314,7 @@ survives Minerva restarting.
 | Last selected session / pane | native wrapper | `snapshot.view` | yes | defaults if absent |
 | User/chair transcript | **Minerva chat** | the native chat history | yes | referenced by `chat_binding`, never copied |
 | Retained conclusions | **Minerva notes** | native notes | yes | referenced by `outcome.note` |
-| Panel reopen payload | Minerva notes | a `plugin_data` note's `linked_plugin_payload` (`Note.gd:363-369`) | yes | the snapshot it was made from |
+| Panel reopen payload | Minerva notes | a `plugin_data` note's `linked_plugin_payload` (`Note.gd:339-368`) | yes | the snapshot it was made from |
 | Source material larger than `InlineLimit` | host blob store | `(editor_name, "blob-N")`, referenced by `blob_handle` | yes, with the document | — |
 
 The seeding path is the seam between the two halves and is worth naming
@@ -290,17 +335,17 @@ Four rules follow, and they are the ones that keep the model honest:
 4. **Nothing is shown as saved before it is in the record.** The backend
    applies a mutation, advances `snapshot_revision` and replies; the wrapper
    persists the snapshot it gets back and emits `content_changed` (which marks
-   the tab dirty at `Editor.gd:2095-2096`). The reply carries the new revision,
+   the tab dirty: `Editor.gd:323-324` connects it to `_on_editor_changed`, which sets `_plugin_scene_modified` at `Editor.gd:2068-2069`). The reply carries the new revision,
    which is what the page renders.
 
 ### 3.1 Why `__panel_state` and not `project_state`
 
 Minerva has two project-persistence lanes. The `project_state` capability with
 `project_file: {serialize_channel, deserialize_channel}` routes through the
-backend over MCP. The other lane is unconditional: `vboxEditor.gd:495-497` calls
+backend over MCP. The other lane is unconditional: `vboxEditor.gd:494-499` calls
 `panel_root._on_panel_save_request()` **directly** and stores the result under
 `tab_state["__panel_state"]`, in all three of its paths — no MCP channel, plugin
-dead, or MCP success. Restore mirrors it at `vboxEditor.gd:769-784`, calling
+dead, or MCP success. Restore mirrors it at `vboxEditor.gd:757-784`, calling
 `_on_panel_load_request(panel_state)` **before** any MCP dispatch.
 
 Council v0.1 uses the unconditional lane only. It works when the backend is
@@ -367,8 +412,54 @@ not re-derive, and does not mint revisions — a second implementation of this r
 in the panel would be a second engine free to disagree with the first. The
 wrapper persists what `Load` returns.
 
+**The panel closing is not the same as the process ending.** When the tab goes
+away but the backend keeps running, the contributions that land afterwards are in
+the engine and **nowhere else** — the wrapper was not there to persist them. On
+reopen the panel hands back the record as it stood *before* the round, and taking
+it would throw that work away.
+
+This is the wrapper's **seeding** path and not loading in general, so it is a
+mode on the tool rather than a change to what loading means:
+`minerva_council_load_snapshot` takes `mode: "replace"` (the default — hold
+exactly this document, stop whatever is running) and `mode: "reopen"`, which the
+panel sends because a seed *is* a panel coming back to its own record. In reopen
+mode the engine keeps what it is already holding when all three of these are
+true, and replaces it otherwise:
+
+1. the resident document has the **same `project_id`** as the incoming one;
+2. its `snapshot_revision` is **at least as high** — equal counts, because a
+   panel can persist the revision `run.start` minted and close before the first
+   contribution commits one of its own; and
+3. every session and run the incoming record names is **still present** in it.
+
+The third is the descendancy test. The engine only ever advances a record it was
+seeded with, so a resident satisfying all three is a later state of the same
+document at the same point or further on; one that has *diverged* — a session or a run the resident never had —
+is a different history, and the caller's record wins.
+
+**The residual, stated honestly: a LAGGING file copy is indistinguishable from
+the same document reopened.** Copy a `.mcouncil` into a second project, work in
+the original until it is at revision 20 with sessions the copy never saw, then
+open the copy in the same backend process: everything the copy names is still in
+the original, so the descendancy test passes and the copy would be handed the
+original's content. The identity is in the bytes and a copy carries it, so no
+test on the documents alone can separate the two.
+
+What separates them is the WRAPPER, which knows something the engine does not:
+whether this panel is coming back to a document nobody else has, or joining one
+another panel is already working in. `_ensure_seeded` therefore sends
+`mode: "reopen"` **only when the lease holder is empty** — nobody's record is in
+the engine, which is what an unmount, a tab close or a backend restart leaves —
+and `mode: "replace"` whenever another panel is the holder. Recovery is then
+scoped to exactly the case it exists for, and two panels open at once can never
+merge, whatever their documents' identities say.
+
+Two panels showing two projects are unaffected for the same reason twice over:
+their identities differ, and the second panel's seed is a `replace`.
+
 **A rewrite costs a revision.** Demotion produces a document that is not the one
-handed in, so `Load` increments `snapshot_revision` when it demoted anything.
+handed in, so `Load` increments `snapshot_revision` when it demoted anything, and
+likewise when a migration rewrote it (§2.3).
 Two different documents must never claim the same revision, and the wrapper has
 to persist the demoted form rather than the one it sent. The corollary is the
 useful half: a valid record loads **unchanged and at the same revision**, because
@@ -385,10 +476,10 @@ are exact.
 
 | Hook | Council's contract | Error case |
 |---|---|---|
-| `_on_panel_loaded(ctx: Dictionary) -> void` | mounts the CEF surface from `ctx.data_directory`; `ctx` shape at `PluginScenePanelHost.gd:657-685` | `CefTexture` missing, page file missing, `user://` unwritable → an explanatory label, never a blank panel |
-| `_on_panel_save_request() -> Dictionary` | returns the held record verbatim, or `{"_bytes": …}` for a document Council could not read | none: it cannot fail. A non-Dictionary return is refused by the host at `Editor.gd:1733`. The same dictionary feeds two writes — the tab's file and the project's `__panel_state` — so it has to be right for both |
-| `_on_panel_load_request(document) -> void` | strips the host's `file_path` / `raw_text` keys, checks `record_kind` + `schema_version`, replaces the record, tells the page to re-read. Does **not** demote or re-derive — the engine does that on `Load` (§4.3) | the file-open path passes `{"file_path": path}` merged with the parsed JSON, or `raw_text` for a non-JSON file (`Editor.gd:1271-1279`). An empty document opens an empty council. An unrecognised one — not JSON, not a council, or a newer schema — is **kept byte-for-byte** and handed back on save, with the panel saying why it will not edit it; it is never replaced by an empty council and never half-recognised |
-| `_on_panel_create_note_request(ctx) -> Dictionary` | `{kind: "plugin_data", plugin_id, panel_name, payload: <snapshot>, preview_alt_text: <one line>}`; accepted shapes at `Editor.gd:2298-2334` | omitting the hook degrades to a screenshot note (`Editor.gd:2289`). The host backfills a missing preview image (`Editor.gd:2272-2278`) |
+| `_on_panel_loaded(ctx: Dictionary) -> void` | mounts the CEF surface from `ctx.data_directory`; `ctx` shape at `PluginScenePanelHost._build_ctx`, `PluginScenePanelHost.gd:677-715` | `CefTexture` missing, page file missing, `user://` unwritable → an explanatory label, never a blank panel |
+| `_on_panel_save_request() -> Dictionary` | returns the held record verbatim, or `{"_bytes": …}` for a document Council could not read | none: it cannot fail. A non-Dictionary return is refused by the host at `PluginScenePanelHost.gd:244-245`, which is also where `_bytes` is written verbatim (`:246-250`) rather than re-serialised (`:254`). The same dictionary feeds two writes — the tab's file and the project's `__panel_state` — so it has to be right for both |
+| `_on_panel_load_request(document) -> void` | strips the host's `file_path` / `raw_text` keys, checks `record_kind` + `schema_version`, replaces the record, tells the page to re-read. Does **not** demote or re-derive — the engine does that on `Load` (§4.3) | the file-open path passes `{"file_path": path}` merged with the parsed JSON, or `raw_text` for a non-JSON file (`Editor.gd:1291-1299`). An empty document opens an empty council. An unrecognised one — not JSON, not a council, or a newer schema — is **kept byte-for-byte** and handed back on save, with the panel saying why it will not edit it; it is never replaced by an empty council and never half-recognised |
+| `_on_panel_create_note_request(ctx) -> Dictionary` | `{kind: "plugin_data", plugin_id, panel_name, payload: <snapshot>, preview_alt_text: <one line>}`; accepted shapes at `Editor.gd:2278-2323` (`_build_note_from_plugin_payload`), the `plugin_data` branch at `:2298-2311` | omitting the hook degrades to a screenshot note (`Editor.gd:2262`). The host backfills a missing preview image (`Editor.gd:2239-2251`) |
 | `_on_panel_restore_from_note(payload: Dictionary) -> bool` | `false` unless `record_kind == "council_project_snapshot"` and `schema_version == 1` | `false` → the host toasts and leaves the panel blank (`src/Scripts/UI/Controls/Note.gd:733`). Must not be a coroutine |
 | `_on_panel_render_for_llm(ctx) -> Array` | one `{"type":"text","text":…}` part | **no production caller today** — implemented for the day there is one |
 | `receive(channel: String, payload: Dictionary) -> void` | raw event name, or the literal `"state"` | unknown channel → forwarded to the page as an event; the page re-reads |
@@ -573,33 +664,43 @@ snapshot. Resolution is: scan the loaded document's sessions for that chat.
 - **Found** → this turn is a `follow_up` run on that session.
 - **Not found, and Council has never routed this chat** → it is new; a session
   is opened here, `question` = the user's text, `chat_id` = the binding.
-- **Not found, but Council routed this chat against an earlier load
-  generation** → *refused*. That chat belongs to a session in a document that
-  is not the one open, and opening a fresh one here would write project A's
-  consultation into project B's record.
+- **Not found, but Council has routed this chat into another project** →
+  *refused*. That chat belongs to a session in a document that is not the one
+  open, and opening a fresh one here would write project A's consultation into
+  project B's record.
 
-The third case needs one piece of process memory, because the snapshot alone
-cannot distinguish "a chat from another project" from "a chat nobody has used
-yet". `Store.chatSeen` records the load generation each chat was last routed
-in; it deliberately survives `Load`, and it is the only chat state that is not
-in the record.
+The third case cannot be decided from the loaded document alone — the snapshot
+in front of the engine cannot distinguish "a chat from another project" from "a
+chat nobody has used yet" — so it is decided from **project identity**.
 
-**The limitation, stated plainly.** `chatSeen` is process memory, so the
-cross-project refusal holds only for as long as one backend process has seen
-both documents. **After a plugin restart every chat looks new again**, and a
-chat bound to a session in project A, asked while project B's document is open,
-will open a *fresh session in B* rather than being refused. Nothing is
-corrupted — project A's session is untouched and still holds its own binding —
-but the user's chat has silently moved projects, and that is a real hole rather
-than a theoretical one. It is also bounded: `chatSeen` is capped
-(`pruneChatSeen`, 4096 chats, older generations evicted first), and hitting the
-cap degrades one chat to exactly this same "looks new" state.
+`project_snapshot.project_id` is minted once, when a document is first loaded by
+a build that has the field, and never changes (§2.3). Every `chat_binding`
+stamps the project it was made in. Two things follow:
 
-Closing it needs a durable project identity in the snapshot so a chat binding
-can name the document it belongs to, and `project_snapshot.schema.json` has
-`additionalProperties: false` with no such field today. **That is T09's**, and
-until it lands the behaviour above is what the live check exercises rather than
-what it fails on.
+- `Store.adoptChatRoutes` rebuilds `Store.chatProject` — chat → owning project —
+  from the bindings of **every document the process loads**. The guard is
+  therefore *recovered from the record* rather than remembered across a restart:
+  as soon as project A's document has been opened once, a chat bound in it is
+  refused everywhere else, in that process or any later one.
+- A binding whose `project_id` is not the loaded document's belongs to a session
+  that was imported or copied in from elsewhere. Its chat is that project's, and
+  `sessionForChat` refuses it here rather than continuing somebody else's
+  consultation into this record.
+
+The refusal names the owning project, because "this chat belongs somewhere else"
+without saying where is not something a user can act on.
+
+**The residual limit, stated plainly.** The evidence is durable but it still has
+to be *read*: a chat whose owning document has not been opened at all since the
+plugin started is a chat this process has never seen any binding for, and the
+first turn on it opens a fresh session in whatever document is loaded. Nothing
+is corrupted — project A's session is untouched and keeps its own binding — but
+the chat has moved projects. Closing that last gap needs Council to ask the host
+which project a chat belongs to, which is a host capability that does not exist;
+it is tracked rather than guessed at. The bound on the table
+(`pruneChatRoutes`, 4096 chats, other projects evicted first) degrades one chat
+to exactly this same state, and the next load of the owning document puts it
+back.
 
 **One chat, one session.** The provider routes by `chat_id` alone, so a chat_id
 appearing on two sessions has no correct resolution — whichever the resolver
@@ -613,7 +714,10 @@ its runs and its outcomes and simply has no chat until somebody gives it one.
 Relaxing the requirement is backward compatible — every session written before
 this still validates — and it replaced the invalid fixture
 `session_without_chat_binding.json` with `snapshot_two_sessions_one_chat.json`,
-which is the rule that actually matters.
+which is the rule that actually matters, and with
+`session_malformed_chat_binding.json`, which holds the *shape* of a binding to
+the contract now that its presence is optional: a binding that is there at all
+carries a `chat_id` and a `bound_at` and nothing else.
 
 Which council a new session runs is the user's choice, made explicitly: the one
 council the project holds, otherwise a `question` envelope offering each by
@@ -711,7 +815,13 @@ Two notes, two jobs, and the distinction matters:
 
 - **The outcome note** is a normal text note holding the conclusion and its
   provenance. It is what the user keeps and what reaches a later chat turn as
-  text. `outcome.note` points at it.
+  text. `outcome.note` points at it. When that note cannot be resolved — moved,
+  deleted, or in a project that is not open — `outcome.mark_missing` sets
+  `note.missing` and the reference is **kept**: dropping it would lose the only
+  link between a conclusion the user kept and the contribution it came from, and
+  the note coming back clears the flag. Resolving the note is the wrapper's job,
+  because it is the only side that can ask the host; the command carries the
+  answer rather than deriving it.
 - **The reopen note** is the `plugin_data` note produced by
   `_on_panel_create_note_request`. Its purpose is to reopen the panel
   (`Note.gd:684-733`).
@@ -1022,10 +1132,11 @@ run from the previous snapshot cannot apply: the run id is not present, and
 | formatting | `gofmt -l .` (in `council/`) | clean |
 | static analysis | `GOWORK=off go vet ./...` | clean |
 | build | `go build ./...` (in `council/`) | clean |
-| contract tests | `GOWORK=off go test ./internal/contract/` | 5 tests, over 10 valid and 19 invalid fixtures (the populated `.mcouncil` is one of them) |
+| contract tests | `GOWORK=off go test ./internal/contract/` | over 10 valid and 20 invalid fixtures (the populated `.mcouncil` is one of them) |
 | GDScript syntax | `godot --headless --check-only -s <file>` on every `ui/*.gd` | clean |
 | panel suite | `council/scripts/run-gd-tests.sh <minerva>` | authored, never executed — see `tests/gd/EXPECTED_SUITES` |
 | chat provider | `GOWORK=off go test -run TestCouncilAnswersAsAChatProvider ./` | authored, not executed in the task that wrote it |
+| persistence, migration, recovery | `go test -run 'Migrated\|MidRun\|ClosedMidRun\|AnotherProjectAfterARestart\|CannotBeResolved' ./` | authored, not executed in the task that wrote it |
 
 `council` is a `use` entry in the repo's `go.work`, so Go commands there need
 no `GOWORK=off`.

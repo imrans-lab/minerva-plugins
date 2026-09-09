@@ -60,6 +60,11 @@
     "expect": "synthesis"
   },
   {
+    "file": "session_malformed_chat_binding.json",
+    "record": "council_session",
+    "expect": "bound_at"
+  },
+  {
     "file": "snapshot_two_sessions_one_chat.json",
     "record": "council_project_snapshot",
     "expect": "one chat has one session"

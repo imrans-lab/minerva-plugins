@@ -10,7 +10,13 @@
 # The assertion count is pinned from the first run that got through every
 # section with the backend up: setup 3, section 1 four, section 2 three,
 # section 3 seventeen (five assertions over each of three documents, plus two
-# after the loop), section 4 six, section 5 seven, section 6 nineteen.
+# after the loop), section 4 six, section 5 seven, section 6 nineteen,
+# section 7 five, section 8 eight, section 9 six.
+#
+# Sections 7-9 are PREDICTED, not observed: they were authored without being
+# run, and each opens with a guard assertion that fires INSTEAD of its own
+# assertions when the backend binary is missing. A first run that ends at 78 has
+# them; one that ends lower has hit a guard, and the guard names which.
 #
 # SETUP THIS SUITE NEEDS beyond the runner's own: section 6 drives the REAL
 # backend over stdio, so council-plugin must be built first —
@@ -23,5 +29,9 @@
 # from the real manifest, saved and reloaded byte-for-byte, round-tripped
 # through a plugin_data note, an unreadable document preserved rather than
 # replaced, the host envelope measured against the host's own cap, and two
-# panels in two projects kept apart against one backend store.
-test_council_panel.gd assertions=59
+# panels in two projects kept apart against one backend store; a document from
+# an older schema migrated on open; a run saved in flight demoted on reopen and
+# continued explicitly without re-asking the seat that answered; and a panel
+# reopened onto a document the engine had already carried further, while a
+# lagging copy opened alongside another panel is replaced rather than merged.
+test_council_panel.gd assertions=78

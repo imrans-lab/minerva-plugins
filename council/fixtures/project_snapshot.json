@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "record_kind": "council_project_snapshot",
+  "project_id": "prj-0a5c1f2e3d4b5a6978c0d1e2f3a4b5c6",
   "snapshot_revision": 12,
   "definitions": [
     {

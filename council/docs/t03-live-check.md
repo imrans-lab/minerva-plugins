@@ -297,23 +297,51 @@ enabled in Minerva's settings.
       with an explicit retry; it does not resume and does not spend anything.
       Asking again in the same chat continues the same session.
 
-#### The known hole — confirm it is still only this big
+#### The cross-project refusal, across a restart
 
-The cross-project refusal above lives in the backend's memory, not in the
-record, so a restart forgets it. This step exercises that deliberately: the
-expected result is the *documented* behaviour, not a pass.
+This used to be a known hole: the guard lived in the backend's memory, so a
+restart forgot it. It now rests on the project identity in the document, which
+means the guard comes back as soon as the owning document is opened.
 
 - [ ] With project A's Council document open, ask something in a chat so it
-      binds to a session there.
+      binds to a session there. Save the project.
 - [ ] Stop and start the Council plugin.
-- [ ] Open project B's Council document, and ask again in that same chat.
-- [ ] Expected **today**: a new session opens in project B, because after a
-      restart the chat looks new. Confirm project A's session is untouched and
-      still records the binding, and that nothing in B references A's content.
+- [ ] Reopen project A's Council document (this is the step that matters — it is
+      what lets the backend see the binding again), then open project B's.
+- [ ] Ask again in that same chat. Expected: Council **refuses**, naming the
+      project the chat belongs to, and project B's document gains no session.
+- [ ] Reopen project A's document and ask again in that chat: it continues the
+      original session.
+
+#### The residual limit — confirm it is still only this big
+
+- [ ] Repeat the sequence above but do **not** reopen project A's document after
+      the restart: go straight to project B and ask.
+- [ ] Expected **today**: a new session opens in project B, because no document
+      the backend has seen names that chat. Confirm project A's session is
+      untouched and still records the binding, and that nothing in B references
+      A's content.
 - [ ] Record what you saw. If B's session carries anything from A, that is a
-      different and much worse bug — file it. Otherwise this is the limitation
-      T09 closes with a durable project identity in the snapshot
-      (`docs/architecture.md` §5.3.2).
+      different and much worse bug — file it. Otherwise this is the residual
+      limit in `docs/architecture.md` §5.3.2, which needs a host capability that
+      does not exist.
+
+### An older document, and a panel closed mid-round
+
+- [ ] Open `council/fixtures/migrations/snapshot_v0_pre_project_identity.json`
+      (copy it to a `.mcouncil` name first). It must OPEN as a council — not as
+      a file Council refuses to touch — and Ctrl+S must write it back carrying
+      `"schema_version": 1` and a `"project_id"`. Reopen it: the identity must be
+      the SAME one, and the tab must not come up dirty.
+- [ ] Start a round from the panel and close the tab while it is still running.
+      Reopen the document from the same project. The contributions that landed
+      after the tab closed must be there. (If the backend was stopped in between,
+      the run reads failed with an explicit retry instead — that is the other
+      rule, and both are correct for what happened.)
+- [ ] Retain a conclusion as a note, then delete that note, then reopen the
+      session. The outcome must still be listed, marked as a note that cannot be
+      resolved, with its link back to the contribution intact — never silently
+      dropped.
 
 ### One chat, one session
 

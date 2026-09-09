@@ -20,20 +20,32 @@ extends RefCounted
 const SCHEMA_VERSION := 1
 const RECORD_KIND := "council_project_snapshot"
 
+## The oldest record shape the engine still has a migration for
+## (internal/contract/migrate.go). A document between this and SCHEMA_VERSION is
+## OPENED rather than preserved as unreadable: seeding the engine migrates it,
+## and the migrated form comes back through the same path a demoted one does. A
+## document from a NEWER version is still refused — guessing at a shape the
+## invariants were not written for is how a council gets quietly truncated.
+const OLDEST_MIGRATABLE_SCHEMA_VERSION := 0
+
 ## Keys the host adds to a document on the file-open path and which are not part
-## of the record: Editor.gd builds `{"file_path": path}` and merges the parsed
-## JSON into it, or sets `raw_text` when the body is not a JSON object.
+## of the record: Editor.gd._load_plugin_scene_file (Editor.gd:1291-1299) builds
+## `{"file_path": path}` and merges the parsed JSON into it, or sets `raw_text`
+## when the body is not a JSON object.
 const HOST_DOCUMENT_KEYS := ["file_path", "raw_text"]
 
 ## The save payload key the host writes verbatim as raw bytes instead of
-## re-serialising as JSON (Editor.gd's PLUGIN_SCENE host_owned branch). It is
-## how an unreadable document survives a save unchanged.
+## re-serialising as JSON: Editor.gd:1727 hands the payload to
+## PluginScenePanelHost.save_file, which writes `_bytes` as a buffer
+## (PluginScenePanelHost.gd:246-250) and otherwise stringifies the whole
+## dictionary (:254). It is how an unreadable document survives a save
+## unchanged.
 const RAW_BYTES_KEY := "_bytes"
 
 ## The same bytes, base64-encoded, for the OTHER consumer of the save payload.
 ##
 ## The file write takes RAW_BYTES_KEY and ignores every other key. The project
-## write takes the same dictionary through JSON.stringify (vboxEditor.gd:499 →
+## write takes the same dictionary through JSON.stringify (vboxEditor.gd:494-499 →
 ## ProjectPackage.gd:303), and Godot serialises a PackedByteArray as a QUOTED
 ## STRING of its str() form — "[137, 80, …]" — which parses back as a String,
 ## not bytes. A restore that only knew the PackedByteArray shape would find
@@ -60,9 +72,21 @@ var _foreign_bytes: PackedByteArray = PackedByteArray()
 var _foreign_reason: String = ""
 
 
+## A brand-new, untitled council: what a fresh tab holds before anything is in
+## it.
+##
+## It is written at the OLDEST migratable version and carries no `project_id`,
+## which is deliberate. `project_id` is required by
+## project_snapshot.schema.json and is minted by the engine's migration ladder;
+## a wrapper that minted one would be a second writer of an identity that must
+## be unique, and claiming the current schema_version while missing a required
+## field would be a record the engine refuses. Declaring the version it really
+## is leaves the ladder as the only path that produces a current record — the
+## first seed migrates this into one, exactly as it migrates a document written
+## by an older Council.
 static func empty_snapshot() -> Dictionary:
 	return {
-		"schema_version": SCHEMA_VERSION,
+		"schema_version": OLDEST_MIGRATABLE_SCHEMA_VERSION,
 		"record_kind": RECORD_KIND,
 		"snapshot_revision": 1,
 		"definitions": [],
@@ -70,10 +94,10 @@ static func empty_snapshot() -> Dictionary:
 	}
 
 
-## True when `candidate` is a Council snapshot this build speaks. A record from
-## a newer schema is deliberately NOT recognised: guessing at a format the
-## engine's invariants were not written for is how a council gets quietly
-## truncated.
+## True when `candidate` is a Council snapshot in the shape this build writes.
+## This is the test for a record coming back FROM the engine, which always
+## answers in the current shape; a reply in any other is a malformed reply and
+## must not overwrite a good record.
 static func is_council_snapshot(candidate: Variant) -> bool:
 	if not (candidate is Dictionary):
 		return false
@@ -81,6 +105,21 @@ static func is_council_snapshot(candidate: Variant) -> bool:
 	if str(d.get("record_kind", "")) != RECORD_KIND:
 		return false
 	return int(d.get("schema_version", 0)) == SCHEMA_VERSION
+
+
+## True when `candidate` is a Council document this build can OPEN — the current
+## shape, or an older one the engine has a migration for. It is deliberately
+## wider than is_council_snapshot: a document the engine can migrate must not be
+## preserved as an unreadable foreign file, because then the user's own council
+## would open as a wall of text saying Council will not touch it.
+static func is_migratable_council_document(candidate: Variant) -> bool:
+	if not (candidate is Dictionary):
+		return false
+	var d: Dictionary = candidate
+	if str(d.get("record_kind", "")) != RECORD_KIND:
+		return false
+	var version := int(d.get("schema_version", 0))
+	return version >= OLDEST_MIGRATABLE_SCHEMA_VERSION and version <= SCHEMA_VERSION
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +194,11 @@ func adopt_document(document: Variant) -> void:
 	if doc.is_empty() and raw_text.strip_edges().is_empty():
 		return
 
-	if is_council_snapshot(doc):
+	# An older document is held as it is and handed to the engine unchanged; the
+	# migrated form comes back from the seed and replaces it (council_backend.gd
+	# `_ensure_seeded`). Nothing is rewritten here — migration is the engine's,
+	# like every other rewrite of the record.
+	if is_migratable_council_document(doc):
 		_snapshot = doc
 		return
 

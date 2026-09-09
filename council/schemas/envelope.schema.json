@@ -28,9 +28,10 @@
         "run.await",
         "run.cancel",
         "run.retry",
-        "outcome.retain"
+        "outcome.retain",
+        "outcome.mark_missing"
       ],
-      "description": "snapshot.get, source.fetch, definition.export and run.await are reads: they omit base_revision and never advance the snapshot. Everything else mutates. run.start consults the members and returns only once the run has reached a resting state, so a caller that wants the answer needs nothing else; run.await is for the second viewer of a run somebody else started. source.upsert takes a source record the caller has already built; source.capture takes the raw text instead and derives the hash and the excerpt spans, so the page and the engine cannot disagree about them. member.upsert edits an identity without touching the seat that holds it, and member.adopt_source is the explicit act of moving a member onto a newer capture."
+      "description": "snapshot.get, source.fetch, definition.export and run.await are reads: they omit base_revision and never advance the snapshot. Everything else mutates. run.start consults the members and returns only once the run has reached a resting state, so a caller that wants the answer needs nothing else; run.await is for the second viewer of a run somebody else started. source.upsert takes a source record the caller has already built; source.capture takes the raw text instead and derives the hash and the excerpt spans, so the page and the engine cannot disagree about them. member.upsert edits an identity without touching the seat that holds it, and member.adopt_source is the explicit act of moving a member onto a newer capture. outcome.mark_missing records that a retained note could not be resolved, or that it has come back; the reference is kept either way, because a note the user has moved or deleted is a recoverable state and never a reason to drop the link to the contribution it came from."
     },
     "Request": {
       "type": "object",

@@ -56,16 +56,12 @@ extends SceneTree
 ## without it:
 ##   (cd council && go build -o council-plugin ./)
 ##
-## A NOTE ON `--check-only`, so the next reader does not chase it: running this
-## file through `godot --headless --check-only -s <file>` from a Minerva checkout
-## reports "Could not resolve external class member document_id" in
-## PluginScenePanelBroker.gd:1174 and a "Failed to compile depended scripts"
-## chain through PluginScenePanelHost. That is the mode, not the suite: the
-## broker reads `buffer.document_id` off DocumentBuffer, whose initialiser needs
-## a class cache that check-only does not warm. Three cad suites preload the same
-## broker and run green with pinned assertion counts (test_mesh_import,
-## test_editor_addressing, test_eval_banner), which is the evidence that the
-## chain compiles at execution time.
+## A NOTE ON `--check-only`: it is clean on this file, and that is a consequence
+## of the rule above rather than a coincidence. The suite names no host script
+## statically, so check-only compiles this file alone and never follows the
+## broker chain — which means a green check-only says the SUITE parses and says
+## nothing at all about the host scripts it loads at run time. The evidence that
+## the chain compiles is execution, not this gate.
 ##
 ## HARNESS NOISE THIS SUITE PRODUCES, and why none of it is allowlisted: loading
 ## Minerva's autoload in a headless script run prints four "Node not found"
@@ -82,6 +78,13 @@ extends SceneTree
 const PLUGIN_DIR := "res://../../minerva-plugins/council"
 const MANIFEST_PATH := PLUGIN_DIR + "/manifest.json"
 const FIXTURE_PATH := PLUGIN_DIR + "/fixtures/project_snapshot.json"
+## The populated worked example: two rounds, two non-human advisors, the council
+## a person opens in the live check. Section 8 needs a run whose seats a retry
+## may actually re-ask, which the smaller fixture's human seat cannot give.
+const POPULATED_FIXTURE_PATH := PLUGIN_DIR + "/fixtures/workshop_complete.mcouncil"
+## A document in the shape Council wrote before the record carried a schema
+## version or a project identity. Section 7 opens it for real.
+const OLDER_FIXTURE_PATH := PLUGIN_DIR + "/fixtures/migrations/snapshot_v0_pre_project_identity.json"
 ## What `{"snapshot": …}` costs in the serialised form: 12 characters of key and
 ## colon plus the closing brace. It is the whole point of measuring the message
 ## rather than the record.
@@ -131,6 +134,7 @@ var _vbox: Control = null
 var _panel_a: Control = null
 var _panel_b: Control = null
 var _broker = null  # PluginScenePanelBroker, loaded at run time (see above)
+var _manager = null  # the StubDB/StubManager pair the host resolves the panel through
 var _conn = null    # MCPServerConnection, likewise
 var _host_script = null  # PluginScenePanelHost, likewise
 
@@ -216,6 +220,9 @@ func _init() -> void:
 		_section_4_note()
 		await _section_5_envelope_size()
 		await _section_6_two_projects()
+		await _section_7_migration()
+		await _section_8_interrupted_run()
+		await _section_9_recovering_a_closed_panel()
 
 	_cleanup()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
@@ -260,6 +267,7 @@ func _setup() -> bool:
 	db.def = def
 	var manager := StubManager.new()
 	manager.db = db
+	_manager = manager
 	_broker = broker_script.new(manager, null, null, null)
 
 	_singleton = root.get_node_or_null("SingletonObject")
@@ -334,11 +342,19 @@ func _section_1_mount() -> void:
 			_panel_a.get_node_or_null(_ipc_helper_node) != null)
 
 	# A new tab: no file, nothing merged. The panel must open an empty council.
+	#
+	# It is written at the OLDEST migratable version and carries no project_id:
+	# the identity is required by the schema and minted by the engine's
+	# migration ladder, so the wrapper declares the version its empty document
+	# really is rather than claiming a current one it cannot produce. The first
+	# seed migrates it, exactly as it migrates a document written by an older
+	# Council (section 7).
 	_panel_a._on_panel_load_request({"file_path": ""})
 	var fresh: Dictionary = _panel_a._on_panel_save_request()
-	check("an empty document opens an empty council at revision 1",
+	check("an empty document opens an empty council the ladder can bring up to date",
 			str(fresh.get("record_kind", "")) == "council_project_snapshot"
-			and int(fresh.get("schema_version", 0)) == 1
+			and int(fresh.get("schema_version", -1)) == 0
+			and not fresh.has("project_id")
 			and int(fresh.get("snapshot_revision", 0)) == 1
 			and (fresh.get("sessions", []) as Array).is_empty(),
 			str(fresh).left(160))
@@ -672,6 +688,310 @@ func _section_6_two_projects() -> void:
 			"taken_by=%s panel=%s" % [taker, str(CouncilBackend.lease_taker_panel())])
 
 
+# ---------------------------------------------------------------------------
+# 7. A document written by an older Council
+# ---------------------------------------------------------------------------
+
+## The oracle is the engine's migration ladder (internal/contract/migrate.go),
+## reached through the real backend: the panel does not migrate anything, it
+## opens the older document, hands it over, and persists what comes back. What
+## is asserted here is the panel's half — that an older document is OPENED and
+## not preserved as an unreadable foreign file, and that the migrated form is
+## the one the project then holds.
+func _section_7_migration() -> void:
+	print("\n7 an older document:")
+	if _conn == null or not _conn.server_connected:
+		check("7: the council-plugin binary is built and speaking", false,
+				"build it first: (cd council && go build -o council-plugin ./)")
+		return
+	var older: Dictionary = _parse(FileAccess.get_file_as_string(OLDER_FIXTURE_PATH))
+	check("control: the migration fixture really is an older document",
+			int(older.get("schema_version", -1)) == 0 and not older.has("project_id"),
+			"schema_version=%s project_id=%s" % [
+				str(older.get("schema_version", "missing")), str(older.get("project_id", "missing"))])
+
+	var path := _temp_dir.path_join("older.mcouncil")
+	_write(path, JSON.stringify(older, "\t"))
+	_panel_a._on_panel_load_request(_document_from_disk(path))
+	check("an older document is opened, not preserved as something Council cannot read",
+			not _panel_a._on_panel_save_request().has("_bytes"),
+			str(_panel_a._on_panel_save_request()).left(160))
+
+	# Seeding the engine is what applies the migration; the rewritten record
+	# comes back through the same path a demoted one does.
+	await _relay(_panel_a, {
+		"schema_version": 1, "envelope": "request", "request_id": "migrate-read",
+		"command": "snapshot.get", "payload": {}})
+	var migrated: Dictionary = _panel_a._on_panel_save_request()
+	check("the record the project now holds is in this build's shape",
+			int(migrated.get("schema_version", 0)) == 1
+			and str(migrated.get("project_id", "")).begins_with("prj-"),
+			"schema_version=%s project_id=%s" % [
+				str(migrated.get("schema_version", "")), str(migrated.get("project_id", ""))])
+	check("a rewritten document takes a new revision",
+			int(migrated.get("snapshot_revision", 0)) == int(older.get("snapshot_revision", 0)) + 1,
+			"%d from %d" % [int(migrated.get("snapshot_revision", 0)),
+				int(older.get("snapshot_revision", 0))])
+
+	# Reopening the migrated form must migrate nothing: an identity re-minted on
+	# every load would make each reopen look like a different project.
+	var identity := str(migrated.get("project_id", ""))
+	var revision := int(migrated.get("snapshot_revision", 0))
+	_panel_a._on_panel_load_request(_document_for("", migrated))
+	await _relay(_panel_a, {
+		"schema_version": 1, "envelope": "request", "request_id": "migrate-reread",
+		"command": "snapshot.get", "payload": {}})
+	var reopened: Dictionary = _panel_a._on_panel_save_request()
+	check("reopening a current document mints nothing and moves nothing",
+			str(reopened.get("project_id", "")) == identity
+			and int(reopened.get("snapshot_revision", 0)) == revision,
+			"%s@%d then %s@%d" % [identity, revision,
+				str(reopened.get("project_id", "")), int(reopened.get("snapshot_revision", 0))])
+
+
+# ---------------------------------------------------------------------------
+# 8. Saved during a run, backend restarted, reopened, continued explicitly
+# ---------------------------------------------------------------------------
+
+## The oracle is the engine's interruption rule (contract.RehydrateOnLoad) read
+## back through the panel's own saved record, plus the seat list of the run a
+## retry starts.
+##
+## "No duplicate model calls" is asserted here as "the seat that already
+## answered is not in the continued round" — the record is the only place this
+## suite can see it, because nothing in a headless run answers
+## host.providers.chat and so no model call is made at all. The COUNTING form of
+## the same claim is TestSavedMidRunDocumentContinuesWithoutDuplicateCalls,
+## where a fake host records every call.
+func _section_8_interrupted_run() -> void:
+	print("\n8 an interrupted run:")
+	if _conn == null or not _conn.server_connected:
+		check("8: the council-plugin binary is built and speaking", false,
+				"build it first: (cd council && go build -o council-plugin ./)")
+		return
+	var saved: Dictionary = _saved_mid_run()
+	var interrupted_run: Dictionary = _run_of(saved, "ses-recurring-order", "run-1")
+	check("control: the saved document holds a run still in flight, with one seat already answered",
+			str(interrupted_run.get("status", "")) == "running"
+			and _seat_status(interrupted_run, "seat-costing") == "complete"
+			and _seat_status(interrupted_run, "seat-capacity") == "running",
+			str(interrupted_run.get("status", "")))
+
+	# THE RESTART. A new backend process holds nothing: no ledger, no live runs,
+	# no working snapshot. Everything asserted below came out of the document.
+	await _restart_backend()
+	check("the backend restarted and is speaking again",
+			_conn != null and _conn.server_connected)
+	if _conn == null or not _conn.server_connected:
+		return
+
+	_panel_a._on_panel_load_request(_document_for("", saved))
+	await _relay(_panel_a, {
+		"schema_version": 1, "envelope": "request", "request_id": "reopen-interrupted",
+		"command": "snapshot.get", "payload": {}})
+	var reopened: Dictionary = _panel_a._on_panel_save_request()
+	var demoted: Dictionary = _run_of(reopened, "ses-recurring-order", "run-1")
+	check("the run that was in flight is a visible failure, not something still running",
+			str(demoted.get("status", "")) == "failed"
+			and str((demoted.get("failure", {}) as Dictionary).get("code", "")) == "interrupted",
+			"%s / %s" % [str(demoted.get("status", "")),
+				str((demoted.get("failure", {}) as Dictionary).get("code", ""))])
+	check("the answer that was already paid for survived the restart",
+			_seat_status(demoted, "seat-costing") == "complete",
+			_seat_status(demoted, "seat-costing"))
+	check("reopening started nothing: the session holds the runs it was saved with",
+			_run_ids(reopened, "ses-recurring-order") == PackedStringArray(["run-1", "run-2"]),
+			str(_run_ids(reopened, "ses-recurring-order")))
+
+	# THE EXPLICIT CONTINUE. No seat_ids: the claim under test is the ENGINE's
+	# own choice of who to re-ask (cmdRunRetry consults the seats that did not
+	# answer), and naming the seat here would make the assertion below true by
+	# construction. The limits are narrowed so the round fails fast on a host
+	# that answers no model call, which is every headless run: what is under test
+	# is who the round consults, not what they say.
+	var continued: Dictionary = await _relay(_panel_a, {
+		"schema_version": 1, "envelope": "request", "request_id": "continue-interrupted",
+		"command": "run.retry",
+		"base_revision": int(_panel_a._on_panel_save_request().get("snapshot_revision", 1)),
+		"wait_seconds": 5,
+		"payload": {
+			"session_id": "ses-recurring-order", "run_id": "run-1",
+			"limits": {"per_member_timeout_seconds": 1, "run_budget_seconds": 2}}})
+	check("the continue is accepted", bool(continued.get("ok", false)),
+			str(continued).left(240))
+	var retried_id := str((continued.get("payload", {}) as Dictionary).get("run_id", ""))
+	var after: Dictionary = _panel_a._on_panel_save_request()
+	var retry_run: Dictionary = _run_of(after, "ses-recurring-order", retried_id)
+	check("the continued round re-asks only the seat that never answered",
+			_seat_ids(retry_run) == PackedStringArray(["seat-capacity"]),
+			str(_seat_ids(retry_run)))
+	check("and the earlier round keeps its own answer rather than being re-run",
+			_seat_status(_run_of(after, "ses-recurring-order", "run-1"), "seat-costing") == "complete")
+
+
+# ---------------------------------------------------------------------------
+# 9. The panel closed while the round kept going
+# ---------------------------------------------------------------------------
+
+## When the panel goes away mid-round the engine carries on, and what it
+## produces afterwards is in the engine and nowhere else — the wrapper was not
+## there to persist it. Reopening hands back the record as it was BEFORE, and
+## taking that record would throw the work away.
+##
+## The oracle is the engine's own recovery rule, read through the panel: after
+## reopening with the older copy, the panel must hold the LATER state. The work
+## done "while the panel was away" is a real mutation driven through the real
+## backend, because a mutation the engine applied and the wrapper never saw is
+## exactly the situation.
+func _section_9_recovering_a_closed_panel() -> void:
+	print("\n9 a panel that closed mid-round:")
+	if _conn == null or not _conn.server_connected:
+		check("9: the council-plugin binary is built and speaking", false,
+				"build it first: (cd council && go build -o council-plugin ./)")
+		return
+	var record: Dictionary = _fixture_as_session("ses-closing", "A question being considered")
+	_panel_a._on_panel_load_request(_document_for("", record))
+	var before: Dictionary = _panel_a._on_panel_save_request()
+
+	# The engine advances the document past what the panel persisted. In
+	# production this is a contribution landing after the tab closed; here it is
+	# a real command through the real transport, which leaves the engine in the
+	# same place: holding a later state of this document than the wrapper has.
+	var bound: Dictionary = await _bind_chat(_panel_a, "ses-closing", "chat-after-close")
+	check("the engine accepted work against the open document",
+			bool(bound.get("ok", false)), str(bound).left(200))
+
+	# The panel comes back with the copy it had persisted BEFORE that work.
+	_panel_a._on_panel_load_request(_document_for("", before))
+	await _relay(_panel_a, {
+		"schema_version": 1, "envelope": "request", "request_id": "recover-read",
+		"command": "snapshot.get", "payload": {}})
+	var recovered: Dictionary = _panel_a._on_panel_save_request()
+	check("reopening recovers the later state instead of overwriting it with the older copy",
+			_chat_of(recovered, "ses-closing") == "chat-after-close",
+			"binding is %s at revision %d" % [_chat_of(recovered, "ses-closing"),
+				int(recovered.get("snapshot_revision", 0))])
+	check("and the recovered record is still this document",
+			str(recovered.get("project_id", "")) == str(before.get("project_id", "")),
+			"%s vs %s" % [str(recovered.get("project_id", "")), str(before.get("project_id", ""))])
+
+	# A LAGGING FILE COPY, WHICH THE ENGINE CANNOT TELL FROM A REOPEN. The copy
+	# carries the same project identity and a lower revision, and everything it
+	# names is still in the newer record — so the engine's own test says "later
+	# state of this document" and would hand the copy the other tab's work. What
+	# separates them is something only the wrapper knows: another panel is the
+	# lease holder, so this is a panel joining a document somebody else is
+	# working in, and the seed must be a plain replace.
+	#
+	# The setup is what makes the assertion able to FAIL: panel B is given the
+	# SAME document, already at the later state, so the engine holds a record
+	# that satisfies every one of its own recovery conditions against the copy A
+	# is about to open. A wrapper that sent "reopen" here would merge them.
+	_panel_b._on_panel_load_request(_document_for("", recovered))
+	await _relay(_panel_b, {
+		"schema_version": 1, "envelope": "request", "request_id": "hold-later-state",
+		"command": "snapshot.get", "payload": {}})
+	check("setup: the other panel holds this same document at its later state",
+			CouncilBackend.lease_holder() == "council_panel#b"
+			and _chat_of(_panel_b._on_panel_save_request(), "ses-closing") == "chat-after-close",
+			"holder=%s binding=%s" % [CouncilBackend.lease_holder(),
+				_chat_of(_panel_b._on_panel_save_request(), "ses-closing")])
+	_panel_a._on_panel_load_request(_document_for("", before))
+	await _relay(_panel_a, {
+		"schema_version": 1, "envelope": "request", "request_id": "lagging-copy",
+		"command": "snapshot.get", "payload": {}})
+	var lagging: Dictionary = _panel_a._on_panel_save_request()
+	check("a lagging copy opened while another panel holds the document is replaced, not merged",
+			_chat_of(lagging, "ses-closing") == ""
+			and int(lagging.get("snapshot_revision", 0)) == int(before.get("snapshot_revision", 0)),
+			"binding %s at revision %d" % [_chat_of(lagging, "ses-closing"),
+				int(lagging.get("snapshot_revision", 0))])
+
+	# The rule is narrow in the other direction too: another project's document
+	# REPLACES what the engine holds. A recovery that fired across projects would
+	# be the cross-project mutation the whole design refuses.
+	var other: Dictionary = _fixture_as_session("ses-elsewhere", "Another project's question")
+	_panel_b._on_panel_load_request(_document_for("", other))
+	var elsewhere: Dictionary = await _relay(_panel_b, {
+		"schema_version": 1, "envelope": "request", "request_id": "recover-other-project",
+		"command": "snapshot.get", "payload": {}})
+	var seen: Dictionary = ((elsewhere.get("payload", {}) as Dictionary).get("snapshot", {}))
+	check("another project's document is loaded as itself, never recovered into",
+			_session_ids(seen) == PackedStringArray(["ses-elsewhere"]),
+			str(_session_ids(seen)))
+
+
+func _restart_backend() -> void:
+	if _conn != null:
+		_conn.disconnect_from_server()
+	_conn = await _start_backend()
+	if _manager != null:
+		_manager.conn = _conn
+
+
+## The document a panel persists while a round is still going: one seat has
+## answered, one is still out, and the run says so. Built from the populated
+## fixture because the engine never writes this state — a run reaches rest
+## inside the command that started it — and the interruption rule exists for it.
+func _saved_mid_run() -> Dictionary:
+	var record: Dictionary = _parse(FileAccess.get_file_as_string(POPULATED_FIXTURE_PATH))
+	var session: Dictionary = record["sessions"][0]
+	var run: Dictionary = _run_of(record, "ses-recurring-order", "run-1")
+	run["status"] = "running"
+	run.erase("failure")
+	run.erase("ended_at")
+	run.erase("synthesis")
+	for c_v in run.get("contributions", []):
+		var contribution: Dictionary = c_v
+		if str(contribution.get("seat_id", "")) == "seat-capacity":
+			contribution["status"] = "running"
+			contribution.erase("failure")
+			contribution.erase("text")
+			contribution.erase("claims")
+	# Status is derived from the run set, and a run in flight makes the session
+	# running. Writing anything else would be a record the engine refuses.
+	session["status"] = "running"
+	return record
+
+
+func _run_of(record: Dictionary, session_id: String, run_id: String) -> Dictionary:
+	for s_v in record.get("sessions", []):
+		var session: Dictionary = s_v
+		if str(session.get("session_id", "")) != session_id:
+			continue
+		for r_v in session.get("runs", []):
+			var run: Dictionary = r_v
+			if str(run.get("run_id", "")) == run_id:
+				return run
+	return {}
+
+
+func _run_ids(record: Dictionary, session_id: String) -> PackedStringArray:
+	var ids := PackedStringArray()
+	for s_v in record.get("sessions", []):
+		var session: Dictionary = s_v
+		if str(session.get("session_id", "")) != session_id:
+			continue
+		for r_v in session.get("runs", []):
+			ids.append(str((r_v as Dictionary).get("run_id", "")))
+	return ids
+
+
+func _seat_ids(run: Dictionary) -> PackedStringArray:
+	var ids := PackedStringArray()
+	for c_v in run.get("contributions", []):
+		ids.append(str((c_v as Dictionary).get("seat_id", "")))
+	return ids
+
+
+func _seat_status(run: Dictionary, seat_id: String) -> String:
+	for c_v in run.get("contributions", []):
+		var contribution: Dictionary = c_v
+		if str(contribution.get("seat_id", "")) == seat_id:
+			return str(contribution.get("status", ""))
+	return ""
+
+
 func _bind_chat(panel: Control, session_id: String, chat_id: String) -> Dictionary:
 	var record: Dictionary = panel._on_panel_save_request()
 	return await _relay(panel, {
@@ -708,6 +1028,10 @@ func _fixture_as_session(session_id: String, question: String) -> Dictionary:
 	session["session_id"] = session_id
 	session["question"] = question
 	record["sessions"] = [session]
+	# Each stands for a DIFFERENT project, so each carries its own durable
+	# identity. Sharing the fixture's id would make them one document as far as
+	# the engine is concerned, which is the thing these sections are about.
+	record["project_id"] = "prj-gd-%s" % session_id
 	record.erase("view")
 	return record
 

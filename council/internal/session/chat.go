@@ -141,7 +141,8 @@ func (s *Store) ChatTurnFor(turn ChatTurn, wait time.Duration) ChatTurnResult {
 		// into another project's record, which is the one thing the binding
 		// exists to prevent.
 		return ChatTurnResult{Reply: chatErrorf(
-			"This chat belongs to a Council session in a document that is not the one currently open. Reopen that Council document and ask again, or start a new chat for this one.")}
+			"This chat belongs to a Council session in another project's document (project %s), not the one currently open. Reopen that Council document and ask again, or start a new chat for this one.",
+			s.chatOwner(chatID))}
 	}
 	return s.chatOpenSession(chatID, "", text, wait)
 }
@@ -477,20 +478,66 @@ func usageOf(payload map[string]any) (int, int) {
 // this is a lookup rather than a choice.
 //
 // The second value reports whether this chat may open a session here at all:
-// false means Council has routed it before, against a document that has since
-// been replaced, so it belongs to a project this one must not adopt.
+// false means Council has routed it before, against a document that belongs to
+// another project, so continuing it here would put one project's consultation
+// into another project's record.
+//
+// The judgement is made against PROJECT IDENTITY, which is durable, rather than
+// against the load generation, which is not. A binding found in the loaded
+// document is stamped with the project it was made in, so a session carried
+// into another project by an import still says whose chat it is; and the
+// routing table this consults is rebuilt from every document the process loads
+// (adoptChatRoutes), so a plugin restart no longer erases the guard.
 func (s *Store) sessionForChat(chatID string) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	project := str(s.snapshot["project_id"])
 	for _, x := range arr(s.snapshot["sessions"]) {
 		record := obj(x)
-		if str(obj(record["chat_binding"])["chat_id"]) == chatID {
-			s.chatSeen[chatID] = s.generation
-			return str(record["session_id"]), true
+		binding := obj(record["chat_binding"])
+		if str(binding["chat_id"]) != chatID {
+			continue
 		}
+		// A binding stamped with another project's id came in with a session
+		// that was imported or copied. The chat is that project's, and this
+		// document is not where its follow-ups belong.
+		if owner := str(binding["project_id"]); owner != "" && owner != project {
+			return "", false
+		}
+		s.chatProject[chatID] = project
+		return str(record["session_id"]), true
 	}
-	seen, known := s.chatSeen[chatID]
-	return "", !known || seen == s.generation
+	owner, known := s.chatProject[chatID]
+	return "", !known || owner == project
+}
+
+// adoptChatRoutes rebuilds the chat routing table from the document just
+// loaded. Every binding in it is durable evidence of which project owns that
+// chat, so the guard is RECOVERED from the record rather than remembered across
+// a restart. The caller holds the lock.
+func (s *Store) adoptChatRoutes() {
+	project := str(s.snapshot["project_id"])
+	for _, x := range arr(s.snapshot["sessions"]) {
+		binding := obj(obj(x)["chat_binding"])
+		chatID := str(binding["chat_id"])
+		if chatID == "" {
+			continue
+		}
+		// The binding's own stamp wins: it names the project the chat was routed
+		// into, which is not necessarily the document now holding the session.
+		if owner := str(binding["project_id"]); owner != "" {
+			s.chatProject[chatID] = owner
+			continue
+		}
+		s.chatProject[chatID] = project
+	}
+	s.pruneChatRoutes()
+}
+
+// projectID is the identity of the document currently loaded. The caller holds
+// the lock.
+func (s *Store) projectID() string {
+	return str(s.snapshot["project_id"])
 }
 
 // chooseCouncil picks the council a new session runs, or reports the choices.
@@ -577,8 +624,8 @@ func (s *Store) rememberRun(chatID, sessionID, runID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.chatRuns[chatID] = chatRun{sessionID: sessionID, runID: runID}
-	s.chatSeen[chatID] = s.generation
-	s.pruneChatSeen()
+	s.chatProject[chatID] = s.projectID()
+	s.pruneChatRoutes()
 }
 
 // liveRunFor reports the round this chat has going, if it still has one. The
@@ -613,35 +660,37 @@ func (s *Store) forgetChatRun(chatID string) {
 func (s *Store) noteChat(chatID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.chatSeen[chatID] = s.generation
-	s.pruneChatSeen()
+	s.chatProject[chatID] = s.projectID()
+	s.pruneChatRoutes()
 }
 
-// maxChatsRemembered bounds the cross-project guard. The caller holds the lock.
+// maxChatsRemembered bounds the cross-project guard.
 const maxChatsRemembered = 4096
 
-// pruneChatSeen keeps the guard from growing without limit over a long session.
+// pruneChatRoutes keeps the guard from growing without limit over a long
+// session. The caller holds the lock.
 //
-// It drops entries from documents that are no longer loaded first, and only
-// then thins the current one. That order is what makes the bound safe to have:
-// a dropped entry degrades exactly one chat to "Council has never seen this",
-// which is the same state a plugin restart produces for every chat, and which
-// the live check exercises deliberately. Reaching it at all takes thousands of
-// distinct chats inside one backend process.
-func (s *Store) pruneChatSeen() {
-	if len(s.chatSeen) <= maxChatsRemembered {
+// It drops entries belonging to other projects first, and only then thins the
+// current one. That order is what makes the bound safe to have: a dropped entry
+// degrades exactly one chat to "Council cannot place this chat", and the next
+// load of the document that owns it puts the entry back, because the routing
+// table is rebuilt from bindings rather than accumulated. Reaching the bound at
+// all takes thousands of distinct chats inside one backend process.
+func (s *Store) pruneChatRoutes() {
+	if len(s.chatProject) <= maxChatsRemembered {
 		return
 	}
-	for chatID, generation := range s.chatSeen {
-		if generation != s.generation {
-			delete(s.chatSeen, chatID)
+	project := s.projectID()
+	for chatID, owner := range s.chatProject {
+		if owner != project {
+			delete(s.chatProject, chatID)
 		}
 	}
-	for chatID := range s.chatSeen {
-		if len(s.chatSeen) <= maxChatsRemembered {
+	for chatID := range s.chatProject {
+		if len(s.chatProject) <= maxChatsRemembered {
 			break
 		}
-		delete(s.chatSeen, chatID)
+		delete(s.chatProject, chatID)
 	}
 }
 
@@ -724,4 +773,16 @@ func (s *Store) nextChatRequestID() string {
 	defer s.mu.Unlock()
 	s.chatSeq++
 	return fmt.Sprintf("chat-%d", s.chatSeq)
+}
+
+// chatOwner names the project a chat was routed into, for a refusal the user
+// can act on. Empty when this process cannot place it.
+func (s *Store) chatOwner(chatID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	owner := s.chatProject[chatID]
+	if owner == "" {
+		return "unknown"
+	}
+	return owner
 }

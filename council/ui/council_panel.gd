@@ -74,13 +74,22 @@ var _request_seq: int = 0
 ## answer belongs to a document this panel no longer has open.
 var _document_epoch: int = 0
 
-## The host wires this to the tab's dirty flag (Editor.gd's PLUGIN_SCENE branch
-## sets _plugin_scene_modified). It is emitted when — and only when — the record
-## this panel holds has actually changed.
+## The host wires this to the tab's dirty flag: Editor.gd:323-324 connects it to
+## _on_editor_changed, which sets _plugin_scene_modified for a PLUGIN_SCENE tab
+## (Editor.gd:2068-2069). It is emitted when — and only when — the record this
+## panel holds has actually changed.
 signal content_changed()
 
 ## Routed by PluginScenePanelBroker to the declared channel, with the reply
 ## delivered through the $_MinervaIPC helper it attaches.
+##
+## The emitter is council_backend.gd, which holds the panel as a plain Node and
+## emits through it — the host contract is "a scene panel exposes this signal",
+## not "this script emits it", and the backend hop must keep working for any
+## panel the host registers. The analyser sees only this file, so it reports a
+## signal nothing here emits; the annotation says that is expected rather than
+## deleting a signal the broker's registration path looks for.
+@warning_ignore("unused_signal")
 signal request(channel: String, payload: Dictionary, reply_id: String)
 
 
@@ -521,9 +530,9 @@ func _err(request_id: String, revision: int, code: String, message: String,
 	}
 
 
-func _push_event(name: String, payload: Dictionary) -> void:
+func _push_event(event_name: String, payload: Dictionary) -> void:
 	_send({
-		"schema_version": 1, "envelope": "event", "event": name,
+		"schema_version": 1, "envelope": "event", "event": event_name,
 		"snapshot_revision": _record.revision(), "payload": payload,
 	})
 

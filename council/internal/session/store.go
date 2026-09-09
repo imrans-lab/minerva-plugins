@@ -50,10 +50,14 @@ type Store struct {
 	// routed, whose session is not in the document now loaded, belongs to
 	// another project and must not be adopted into this one.
 	//
-	// Because it is process memory, the guard does not survive a plugin
-	// restart: after one, every chat looks new again. chatSeen is bounded
-	// (pruneChatSeen) and chatRuns is dropped as each round comes to rest.
-	chatSeen    map[string]uint64
+	// chatProject maps a chat to the PROJECT that owns it, not to a load
+	// generation, and every Load rebuilds it from the bindings in the document
+	// it adopts (adoptChatRoutes). That is what makes the guard survive a plugin
+	// restart: it is recovered from the durable record rather than remembered
+	// across it. Its residual limit is stated in architecture.md §5.3.2 — a
+	// chat whose owning document has not been opened at all since the restart is
+	// a chat this process has no way to place.
+	chatProject map[string]string
 	chatRuns    map[string]chatRun
 	chatPending map[string]string
 	chatCouncil map[string]string
@@ -78,14 +82,18 @@ func New() (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	empty, err := emptySnapshot()
+	if err != nil {
+		return nil, err
+	}
 	return &Store{
 		registry:    r,
-		snapshot:    emptySnapshot(),
+		snapshot:    empty,
 		ledger:      map[string]Reply{},
 		seq:         map[string]int{},
 		chat:        unavailableChatHost{},
 		live:        map[string]*runControl{},
-		chatSeen:    map[string]uint64{},
+		chatProject: map[string]string{},
 		chatRuns:    map[string]chatRun{},
 		chatPending: map[string]string{},
 		chatCouncil: map[string]string{},
@@ -101,34 +109,68 @@ func (s *Store) SetClock(f func() string) {
 	s.now = f
 }
 
-func emptySnapshot() map[string]any {
+// emptySnapshot is the document a backend holds before anything is loaded into
+// it. It carries a project identity of its own so that it is a valid record
+// like any other — and so that it can never be mistaken for a later state of a
+// document the wrapper is about to hand over (Store.recoverable).
+func emptySnapshot() (map[string]any, error) {
+	id, err := contract.NewProjectID()
+	if err != nil {
+		return nil, err
+	}
 	return map[string]any{
 		"schema_version":    float64(SchemaVersion),
 		"record_kind":       "council_project_snapshot",
+		"project_id":        id,
 		"snapshot_revision": float64(1),
 		"definitions":       []any{},
 		"sessions":          []any{},
-	}
+	}, nil
 }
 
 // LoadReport says what changed when a snapshot was adopted. runs_demoted is the
 // count the interruption rule acted on: work that was in flight when the owning
 // process went away, and which is now a visible failure with a retry rather
 // than something that quietly resumes and spends tokens.
+//
+// migrations names every migration step that rewrote the document, and
+// recovered says the engine KEPT what it was already holding instead of taking
+// the record it was handed — the panel-closed-mid-round case (§4.3). Either one
+// means the record that comes back is not the record that went in, so the
+// wrapper has to persist what Export now returns.
 type LoadReport struct {
-	SnapshotRevision int `json:"snapshot_revision"`
-	Definitions      int `json:"definitions"`
-	Sessions         int `json:"sessions"`
-	RunsDemoted      int `json:"runs_demoted"`
+	SnapshotRevision int      `json:"snapshot_revision"`
+	ProjectID        string   `json:"project_id"`
+	Definitions      int      `json:"definitions"`
+	Sessions         int      `json:"sessions"`
+	RunsDemoted      int      `json:"runs_demoted"`
+	Migrations       []string `json:"migrations,omitempty"`
+	Recovered        bool     `json:"recovered,omitempty"`
 }
 
 // Load replaces the working snapshot with one the wrapper restored, applies the
-// interruption rule, and clears the idempotency ledger.
+// interruption rule, and clears the idempotency ledger. Whatever the engine was
+// working on is replaced, and any run still executing is stopped.
 //
 // Rehydration only demotes statuses and attaches an interrupted failure, both
 // of which the schema and the invariants already permit, so the validated input
 // is still valid afterwards.
 func (s *Store) Load(raw []byte) (LoadReport, error) {
+	return s.load(raw, false)
+}
+
+// Reopen is Load for the wrapper's own seeding path: a panel making the engine
+// hold ITS record. It differs in one case — when the engine is already holding a
+// later state of the very same document, that state is KEPT and reported rather
+// than being replaced by the older copy the panel persisted (§4.3). That is the
+// panel-closed-mid-round recovery, and it is opt-in rather than part of Load
+// because "load this document" otherwise has to mean exactly that: a caller
+// replacing the working document must be able to rely on it.
+func (s *Store) Reopen(raw []byte) (LoadReport, error) {
+	return s.load(raw, true)
+}
+
+func (s *Store) load(raw []byte, allowRecovery bool) (LoadReport, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// v0.1 moves the whole snapshot across the host's IPC hop in one message, so
@@ -140,15 +182,49 @@ func (s *Store) Load(raw []byte) (LoadReport, error) {
 			"this Council document is %d bytes and the host's IPC transport carries %d in one message, so it cannot be loaded; it holds %d council(s) and %d session(s), and v0.1 moves the whole snapshot at once",
 			len(raw), MaxEnvelopeBytes, countRecords(raw, "definitions"), countRecords(raw, "sessions"))
 	}
-	if errs := s.registry.ValidateRecord("council_project_snapshot", raw); len(errs) > 0 {
-		return LoadReport{}, fmt.Errorf("snapshot is not a valid council_project_snapshot: %s", joinErrs(errs))
-	}
+	// Migration runs BEFORE validation: an older document is not expected to
+	// satisfy today's schema, and the ladder is what makes it able to. A
+	// document from a newer version is refused here rather than guessed at.
 	var next map[string]any
 	if err := json.Unmarshal(raw, &next); err != nil {
 		return LoadReport{}, err
 	}
+	migrations, err := contract.MigrateSnapshot(next)
+	if err != nil {
+		return LoadReport{}, err
+	}
+	if len(migrations) > 0 {
+		if raw, err = json.Marshal(next); err != nil {
+			return LoadReport{}, err
+		}
+	}
+	if errs := s.registry.ValidateRecord("council_project_snapshot", raw); len(errs) > 0 {
+		return LoadReport{}, fmt.Errorf("snapshot is not a valid council_project_snapshot: %s", joinErrs(errs))
+	}
 	if err := checkSnapshotBudget(next); err != nil {
 		return LoadReport{}, err
+	}
+
+	// The panel closed while a round was running, and here it is again. The
+	// engine kept executing — the contributions that landed after the panel went
+	// away are in the resident snapshot and in no other place, because the
+	// wrapper was not there to persist them. Taking the record the panel just
+	// handed over would throw exactly that work away.
+	//
+	// It is safe to keep the resident copy only when it is provably the SAME
+	// document and not behind: same project identity, a revision at least as
+	// high, and every session and run the incoming record names still present
+	// in it. The engine
+	// only ever advances a record it was seeded with, so a resident that
+	// satisfies all three descends from the one being handed back.
+	if allowRecovery && s.recoverable(next) {
+		return LoadReport{
+			SnapshotRevision: s.revision(),
+			ProjectID:        str(s.snapshot["project_id"]),
+			Definitions:      len(arr(s.snapshot["definitions"])),
+			Sessions:         len(arr(s.snapshot["sessions"])),
+			Recovered:        true,
+		}, nil
 	}
 	// The document these runs belong to is being replaced. Stop the calls, and
 	// drop the handles so anything already in flight lands on nothing: a reply
@@ -164,15 +240,61 @@ func (s *Store) Load(raw []byte) (LoadReport, error) {
 	if demoted > 0 {
 		next["snapshot_revision"] = float64(int(num(next["snapshot_revision"])) + 1)
 	}
+	if len(migrations) > 0 && demoted == 0 {
+		// A migrated document is not the document that was handed in, for the
+		// same reason a demoted one is not: two different records must never
+		// claim one revision, and the wrapper has to persist the migrated form.
+		next["snapshot_revision"] = float64(int(num(next["snapshot_revision"])) + 1)
+	}
 	s.snapshot = next
 	s.ledger = map[string]Reply{}
 	s.seq = map[string]int{}
+	s.adoptChatRoutes()
 	return LoadReport{
 		SnapshotRevision: s.revision(),
+		ProjectID:        str(next["project_id"]),
 		Definitions:      len(arr(next["definitions"])),
 		Sessions:         len(arr(next["sessions"])),
 		RunsDemoted:      demoted,
+		Migrations:       migrations,
 	}, nil
+}
+
+// recoverable reports whether the resident snapshot is a later state of the
+// document being handed in, and so must be kept rather than replaced. The
+// caller holds the lock.
+func (s *Store) recoverable(incoming map[string]any) bool {
+	project := str(s.snapshot["project_id"])
+	if project == "" || project != str(incoming["project_id"]) {
+		return false
+	}
+	// Strictly BEHIND, not "not ahead": a panel can persist the revision
+	// run.start minted and close before the first contribution lands, since a
+	// contribution commits its own revision as it arrives (round.go). Equal
+	// revision plus descendancy is the same document at the same point, and
+	// replacing there would cancel the live round and demote it "interrupted" —
+	// the exact loss this rule exists to prevent.
+	if s.revision() < int(num(incoming["snapshot_revision"])) {
+		return false
+	}
+	// Descendancy: everything the incoming record knows about, the resident one
+	// still knows about. A document that has lost a session or a run is a
+	// different history, not a later one — a reverted copy, say — and the
+	// caller's record wins.
+	for _, x := range arr(incoming["sessions"]) {
+		incomingSession := obj(x)
+		resident, _ := findByID(s.snapshot["sessions"], "session_id", str(incomingSession["session_id"]))
+		if resident == nil {
+			return false
+		}
+		for _, r := range arr(incomingSession["runs"]) {
+			run, _ := findByID(resident["runs"], "run_id", str(obj(r)["run_id"]))
+			if run == nil {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // Export returns the acknowledged snapshot for the wrapper to persist. It is a
