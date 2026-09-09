@@ -37,7 +37,7 @@ import (
 const (
 	protocolVersion = "2024-11-05"
 	serverName      = "cad"
-	serverVersion   = "0.3.13"
+	serverVersion   = "0.3.14"
 
 	// workerModule is the python module the worker is launched as
 	// (`python -m <workerModule>`). Passed to bridge.New.
