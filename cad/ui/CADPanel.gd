@@ -241,6 +241,7 @@ func receive(channel: String, payload: Dictionary) -> void:
 		"host.fs.changed":
 			_dependencies.changed(payload)
 		"attach_buffer":
+			_dependencies.bind_buffer(_shared_buffer())
 			_buffer_path = str(payload.get("path", ""))
 			if not _buffer_path.is_empty():
 				_document_path = _buffer_path
@@ -267,6 +268,7 @@ func receive(channel: String, payload: Dictionary) -> void:
 				_annotation_host.set_document_source(_buffer_path, text2)
 			_start_eval_debounce()
 		"detach_buffer":
+			_dependencies.bind_buffer(null)
 			_cancel_inflight_eval_if_any()
 			# Stop any pending debounce so we don't fire an evaluate against
 			# the now-empty _pending_dsl_text after the buffer detaches.

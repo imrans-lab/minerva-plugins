@@ -60,7 +60,7 @@ func freshness(panel: Node) -> Dictionary:
 	if panel._dependencies.is_stale():
 		out["stale"] = true
 		out["dependency_changes"] = panel._dependencies.changed_paths.duplicate()
-		out["stale_reason"] = "Imported dependencies changed. Build latest to update the displayed model."
+		out["stale_reason"] = "Document path or imported dependencies changed. Build latest to update the displayed model."
 		return out
 	if panel._build.mode == "manual" and panel._build.state().build_required:
 		out["stale"] = true

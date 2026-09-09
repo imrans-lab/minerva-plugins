@@ -25,6 +25,29 @@ func _run() -> void:
 	await process_frame
 	check("painted dependencies subscribe through the host watcher", Watcher.get_instance().is_watched(_reference_path),
 		str(panel.get_evaluation_state()))
+	var old_path: String = panel.get_evaluation_state().path
+	var saved_path := OS.get_user_data_dir().path_join("cad_dependencies_saved.mcad")
+	rig.buffer.file_path = saved_path
+	rig.buffer.save_to_disk()
+	check("Save As invalidates the old base without changing completed evidence",
+		panel.get_document_state().path == saved_path and panel.get_evaluation_state().path == old_path
+		and panel.evaluation_freshness().stale and panel.build_status().build_required, str(panel.get_document_state()))
+	await create_timer(0.35).timeout
+	check("Save As preserves Manual mode and does not compile", _evaluations(rig.dispatched).size() == 1)
+	panel.build_latest()
+	_reply(rig, str(_evaluations(rig.dispatched)[-1].reply_id), answer)
+	await process_frame
+	check("explicit rebuild adopts the saved base without a source edit",
+		panel.get_evaluation_state().path == saved_path and not panel.evaluation_freshness().stale,
+		str(panel.get_evaluation_state()))
+	var spec := FileAccess.open(saved_path + ".checks.json", FileAccess.WRITE)
+	spec.store_string('{"schema":"minerva.cad.validation/v1","checks":[{"id":"fit","kind":"design","selection":"","configuration":"","args":{"required_mm":0.5}}]}')
+	spec.close()
+	var inspection: Dictionary = await PanelTools.handle(panel, "minerva_cad_validation", {"action":"inspect"})
+	check("default validation sidecar follows Save As", inspection.get("success", false)
+		and inspection.get("path") == saved_path + ".checks.json", str(inspection))
+	DirAccess.remove_absolute(saved_path + ".checks.json")
+	DirAccess.remove_absolute(saved_path)
 	var original: Dictionary = panel.get_evaluation_state().dependencies
 	var before := _evaluations(rig.dispatched).size()
 	var loads: int = panel._reference_library.get_load_count()

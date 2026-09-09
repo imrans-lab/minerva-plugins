@@ -899,7 +899,7 @@ test_source_annotations.gd assertions=14
 test_model_views.gd assertions=9
 
 # Imported file changes, manual/automatic build policy and host watcher lifetime.
-test_dependencies.gd assertions=8
+test_dependencies.gd assertions=12
 
 # Private queries preserve the editor, selection identity and physical eligibility.
 test_scoped_queries.gd assertions=11

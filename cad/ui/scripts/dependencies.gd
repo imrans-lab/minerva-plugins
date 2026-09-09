@@ -4,9 +4,41 @@ var _owner: WeakRef
 var _snapshot: Dictionary = {}
 var _watched: Dictionary = {}
 var changed_paths: Array[String] = []
+var _buffer: WeakRef
 
 func _init(panel: Node) -> void:
 	_owner = weakref(panel)
+
+## Save As rebinds the same canonical buffer; it does not emit attach_buffer.
+func bind_buffer(buffer: Object) -> void:
+	var old: Object = _buffer.get_ref() if _buffer != null else null
+	if old != null and old.saved.is_connected(_saved):
+		old.saved.disconnect(_saved)
+	_buffer = weakref(buffer) if buffer != null else null
+	if buffer != null:
+		buffer.saved.connect(_saved)
+
+func _saved() -> void:
+	var panel: Node = _owner.get_ref()
+	var buffer: Object = _buffer.get_ref() if _buffer != null else null
+	if panel == null or buffer == null:
+		return
+	var path := str(buffer.get("file_path"))
+	if path == panel._document_path:
+		return
+	panel._cancel_inflight_eval_if_any()
+	panel._document_path = path
+	panel._buffer_path = path
+	panel._open_eval_path = ""
+	if panel._annotation_host != null:
+		panel._annotation_host.set_document_source(path, panel._current_source())
+	panel._start_eval_debounce()
+	panel._build.refresh()
+
+func path_changed() -> bool:
+	var panel: Node = _owner.get_ref()
+	var completed: Dictionary = panel._evaluation_state.completed
+	return not completed.is_empty() and str(completed.get("path", "")) != panel._document_path
 
 func accept() -> void:
 	var panel: Node = _owner.get_ref()
@@ -65,7 +97,7 @@ func verify() -> void:
 			panel._start_eval_debounce()
 
 func is_stale() -> bool:
-	return not changed_paths.is_empty()
+	return not changed_paths.is_empty() or path_changed()
 
 func snapshot() -> Dictionary:
 	return _snapshot.duplicate()
