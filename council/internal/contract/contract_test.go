@@ -48,7 +48,10 @@ func TestValidFixturesRoundTrip(t *testing.T) {
 	}
 	seen := 0
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+		// .mcouncil is the extension Minerva opens a Council document under; the
+		// record inside it is a council_project_snapshot like any other, and it
+		// is held to the same contract here.
+		if e.IsDir() || !(strings.HasSuffix(e.Name(), ".json") || strings.HasSuffix(e.Name(), ".mcouncil")) {
 			continue
 		}
 		name := e.Name()
@@ -376,14 +379,23 @@ func TestInlineLimitIsDerivedFromTheHostIPCCap(t *testing.T) {
 	}
 
 	r := registry(t)
-	freeText := []struct {
+	// Every free-text ceiling in the schemas is one of the two named constants,
+	// and the engine truncates to the same constant before it writes. A schema
+	// the engine does not agree with is a ceiling the engine would discover by
+	// being refused after a model had already been paid for.
+	ceilings := []struct {
 		schema  string
 		pointer []string
+		want    int
+		named   string
 	}{
-		{schemas.Session, []string{"$defs", "Contribution", "properties", "text"}},
-		{schemas.CouncilDefinition, []string{"$defs", "Anchor", "properties", "quote"}},
+		{schemas.Session, []string{"$defs", "Contribution", "properties", "text"}, InlineLimit, "InlineLimit"},
+		{schemas.CouncilDefinition, []string{"$defs", "Anchor", "properties", "quote"}, InlineLimit, "InlineLimit"},
+		{schemas.Session, []string{"$defs", "Claim", "properties", "text"}, ClaimTextLimit, "ClaimTextLimit"},
+		{schemas.Session, []string{"properties", "question"}, ClaimTextLimit, "ClaimTextLimit"},
+		{schemas.Session, []string{"$defs", "Run", "properties", "prompt"}, ClaimTextLimit, "ClaimTextLimit"},
 	}
-	for _, ft := range freeText {
+	for _, ft := range ceilings {
 		node, err := r.lookup(ft.schema, ft.pointer)
 		if err != nil {
 			t.Errorf("%s %v: %v", ft.schema, ft.pointer, err)
@@ -391,11 +403,11 @@ func TestInlineLimitIsDerivedFromTheHostIPCCap(t *testing.T) {
 		}
 		got, ok := node["maxLength"].(float64)
 		if !ok {
-			t.Errorf("%s %v: no maxLength; every free-text field carries the inline ceiling", ft.schema, ft.pointer)
+			t.Errorf("%s %v: no maxLength; every free-text field carries a named ceiling", ft.schema, ft.pointer)
 			continue
 		}
-		if int(got) != InlineLimit {
-			t.Errorf("%s %v: maxLength %d, want InlineLimit %d", ft.schema, ft.pointer, int(got), InlineLimit)
+		if int(got) != ft.want {
+			t.Errorf("%s %v: maxLength %d, want %s %d", ft.schema, ft.pointer, int(got), ft.named, ft.want)
 		}
 	}
 }

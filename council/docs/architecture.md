@@ -606,6 +606,114 @@ is inside `{"snapshot": …}`, so the wrapper measures the message that will
 actually travel and refuses it with `payload_too_large` — a refusal the page can
 render, rather than a message the broker drops.
 
+### 5.6 The round engine, and the one call it makes
+
+**How Council reaches a model.** The backend writes a JSON-RPC *request* to its
+own stdout — `{"method": "minerva/capability", "id": …, "params": {"capability":
+"host.providers.chat", "args": {…}}}` — and the host answers on its stdin,
+correlated by `id`. The JSON-RPC `result` holds a second envelope,
+`{"success": true, "result": {…}}` on success and a flat
+`{"success": false, "error_code", "error_message"}` on refusal. The grant is
+`permissions.host_capabilities: ["host.providers.chat"]` in the manifest.
+`hostchat.go` is the whole of that transport, and `session.ChatHost` is the one
+method the engine sees through it, which is what lets a deterministic fake stand
+in for a live model in tests without standing in for anything else.
+
+**One reader, routing by shape.** `serve` starts the single goroutine that reads
+stdin for the life of the process and classifies each line the only way JSON-RPC
+allows: a message carrying a `method` is a request and goes to the protocol
+loop; one carrying an `id` and no method is a response and goes to whichever
+capability exchange is waiting on that id. Two readers on one `bufio.Reader`
+would each swallow bytes the other was waiting for, and a handler that read
+stdin directly would swallow the very requests it is meant to leave room for.
+All writing goes through one `stdoutWriter` with one lock, because several
+replies are now in flight and two encoders interleaving would emit lines that
+are not messages.
+
+An exchange registers a channel under its id before it writes, so it can be
+**abandoned**: waiting on a channel can be given up when a member's context
+expires, and waiting on a `Read` cannot. Giving up costs nothing — the entry is
+removed, and a reply that arrives afterwards finds nothing waiting and is
+dropped by the reader. There is no desynced state to recover from, because
+nothing was ever swallowed.
+
+**Several requests at once, deliberately.** The host runs any number of requests
+in flight; panel IPC, MCP tool dispatch and a provider's cancel are independent
+coroutines, and the host's own stdout drain already routes capability replies by
+id. Council matches that on both sides. Each `tools/call` handler runs on its own
+goroutine, so a read, a `run.await` or a `run.cancel` is answered while a round
+is running — answering them in order would mean answering none of them until the
+round finished. And exchanges do not serialise, so a round may run as many
+concurrent calls as `max_concurrent_members` allows.
+
+An adapter that can carry fewer is expected to say so through
+`session.ConcurrencyLimiter`, and the engine clamps its own semaphore to it.
+That is not a nicety: a member's timeout is armed when it takes a semaphore
+slot, so one left queueing inside an adapter would spend its whole allowance
+waiting and expire without ever having been asked.
+
+**Bounded replies.** The host gives a tool call 120 seconds by default, so a
+reply held past that is a reply nobody receives. `run.start` and `run.retry`
+therefore set the round going and answer within the envelope's `wait_seconds`
+(1–90, default 20, schema-validated) with the run's id and its status so far; a
+round that outruns the wait keeps going on its own goroutine and the caller
+reads it with `run.await` — bounded by the same field, so there is one answer to
+"how long may the backend hold a reply" rather than two that can drift.
+
+**Where a round runs.** `run.start` and `run.retry` create the pending run under
+the engine lock, hand it to a background goroutine, and wait for it with the
+lock **released**. Nothing else would work: a round that held the lock would
+make every read and every cancel wait on a model, however concurrent the
+protocol loop was. The mechanism is one field on the command table, `after`, and
+it is the only place in the engine where a command has a second stage.
+
+**What a member is sent.** `prompt.go` is the only builder, and it is never
+handed another member's answer on an initial call — that is how
+`independent_initial_round` is enforced rather than promised. A member gets the
+question, the session's context snapshot, and the source revisions **its own**
+`grounding` pins, with the anchor ids it may cite. A follow-up adds the focused
+prompt and, when it names a claim, that claim — which is always this member's
+own, because a follow-up about an argument is routed to whoever made it. Only
+the chair sees the bench.
+
+A seat held by a `human` member is never consulted: nothing prompts the local
+user, and their view reaches a council as context or as a captured source.
+
+**What comes back.** Members answer in a small JSON shape; a reply that is not
+in it is still kept as the answer with no claims. A `source` claim keeps only
+the citations that resolve inside that member's own grounding, and a claim left
+with none becomes `unknown` — an interpretation is never displayed as something
+a source said, and dropping the label is the only way to keep that true without
+dropping the assertion. `model_id` and `usage` are recorded from the reply, so
+an answer is never attributed to a model that did not produce it and a cost is
+never estimated.
+
+**What the chair is told, and what it cannot leave out.** Synthesis runs over
+the results that exist. When a member is missing, the engine appends its own
+`unknown` claim to the synthesis naming the seats that did not answer — written
+after the model's reply is read, so a chair that wrote around the gap still
+produces a labelled partial. A round with no answers at all is `failed` and
+carries no synthesis.
+
+**Limits are data.** `max_members_per_round`, `max_concurrent_members`,
+`max_prompt_bytes`, `run_budget_seconds`, `max_rounds_per_session` and
+`per_member_timeout_seconds` live on `deliberation` in the council definition,
+where the schema validates them and an export carries them. A run may **narrow**
+any of the four per-call limits through `run.start`'s `limits`, and never widen
+one; the narrowing is stored on the run, because a round is planned from the
+record and a limit that lived only in the request would be gone by the time it
+mattered. `max_rounds_per_session` is the ceiling that makes "nothing loops"
+more than a claim about control flow: the engine starts nothing on its own, and
+a client that did could still only reach that many runs.
+
+**Superseding.** Each executing run holds a `runControl`, and its *pointer* is
+the identity a landing result is checked against. A cancelled run, a document
+replaced by `Load`, or a second attempt at the same seat all leave a reply with
+nowhere to land. A reply that arrives after its own run left `running` is
+recorded `stale` with full attribution and changes nothing else (§4.2), keeping
+any failure already recorded against that seat; a reply whose control is gone is
+dropped without touching the snapshot at all.
+
 ---
 
 ## 6. Sources, payload size, and missing references
@@ -723,7 +831,7 @@ run from the previous snapshot cannot apply: the run id is not present, and
 | formatting | `gofmt -l .` (in `council/`) | clean |
 | static analysis | `GOWORK=off go vet ./...` | clean |
 | build | `go build ./...` (in `council/`) | clean |
-| contract tests | `GOWORK=off go test ./internal/contract/` | 5 tests, over 9 valid and 19 invalid fixtures |
+| contract tests | `GOWORK=off go test ./internal/contract/` | 5 tests, over 10 valid and 19 invalid fixtures (the populated `.mcouncil` is one of them) |
 | GDScript syntax | `godot --headless --check-only -s <file>` on every `ui/*.gd` | clean |
 | panel suite | `council/scripts/run-gd-tests.sh <minerva>` | authored, never executed — see `tests/gd/EXPECTED_SUITES` |
 

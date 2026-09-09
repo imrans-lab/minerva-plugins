@@ -107,7 +107,11 @@
       "max_members_per_round": 4,
       "independent_initial_round": true,
       "preserve_disagreement": true,
-      "per_member_timeout_seconds": 120
+      "per_member_timeout_seconds": 120,
+      "max_concurrent_members": 2,
+      "max_prompt_bytes": 16384,
+      "run_budget_seconds": 300,
+      "max_rounds_per_session": 12
     }
   },
   "chat_binding": {

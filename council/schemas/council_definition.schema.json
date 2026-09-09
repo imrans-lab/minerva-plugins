@@ -260,12 +260,36 @@
     },
     "DeliberationRules": {
       "type": "object",
-      "description": "How one consultation runs. v0.1 is one bounded independent round followed by chair synthesis; the fields exist so a preset can tune it, not so the engine can grow modes implicitly.",
+      "description": "How one consultation runs, and what it is allowed to spend. v0.1 is one bounded independent round followed by chair synthesis; the fields exist so a preset can tune it, not so the engine can grow modes implicitly. Every limit lives here rather than as a constant in the engine, so what a council may cost is inspectable in the record and travels with an exported definition.",
       "properties": {
         "max_members_per_round": {
           "type": "integer",
           "minimum": 1,
           "maximum": 12
+        },
+        "max_concurrent_members": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 12,
+          "description": "How many member calls may be in flight at once. It bounds what a round costs at any instant; max_members_per_round bounds what it costs in total."
+        },
+        "max_prompt_bytes": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 32768,
+          "description": "Ceiling on the bytes of one assembled call. Council bounds what it SENDS, in bytes, because that is the quantity it can count exactly; grounding and prior contributions are dropped from the tail with a visible marker until the call fits. What a model produces is bounded by per_member_timeout_seconds and run_budget_seconds instead."
+        },
+        "run_budget_seconds": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 3600,
+          "description": "Wall-clock ceiling for a whole run, chair synthesis included. A run that reaches it stops with the contributions it has and is reported partial, rather than running on unattended."
+        },
+        "max_rounds_per_session": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50,
+          "description": "How many runs one session may hold. Nothing in the engine starts a run, so this is the ceiling on what a caller can ask of one session — the reason a client loop cannot turn one question into unbounded spend."
         },
         "independent_initial_round": {
           "const": true,
@@ -283,6 +307,10 @@
       },
       "required": [
         "max_members_per_round",
+        "max_concurrent_members",
+        "max_prompt_bytes",
+        "run_budget_seconds",
+        "max_rounds_per_session",
         "independent_initial_round",
         "preserve_disagreement",
         "per_member_timeout_seconds"
