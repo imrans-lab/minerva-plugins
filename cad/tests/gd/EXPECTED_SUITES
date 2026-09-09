@@ -894,3 +894,9 @@ test_fastener_mounting.gd assertions=12
 
 # Source-owned overlays: all panes, replacement, read-only ownership and failed builds.
 test_source_annotations.gd assertions=14
+
+# Configuration switching, manual build boundary, physical eligibility and host export context.
+test_model_views.gd assertions=9
+
+# Imported file changes, manual/automatic build policy and host watcher lifetime.
+test_dependencies.gd assertions=8

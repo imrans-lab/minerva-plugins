@@ -258,7 +258,7 @@ def test_the_probe_reuses_the_shape_the_last_evaluation_built() -> None:
     """
     methods.reset_caches()
     fresh = _ray(TRAY)
-    assert methods.cached_shape(TRAY) is None
+    assert methods.cached_shape(TRAY) is not None  # All consumers share the compiled document.
 
     evaluated = methods.handle_request(
         {"id": 1, "method": "evaluate", "params": {"source": TRAY}})

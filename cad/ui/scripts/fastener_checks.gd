@@ -248,7 +248,7 @@ func check(panel: Object, args: Dictionary = {}) -> Dictionary:
 	# The B-Rep first, and OUTSIDE the reservation: it is an IPC round trip to
 	# the worker, and holding the solid's collider across it would stall every
 	# evaluation for its duration.
-	var features := await _solid_cylinders(panel, solid_source, screw)
+	var features := await _solid_cylinders(panel, solid_source, screw, args)
 	if features.has("error"):
 		return _nothing(str(features["error"]))
 

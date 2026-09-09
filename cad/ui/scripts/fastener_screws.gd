@@ -120,6 +120,7 @@ static func run(panel, args: Dictionary, find_holes: Callable,
 			# collider another's.
 			"mesh": args.get("mesh", {}),
 			"source": str(args.get("source", "")),
+			"selection": args.get("selection", ""), "configuration": args.get("configuration", ""),
 			"screw": spec,
 			"holes": holes.get("holes", []),
 			"pairs": args.get("pairs", []),

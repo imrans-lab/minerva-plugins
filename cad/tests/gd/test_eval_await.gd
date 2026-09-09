@@ -820,6 +820,7 @@ func _teardown(rig: Dictionary) -> void:
 	if panel != null and is_instance_valid(panel):
 		if broker != null:
 			broker.detach_buffer_from_panel("cad", str(rig["panel_name"]))
+			broker.unregister_panel("cad", str(rig["panel_name"]))
 		if panel.get_parent() != null:
 			panel.get_parent().remove_child(panel)
 		panel.free()

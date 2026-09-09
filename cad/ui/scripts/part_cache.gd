@@ -1,21 +1,19 @@
 extends RefCounted
 ## part_cache.gd — what a named part is, evaluated once.
 ##
-## A part-scoped check (`parts: ["bottom", "top"]`) reaches its binding by
-## evaluating the document with that binding as the trailing expression — see
-## part_scope.gd. That evaluation is a full worker translate, minutes on a
-## lofted shell, and a verb with three legs over four parts would otherwise
-## pay for twelve of them inside one caller's window.
+## Part-scoped checks resolve selections through the worker's evaluated
+## document. This panel cache shares their tessellations and collision reports
+## across the legs of a check without repeating IPC or collider preparation.
 ##
 ## Nothing about a binding changes between the legs of one call, so this is a
 ## cache and not a scheduler. It holds two things per document:
 ##
-##   the resolved PART — the scoped source, the worker's tessellation of it
-##   and the shape name — keyed by binding name, so every leg of every verb
+##   the resolved PART — canonical source, selector, configuration, mesh
+##   and shape name — keyed by configuration and selector, so every leg
 ##   evaluates a binding at most once;
 ##
-##   the part's own INTERFERENCE report, keyed by the digest of the scoped
-##   source that produced it, so the clearance check can join against the
+##   the part's own INTERFERENCE report, keyed by source, selector and
+##   configuration, so the clearance check can join against the
 ##   report for THAT part. Joining the document's report instead cannot work:
 ##   the document's solid is the union, and a node buried in the union may be
 ##   nowhere near the half being measured.
@@ -71,6 +69,16 @@ static func digest(source: String) -> String:
 	if not bytes.is_empty():
 		hasher.update(bytes)
 	return hasher.finish().hex_encode()
+
+
+## Identity of measured geometry, separate from the canonical source digest.
+static func scope_digest(args: Dictionary) -> String:
+	var source := str(args.get("source", ""))
+	var selection := str(args.get("selection", ""))
+	var configuration := str(args.get("configuration", ""))
+	if selection.is_empty() and configuration.is_empty():
+		return digest(source)
+	return digest(JSON.stringify([digest(source), selection, configuration]))
 
 
 ## Point this panel's slot at `document_digest`, dropping everything it holds

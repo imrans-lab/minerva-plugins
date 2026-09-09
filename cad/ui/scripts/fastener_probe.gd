@@ -438,13 +438,14 @@ func _unmeasurable(hole: Dictionary, bore: Dictionary, reason: String) -> Dictio
 ## the request's closed_only flag, because a partial surface that reaches the
 ## pairing is graded exactly like a drilled hole. They are listed as partial so
 ## the reply can name them instead of dropping them.
-func _solid_cylinders(panel: Object, source: String, screw: Dictionary) -> Dictionary:
+func _solid_cylinders(panel: Object, source: String, screw: Dictionary, args: Dictionary = {}) -> Dictionary:
 	if source.strip_edges().is_empty():
 		return {"cylinders": [], "reason": "the document is empty"}
 	if not panel.has_method("call_backend"):
 		return {"cylinders": [], "reason": "this panel has no backend channel"}
 	var envelope: Dictionary = await panel.call_backend(FEATURES_CHANNEL, {
 		"source": source,
+		"selection": args.get("selection", ""), "configuration": args.get("configuration", ""),
 		"sense": "concave",
 		# Ask for the partial surfaces TOO. The reply promises to name every
 		# cylindrical surface that is not a bore, and a worker-side filter

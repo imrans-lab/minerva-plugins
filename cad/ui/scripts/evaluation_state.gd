@@ -30,6 +30,8 @@ func attach(payload: Dictionary) -> void:
 func painted(panel: Node, snapshot: Dictionary, result: Dictionary) -> void:
 	completed = snapshot.duplicate(true)
 	completed["mesh"] = result.get("mesh", {})
+	completed["model"] = result.get("model", {})
+	completed["dependencies"] = panel._dependencies.snapshot()
 	completed["references"] = result.get("references", [])
 	completed["last_eval"] = {"status": "ok", "shape_name": result.get("shape_name", "")}
 	completed["evaluated_at"] = Time.get_unix_time_from_system()
@@ -55,6 +57,11 @@ func freshness(panel: Node) -> Dictionary:
 	}
 	if not out.provenance.is_empty():
 		out.provenance["reference_digest"] = str(panel.get_reference_digest()).sha256_text()
+	if panel._dependencies.is_stale():
+		out["stale"] = true
+		out["dependency_changes"] = panel._dependencies.changed_paths.duplicate()
+		out["stale_reason"] = "Imported dependencies changed. Build latest to update the displayed model."
+		return out
 	if panel._build.mode == "manual" and panel._build.state().build_required:
 		out["stale"] = true
 		out["stale_reason"] = "Source differs from the displayed model. Call minerva_cad_build with action=build_latest, then await evaluation."
@@ -105,6 +112,8 @@ static func document(panel: Object, args: Dictionary = {}) -> Dictionary:
 	return panel.get_document_state() if panel.has_method("get_document_state") else {}
 
 static func preflight(panel: Node, args: Dictionary, require_current: bool) -> Dictionary:
+	if require_current and panel.has_method("verify_dependencies"):
+		panel.verify_dependencies()
 	var freshness: Dictionary = panel.evaluation_freshness()
 	var gate = preload("eval_freshness.gd")
 	var error: String = gate.requirement_error(args, freshness)

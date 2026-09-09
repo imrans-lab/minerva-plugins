@@ -292,6 +292,7 @@ func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
 
 	var head := {
 		"source": source,
+		"selection": args.get("selection", ""), "configuration": args.get("configuration", ""),
 		"required_mm": required_mm,
 		"tolerance_mm": tolerance_mm,
 	}
@@ -319,7 +320,7 @@ func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
 	# by itself, so a measurement that outlives this verb still finishes and
 	# still lands in its job.
 	_measure_into(job, panel, head, plan["batches"] as Array, records,
-		_buried_pairs(document, source, records, panel),
+		_buried_pairs(document, source, records, panel, args),
 		bool(args.get("accept_unbounded_tolerance", false)), bar,
 		declared["entries"] as Array)
 	# `wait_ms` is the caller's own budget for this call: 0 starts the

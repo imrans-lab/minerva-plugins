@@ -76,6 +76,8 @@ static func probe(panel: Object, args: Dictionary) -> Dictionary:
 	if source.strip_edges().is_empty():
 		return _refused("there is no DSL source to evaluate a solid from")
 	request["source"] = source
+	request["selection"] = args.get("selection", "")
+	request["configuration"] = args.get("configuration", "")
 
 	var envelope: Dictionary = {}
 	if panel.has_method("call_backend_until"):

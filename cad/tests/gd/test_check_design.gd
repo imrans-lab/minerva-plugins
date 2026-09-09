@@ -770,8 +770,8 @@ func _check_every_binding_is_evaluated_once() -> void:
 	check("evaluate-once: and all four parts are still cached SEPARATELY — "
 			+ "one entry each, so no leg was answered about another binding",
 			PartCache.part_count(panel) == parts.size()
-				and str(PartCache.part(panel, "door").get("source", "")) \
-					.ends_with("\ndoor\n"),
+				and str(PartCache.part(panel, "door").get("source", "")) == panel.document_source
+				and PartCache.part(panel, "door").get("selection", "") == "door",
 			"cached = %d, door source = %s" % [PartCache.part_count(panel),
 				str(PartCache.part(panel, "door").get("source", ""))])
 
@@ -1066,7 +1066,7 @@ class _DesignStandIn extends Node:
 		# the binding's name; its ticket is named after it so the fold can be
 		# seen to keep the two apart.
 		var source := str(args.get("source", "")).strip_edges()
-		var part := source.get_slice("\n", source.get_slice_count("\n") - 1)
+		var part := str(args.get("selection", ""))
 		clearance_calls.append("start:%s:wait=%s" % [part,
 			str(args.get("wait_ms", "default"))])
 		var reply: Dictionary = (clearance_by_part.get(part, clearance) \
@@ -1091,7 +1091,7 @@ class _DesignStandIn extends Node:
 				"error_message": "the worker did not answer in time"}
 		var source := str(args.get("source", "")).strip_edges()
 		return {"success": true, "result": {"ok": true, "result": {
-			"shape_name": source.get_slice("\n", source.get_slice_count("\n") - 1),
+			"shape_name": str(args.get("selection", "")),
 			"mesh": {"vertices": [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
 				"faces": [[0, 1, 2]]},
 		}}}

@@ -179,39 +179,13 @@ def _occt():
     }
 
 
-def shape_for(source: str):
-    """Translate the DSL and hand back (shape_name, shape).
-
-    Deliberately not `evaluate_source`: that one returns a tessellation and
-    throws the shape away, and the shape is the entire point of this method.
-    """
+def shape_for(source: str, selection: str = "", configuration: str = ""):
+    """Read the already compiled definition/instance selected by every CAD consumer."""
+    from .methods import selected_shape
     try:
-        from mcad.build_trace import translate_program
-        from mcad.parser import ParseError, parse
-        from mcad.translator import Translator, TranslatorError
-    except ImportError as exc:
-        raise FeatureError(f"mcad package unavailable: {exc}") from exc
-
-    # translate_program, not Translator.translate: it is the entry point that
-    # applies the trailing-expression result rule, so the features reported
-    # here are the features of the shape the panel is showing.
-    try:
-        program = parse(source)
-        translator = Translator()
-        translate_program(translator, program)
-    except (ParseError, TranslatorError) as exc:
-        raise FeatureError(f"the DSL did not evaluate: {exc}") from exc
-
-    shape_name, shape = translator.last_part()
-    if shape_name is None or shape is None:
-        raise FeatureError(
-            "the document produced no 3D part, so it has no B-Rep features; "
-            "define a shape with extrude(...) or a primitive first"
-        )
-    wrapped = getattr(shape, "wrapped", shape)
-    if wrapped is None:
-        raise FeatureError("the evaluated part carries no OCCT shape")
-    return str(shape_name), wrapped
+        return selected_shape(source, selection, configuration)
+    except ValueError as exc:
+        raise FeatureError(str(exc).replace("No 3D part", "no 3D part")) from exc
 
 
 def _face_cylinder(occt: dict, face) -> Optional[dict]:
@@ -926,7 +900,7 @@ def largest_curved_radius(source: str) -> Optional[float]:
 
 
 def curvature_report(source: str,
-                     tolerance_mm: Optional[float] = None) -> dict:
+                     tolerance_mm: Optional[float] = None, selection: str = "", configuration: str = "") -> dict:
     """Every curved face of the shape, sorted into measured and not.
 
     Returns {largest_radius_mm: float|None, unrecognised_faces: int,
@@ -955,7 +929,7 @@ def curvature_report(source: str,
     Raises FeatureError for the same reasons every other reader here does.
     """
     occt = _occt()
-    _shape_name, wrapped = shape_for(source)
+    _shape_name, wrapped = shape_for(source, selection, configuration)
     largest = None
     unrecognised = 0
     sampled = 0
@@ -1046,7 +1020,7 @@ def cylindrical_features(params: dict) -> dict:
 
     try:
         occt = _occt()
-        shape_name, wrapped = shape_for(source)
+        shape_name, wrapped = shape_for(source, params.get("selection", ""), params.get("configuration", ""))
         raw: list = []
         explorer = occt["TopExp_Explorer"](wrapped, occt["TopAbs_FACE"])
         while explorer.More():

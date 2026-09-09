@@ -17,14 +17,8 @@ extends RefCounted
 ##   a check can be asked about NAMED bindings instead, `parts: ["bottom",
 ##   "top"]`, and reports one result per part.
 ##
-## HOW A NAMED BINDING IS REACHED. Not by a second evaluator: the DSL already
-## has a documented rule for choosing the render target — a trailing bare
-## expression selects the shape it names — so the source for part `bottom` is
-## the document's own source with `bottom` appended on its own line. That is
-## the same program the author would run to look at that half, evaluated by the
-## same worker, so no part of this module can disagree with what the panel
-## would show. It costs one translate per part, which is what looking at that
-## half costs anyway.
+## Names resolve in the worker's cached evaluated document. Source remains
+## byte-identical; selection and configuration are explicit request fields.
 ##
 ## No class_name: off-tree plugin scripts cannot use class_name.
 ## Consumers: preload("scripts/part_scope.gd") from panel_tools.gd.
@@ -39,14 +33,11 @@ const _Freshness: Script = preload("eval_freshness.gd")
 
 ## Channel name = MCP tool name; the worker method behind it is "evaluate".
 const EVALUATE_CHANNEL: String = "cad.evaluate"
-## A named part is translated from scratch, which on a lofted shell is the same
-## cost as evaluating it in the panel.
+## A cache miss may need to compile the document before resolving its selection.
 const EVALUATE_TIMEOUT_MS: int = 600000
 
-## A binding name the DSL could actually have bound. Refusing anything else
-## keeps the appended line from being an arbitrary expression evaluated in the
-## document's own scope.
-const NAME_PATTERN: String = "^[A-Za-z_][A-Za-z0-9_]*$"
+## Explicit namespaces and hierarchical instance IDs, never DSL expressions.
+const NAME_PATTERN: String = "^(binding:|instance:|reference:)?[A-Za-z_][A-Za-z0-9_./-]*$"
 
 
 ## The parts the caller asked about, in order and without repeats. Empty means
@@ -63,18 +54,11 @@ static func names(args: Dictionary) -> Array:
 	return out
 
 
-## Is `name` a bare DSL binding name? A `parts` entry is appended to the
-## source as a statement, so anything else is refused rather than run.
+## Is `name` a supported object selector?
 static func is_binding_name(name: String) -> bool:
 	var expression := RegEx.new()
 	expression.compile(NAME_PATTERN)
 	return expression.search(name) != null
-
-
-## The source that evaluates to `part`: the document's own source with the
-## binding named on the last line, which is the DSL's render-target rule.
-static func source_for(source: String, part: String) -> String:
-	return source.rstrip("\n \t") + "\n" + part + "\n"
 
 
 ## The name the document itself evaluates to, or "" when nothing has evaluated
@@ -119,12 +103,13 @@ static func resolve(panel: Object, part: String, args: Dictionary = {}) -> Dicti
 		return {"error": "there is no DSL source to evaluate a part from"}
 	var document_digest: String = _PartCache.digest(source)
 	_PartCache.retain(panel, document_digest)
-	var kept: Dictionary = _PartCache.part(panel, part)
+	var configuration := str(args.get("configuration", document.get("model", {}).get("configuration", "")))
+	var cache_key := part if configuration.is_empty() else configuration + "|" + part
+	var kept: Dictionary = _PartCache.part(panel, cache_key)
 	if not kept.is_empty():
 		return kept
-	var scoped := source_for(source, part)
 	var envelope: Variant = await panel.call_backend(EVALUATE_CHANNEL,
-		{"source": scoped}, EVALUATE_TIMEOUT_MS)
+		{"source": source, "selection": part, "configuration": configuration}, EVALUATE_TIMEOUT_MS)
 	var result: Dictionary = _WorkerReply.unwrap(envelope, "part '%s'" % part)
 	# A binding the worker REFUSED is kept: that is the same refusal for every
 	# leg of the same document, and re-asking three times to be told the same
@@ -137,19 +122,21 @@ static func resolve(panel: Object, part: String, args: Dictionary = {}) -> Dicti
 			+ "entry must name a binding the document assigns a 3D shape to")
 			% [part, str(result["error"])]}
 		if not bool(result.get("transient", false)):
-			_PartCache.put_part(panel, part, refused, document_digest)
+			_PartCache.put_part(panel, cache_key, refused, document_digest)
 		return refused
 	var mesh: Dictionary = result.get("mesh", {}) as Dictionary
 	if (mesh.get("faces", []) as Array).is_empty():
 		var empty := {"error": "part '%s' produced no solid geometry" % part}
-		_PartCache.put_part(panel, part, empty, document_digest)
+		_PartCache.put_part(panel, cache_key, empty, document_digest)
 		return empty
 	var resolved := {
-		"source": scoped,
+		"source": source,
+		"selection": part, "configuration": configuration,
+		"model": result.get("model", {}),
 		"mesh": mesh,
 		"shape_name": str(result.get("shape_name", part)),
 	}
-	if not _PartCache.put_part(panel, part, resolved, document_digest):
+	if not _PartCache.put_part(panel, cache_key, resolved, document_digest):
 		resolved["note"] = ("part '%s' was evaluated from a source the "
 			+ "document has since moved past; it is answered from but not "
 			+ "kept, and the next call evaluates the current document") % part
@@ -164,8 +151,8 @@ static func resolve(panel: Object, part: String, args: Dictionary = {}) -> Dicti
 ##
 ## With no `parts` the check runs once, against the shape the document
 ## evaluates to, and the reply NAMES that shape, which is the answer to "which
-## half did you just check". With `parts`, each named binding is evaluated on its own (part_scope appends it
-## as the trailing expression, the DSL's own render-target rule) and checked
+## half did you just check". With `parts`, each selection resolves from the
+## evaluated document and is checked
 ## against its own mesh, and the replies come back together under `parts` with
 ## `pass` true only when every one of them passed. The parts run one after
 ## another because they share the panel's single solid collider.
@@ -213,6 +200,11 @@ static func per_part(panel, args: Dictionary, verb: Callable,
 			unmeasured.append(_unmeasured_leg(part, unresolved))
 			failed += 1
 			continue
+		if not bool(resolved.get("model", {}).get("physical", true)):
+			rows.append({"part": part, "checked": false, "reason": "Presentation-only configuration cannot pass physical validation"})
+			unmeasured.append(part + ": presentation-only configuration")
+			failed += 1
+			continue
 		var scoped: Dictionary = args.duplicate()
 		scoped.erase("parts")
 		# What the check measures instead of the document's own render target:
@@ -220,6 +212,8 @@ static func per_part(panel, args: Dictionary, verb: Callable,
 		# produced it for anything the worker re-evaluates.
 		scoped["mesh"] = resolved["mesh"]
 		scoped["source"] = resolved["source"]
+		scoped["selection"] = resolved["selection"]
+		scoped["configuration"] = resolved["configuration"]
 		var one: Dictionary = await fresh.call(panel, scoped, verb)
 		one["part"] = part
 		rows.append(one)
@@ -248,9 +242,8 @@ static func per_part(panel, args: Dictionary, verb: Callable,
 		"count": rows.size(),
 		"failed": failed,
 		"pass": verdict,
-		"parts_note": "each part is the document evaluated with that binding "
-			+ "as its trailing expression, which is the DSL\'s own "
-			+ "render-target rule; a part that does not evaluate is reported "
+		"parts_note": "each part resolves from the same evaluated document; "
+			+ "a part that does not resolve is reported "
 			+ "as checked:false with the reason and does not silently drop "
 			+ "out of the count",
 	}

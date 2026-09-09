@@ -342,3 +342,15 @@ func TestExportJobsKeepDocumentAttributionSeparate(t *testing.T) {
 		t.Fatal("distinct document identities share an export job")
 	}
 }
+
+func TestExportJobsKeepSelectionsAndConfigurationsSeparate(t *testing.T) {
+	base := json.RawMessage(`{"source":"assembly", "format":"step", "path":"/tmp/same.step", "selection":"instance:left", "configuration":"assembled"}`)
+	for _, different := range []json.RawMessage{
+		json.RawMessage(`{"source":"assembly", "format":"step", "path":"/tmp/same.step", "selection":"instance:right", "configuration":"assembled"}`),
+		json.RawMessage(`{"source":"assembly", "format":"step", "path":"/tmp/same.step", "selection":"instance:left", "configuration":"exploded"}`),
+	} {
+		if exportJobKey(base) == exportJobKey(different) {
+			t.Fatal("different evaluated objects join the same export job")
+		}
+	}
+}

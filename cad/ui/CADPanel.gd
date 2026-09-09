@@ -105,6 +105,8 @@ var _eval_buffer_version: int = -1
 var _painted_buffer_version: int = -1
 
 var _evaluation_state := preload("scripts/evaluation_state.gd").new()
+var _dependencies := preload("scripts/dependencies.gd").new(self)
+var _model_views := preload("scripts/model_views.gd").new(self)
 var _build := preload("scripts/build_controls.gd").new(self)
 
 func build_status() -> Dictionary:
@@ -112,6 +114,12 @@ func build_status() -> Dictionary:
 
 func set_build_mode(mode: String) -> Dictionary:
 	return _build.set_mode(mode)
+
+func verify_dependencies() -> void:
+	_dependencies.verify()
+
+func restore_model_view(value: Dictionary) -> void:
+	_model_views.restore(value)
 
 func build_latest() -> Dictionary:
 	return _build.build_latest()
@@ -125,6 +133,7 @@ func get_document_state() -> Dictionary:
 		"source": _current_source(),
 		"path": _document_path,
 		"build_mode": _build.mode,
+		"model_view": _model_views.arguments(),
 		"last_eval": _last_eval_result,
 		"mesh": _last_mesh_data,
 		"references": _last_references,
@@ -194,6 +203,7 @@ func call_backend_until(channel: String, args: Dictionary,
 func _on_panel_loaded(ctx: Dictionary) -> void:
 	_ctx = ctx
 	_build.wire()
+	_model_views.wire()
 
 	var ed: Variant = ctx.get("editor", null)
 	if ed != null and "tab_title" in ed and _annotation_host != null:
@@ -227,6 +237,8 @@ func _on_panel_unload() -> void:
 ## Channels: attach_buffer / text_changed / detach_buffer.
 func receive(channel: String, payload: Dictionary) -> void:
 	match channel:
+		"host.fs.changed":
+			_dependencies.changed(payload)
 		"attach_buffer":
 			_buffer_path = str(payload.get("path", ""))
 			if not _buffer_path.is_empty():
@@ -433,6 +445,7 @@ func _on_panel_save_request() -> Dictionary:
 	return {
 		"version": 1,
 		"build_mode": _build.mode,
+		"model_view": _model_views.arguments(),
 		"source": _pending_dsl_text,
 		"last_eval": _last_eval_for_mcp(),
 	}
@@ -699,6 +712,7 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 
 	var reply_id := "cad.evaluate:" + str(Time.get_ticks_usec())
 	var args: Dictionary = {"source": dsl_text}
+	args.merge(_model_views.arguments())
 	if request_id != "":
 		args["request_id"] = request_id
 		_inflight_request_id = request_id
@@ -842,6 +856,7 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 	# frame has to cover the references as well as the solid.
 	var references_var: Variant = eval_result.get("references", [])
 	_mount_references(references_var if references_var is Array else [])
+	_dependencies.accept()
 
 	# Push mesh into all 5 MeshDisplay instances. The MeshRoot Node3D in each
 	# SubViewport has scripts/mesh_display.gd attached, exposing update_mesh().
@@ -856,6 +871,7 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 	# freshness stamp moves here and nowhere else.
 	_painted_buffer_version = int(snapshot.source_version)
 	_evaluation_state.painted(self, snapshot, eval_result)
+	_model_views.refresh()
 	_annotation_host.set_source_annotations(prepared_annotations.annotations,
 		_evaluation_state.completed.get("provenance", {}))
 	_build.painted_source = dsl_text
@@ -931,7 +947,9 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 	# document may have moved on: the result is attached only if this
 	# evaluation is still the one being shown.
 	var stamp: float = float(_last_eval_result.get("ts", 0.0))
-	var interference: Dictionary = await check_interference()
+	var interference: Dictionary = {"checked": false, "reason": "Presentation-only configuration"}
+	if bool(eval_result.get("model", {}).get("physical", true)):
+		interference = await check_interference()
 	if not is_instance_valid(self) or float(_last_eval_result.get("ts", -1.0)) != stamp:
 		# A newer evaluation owns the banner now; this one paints nothing.
 		return

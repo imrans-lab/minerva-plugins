@@ -292,12 +292,13 @@ class TestEvaluate:
         except ImportError:
             pytest.skip("mcad.evaluator not importable")
 
-        def _counting_eval(source, *, tolerance=0.1, angular_tolerance=0.1):
+        def _counting_eval(source, *, tolerance=0.1, angular_tolerance=0.1, **selection):
             call_count[0] += 1
             return original_eval(
                 source,
                 tolerance=tolerance,
                 angular_tolerance=angular_tolerance,
+                **selection,
             )
 
         import mcad.evaluator as _evaluator_mod
@@ -469,12 +470,13 @@ class TestListEdges:
         except ImportError:
             pytest.skip("mcad.evaluator not importable")
 
-        def _counting_eval(source, *, tolerance=0.1, angular_tolerance=0.1):
+        def _counting_eval(source, *, tolerance=0.1, angular_tolerance=0.1, **selection):
             call_count[0] += 1
             return original_eval(
                 source,
                 tolerance=tolerance,
                 angular_tolerance=angular_tolerance,
+                **selection,
             )
 
         import mcad.evaluator as _evaluator_mod

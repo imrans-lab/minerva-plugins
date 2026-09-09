@@ -97,6 +97,7 @@ static func build_payload(panel: Node) -> Dictionary:
 		"source": _source_of(panel),
 		"document_path": _document_path_of(panel),
 		"build_mode": str(_state_of(panel).get("build_mode", "automatic")),
+		"model_view": _state_of(panel).get("model_view", {}),
 		"cameras": cameras_of(panel),
 		# The mesh() specs the last evaluation named, verbatim: name, path,
 		# pose matrix, units and up. Carried so the reopened tab can mount its
@@ -177,6 +178,8 @@ static func restore(payload: Dictionary, panel: Node) -> bool:
 	# pane, and this is what puts the user's view back afterwards.
 	panel.set_meta(PENDING_CAMERA_META, cameras)
 
+	if panel.has_method("restore_model_view"):
+		panel.restore_model_view(payload.get("model_view", {}))
 	if panel.has_method("set_build_mode"):
 		panel.set_build_mode(str(payload.get("build_mode", "automatic")))
 	panel.adopt_restored_document(
@@ -212,6 +215,11 @@ static func validation_error(payload: Variant) -> String:
 		return "payload.source is not a String"
 	if not (d.get("cameras", {}) is Dictionary):
 		return "payload.cameras is not a Dictionary"
+	if not (d.get("model_view", {}) is Dictionary):
+		return "payload.model_view is not a Dictionary"
+	for key in ["selection", "configuration"]:
+		if not (d.get("model_view", {}).get(key, "") is String):
+			return "payload.model_view.%s is not a String" % key
 	return ""
 
 

@@ -359,7 +359,7 @@ def _chord_clause(angular_rad: float, effective_mm: float,
             % (step, printed_effective, relation, printed_request))
 
 
-def _curvature(source: str, tolerance_mm: float) -> tuple:
+def _curvature(source: str, tolerance_mm: float, selection: str = "", configuration: str = "") -> tuple:
     """(widest binding radius or None, every curved face measured, sampled?).
 
     The widest, because the sagitta of a fixed angle grows with the radius:
@@ -382,7 +382,7 @@ def _curvature(source: str, tolerance_mm: float) -> tuple:
     sampling, so the reply can name where its bound came from.
     """
     key = hashlib.sha256(
-        ("%r\n" % tolerance_mm).encode("utf-8") + source.encode("utf-8")
+        ("%r\n%r\n%r\n" % (tolerance_mm, selection, configuration)).encode("utf-8") + source.encode("utf-8")
     ).hexdigest()
     cached = _curvatures.take(key)
     if cached is not None:
@@ -392,7 +392,7 @@ def _curvature(source: str, tolerance_mm: float) -> tuple:
     except ImportError:
         return None, False, False
     try:
-        report = curvature_report(source, tolerance_mm=tolerance_mm)
+        report = curvature_report(source, tolerance_mm=tolerance_mm, selection=selection, configuration=configuration)
     except FeatureError:
         answer = (None, False, False)
     except BaseException:  # noqa: BLE001 — a broken OCCT raises anything
@@ -448,7 +448,7 @@ UNBOUNDED_BECAUSE = {
 
 
 def _prepare_solid(source: str, tolerance_mm: float,
-                   angular_param: Optional[float] = None):
+                   angular_param: Optional[float] = None, selection: str = "", configuration: str = ""):
     """Tessellate the solid so the CHORD error really is within the tolerance.
 
     Returns (vertices, faces, angular_rad, how, effective_mm, bounded). OCCT
@@ -480,11 +480,11 @@ def _prepare_solid(source: str, tolerance_mm: float,
     The seventh value is where the bar came from: "stated", "analytic",
     "none" (nothing curved binds), "sampled" or "guessed".
     """
-    measured, known, sampled = _curvature(source, tolerance_mm)
+    measured, known, sampled = _curvature(source, tolerance_mm, selection, configuration)
     certain = known and not sampled
 
     if angular_param is not None:
-        vertices, faces = _solid_arrays(source, tolerance_mm, angular_param)
+        vertices, faces = _solid_arrays(source, tolerance_mm, angular_param, selection, configuration)
         radius = measured if known else max(measured or 0.0,
                                             _bbox_radius(vertices))
         effective = max(tolerance_mm, _sagitta_mm(angular_param, radius or 0.0))
@@ -493,7 +493,7 @@ def _prepare_solid(source: str, tolerance_mm: float,
 
     if known and measured is not None:
         angular = _angular_for(tolerance_mm, measured)
-        vertices, faces = _solid_arrays(source, tolerance_mm, angular)
+        vertices, faces = _solid_arrays(source, tolerance_mm, angular, selection, configuration)
         effective = max(tolerance_mm, _sagitta_mm(angular, measured))
         how = "derived from the widest curved face (radius %.4f mm)" % measured
         if sampled:
@@ -507,7 +507,7 @@ def _prepare_solid(source: str, tolerance_mm: float,
         # Nothing curved enough to bind: either no curved face at all, or only
         # faces too small for the curvature they carry to deviate by the
         # tolerance however they are cut. Every chord is inside it at any angle.
-        vertices, faces = _solid_arrays(source, tolerance_mm, DEFAULT_ANGULAR_RAD)
+        vertices, faces = _solid_arrays(source, tolerance_mm, DEFAULT_ANGULAR_RAD, selection, configuration)
         how = "the default: no curved face was found to bind it"
         if sampled:
             how = ("the default: every curved face was measured, by sampling "
@@ -521,11 +521,11 @@ def _prepare_solid(source: str, tolerance_mm: float,
     # default and take the bounding box as the radius — wider than any face
     # this reader measured, but only a guess about the one it could not — and
     # rebuild only when that guess asks for a finer angle than the default.
-    vertices, faces = _solid_arrays(source, tolerance_mm, DEFAULT_ANGULAR_RAD)
+    vertices, faces = _solid_arrays(source, tolerance_mm, DEFAULT_ANGULAR_RAD, selection, configuration)
     radius = max(measured or 0.0, _bbox_radius(vertices))
     guess = _angular_for(tolerance_mm, radius)
     if guess < DEFAULT_ANGULAR_RAD:
-        vertices, faces = _solid_arrays(source, tolerance_mm, guess)
+        vertices, faces = _solid_arrays(source, tolerance_mm, guess, selection, configuration)
     else:
         guess = DEFAULT_ANGULAR_RAD
     return (vertices, faces, guess,
@@ -534,13 +534,13 @@ def _prepare_solid(source: str, tolerance_mm: float,
             max(tolerance_mm, _sagitta_mm(guess, radius)), False, "guessed")
 
 
-def _solid_arrays(source: str, tolerance: float, angular_tolerance: float):
+def _solid_arrays(source: str, tolerance: float, angular_tolerance: float,
+                  selection: str = "", configuration: str = ""):
     """Tessellate the DSL source at `tolerance` and return (vertices, faces).
 
-    Deliberately NOT the dispatcher's `evaluate` cache: that one is keyed on
-    the source alone, so asking it for a different tolerance would hand back
-    the tessellation the display asked for while this reply claimed the
-    tolerance the caller wanted. The measurement owns its own tessellation.
+    Reuse compiled geometry through the shared evaluated document. Its render
+    cache includes both tessellation tolerances, selection and configuration;
+    measurement precision therefore cannot inherit a coarser display mesh.
     """
     import numpy as np
 
@@ -549,27 +549,20 @@ def _solid_arrays(source: str, tolerance: float, angular_tolerance: float):
     # number from a measurement verb is the one failure this module must not
     # have. SHA-256 of a few kilobytes of DSL is free beside OCCT.
     cache_key = hashlib.sha256(
-        ("%r\n%r\n" % (tolerance, angular_tolerance)).encode("utf-8")
+        ("%r\n%r\n%r\n%r\n" % (tolerance, angular_tolerance, selection, configuration)).encode("utf-8")
         + source.encode("utf-8")
     ).hexdigest()
     cached = _solid_meshes.take(cache_key)
     if cached is not None:
         return cached
 
-    try:
-        from mcad.evaluator import EvaluationError, evaluate_source
-    except ImportError as exc:
-        raise ClearanceError(f"mcad package unavailable: {exc}") from exc
-
-    try:
-        result = evaluate_source(
-            source, tolerance=tolerance, angular_tolerance=angular_tolerance
-        )
-    except EvaluationError as exc:
-        raise ClearanceError(f"the DSL did not evaluate: {exc}") from exc
-
-    raw_vertices = result.mesh.get("vertices") or []
-    raw_faces = result.mesh.get("faces") or []
+    from .methods import _evaluate
+    reply = _evaluate({"source": source, "tolerance": tolerance,
+        "angular_tolerance": angular_tolerance, "selection": selection, "configuration": configuration})
+    if not reply["ok"]:
+        raise ClearanceError("the DSL did not evaluate: " + reply["error"]["message"])
+    raw_vertices = reply["result"]["mesh"].get("vertices") or []
+    raw_faces = reply["result"]["mesh"].get("faces") or []
     if not raw_vertices or not raw_faces:
         raise ClearanceError(
             "the evaluation produced no solid geometry to measure"
@@ -688,7 +681,7 @@ def clearance(params: dict) -> dict:
 
         (solid_vertices, solid_faces, angular_rad, angular_how,
             effective_mm, bounded, tolerance_source) = _prepare_solid(
-                source, tolerance_mm, angular)
+                source, tolerance_mm, angular, params.get("selection", ""), params.get("configuration", ""))
         solid_tree = _build_tree(solid_vertices, solid_faces)
 
         pairs = []

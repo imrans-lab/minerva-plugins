@@ -430,10 +430,12 @@ func _required_for(pair: Dictionary, fallback: float) -> float:
 ## blind spot the join exists to close, so it is carried through and the pair
 ## says so.
 func _buried_pairs(document: Dictionary, source: String, records: Array,
-		panel: Object) -> Dictionary:
+		panel: Object, args: Dictionary = {}) -> Dictionary:
 	var out := {"fresh": false, "nodes": {}, "contacts": {}, "undecided": {},
 		"undecided_references": {}}
-	var digest := _source_digest(source)
+	var scope := args.duplicate()
+	scope["source"] = source
+	var digest: String = _PartCache.scope_digest(scope)
 	# A PART is measured against its own report, never the document's: the
 	# document's solid is the union of every binding, so a node buried in
 	# another half would be joined onto this one. The store is keyed by the
@@ -450,7 +452,7 @@ func _buried_pairs(document: Dictionary, source: String, records: Array,
 		interference = report
 	if not bool(interference.get("checked", false)):
 		return out
-	if str(interference.get("source_digest", "")) != digest:
+	if str(interference.get("scope_digest", interference.get("source_digest", ""))) != digest:
 		return out
 	# A WALK THAT RAN OUT OF RAYS NAMES ONLY SOME OF WHAT CROSSES. The join
 	# reads a pair the report does not name as "nothing crossing there", so a

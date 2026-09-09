@@ -153,7 +153,7 @@ def _occt() -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _shape(source: str) -> tuple:
+def _shape(source: str, selection: str = "", configuration: str = "") -> tuple:
     """(shape_name, OCCT shape) for the source, translating only if it must.
 
     The evaluation the panel is showing already built this B-Rep, and the
@@ -163,6 +163,8 @@ def _shape(source: str) -> tuple:
     """
     from . import methods
 
+    if selection or configuration:
+        return shape_for(source, selection, configuration)
     cached = methods.cached_shape(source)
     if cached is not None:
         return cached
@@ -618,7 +620,7 @@ def material(params: dict) -> dict:
             raise MaterialError("tolerance_mm must be greater than zero")
 
         occt = _occt()
-        shape_name, wrapped = _shape(source)
+        shape_name, wrapped = _shape(source, params.get("selection", ""), params.get("configuration", ""))
         bodies = _bodies(occt, wrapped)
         if not bodies:
             raise MaterialError(

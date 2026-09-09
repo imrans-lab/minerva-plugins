@@ -37,6 +37,8 @@ var Export = ToolSpec{
 		"type": "object",
 		"properties": {
 			"source": {"type": "string"},
+			"selection": {"type": "string", "description": "Shared evaluated object selector; supersedes part when supplied."},
+			"configuration": {"type": "string"},
 			"part": {"type": "string", "description": "Optional named solid binding; excludes references."},
 			"source_version": {"type": "integer"},
 			"document_id": {"type": "string"},
@@ -158,13 +160,15 @@ func handleExportWith(ctx context.Context, params json.RawMessage,
 // caller collect a running one by simply asking again.
 func exportJobKey(params json.RawMessage) string {
 	var a struct {
-		Source     string          `json:"source"`
-		Part       string          `json:"part"`
-		Version    json.RawMessage `json:"source_version"`
-		Document   string          `json:"document_id"`
-		Evaluation map[string]any  `json:"evaluation_provenance"`
-		Format     string          `json:"format"`
-		Path       string          `json:"path"`
+		Source        string          `json:"source"`
+		Part          string          `json:"part"`
+		Selection     string          `json:"selection,omitempty"`
+		Configuration string          `json:"configuration,omitempty"`
+		Version       json.RawMessage `json:"source_version"`
+		Document      string          `json:"document_id"`
+		Evaluation    map[string]any  `json:"evaluation_provenance"`
+		Format        string          `json:"format"`
+		Path          string          `json:"path"`
 	}
 	sum := sha256.New()
 	if err := json.Unmarshal(params, &a); err != nil {
@@ -175,14 +179,16 @@ func exportJobKey(params json.RawMessage) string {
 		// source_version is normalized rather than hashed as written, so the
 		// host's 4 and 4.0 spellings of one version name the same export.
 		keyed := struct {
-			Source     string         `json:"source"`
-			Part       string         `json:"part"`
-			Version    *int64         `json:"source_version"`
-			Document   string         `json:"document_id"`
-			Evaluation map[string]any `json:"evaluation_provenance"`
-			Format     string         `json:"format"`
-			Path       string         `json:"path"`
-		}{Source: a.Source, Part: a.Part, Format: a.Format, Path: a.Path, Document: a.Document, Evaluation: a.Evaluation}
+			Source        string         `json:"source"`
+			Part          string         `json:"part"`
+			Selection     string         `json:"selection,omitempty"`
+			Configuration string         `json:"configuration,omitempty"`
+			Version       *int64         `json:"source_version"`
+			Document      string         `json:"document_id"`
+			Evaluation    map[string]any `json:"evaluation_provenance"`
+			Format        string         `json:"format"`
+			Path          string         `json:"path"`
+		}{Source: a.Source, Part: a.Part, Selection: a.Selection, Configuration: a.Configuration, Format: a.Format, Path: a.Path, Document: a.Document, Evaluation: a.Evaluation}
 		if !jsonAbsent(a.Version) {
 			if v, err := jsonInt(a.Version); err == nil {
 				keyed.Version = &v
