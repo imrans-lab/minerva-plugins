@@ -744,16 +744,46 @@ Cancellation arrives carrying only `chat_id`, so the backend keeps the run each
 chat last started and cancels that. A cancel for a chat with nothing running,
 or for a round that already stopped, is a success that moves nothing.
 
-**One round at a time per chat.** That same handle does a second job. A round
-can outlive the 90 s reply, and the host then hands the user their prompt back
-with no idea anything is still in flight — so a user who asks again would
-otherwise buy a second full bench over the same question and get two syntheses
-of it. While a chat's handle is live a turn dispatches `run.await`, not
+**One round at a time per chat.** A round can outlive the 90 s reply, and the
+host then hands the user their prompt back with no idea anything is still in
+flight — so a user who asks again would otherwise buy a second full bench over
+the same question and get two syntheses of it. While the chat's session holds a
+run that is `pending` or `running`, a turn dispatches `run.await`, not
 `run.start`: it reports the running round and says plainly that the new question
-was **not** asked and should be asked again once this one lands. The handle is
-released the moment the round reaches a resting state, so the next question does
-start a round of its own, and a late cancel truthfully answers "nothing was
-running".
+was **not** asked and should be asked again once this one lands.
+
+**Both of those read the RECORD, not a remembered handle**, and that is load
+bearing rather than tidy. An earlier draft kept the run id in process memory,
+written by the turn that started the round — which meant it was written when
+`run.start` *returned*, after its bounded wait of up to 90 s. For the whole
+duration of the round there was nothing recorded to find, and that window is
+exactly when the host's `cancel_tool` arrives and exactly when an impatient user
+types again: cancel found nothing and did nothing, and a second turn started a
+second round. The snapshot holds the run from the instant `run.start`'s mutation
+commits, under the same lock every other reader takes, so there is no window
+once the run exists. Two protocol tests hold a round open on a gated model call
+and assert both behaviours against it.
+
+One residual, and it is narrow: `session.create` and `run.start` are two
+commits, so a cancel landing between them finds no run and truthfully answers
+"nothing was running" while the round then starts uncancelled. The user's next
+turn hits the await path and reports it rather than spending again, and stopping
+that turn cancels it — so the cost is one round the user asked to stop and got
+anyway, not a runaway. Closing it properly means creating the session and its
+first run in one mutation.
+
+Ownership, session and live round are resolved together in `routeChat`, under
+one lock and in that order, because the order is the correctness property: a
+foreign chat must be refused before anything asks whether its session has a
+round going. `ChatTurnFor` and `ChatCancelFor` share the one rule, and a cancel
+for another project's chat is answered as "nothing was running" — another
+project's round is emphatically not ours to end.
+
+A run that has reached any resting state is not live, so the next question
+starts a round of its own and a late cancel truthfully answers "nothing was
+running". A document replaced by `Load` takes its runs with it, and
+`RehydrateOnLoad` demotes anything left in flight, so neither a project switch
+nor a crashed process can wedge a chat behind a round that will never finish.
 
 **Choosing a council is refused rather than guessed.** `/council <id>` naming a
 council the open document does not hold is an error: falling through to "the

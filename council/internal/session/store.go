@@ -58,7 +58,6 @@ type Store struct {
 	// chat whose owning document has not been opened at all since the restart is
 	// a chat this process has no way to place.
 	chatProject map[string]string
-	chatRuns    map[string]chatRun
 	chatPending map[string]string
 	chatCouncil map[string]string
 	chatSeq     int
@@ -94,7 +93,6 @@ func New() (*Store, error) {
 		chat:        unavailableChatHost{},
 		live:        map[string]*runControl{},
 		chatProject: map[string]string{},
-		chatRuns:    map[string]chatRun{},
 		chatPending: map[string]string{},
 		chatCouncil: map[string]string{},
 		now:         func() string { return time.Now().UTC().Format("2006-01-02T15:04:05Z") },

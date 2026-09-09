@@ -58,7 +58,17 @@ type providerHost struct {
 	// gate, when non-nil, holds every host.providers.chat call until it is
 	// closed. It is how a round can be caught mid-flight and cancelled, or held
 	// running while something else is asserted about it.
-	gate chan struct{}
+	gate       chan struct{}
+	gateOpen   bool
+	modelsOpen bool
+
+	// finished is closed when the test ends, and over stops any goroutine still
+	// in flight from logging afterwards. Both are needed: a helper called from
+	// a turn goroutine must stop WAITING when the test is over (finished) and
+	// must not touch *testing.T once it has (over), which panics.
+	finished chan struct{}
+	failMu   sync.Mutex
+	over     bool
 	// modelsGate does the same for the two catalogue listings, so the startup
 	// handshake can be held mid-flight.
 	modelsGate chan struct{}
@@ -99,9 +109,73 @@ func newProviderHost(t *testing.T, store *session.Store) *providerHost {
 			"anthropic": {{"model_name": "claude-test", "display": "Claude Test"}},
 		},
 	}
+	h.finished = make(chan struct{})
 	go h.route(json.NewDecoder(outR))
-	t.Cleanup(func() { _ = inW.Close() })
+	// Order matters. Gates are released first so a capability handler blocked
+	// inside one returns and the turn goroutine waiting on it can finish;
+	// finished then unblocks anything still waiting on a reply; and only after
+	// that is logging closed off, because a helper that logs after the test has
+	// completed panics the whole run rather than failing one test.
+	t.Cleanup(func() {
+		h.release()
+		close(h.finished)
+		_ = inW.Close()
+		h.failMu.Lock()
+		h.over = true
+		h.failMu.Unlock()
+	})
 	return h
+}
+
+// fail records a harness failure from ANY goroutine.
+//
+// Never Fatalf: it only stops the goroutine that calls it, so a turn goroutine
+// would carry on into assertions with no result. Never after the test is over:
+// testing panics on a log from a goroutine outliving its test, which takes down
+// every other test in the package with it.
+func (h *providerHost) fail(format string, args ...any) {
+	h.failMu.Lock()
+	defer h.failMu.Unlock()
+	if h.over {
+		return
+	}
+	h.t.Errorf(format, args...)
+}
+
+// release opens any gate this test installed, so nothing is left blocked in a
+// capability handler when the test ends.
+func (h *providerHost) release() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.gate != nil && !h.gateOpen {
+		h.gateOpen = true
+		close(h.gate)
+	}
+	if h.modelsGate != nil && !h.modelsOpen {
+		h.modelsOpen = true
+		close(h.modelsGate)
+	}
+}
+
+// openChat and openModels release a gate from the test body. They go through
+// the same bookkeeping release() uses so the cleanup cannot close a channel
+// twice.
+func (h *providerHost) openChat() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.gate != nil && !h.gateOpen {
+		h.gateOpen = true
+		close(h.gate)
+	}
+}
+
+func (h *providerHost) openModels() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.modelsGate != nil && !h.modelsOpen {
+		h.modelsOpen = true
+		close(h.modelsGate)
+	}
 }
 
 // route is the host's stdout drain. It classifies by shape exactly as
@@ -214,20 +288,18 @@ func (h *providerHost) answerCapability(message map[string]any) {
 // holdChat and holdModels install a gate under the lock. They are setters
 // rather than plain field writes because route reads the gates from another
 // goroutine, and the suite is run with -race.
-func (h *providerHost) holdChat() chan struct{} {
-	gate := make(chan struct{})
+func (h *providerHost) holdChat() {
 	h.mu.Lock()
-	h.gate = gate
-	h.mu.Unlock()
-	return gate
+	defer h.mu.Unlock()
+	h.gate = make(chan struct{})
+	h.gateOpen = false
 }
 
-func (h *providerHost) holdModels() chan struct{} {
-	gate := make(chan struct{})
+func (h *providerHost) holdModels() {
 	h.mu.Lock()
-	h.modelsGate = gate
-	h.mu.Unlock()
-	return gate
+	defer h.mu.Unlock()
+	h.modelsGate = make(chan struct{})
+	h.modelsOpen = false
 }
 
 func (h *providerHost) write(message map[string]any) {
@@ -248,11 +320,16 @@ func (h *providerHost) rpc(id int, method string, params map[string]any) map[str
 	select {
 	case response, open := <-waiter:
 		if !open {
-			h.t.Fatalf("%s: the backend closed the stream before answering", method)
+			h.fail("%s: the backend closed the stream before answering", method)
+			return nil
 		}
 		return response
+	case <-h.finished:
+		// The test is over and this goroutine is on its way out. Saying
+		// anything now would panic the package.
+		return nil
 	case <-time.After(20 * time.Second):
-		h.t.Fatalf("%s: no reply in 20s", method)
+		h.fail("%s: no reply in 20s", method)
 		return nil
 	}
 }
@@ -261,18 +338,24 @@ func (h *providerHost) rpc(id int, method string, params map[string]any) map[str
 func (h *providerHost) tool(id int, name string, args map[string]any) map[string]any {
 	h.t.Helper()
 	response := h.rpc(id, "tools/call", map[string]any{"name": name, "arguments": args})
+	if response == nil {
+		return nil
+	}
 	if response["error"] != nil {
-		h.t.Fatalf("%s: protocol error %v", name, response["error"])
+		h.fail("%s: protocol error %v", name, response["error"])
+		return nil
 	}
 	result, _ := response["result"].(map[string]any)
 	content, _ := result["content"].([]any)
 	if len(content) != 1 {
-		h.t.Fatalf("%s: expected one content part, got %v", name, result["content"])
+		h.fail("%s: expected one content part, got %v", name, result["content"])
+		return nil
 	}
 	text, _ := content[0].(map[string]any)["text"].(string)
 	var body map[string]any
 	if err := json.Unmarshal([]byte(text), &body); err != nil {
-		h.t.Fatalf("%s: tool body is not JSON: %v (%s)", name, err, text)
+		h.fail("%s: tool body is not JSON: %v (%s)", name, err, text)
+		return nil
 	}
 	return body
 }
@@ -756,7 +839,7 @@ func TestCouncilChatCancelStopsTheRound(t *testing.T) {
 	}
 	store.SetClock(func() string { return "2026-01-01T00:00:00Z" })
 	host := newProviderHost(t, store)
-	gate := host.holdChat()
+	host.holdChat()
 	host.rpc(1, "initialize", map[string]any{})
 	host.awaitCapability("host.chat_providers.register")
 
@@ -785,24 +868,26 @@ func TestCouncilChatCancelStopsTheRound(t *testing.T) {
 	replies := make(chan map[string]any, 1)
 	go func() { replies <- host.turn(3, chatID, "Take your time.") }()
 
-	sessionID := awaitBoundSession(t, store, chatID)
+	// Wait for the RUN, not just the session: session.create commits before
+	// run.start does, and a cancel sent in that gap would find nothing because
+	// there was nothing yet — a different bug from the one under test.
+	sessionID, _ := awaitLiveRun(t, store, chatID)
 	cancelled := host.tool(4, chatCancelTool, map[string]any{"chat_id": chatID})
-	if kind := str(cancelled["kind"]); kind == session.ChatError {
+	// Recorded, not asserted yet: the turn goroutine is still blocked inside
+	// the gate, and a Fatal here would end the test with it stranded.
+	cancelFailed := str(cancelled["kind"]) == session.ChatError
+	host.openChat()
+
+	reply := awaitTurn(t, replies)
+	if cancelFailed {
 		t.Fatalf("a cancel must not fail: %v", cancelled)
 	}
-	close(gate)
-
-	select {
-	case reply := <-replies:
-		// The user asked to stop, so the turn must not come back as an answer
-		// nobody wanted. The host has already resolved their turn with
-		// "Request cancelled." by now (PluginProvider.gd:132-140); what matters
-		// here is that Council's own record says cancelled.
-		if kind := str(reply["kind"]); kind != session.ChatError {
-			t.Errorf("a cancelled round is a visible failure, not an answer: %v", reply)
-		}
-	case <-time.After(20 * time.Second):
-		t.Fatal("the cancelled turn never returned")
+	// The user asked to stop, so the turn must not come back as an answer
+	// nobody wanted. The host has already resolved their turn with
+	// "Request cancelled." by now (PluginProvider.gd:132-140); what matters
+	// here is that Council's own record says cancelled.
+	if kind := str(reply["kind"]); kind != session.ChatError {
+		t.Errorf("a cancelled round is a visible failure, not an answer: %v", reply)
 	}
 	if status := sessionStatus(t, store, sessionID); status != "cancelled" {
 		t.Errorf("the session must record the cancellation; got %q", status)
@@ -913,7 +998,7 @@ func TestCouncilRegistersBeforeReadingTheModelCatalogue(t *testing.T) {
 		t.Fatal(err)
 	}
 	host := newProviderHost(t, store)
-	modelsGate := host.holdModels()
+	host.holdModels()
 	host.rpc(1, "initialize", map[string]any{})
 
 	registration := host.awaitCapability("host.chat_providers.register")
@@ -926,7 +1011,7 @@ func TestCouncilRegistersBeforeReadingTheModelCatalogue(t *testing.T) {
 	}
 
 	// Released, the catalogue lands on its own budget and the engine picks it up.
-	close(modelsGate)
+	host.openModels()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, known := store.Models(); known {
@@ -953,7 +1038,7 @@ func TestCouncilChatDoesNotStartASecondRoundWhileOneIsRunning(t *testing.T) {
 	}
 	store.SetClock(func() string { return "2026-01-01T00:00:00Z" })
 	host := newProviderHost(t, store)
-	gate := host.holdChat()
+	host.holdChat()
 	host.rpc(1, "initialize", map[string]any{})
 	host.awaitCapability("host.chat_providers.register")
 	seedWorkshopCouncil(t, host, store, 2)
@@ -962,7 +1047,7 @@ func TestCouncilChatDoesNotStartASecondRoundWhileOneIsRunning(t *testing.T) {
 	firstTurn := make(chan map[string]any, 1)
 	go func() { firstTurn <- host.turn(3, chatID, "How much capacity should the workshop hold?") }()
 
-	sessionID := awaitBoundSession(t, store, chatID)
+	sessionID, _ := awaitLiveRun(t, store, chatID)
 	// The council's one advisor is now inside the gate, so the round cannot
 	// rest and anything arriving next necessarily arrives mid-round.
 	awaitModelCalls(t, host, 1)
@@ -970,20 +1055,26 @@ func TestCouncilChatDoesNotStartASecondRoundWhileOneIsRunning(t *testing.T) {
 	secondTurn := make(chan map[string]any, 1)
 	go func() { secondTurn <- host.turn(4, chatID, "Actually, what about demand instead?") }()
 
-	// A second round would send its own advisor call. Watch for one: the window
-	// is what makes the negative meaningful, and a call that arrives later than
-	// this still shows up in the run count below.
+	// A second round would send its own advisor call. Watch for one over a
+	// window — the window is what makes the negative meaningful — and RECORD
+	// rather than fail, because both turn goroutines are still inside the gate
+	// and a Fatal here would strand them.
+	extra := 0
 	settle := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(settle) {
 		if calls := host.modelCalls(); len(calls) != 1 {
-			t.Fatalf("a second turn must watch the running round, not start another; the host saw %d model calls", len(calls))
+			extra = len(calls)
+			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	close(gate)
+	host.openChat()
 	first := awaitTurn(t, firstTurn)
 	second := awaitTurn(t, secondTurn)
+	if extra != 0 {
+		t.Fatalf("a second turn must watch the running round, not start another; the host saw %d model calls", extra)
+	}
 
 	if kind := str(first["kind"]); kind != session.ChatAnswer {
 		t.Fatalf("the first turn must answer once the round lands: %v", first)
@@ -1134,6 +1225,38 @@ func seedWorkshopCouncil(t *testing.T, host *providerHost, store *session.Store,
 		t.Fatalf("definition.upsert: %v", reply)
 	}
 	return str(definition["definition_id"])
+}
+
+// awaitLiveRun waits until the chat's session actually holds a run that is
+// going somewhere.
+//
+// Waiting for the SESSION is not enough, and that was the bug in the first
+// draft of these tests: session.create commits before run.start does, so a
+// cancel sent on that signal could arrive before the run existed at all. The
+// run is in the record from the moment run.start's mutation commits, which is
+// the same instant the backend itself can first find it.
+func awaitLiveRun(t *testing.T, store *session.Store, chatID string) (string, string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, record := range sessionsOf(t, store) {
+			binding, _ := record["chat_binding"].(map[string]any)
+			if str(binding["chat_id"]) != chatID {
+				continue
+			}
+			runs, _ := record["runs"].([]any)
+			for _, r := range runs {
+				run, _ := r.(map[string]any)
+				switch str(run["status"]) {
+				case "pending", "running":
+					return str(record["session_id"]), str(run["run_id"])
+				}
+			}
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("no run for %s ever reached a live state", chatID)
+	return "", ""
 }
 
 // awaitModelCalls waits until the host has been asked for at least n models.

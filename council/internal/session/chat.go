@@ -122,27 +122,20 @@ func (s *Store) ChatTurnFor(turn ChatTurn, wait time.Duration) ChatTurnResult {
 			len(text), maxQuestionBytes)}
 	}
 
-	// A round already running for this chat is reported, never joined by a
-	// second one. The host has no idea a turn is still in flight — it resolved
-	// the user's last turn with "still deliberating" and let them type again —
-	// so without this a user who asks twice pays for two full benches and gets
-	// two syntheses of the same question.
-	if active, live := s.liveRunFor(chatID); live {
-		return s.chatAwait(chatID, active, text, wait)
+	route := s.routeChat(chatID)
+	if route.foreign {
+		return ChatTurnResult{Reply: s.foreignChatRefusal(chatID)}
 	}
-
-	sessionID, owned := s.sessionForChat(chatID)
-	if sessionID != "" {
-		return s.chatFollowUp(chatID, sessionID, text, wait)
+	// A round already running for this chat's session is reported, never joined
+	// by a second one. The host has no idea a turn is still in flight — it
+	// resolved the user's last turn with "still deliberating" and let them type
+	// again — so without this a user who asks twice pays for two full benches
+	// and gets two syntheses of the same question.
+	if route.hasLive {
+		return s.chatAwait(chatID, route.live, text, wait)
 	}
-	if !owned {
-		// This chat was routed against a document that is no longer loaded.
-		// Starting a fresh session here would put one project's consultation
-		// into another project's record, which is the one thing the binding
-		// exists to prevent.
-		return ChatTurnResult{Reply: chatErrorf(
-			"This chat belongs to a Council session in another project's document (project %s), not the one currently open. Reopen that Council document and ask again, or start a new chat for this one.",
-			s.chatOwner(chatID))}
+	if route.sessionID != "" {
+		return s.chatFollowUp(chatID, route.sessionID, text, wait)
 	}
 	return s.chatOpenSession(chatID, "", text, wait)
 }
@@ -159,12 +152,15 @@ const maxQuestionBytes = 8000
 // tolerant by design: a cancel for a chat with no run, or for a run that has
 // already stopped, is a success that moves nothing.
 func (s *Store) ChatCancelFor(chatID string) ChatReply {
-	s.mu.Lock()
-	active, running := s.chatRuns[strings.TrimSpace(chatID)]
-	s.mu.Unlock()
-	if !running {
+	route := s.routeChat(strings.TrimSpace(chatID))
+	if route.foreign || !route.hasLive {
+		// A cancel is fire-and-forget and never reaches the user, so a chat
+		// this document does not own is answered the same way as one with
+		// nothing running: there is nothing here to stop either way, and
+		// another project's round is emphatically not ours to end.
 		return ChatReply{Kind: ChatAnswer, Text: "There was nothing running for this chat."}
 	}
+	active := route.live
 	reply := s.chatCommand("run.cancel", map[string]any{
 		"session_id": active.sessionID,
 		"run_id":     active.runID,
@@ -249,15 +245,14 @@ func (s *Store) chatAwait(chatID string, active chatRun, unsent string, wait tim
 		"run_id":     active.runID,
 	}, false, &seconds)
 	if !reply.OK {
-		// The run is gone — a document replaced under it, most likely. Drop the
-		// handle so the next turn is free to start a fresh round.
-		s.forgetChatRun(chatID)
+		// The run is gone — a document replaced under it, most likely. The next
+		// turn reads the record again and is free to start a fresh round.
 		return ChatTurnResult{
 			SessionID: active.sessionID,
 			Reply:     chatErrorf("The round this chat was waiting on could not be read: %s", reply.Error.Message),
 		}
 	}
-	rendered := s.settleRound(chatID, reply.Payload)
+	rendered := renderRound(reply.Payload)
 	if unsent != "" && !restingStatus(str(reply.Payload["status"])) {
 		rendered.Text += "\n\nYour new question has NOT been asked — the council is still on the previous one, and starting a second round would consult the whole bench twice. Ask it again once this round lands."
 	} else if unsent != "" {
@@ -336,12 +331,11 @@ func (s *Store) chatRound(chatID, sessionID string, payload map[string]any, wait
 			Reply:     chatErrorf("The council could not be consulted: %s", reply.Error.Message),
 		}
 	}
-	runID := str(reply.Payload["run_id"])
-	s.rememberRun(chatID, sessionID, runID)
+	s.noteChat(chatID)
 	return ChatTurnResult{
 		SessionID: sessionID,
-		RunID:     runID,
-		Reply:     s.settleRound(chatID, reply.Payload),
+		RunID:     str(reply.Payload["run_id"]),
+		Reply:     renderRound(reply.Payload),
 	}
 }
 
@@ -358,25 +352,10 @@ func waitSecondsFor(wait time.Duration) int {
 	return seconds
 }
 
-// settleRound renders a run and releases the chat's handle once the round is at
-// rest.
-//
-// The handle does two jobs, and both end together: it is what a cancel carrying
-// only a chat_id reaches, and it is what stops the next turn starting a second
-// round over the same question. Once the round rests there is nothing to cancel
-// and nothing to collide with, so a later cancel truthfully answers "nothing
-// was running" and the next question starts a round of its own.
-func (s *Store) settleRound(chatID string, payload map[string]any) ChatReply {
-	if restingStatus(str(payload["status"])) {
-		s.forgetChatRun(chatID)
-	}
-	return renderRound(payload)
-}
-
 // restingStatus reports whether a run has stopped moving. The two live states
 // are named rather than the five resting ones, so a status added to the enum
-// later is treated as resting — which releases a handle early at worst, and
-// never holds a chat's next question behind a run that is not going anywhere.
+// later is treated as resting — which frees the chat to ask again at worst, and
+// never wedges it behind a run that is not going anywhere.
 func restingStatus(status string) bool {
 	switch status {
 	case "pending", "running":
@@ -472,26 +451,43 @@ func usageOf(payload map[string]any) (int, int) {
 // the chat routing table
 // ---------------------------------------------------------------------------
 
-// sessionForChat resolves a chat to the session it is bound to in the loaded
-// document. At most one session can carry a given chat_id — checkSnapshot
-// refuses a document where two do — so the first match is the only match, and
-// this is a lookup rather than a choice.
+// chatRoute is where one chat's turn belongs in the open document.
 //
-// The second value reports whether this chat may open a session here at all:
-// false means Council has routed it before, against a document that belongs to
-// another project, so continuing it here would put one project's consultation
-// into another project's record.
+// It is ONE answer produced under ONE lock, in a fixed order, because the order
+// is the correctness property: ownership is decided first, then the session,
+// then the round. Two separate lookups let a foreign chat be routed to a live
+// round before anything had asked whose chat it was.
+type chatRoute struct {
+	// foreign is set when this chat belongs to another project. Nothing else in
+	// the struct is meaningful when it is.
+	foreign bool
+	// sessionID is the session this chat continues, empty when it has none here.
+	sessionID string
+	// live is the round that session currently has going, if any.
+	live    chatRun
+	hasLive bool
+}
+
+// routeChat resolves a chat against the loaded document.
 //
-// The judgement is made against PROJECT IDENTITY, which is durable, rather than
-// against the load generation, which is not. A binding found in the loaded
-// document is stamped with the project it was made in, so a session carried
-// into another project by an import still says whose chat it is; and the
-// routing table this consults is rebuilt from every document the process loads
-// (adoptChatRoutes), so a plugin restart no longer erases the guard.
-func (s *Store) sessionForChat(chatID string) (string, bool) {
+// Ownership is judged on PROJECT IDENTITY, which is durable, rather than on a
+// load generation, which is not. A binding found in the loaded document carries
+// the project it was made in, so a session carried into another project by an
+// import still says whose chat it is; and the routing table consulted when the
+// document holds no such session is rebuilt from every document the process
+// loads (adoptChatRoutes), so a plugin restart no longer erases the guard.
+//
+// The live round is read from the RECORD and only from the session this
+// resolves to. A handle remembered by the turn that started a round is written
+// when run.start RETURNS — after its bounded wait of up to 90 s — so for the
+// whole duration of a round there would be nothing recorded to find, which is
+// exactly when the host's cancel arrives and when an impatient user types
+// again. The snapshot has the run from the instant run.start's mutation
+// commits.
+func (s *Store) routeChat(chatID string) chatRoute {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	project := str(s.snapshot["project_id"])
+	project := s.projectID()
 	for _, x := range arr(s.snapshot["sessions"]) {
 		record := obj(x)
 		binding := obj(record["chat_binding"])
@@ -500,15 +496,32 @@ func (s *Store) sessionForChat(chatID string) (string, bool) {
 		}
 		// A binding stamped with another project's id came in with a session
 		// that was imported or copied. The chat is that project's, and this
-		// document is not where its follow-ups belong.
+		// document is not where its follow-ups belong — nor is its round one
+		// this chat may watch or cancel.
 		if owner := str(binding["project_id"]); owner != "" && owner != project {
-			return "", false
+			return chatRoute{foreign: true}
 		}
 		s.chatProject[chatID] = project
-		return str(record["session_id"]), true
+		route := chatRoute{sessionID: str(record["session_id"])}
+		// The NEWEST live run, not the first found: runs are appended, so the
+		// last one is the round the user is actually waiting on.
+		for _, r := range arr(record["runs"]) {
+			run := obj(r)
+			if restingStatus(str(run["status"])) {
+				continue
+			}
+			route.live = chatRun{sessionID: route.sessionID, runID: str(run["run_id"])}
+			route.hasLive = true
+		}
+		// One chat has one session, so there is nowhere else to look.
+		return route
 	}
-	owner, known := s.chatProject[chatID]
-	return "", !known || owner == project
+	// No session here. The routing table is the only remaining evidence, and it
+	// outlives a restart because every Load rebuilds it from the record.
+	if owner, known := s.chatProject[chatID]; known && owner != project {
+		return chatRoute{foreign: true}
+	}
+	return chatRoute{}
 }
 
 // adoptChatRoutes rebuilds the chat routing table from the document just
@@ -618,43 +631,6 @@ func (s *Store) mintSessionID() string {
 		record, _ := findByID(s.snapshot["sessions"], "session_id", candidate)
 		return record != nil
 	})
-}
-
-func (s *Store) rememberRun(chatID, sessionID, runID string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.chatRuns[chatID] = chatRun{sessionID: sessionID, runID: runID}
-	s.chatProject[chatID] = s.projectID()
-	s.pruneChatRoutes()
-}
-
-// liveRunFor reports the round this chat has going, if it still has one. The
-// handle is removed as soon as a round comes to rest, so its presence IS the
-// claim that something is still running.
-//
-// A handle whose session is not in the document now loaded is dropped here
-// rather than reported. Load cancels the runs it replaces but the handles
-// outlive it, and reporting one would answer the first turn after a project
-// switch with "that round could not be read" instead of the cross-project
-// refusal that actually explains what happened.
-func (s *Store) liveRunFor(chatID string) (chatRun, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	active, live := s.chatRuns[chatID]
-	if !live {
-		return chatRun{}, false
-	}
-	if record, _ := findByID(s.snapshot["sessions"], "session_id", active.sessionID); record == nil {
-		delete(s.chatRuns, chatID)
-		return chatRun{}, false
-	}
-	return active, true
-}
-
-func (s *Store) forgetChatRun(chatID string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.chatRuns, chatID)
 }
 
 func (s *Store) noteChat(chatID string) {
@@ -773,6 +749,18 @@ func (s *Store) nextChatRequestID() string {
 	defer s.mu.Unlock()
 	s.chatSeq++
 	return fmt.Sprintf("chat-%d", s.chatSeq)
+}
+
+// foreignChatRefusal is what a chat belonging to another project is told.
+//
+// It is a function rather than a literal because ChatTurnFor is not the only
+// caller that must not guess: keeping the wording and the reasoning in one
+// place is what stops a second entry point inventing a friendlier answer that
+// quietly adopts the chat.
+func (s *Store) foreignChatRefusal(chatID string) ChatReply {
+	return chatErrorf(
+		"This chat belongs to a Council session in another project's document (project %s), not the one currently open. Reopen that Council document and ask again, or start a new chat for this one.",
+		s.chatOwner(chatID))
 }
 
 // chatOwner names the project a chat was routed into, for a refusal the user
