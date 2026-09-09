@@ -102,7 +102,7 @@ def test_an_evaluated_clean_part_is_not_told_to_evaluate_again():
 
     source = "block = cube(10, 20, 30)\n"
     saved = methods._last_program
-    methods._last_program = (hash(source), {"mesh_defects": {}, "shape_name": "block",
+    methods._last_program = ((methods._digest(source), 0.1, 0.1), {"mesh_defects": {}, "shape_name": "block",
                                             "body_count": 1, "mesh_defect_sites": {}})
     try:
         reply = methods._mesh_invalid_error(

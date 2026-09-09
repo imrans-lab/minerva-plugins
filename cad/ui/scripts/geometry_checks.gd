@@ -235,7 +235,7 @@ func _keep_part_report(panel: Object, args: Dictionary,
 		return
 	# _PartCache is declared by clearance_report.gd, further down the chain
 	# this script extends, which is the other half of the same join.
-	_PartCache.put_interference(panel, str(report.get("source_digest", "")),
+	_PartCache.put_interference(panel, str(report.get("scope_digest", report.get("source_digest", ""))),
 		report)
 
 
@@ -261,7 +261,7 @@ func _run(panel: Object, args: Dictionary, ticket: int = 0) -> Dictionary:
 
 	var document: Dictionary = {}
 	if panel.has_method("get_document_state"):
-		document = panel.get_document_state()
+		document = preload("evaluation_state.gd").document(panel, args)
 	# A part-scoped check brings its own tessellation; otherwise the shape the
 	# document evaluates to.
 	var scoped_mesh: Dictionary = args.get("mesh", {}) as Dictionary
@@ -275,7 +275,7 @@ func _run(panel: Object, args: Dictionary, ticket: int = 0) -> Dictionary:
 	# it — so its collider is welded once and swapped back in for the legs
 	# that follow. The document's own render target has none and rebuilds.
 	var triangles := build_solid(scoped_mesh, ticket,
-		_source_digest(scoped_source) if part_scoped else "")
+		_PartCache.scope_digest(args) if part_scoped else "")
 	if triangles < 0:
 		return _nothing("another check holds this panel's geometry; nothing "
 			+ "was measured")
@@ -361,6 +361,7 @@ func _run(panel: Object, args: Dictionary, ticket: int = 0) -> Dictionary:
 	# document — can neither mark a node as buried nor clear one.
 	if bool(reply.get("checked", false)):
 		reply["source_digest"] = _source_digest(scoped_source)
+		reply["scope_digest"] = _PartCache.scope_digest(args)
 		reply["records_digest"] = records_digest
 		reply["gauge_generation"] = gauge_generation
 		if colliders_rebuilt:

@@ -58,6 +58,7 @@ from .lexer import LexError, TT, Token
 
 # Command keywords that take a bare (non-parenthesised) argument list
 _COMMAND_KEYWORDS: set[TT] = {
+    TT.KW_ANNOTATE,
     TT.KW_FILLET,
     TT.KW_CHAMFER,
     TT.KW_SHELL,

@@ -149,6 +149,26 @@ func clear_cache() -> void:
 	_reader.clear_stamps()
 
 
+## Independent mounted records with shared immutable load/conversion artifacts.
+func fork() -> RefCounted:
+	var other: RefCounted = get_script().new()
+	other._cache = _cache
+	other.outline_triangle_budget = outline_triangle_budget
+	other.max_triangles = max_triangles
+	other.max_file_bytes = max_file_bytes
+	return other
+
+
+func refresh_stamps() -> void:
+	_reader.clear_stamps()
+
+func dependency_paths(path: String) -> Array:
+	var paths: Array = [path]
+	if path.get_extension().to_lower() == "gltf" and FileAccess.file_exists(path):
+		paths.append_array(_reader._external_file_paths(path))
+	return paths
+
+
 ## Identity of the bytes on disk — a content digest, so a rewrite that keeps
 ## the length still reads as a change. Public so a test can see that the cache
 ## is keyed on content; the scheme that makes it cheap is the reader's.

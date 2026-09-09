@@ -87,6 +87,7 @@ from .ast_nodes import (
     UnaryOp,
     While,
 )
+from .assembly import Assembly, Instance, make_instance, make_assembly, configure
 from .edge_numbering import number_edges_2d, number_edges_extruded
 from .reference import (
     MeshReference,
@@ -171,6 +172,7 @@ class Translator:
         # records intent — it does NOT write to disk during translation.
         # Call ``write_exports()`` (or walk this list externally) to flush.
         self.export_targets: list[dict[str, Any]] = []
+        self.annotations: list[dict[str, Any]] = []
         self._in_sketch = False  # whether we're inside a sketch: block
         # Track 2D profile vertices for edge numbering.
         # Maps variable name -> list of (x, y) vertices of the composite profile.
@@ -249,13 +251,17 @@ class Translator:
         """True for a value that carries a B-Rep the panel can render."""
         return hasattr(value, "tessellate") and hasattr(value, "volume")
 
+    @classmethod
+    def is_renderable(cls, value: Any) -> bool:
+        return cls.is_part(value) or isinstance(value, (Assembly, Instance))
+
     def _bind_value(self, name: str, value: Any) -> None:
         """Bind a value into the env and, if it's a 3D part, mark it as the
         current render target. Centralizing this keeps render-target tracking
         out of dict-insertion-order semantics.
         """
         self.env[name] = value
-        if self.is_part(value):
+        if self.is_renderable(value):
             self._last_part_name = name
 
     def select_result(self, name: str, value: Any) -> None:
@@ -281,6 +287,8 @@ class Translator:
         A reference has no B-Rep to cut, fillet or shell, so silently ignoring
         it would leave the user with a document that looks like it worked.
         """
+        if isinstance(value, (Instance, Assembly)):
+            raise TranslatorError(f"{operation} cannot alter an instance or assembly; operate on its definition instead")
         if isinstance(value, MeshReference):
             raise TranslatorError(
                 f"{operation} cannot be applied to mesh reference {value.label}"
@@ -741,6 +749,19 @@ class Translator:
         # win.
         if node.name in self._module_defs:
             return self._call_module(node)
+        if node.name == "instance":
+            return self._assembly_call(node)
+        if node.name == "assembly":
+            return self._assembly_call(node)
+        if node.name == "configuration":
+            return self._assembly_call(node)
+        if node.name == "edges":
+            from .edge_rules import select_edges
+            try:
+                return select_edges(*(self._eval_expr(v) for v in node.args),
+                    **{key: self._eval_expr(v) for key, v in node.kwargs.items()})
+            except (TypeError, ValueError) as exc:
+                raise TranslatorError(str(exc)) from exc
         if node.name == "rect":
             return self._make_rect(node)
         if node.name == "circle":
@@ -1116,6 +1137,22 @@ class Translator:
             raise TranslatorError("cylinder() radii must be numeric")
         return (float(height), None, float(radius1), float(radius2))
 
+    def _assembly_call(self, node: FuncCall) -> Any:
+        args = [self._eval_expr(a) for a in node.args]
+        kwargs = {k: self._eval_expr(v) for k, v in node.kwargs.items()}
+        try:
+            if node.name == "instance":
+                if len(args) != 1:
+                    raise ValueError("instance() requires one definition value")
+                definition = next((name for name, value in self._env_stack[0].items() if value is args[0]), None)
+                kwargs.setdefault("definition", definition or kwargs.get("id", ""))
+                return make_instance(args[0], **kwargs)
+            if node.name == "assembly":
+                return make_assembly(*args, **kwargs)
+            return configure(*args, **kwargs)
+        except (ValueError, TypeError) as exc:
+            raise TranslatorError(str(exc), line=node.line) from exc
+
     def _make_mesh(self, node: FuncCall) -> Any:
         """``mesh("path", units=, up=)`` — a foreign mesh file, never opened.
 
@@ -1143,7 +1180,7 @@ class Translator:
     def _apply_translate(self, node: FuncCall) -> Any:
         """Translate a shape using OpenSCAD-style translate([x, y, z], shape)."""
         offset_values, shape = self._coerce_transform_args(node, "translate")
-        if isinstance(shape, MeshReference):
+        if isinstance(shape, (MeshReference, Instance, Assembly)):
             return shape.posed(translation(offset_values))
         result = shape.moved(Location(tuple(offset_values), (0.0, 0.0, 0.0)))
         self._pending_edge_registry = self._enumerate_edges(result)
@@ -1152,7 +1189,7 @@ class Translator:
     def _apply_rotate(self, node: FuncCall) -> Any:
         """Rotate a shape using OpenSCAD-style rotate([rx, ry, rz], shape)."""
         rotation_values, shape = self._coerce_transform_args(node, "rotate")
-        if isinstance(shape, MeshReference):
+        if isinstance(shape, (MeshReference, Instance, Assembly)):
             return shape.posed(rotation(rotation_values))
         result = shape.moved(Location((0.0, 0.0, 0.0), tuple(rotation_values)))
         self._pending_edge_registry = self._enumerate_edges(result)
@@ -1209,7 +1246,7 @@ class Translator:
             raise TranslatorError(f"{name}() vector values must be numeric")
 
         shape = self._eval_expr(node.args[1])
-        if not isinstance(shape, MeshReference) and not hasattr(shape, "moved"):
+        if not isinstance(shape, (MeshReference, Instance, Assembly)) and not hasattr(shape, "moved"):
             raise TranslatorError(f"{name}() second argument must be a shape")
         return ([float(value) for value in raw_values], shape)
 
@@ -1351,7 +1388,19 @@ class Translator:
     # ------------------------------------------------------------------
 
     def _eval_command(self, node: Command) -> None:
-        if node.name == "fillet":
+        if node.name == "annotate":
+            from .annotations import annotation_record
+            try:
+                record = annotation_record([self._eval_expr(a) for a in node.args],
+                    {k: self._eval_expr(v) for k, v in node.kwargs.items()}, len(self.annotations), node.line)
+                if any(a["id"] == record["id"] for a in self.annotations):
+                    raise ValueError(f"duplicate annotation id: {record['id']}")
+                if len(self.annotations) >= 200:
+                    raise ValueError("a render supports at most 200 source annotations")
+                self.annotations.append(record)
+            except ValueError as exc:
+                raise TranslatorError(str(exc), line=node.line) from exc
+        elif node.name == "fillet":
             self._cmd_fillet(node)
         elif node.name == "chamfer":
             self._cmd_chamfer(node)
@@ -1455,6 +1504,12 @@ class Translator:
         Empty list → TranslatorError. Non-int / non-list-of-int → TranslatorError.
         """
         value = self._eval_expr(edge_num_node)
+
+        from .edge_rules import EdgeSelection
+        if isinstance(value, EdgeSelection):
+            if value.shape is not shape:
+                raise TranslatorError("edge selection belongs to a different or superseded shape; select edges again")
+            return list(value.edges)
 
         if isinstance(value, (list, tuple)):
             if len(value) == 0:

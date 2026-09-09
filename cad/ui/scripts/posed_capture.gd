@@ -542,6 +542,8 @@ static func _is_one_colour(image: Image) -> bool:
 ## Pick a shaded pane by presentation mode, independently of whether the
 ## document contains a generated solid or only imported references.
 static func _mesh_root(panel) -> Node3D:
+	if panel.has_method("get_query_mesh_root"):
+		return panel.get_query_mesh_root()
 	var fallback: Node3D = null
 	for path in _PanelMeasurement.MESH_ROOT_PATHS:
 		var root := panel.get_node_or_null(path) as Node3D

@@ -26,6 +26,8 @@ var Evaluate = ToolSpec{
 	InputSchema: json.RawMessage(`{
 		"type": "object",
 		"properties": {
+			"selection": {"type": "string", "description": "Named evaluated binding, instance or reference; optional namespace binding:, instance: or reference:. Does not rewrite source."},
+			"configuration": {"type": "string", "description": "Assembly configuration binding; defaults to source render target."},
 			"source": {"type": "string", "description": ".mcad DSL source code"},
 			"summary": {"type": "boolean", "description": "Return the evaluation without its mesh: shape_name, body_count, bbox, vertex/face/edge counts and mesh_defects (counts) plus mesh_defect_sites, which locates non-manifold edges (up to 64 sites spread across the part, with the total count beside them) and a capped sample of degenerate faces. Default false."}
 		},

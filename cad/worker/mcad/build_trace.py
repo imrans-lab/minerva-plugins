@@ -237,7 +237,7 @@ def _select_result(translator: Translator, expr: Any) -> None:
     """
     value = translator._eval_expr(expr)
     name = expr.name if isinstance(expr, Identifier) else _RESULT_BINDING
-    if not translator.is_part(value):
+    if not translator.is_renderable(value):
         subject = f"'{expr.name}'" if isinstance(expr, Identifier) else "expression"
         raise TranslatorError(
             f"The program's final {subject} is a {type(value).__name__}, not a "

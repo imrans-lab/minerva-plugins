@@ -51,23 +51,6 @@ const MEASURING_VERBS: Array = [
 	"minerva_cad_check_design",
 ]
 
-## The verbs whose replies carry the stamp: the measuring ones, the await that
-## exists to clear it, and the posed capture. The capture is STAMPED BUT NOT
-## GATED on purpose — it renders, it does not measure, and a picture of the
-## previous evaluation is still a picture worth having as long as the reply
-## says which evaluation it is of.
-const STAMPED_VERBS: Array = [
-	"minerva_cad_snapshot_posed",
-	"minerva_cad_gauge",
-	"minerva_cad_material",
-	"minerva_cad_check_interference",
-	"minerva_cad_check_clearance",
-	"minerva_cad_check_fasteners",
-	"minerva_cad_check_design",
-	"minerva_cad_await_eval",
-]
-
-
 ## What the panel says about its own evaluation, or {known: false}.
 static func read(panel) -> Dictionary:
 	if panel == null or not is_instance_valid(panel) \
@@ -89,6 +72,24 @@ static func blocks(tool_name: String, freshness: Dictionary) -> bool:
 	return bool(freshness.get("known", false)) \
 		and bool(freshness.get("stale", false)) \
 		and MEASURING_VERBS.has(tool_name)
+
+
+static func requirement_error(args: Dictionary, freshness: Dictionary) -> String:
+	if args.has("require_source_version"):
+		if not freshness.get("known", false) or int(freshness.get("source_version", -1)) < 0:
+			return "No completed source version is available. Build the document first."
+		if int(args.require_source_version) != int(freshness.source_version):
+			return "The displayed model does not match require_source_version."
+	if args.has("require_source_digest"):
+		var digest: String = str(freshness.get("provenance", {}).get("source_digest", ""))
+		if digest.is_empty() or digest != str(args.require_source_digest):
+			return "The displayed model does not match require_source_digest."
+	if bool(args.get("accept_last_completed", false)) and freshness.get("provenance", {}).is_empty():
+		return "No identified completed evaluation is available to accept. Build the document first."
+	return ""
+
+static func accepts_stale(args: Dictionary) -> bool:
+	return bool(args.get("accept_last_completed", false))
 
 
 ## The refusal itself. `checked` false with a reason is not the same answer as
@@ -120,7 +121,8 @@ static func outrun(tool_name: String, before: Dictionary,
 	if not bool(before.get("known", false)) or not bool(after.get("known", false)):
 		return false
 	return int(before.get("source_version", -1)) != int(after.get("source_version", -1)) \
-		or float(before.get("evaluated_at", 0.0)) != float(after.get("evaluated_at", 0.0))
+		or float(before.get("evaluated_at", 0.0)) != float(after.get("evaluated_at", 0.0)) \
+		or str(before.get("provenance", {}).get("reference_digest", "")) != str(after.get("provenance", {}).get("reference_digest", ""))
 
 
 ## The stamp for a reply whose verb ran while the painted evaluation moved:
@@ -137,6 +139,9 @@ static func stamp_moved(reply: Dictionary, before: Dictionary,
 	# keeps that as its start; the stamp below never overwrites it.
 	var started := int(reply.get("source_version",
 		int(before.get("source_version", -1))))
+	reply["result_valid"] = false
+	if reply.has("pass"):
+		reply["pass"] = null
 	reply["stale"] = true
 	reply["stale_reason"] = ("the evaluation changed %s: it "
 		+ "started against the evaluation of version %d and version %d was "
@@ -178,6 +183,10 @@ static func stamp(reply: Dictionary, freshness: Dictionary) -> Dictionary:
 	# The buffer version is always the document's now.
 	if not reply.has("source_version"):
 		reply["source_version"] = int(freshness.get("source_version", -1))
+		if freshness.has("provenance"):
+			reply["provenance"] = freshness.provenance.duplicate(true)
+		if freshness.has("document_id"):
+			reply["document_id"] = freshness.document_id
 		reply["evaluated_at"] = float(freshness.get("evaluated_at", 0.0))
 		# What the standing evaluation DID. Two replies can name the same
 		# source_version for opposite reasons — one painted it, one failed on

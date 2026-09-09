@@ -283,6 +283,11 @@ popup/item_1/id = 1
 layout_mode = 2
 text = "Build latest"
 
+[node name="Configuration" type="OptionButton" parent="ResponsiveContainer/WideLayout/WideSidebar/BuildControls"]
+layout_mode = 2
+visible = false
+tooltip_text = "Show an assembly configuration from the completed source."
+
 [node name="Status" type="Label" parent="ResponsiveContainer/WideLayout/WideSidebar/BuildControls"]
 layout_mode = 2
 text = "Build required"
@@ -338,6 +343,11 @@ popup/item_1/id = 1
 [node name="Build" type="Button" parent="ResponsiveContainer/NarrowLayout/BuildControls"]
 layout_mode = 2
 text = "Build latest"
+
+[node name="Configuration" type="OptionButton" parent="ResponsiveContainer/NarrowLayout/BuildControls"]
+layout_mode = 2
+visible = false
+tooltip_text = "Show an assembly configuration from the completed source."
 
 [node name="Status" type="Label" parent="ResponsiveContainer/NarrowLayout/BuildControls"]
 layout_mode = 2

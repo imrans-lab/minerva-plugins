@@ -334,3 +334,23 @@ func TestExportCollectionAcceptsFloatWaitMS(t *testing.T) {
 		t.Fatalf("the export ran %d times; float wait_ms broke job joining", got)
 	}
 }
+
+func TestExportJobsKeepDocumentAttributionSeparate(t *testing.T) {
+	a := json.RawMessage(`{"source":"cube(2)","format":"stl","path":"/tmp/shared.stl","source_version":1,"document_id":"doc-a"}`)
+	b := json.RawMessage(`{"source":"cube(2)","format":"stl","path":"/tmp/shared.stl","source_version":1,"document_id":"doc-b"}`)
+	if exportJobKey(a) == exportJobKey(b) {
+		t.Fatal("distinct document identities share an export job")
+	}
+}
+
+func TestExportJobsKeepSelectionsAndConfigurationsSeparate(t *testing.T) {
+	base := json.RawMessage(`{"source":"assembly", "format":"step", "path":"/tmp/same.step", "selection":"instance:left", "configuration":"assembled"}`)
+	for _, different := range []json.RawMessage{
+		json.RawMessage(`{"source":"assembly", "format":"step", "path":"/tmp/same.step", "selection":"instance:right", "configuration":"assembled"}`),
+		json.RawMessage(`{"source":"assembly", "format":"step", "path":"/tmp/same.step", "selection":"instance:left", "configuration":"exploded"}`),
+	} {
+		if exportJobKey(base) == exportJobKey(different) {
+			t.Fatal("different evaluated objects join the same export job")
+		}
+	}
+}

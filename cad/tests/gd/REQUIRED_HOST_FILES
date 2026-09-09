@@ -25,3 +25,9 @@ src/Scripts/Services/Annotations/AnnotationHostRegistry.gd
 # that keys it, and the error builder whose reply tells a caller which names
 # are reachable and which registration has no panel behind it.
 src/Scripts/Services/Plugins/PluginErrors.gd
+
+# Legacy host tools forward the plugin evaluation contract.
+src/Scripts/Services/MCP/Modules/MCPCadTools.gd
+src/Scripts/Services/MCP/Modules/MCPCadEvaluation.gd
+
+src/Scripts/Services/Watcher/FileWatcherService.gd

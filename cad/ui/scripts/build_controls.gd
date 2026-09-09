@@ -47,6 +47,7 @@ func set_mode(value: String) -> Dictionary:
 
 func build_latest() -> Dictionary:
 	var panel: Node = _owner.get_ref()
+	panel.verify_dependencies()
 	var source: String = panel._current_source()
 	if panel._eval_debounce_timer != null:
 		panel._eval_debounce_timer.stop()
@@ -58,7 +59,7 @@ func build_latest() -> Dictionary:
 
 func state() -> Dictionary:
 	var panel: Node = _owner.get_ref()
-	var required: bool = not has_painted or panel._current_source() != painted_source
+	var required: bool = not has_painted or panel._current_source() != painted_source or panel._dependencies.is_stale()
 	if panel._painted_buffer_version >= 0:
 		required = required or panel._buffer_version > panel._painted_buffer_version
 	var status := "building" if panel._evaluation_is_unsettled() else "current"

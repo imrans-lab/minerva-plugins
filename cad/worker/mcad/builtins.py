@@ -48,6 +48,10 @@ BUILTIN_FUNCTIONS: dict[str, frozenset[str]] = {
     "sphere": frozenset({"r"}),
     "cylinder": frozenset({"center", "h", "r", "r1", "r2"}),
     "polyhedron": frozenset({"points", "faces"}),
+    "instance": frozenset({"id", "definition", "source", "accuracy"}),
+    "assembly": frozenset(),
+    "configuration": frozenset({"physical", "include"}),
+    "edges": frozenset({"parallel", "face_normal", "outer", "above_z", "below_z", "tolerance", "angle_deg", "expected"}),
     "mesh": frozenset({"units", "up"}),
     "translate": frozenset(),
     "rotate": frozenset(),
@@ -57,6 +61,7 @@ BUILTIN_FUNCTIONS: dict[str, frozenset[str]] = {
 
 # Statement-level commands (``fillet beam, 2, r=4``) and their keywords.
 BUILTIN_COMMANDS: dict[str, frozenset[str]] = {
+    "annotate": frozenset({"id", "text", "dimension", "nominal", "tolerance"}),
     "fillet": frozenset({"r"}),
     "chamfer": frozenset({"d"}),
     "shell": frozenset({"t", "thickness", "open"}),

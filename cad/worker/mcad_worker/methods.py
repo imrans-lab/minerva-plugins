@@ -35,10 +35,10 @@ from mcad_worker import mesh_defects as _defect_module
 WORKER_VERSION = "0.1.0"
 
 # Module-level last-program cache (design §5).
-# Keyed by hash(source); holds the last evaluation result as a plain dict.
+# Keyed by SHA-256(source) and tessellation settings; holds the mesh reply.
 # Size 1: replaced on each new source. Threadsafe is not required — the worker
 # is single-threaded by design (§2 process model).
-_last_program: Optional[Tuple[int, dict]] = None
+_last_program: Optional[Tuple[tuple, dict]] = None
 
 # The B-Rep the last evaluation built, as (source digest, shape_name, shape).
 # Separate from _last_program because it is a different product of the same
@@ -52,7 +52,7 @@ _last_program: Optional[Tuple[int, dict]] = None
 # write one document's geometry into the other's file with no signal at all.
 _last_shape: Optional[Tuple[str, str, Any]] = None
 # A few recently evaluated documents, including their final named solids.
-_shape_documents: OrderedDict[str, tuple[str, dict[str, Any]]] = OrderedDict()
+_shape_documents: OrderedDict[str, Any] = OrderedDict()
 _MAX_SHAPE_DOCUMENTS = 4
 
 
@@ -77,6 +77,20 @@ def cached_shape(source: str):
     if wrapped is None:
         return None
     return str(cached[1]), wrapped
+
+
+def selected_shape(source: str, selection: str = "", configuration: str = ""):
+    """Resolve the same evaluated object used by rendering and export."""
+    document = _shape_documents.get(_digest(source))
+    if document is None:
+        reply = _evaluate({"source": source})
+        if not reply["ok"]:
+            raise ValueError(reply["error"]["message"])
+        document = _shape_documents[_digest(source)]
+    name, shape, _, _ = document.select(selection, configuration)
+    if shape is None or getattr(shape, "wrapped", None) is None:
+        raise ValueError(f"selection {name!r} has no 3D part (solid B-Rep)")
+    return name, shape.wrapped
 
 
 def reset_caches() -> None:
@@ -150,7 +164,7 @@ def _defects_for_source(source: str) -> tuple[dict, str, int]:
     the one standing in the cache — an export of never-evaluated source has
     nothing measured to quote.
     """
-    if _last_program is None or _last_program[0] != hash(source):
+    if _last_program is None or _last_program[0][0] != _digest(source):
         return {}, "", 0
     cached = _last_program[1]
     counts = (cached["mesh_defects"] if "mesh_defects" in cached
@@ -173,7 +187,7 @@ def _phrase_defects(defects: dict) -> str:
     return ", ".join(parts)
 
 
-def _mesh_invalid_error(exc: Exception, source: str, part: str = "") -> dict:
+def _mesh_invalid_error(exc: Exception, source: str, part: str = "", configuration: str = "") -> dict:
     """The reply for a 3MF the writer refused, naming the defect that stands.
 
     The 3MF writer validates its own triangulation and says only "3mf mesh is
@@ -183,8 +197,9 @@ def _mesh_invalid_error(exc: Exception, source: str, part: str = "") -> dict:
     thing to a body name the exporter has.
     """
     defects, shape_name, body_count = _defects_for_source(source)
-    evaluated = _last_program is not None and _last_program[0] == hash(source)
-    if part and part != shape_name:
+    evaluated = _last_program is not None and _last_program[0][0] == _digest(source)
+    if (part and part != shape_name) or (evaluated and
+            _last_program[1].get("provenance", {}).get("configuration", "") != configuration):
         # A named export may select another binding from the same document.
         # Assembly diagnostics cannot be attributed to that part's mesh.
         defects, shape_name, body_count = {}, part, 0
@@ -275,6 +290,7 @@ def _summarise(result: dict) -> dict:
     mesh: dict = result.get("mesh") or {}
     summary = {
         "summary": True,
+        "provenance": result.get("provenance", {}),
         "shape_name": result.get("shape_name", ""),
         "body_count": result.get("body_count", 0),
         "bbox": _mesh_bbox(mesh),
@@ -282,6 +298,8 @@ def _summarise(result: dict) -> dict:
         "face_count": len(mesh.get("faces") or []),
         "edge_count": len(result.get("edges") or []),
         "reference_count": len(result.get("references") or []),
+        "annotations": result.get("annotations", []),
+        "model": result.get("model", {}),
     }
     # Counts and locations both come from the walk the evaluation already
     # did; a summary of a dict that predates it (a direct caller, an old
@@ -331,7 +349,11 @@ def _evaluate(params: dict) -> dict:
 
     summary_only = bool(params.get("summary", False))
 
-    h = hash(source)
+    selection = params.get("selection", params.get("part", ""))
+    configuration = params.get("configuration", "")
+    if not isinstance(selection, str) or not isinstance(configuration, str):
+        return {"ok": False, "error": {"kind": "internal", "message": "selection and configuration must be strings"}}
+    h = (_digest(source), tolerance, angular_tolerance, selection, configuration)
     if _last_program is not None and _last_program[0] == h:
         cached = _last_program[1]
         return {"ok": True, "result": _summarise(cached) if summary_only else cached}
@@ -356,6 +378,7 @@ def _evaluate(params: dict) -> dict:
             source,
             tolerance=tolerance,
             angular_tolerance=angular_tolerance,
+            document=_shape_documents.get(h[0]), selection=selection, configuration=configuration,
         )
     except LexError as exc:
         # LexError is not wrapped by EvaluationError; lex is conceptually part
@@ -432,6 +455,15 @@ def _evaluate(params: dict) -> dict:
         "mesh": result.mesh,
         "edges": result.edges,
         "references": result.references,
+        "annotations": result.annotations,
+        "model": result.model,
+        "provenance": {
+            "source_digest": h[0],
+            "selection": selection, "configuration": configuration,
+            "settings": {"tolerance": tolerance, "angular_tolerance": angular_tolerance},
+            "worker_version": WORKER_VERSION,
+            "occt_version": _OCCT_VERSION,
+        },
     }
     # One walk of the tessellation, cached with it: the counts the summary and
     # the 3MF refusal quote, and the positions that say WHICH edge is bad.
@@ -442,12 +474,11 @@ def _evaluate(params: dict) -> dict:
     result_dict["mesh_defects"] = _report["counts"]
     result_dict["mesh_defect_sites"] = _report["sites"]
     _last_program = (h, result_dict)
-    # A document made only of references builds no part; leave the previous
-    # shape in place rather than caching a None an export would trip over.
-    if result.shape is not None:
+    if not selection and not configuration and result.shape is not None:
         _last_shape = (_digest(source), result.shape_name, result.shape)
-        _shape_documents[_digest(source)] = (result.shape_name, result.bindings)
-        _shape_documents.move_to_end(_digest(source))
+    if result.document is not None:
+        _shape_documents[h[0]] = result.document
+        _shape_documents.move_to_end(h[0])
         while len(_shape_documents) > _MAX_SHAPE_DOCUMENTS:
             _shape_documents.popitem(last=False)
     if summary_only:
@@ -473,12 +504,7 @@ def _list_edges(params: dict) -> dict:
             },
         }
 
-    h = hash(source)
-    if _last_program is not None and _last_program[0] == h:
-        return {"ok": True, "result": _without_polylines(_last_program[1]["edges"])}
-
-    # Cache miss — run the full evaluate pipeline.
-    response = _evaluate({"source": source})
+    response = _evaluate({**params, "summary": False})
     if not response.get("ok"):
         return response  # propagate error unchanged
 
@@ -594,9 +620,10 @@ def _export(params: dict) -> dict:
             },
         }
 
-    part = params.get("part", "")
-    if not isinstance(part, str) or (part and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", part)):
-        return {"ok": False, "error": {"kind": "internal", "message": "part must be a DSL binding name"}}
+    selection = params.get("selection", params.get("part", ""))
+    configuration = params.get("configuration", "")
+    if not isinstance(selection, str) or not isinstance(configuration, str):
+        return {"ok": False, "error": {"kind": "internal", "message": "selection and configuration must be strings"}}
     digest = _digest(source)
     cached = _shape_documents.get(digest)
     reused = cached is not None
@@ -605,12 +632,15 @@ def _export(params: dict) -> dict:
         if not evaluated["ok"]:
             return evaluated
         cached = _shape_documents.get(digest)
-    name = part or (cached[0] if cached else "")
-    if cached is None or name not in cached[1]:
-        return {"ok": False, "error": {"kind": "translate", "message": f"No 3D solid binding {name!r} to export"}}
+    try:
+        name, selected_shape, _, _ = cached.select(selection, configuration)
+        if selected_shape is None:
+            raise ValueError(f"No 3D solid binding {name!r} to export")
+    except ValueError as exc:
+        return {"ok": False, "error": {"kind": "translate", "message": str(exc)}}
     _shape_documents.move_to_end(digest)
     try:
-        written_path = export_built(cached[1][name], format=fmt, path=path, node_name=name)
+        written_path = export_built(selected_shape, format=fmt, path=path, node_name=name)
     except LexError as exc:
         # Lex errors aren't wrapped by ExportError (which only catches
         # ParseError/TranslatorError); surface as parse kind so callers
@@ -637,7 +667,7 @@ def _export(params: dict) -> dict:
             },
         }
     except MeshNotSolid as exc:
-        return _mesh_invalid_error(exc, source, name)
+        return _mesh_invalid_error(exc, source, name, configuration)
     except ExportError as exc:
         cause = exc.__cause__
         if isinstance(cause, ParseError):
@@ -686,8 +716,20 @@ def _export(params: dict) -> dict:
             # this call. A reader watching an export get slow can tell the two
             # apart without guessing.
             "reused_evaluation": reused,
+            "annotations": {"included_in_geometry": False, "records": cached.annotations},
             "part": name,
             "source_digest": digest,
+            "selection": selection, "configuration": configuration,
+            "document_id": params.get("document_id", ""),
+            "evaluation_provenance": params.get("evaluation_provenance", {}),
+            "provenance": {
+                "source_digest": digest,
+                "source_version": params.get("source_version"),
+                "document_id": params.get("document_id", ""),
+                "operation": "export",
+                "format": fmt,
+                "part": name,
+            },
             "source_version": params.get("source_version"),
         },
     }

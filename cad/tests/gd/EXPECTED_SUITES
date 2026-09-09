@@ -782,7 +782,7 @@ test_ortho_speckles.gd assertions=19
 # + 1 a probe that started against one evaluation and returned after the next
 # was painted is stamped stale, with the version it started against and a
 # reason naming both versions.
-test_eval_await.gd assertions=47
+test_eval_await.gd assertions=53
 
 # Two documents open on ONE real broker: each keeps its own registration, IPC
 # helper and evaluation, an edit to one reaches only its own worker, and
@@ -891,3 +891,18 @@ test_snapshot_posed.gd assertions=22
 
 # Stepped mounting holes, metre-scale seat physics and countersunk head profiles.
 test_fastener_mounting.gd assertions=12
+
+# Source-owned overlays: all panes, replacement, read-only ownership and failed builds.
+test_source_annotations.gd assertions=14
+
+# Configuration switching, manual build boundary, physical eligibility and host export context.
+test_model_views.gd assertions=9
+
+# Imported file changes, manual/automatic build policy and host watcher lifetime.
+test_dependencies.gd assertions=8
+
+# Private queries preserve the editor, selection identity and physical eligibility.
+test_scoped_queries.gd assertions=11
+
+# Authored requirements, persisted evidence, pending jobs and unknown verdicts.
+test_validation_run.gd assertions=11

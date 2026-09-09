@@ -63,8 +63,12 @@ func ensure_gauge_built() -> int:
 ## Identity of the mounted reference set: which files, at which content stamp,
 ## in which pose. Colliders and segmentation are keyed on it.
 func _compute_digest() -> String:
+	return reference_digest(_panel.get_reference_state())
+
+
+static func reference_digest(records: Array) -> String:
 	var parts := PackedStringArray()
-	for entry in _panel.get_reference_state():
+	for entry in records:
 		var record: Dictionary = entry
 		# units and up are baked into the converted part transforms, so a
 		# digest without them lets a units= edit keep stale colliders.

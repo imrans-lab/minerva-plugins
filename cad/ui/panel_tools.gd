@@ -136,7 +136,22 @@ const PAIR_VERBS: Array[String] = [
 
 
 static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
+	if (_Freshness.MEASURING_VERBS.has(tool_name) or tool_name.begins_with("minerva_cad_snapshot")) and panel.has_method("verify_dependencies"):
+		panel.verify_dependencies()
 	var freshness: Dictionary = _Freshness.read(panel)
+	if tool_name not in ["minerva_cad_build", "minerva_cad_await_eval", "minerva_cad_model"]:
+		var requirement_error: String = _Freshness.requirement_error(args, freshness)
+		if not requirement_error.is_empty():
+			return _Freshness.stamp({"success": false, "checked": false,
+				"error": requirement_error, "error_code": "evaluation_requirement"}, freshness)
+		args = args.duplicate(true)
+		args["_evaluated_document"] = preload("scripts/evaluation_state.gd").document(panel)
+
+	var context_error: String = preload("scripts/model_views.gd").prepare_measurement(args, tool_name)
+	if not context_error.is_empty():
+		return _Freshness.stamp({"success": false, "checked": false, "pass": null,
+			"reason": context_error, "error_code": "configuration_context"}, freshness)
+
 	# A reference-against-reference call measures two mounted meshes and never
 	# the evaluated solid, so the document running ahead of its evaluation
 	# says nothing about its answer: it is STAMPED but not refused. Only the
@@ -144,10 +159,15 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 	# an against= key on any other verb is ignored by its body and must not
 	# lift the gate.
 	var pair_call: bool = PAIR_VERBS.has(tool_name) and _ReferenceVerbs.is_pair_call(args)
-	if not pair_call and _Freshness.blocks(tool_name, freshness):
+	if not pair_call and not _Freshness.accepts_stale(args) and _Freshness.blocks(tool_name, freshness):
 		return _Freshness.refusal(freshness)
-	var reply: Dictionary = await _dispatch(panel, tool_name, args)
-	if not _Freshness.STAMPED_VERBS.has(tool_name):
+	var scopes := preload("scripts/scoped_queries.gd")
+	var reply: Dictionary
+	if scopes.applies(tool_name, args):
+		reply = await scopes.run(panel, tool_name, args, _dispatch)
+	else:
+		reply = await _dispatch(panel, tool_name, args)
+	if tool_name in ["minerva_cad_build", "minerva_cad_model"]:
 		return reply
 	# Read AGAIN: the document can change while a measurement runs. A reply
 	# stamped only with the state before it would say the geometry it
@@ -163,6 +183,10 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 
 static func _dispatch(panel, tool_name: String, args: Dictionary) -> Dictionary:
 	match tool_name:
+		"minerva_cad_validation":
+			return await preload("scripts/validation_run.gd").handle(panel, args, handle)
+		"minerva_cad_model":
+			return await panel._model_views.handle(args)
 		"minerva_cad_build":
 			match str(args.get("action", "status")):
 				"status": return panel.build_status()
@@ -311,6 +335,9 @@ static func _references(panel, args: Dictionary) -> Dictionary:
 			"name": str(record.get("name", "")),
 			"path": str(record.get("path", "")),
 			"resolved_path": str(record.get("resolved_path", "")),
+			"content_stamp": str(record.get("stamp", "")),
+			"definition": record.get("definition", ""),
+			"source": record.get("source", ""), "accuracy": record.get("accuracy", "unspecified"),
 			"status": status,
 			"reason": str(record.get("reason", "")),
 			"warning": str(record.get("warning", "")),
@@ -590,6 +617,7 @@ static func _check_interference(panel, args: Dictionary) -> Dictionary:
 		# digest and the clearance join lines up per part.
 		"mesh": args.get("mesh", {}),
 		"source": str(args.get("source", "")),
+		"selection": args.get("selection", ""), "configuration": args.get("configuration", ""),
 		# The contacts this design MEANS to have: measured like any other and
 		# then held out of the count while the overlap stays inside what was
 		# declared.
@@ -632,6 +660,7 @@ static func _check_clearance(panel, args: Dictionary) -> Dictionary:
 		# The clearance measurement re-tessellates in the worker, so a
 		# part-scoped call hands it that part's SOURCE rather than a mesh.
 		"source": str(args.get("source", "")),
+		"selection": args.get("selection", ""), "configuration": args.get("configuration", ""),
 		"required_mm": float(args.get("required_mm", 0.0)),
 		"tolerance_mm": float(args.get("tolerance_mm",
 			_GeometryChecks.CLEARANCE_TOLERANCE_MM)),
@@ -679,7 +708,7 @@ static func _ensure_part_interference(panel, args: Dictionary) -> void:
 	var source := str(args.get("source", ""))
 	if source.strip_edges().is_empty():
 		return
-	var kept: Dictionary = _PartCache.interference(panel, _PartCache.digest(source))
+	var kept: Dictionary = _PartCache.interference(panel, _PartCache.scope_digest(args))
 	if not kept.is_empty() and int(kept.get("gauge_generation", -1)) == _gauge_generation(panel):
 		return
 	# UNDECLARED ON PURPOSE. A declared pair leaves the report's `pairs` for
@@ -692,6 +721,7 @@ static func _ensure_part_interference(panel, args: Dictionary) -> void:
 	await _check_interference(panel, {
 		"mesh": args.get("mesh", {}),
 		"source": source,
+		"selection": args.get("selection", ""), "configuration": args.get("configuration", ""),
 	})
 
 

@@ -4,6 +4,8 @@ extends AnnotationHost
 const _CadAnchorTypesScript = preload("scripts/CadAnchorTypes.gd")
 const _CadPointAnchorScript = preload("scripts/CadPointAnchor.gd")
 const _SchemaScript = preload("res://Scripts/Services/Annotations/AnnotationV2Schema.gd")
+const _SourceKind := preload("kinds/cad_source_annotation_kind.gd")
+const _SourceAnnotations := preload("scripts/source_annotations.gd")
 const _CadEdgeNumberKindScript = preload("kinds/cad_edge_number_kind.gd")
 ## AnnotationHost for the CAD plugin panel (Round 1 scaffold).
 ##
@@ -47,6 +49,7 @@ signal annotations_changed()
 var _registry: AnnotationRegistry = null
 
 ## Flat list of all annotation envelope dicts.
+var _source_annotations: Array = []
 var _annotations: Array = []  # Array[Dictionary]
 
 ## Currently selected annotation id, or "".
@@ -99,7 +102,7 @@ func get_capabilities() -> Dictionary:
 	return {
 		"kinds": ["callout", "2d_arrow", "2d_text", "cad_edge_number"],
 		"tools": ["select"],
-		"anchor_types": ["cad/edge", "cad/point", "core/canvas.point"],
+		"anchor_types": ["cad/edge", "cad/point", "cad/model_point", "core/canvas.point"],
 		"lifecycle": {
 			"resolve": true,
 			"reopen": true,
@@ -122,6 +125,8 @@ func get_capabilities() -> Dictionary:
 ## TextEditorAnnotationHost / PcbAnnotationHost), stamps anchor, emits signal.
 ## Returns "" (nothing stored) when the envelope fails validation.
 func add_annotation(annotation: Dictionary) -> String:
+	if str(annotation.get("kind", "")) == "cad_source_annotation":
+		return ""
 	var stored: Dictionary = _normalize_envelope(annotation)
 	var id: String = str(stored.get("id", ""))
 	if id.is_empty():
@@ -200,7 +205,19 @@ func get_selected_annotation_id() -> String:
 
 ## Return a shallow duplicate of the annotation list.
 func get_annotations() -> Array:
-	return _annotations.duplicate()
+	return _annotations.duplicate() + _source_annotations
+
+
+## Validate derived callouts before replacing any displayed geometry.
+func prepare_source_annotations(records: Variant) -> Dictionary:
+	return _SourceAnnotations.prepare(self, records)
+
+
+func set_source_annotations(prepared: Array, provenance: Dictionary) -> void:
+	_source_annotations = prepared
+	for annotation: Dictionary in _source_annotations:
+		annotation.kind_payload["provenance"] = provenance.duplicate(true)
+	annotations_changed.emit()
 
 
 ## Replace the annotation list wholesale (used by panel save/load).
@@ -212,7 +229,7 @@ func get_annotations() -> Array:
 func set_annotations(list: Array) -> void:
 	_annotations = []
 	for ann in list:
-		if ann is Dictionary:
+		if ann is Dictionary and str(ann.get("kind", "")) != "cad_source_annotation":
 			_annotations.append(_normalize_envelope(ann as Dictionary))
 	AnnotationHost.refresh_all_anchors(_annotations, self)
 	annotations_changed.emit()
@@ -838,6 +855,7 @@ func transform_doc_to_viewport_screen(p: Vector2, _viewport_id: String) -> Vecto
 ## then register the edge anchor resolver on self.
 func _init() -> void:
 	super._init()
+	register_anchor_resolver("cad/model_point", _SourceAnnotations.resolve)
 	register_anchor_resolver(
 		_CadAnchorTypesScript.EDGE_ANCHOR_KEY,
 		_resolve_edge_anchor
@@ -857,6 +875,7 @@ func _init() -> void:
 	_registry = AnnotationRegistry.new()
 	BuiltinKinds.register_all(_registry)
 	_registry.register_annotation_kind(_CadEdgeNumberKindScript.new())
+	_registry.register_annotation_kind(_SourceKind.new())
 
 
 ## Phase B2: domain picker — surfaces the currently-selected edge as a

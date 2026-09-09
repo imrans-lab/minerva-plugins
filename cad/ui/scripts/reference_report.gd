@@ -114,6 +114,8 @@ func mount_under(
 			var pose: Transform3D = _library.transform_from_matrix(reference.get("matrix", []))
 			var state := {
 				"name": reference_name,
+				"definition": reference.get("definition", ""),
+				"source": reference.get("source", ""), "accuracy": reference.get("accuracy", "unspecified"),
 				"path": str(reference.get("path", "")),
 				"resolved_path": "",
 				# units and up are baked into parts[].transform, so anything
