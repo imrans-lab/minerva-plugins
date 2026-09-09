@@ -17,6 +17,8 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "selection": {"type": "string", "description": "Evaluated binding, instance ID or reference; optional binding:, instance: or reference: namespace. Queries do not change the visible model."},
+          "configuration": {"type": "string", "description": "Named assembly configuration; defaults to the displayed configuration. Physical checks refuse presentation-only configurations."},
           "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
           "require_source_version": {"type": "integer", "description": "Require this completed buffer revision; mismatch refuses the operation."},
           "require_source_digest": {"type": "string", "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."},
@@ -37,6 +39,8 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "selection": {"type": "string", "description": "Evaluated binding, instance ID or reference; optional binding:, instance: or reference: namespace. Queries do not change the visible model."},
+          "configuration": {"type": "string", "description": "Named assembly configuration; defaults to the displayed configuration. Physical checks refuse presentation-only configurations."},
           "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
           "require_source_version": {"type": "integer", "description": "Require this completed buffer revision; mismatch refuses the operation."},
           "require_source_digest": {"type": "string", "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."},
@@ -66,6 +70,8 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "selection": {"type": "string", "description": "Evaluated binding, instance ID or reference; optional binding:, instance: or reference: namespace. Queries do not change the visible model."},
+          "configuration": {"type": "string", "description": "Named assembly configuration; defaults to the displayed configuration. Physical checks refuse presentation-only configurations."},
           "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
           "require_source_version": {"type": "integer", "description": "Require this completed buffer revision; mismatch refuses the operation."},
           "require_source_digest": {"type": "string", "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."},
@@ -88,6 +94,8 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "selection": {"type": "string", "description": "Evaluated binding, instance ID or reference; optional binding:, instance: or reference: namespace. Queries do not change the visible model."},
+          "configuration": {"type": "string", "description": "Named assembly configuration; defaults to the displayed configuration. Physical checks refuse presentation-only configurations."},
           "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
           "require_source_version": {"type": "integer", "description": "Require this completed buffer revision; mismatch refuses the operation."},
           "require_source_digest": {"type": "string", "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."},
@@ -110,6 +118,8 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "selection": {"type": "string", "description": "Evaluated binding, instance ID or reference; optional binding:, instance: or reference: namespace. Queries do not change the visible model."},
+          "configuration": {"type": "string", "description": "Named assembly configuration; defaults to the displayed configuration. Physical checks refuse presentation-only configurations."},
           "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
           "require_source_version": {"type": "integer", "description": "Require this completed buffer revision; mismatch refuses the operation."},
           "require_source_digest": {"type": "string", "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."},
@@ -141,6 +151,8 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "selection": {"type": "string", "description": "Evaluated binding, instance ID or reference; optional binding:, instance: or reference: namespace. Queries do not change the visible model."},
+          "configuration": {"type": "string", "description": "Named assembly configuration; defaults to the displayed configuration. Physical checks refuse presentation-only configurations."},
           "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
           "require_source_version": {"type": "integer", "description": "Require this completed buffer revision; mismatch refuses the operation."},
           "require_source_digest": {"type": "string", "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."},
@@ -216,6 +228,8 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "selection": {"type": "string", "description": "Evaluated reference or instance selector; does not change the active view."},
+          "configuration": {"type": "string", "description": "Named assembly configuration; defaults to the displayed configuration."},
           "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
           "require_source_version": {"type": "integer", "description": "Require this completed buffer revision; mismatch refuses the operation."},
           "require_source_digest": {"type": "string", "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."},
@@ -238,6 +252,8 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "selection": {"type": "string", "description": "Evaluated binding, instance ID or reference; optional binding:, instance: or reference: namespace. Queries do not change the visible model."},
+          "configuration": {"type": "string", "description": "Named assembly configuration; defaults to the displayed configuration. Physical checks refuse presentation-only configurations."},
           "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
           "require_source_version": {"type": "integer", "description": "Require this completed buffer revision; mismatch refuses the operation."},
           "require_source_digest": {"type": "string", "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."},
@@ -362,6 +378,8 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "selection": {"type": "string", "description": "Evaluated binding, instance ID or reference; optional binding:, instance: or reference: namespace. Queries do not change the visible model."},
+          "configuration": {"type": "string", "description": "Named assembly configuration; defaults to the displayed configuration. Physical checks refuse presentation-only configurations."},
           "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
           "require_source_version": {"type": "integer", "description": "Require this completed buffer revision; mismatch refuses the operation."},
           "require_source_digest": {"type": "string", "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."},
@@ -504,6 +522,8 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "selection": {"type": "string", "description": "Evaluated binding, instance ID or reference; optional binding:, instance: or reference: namespace. Queries do not change the visible model."},
+          "configuration": {"type": "string", "description": "Named assembly configuration; defaults to the displayed configuration. Physical checks refuse presentation-only configurations."},
           "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
           "require_source_version": {"type": "integer", "description": "Require this completed buffer revision; mismatch refuses the operation."},
           "require_source_digest": {"type": "string", "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."},
@@ -521,6 +541,8 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "selection": {"type": "string", "description": "Evaluated binding, instance ID or reference; optional binding:, instance: or reference: namespace. Queries do not change the visible model."},
+          "configuration": {"type": "string", "description": "Named assembly configuration; defaults to the displayed configuration. Physical checks refuse presentation-only configurations."},
           "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
           "require_source_version": {"type": "integer", "description": "Require this completed buffer revision; mismatch refuses the operation."},
           "require_source_digest": {"type": "string", "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."},
@@ -542,6 +564,8 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "selection": {"type": "string", "description": "Evaluated binding, instance ID or reference; optional binding:, instance: or reference: namespace. Queries do not change the visible model."},
+          "configuration": {"type": "string", "description": "Named assembly configuration; defaults to the displayed configuration. Physical checks refuse presentation-only configurations."},
           "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
           "require_source_version": {"type": "integer", "description": "Require this completed buffer revision; mismatch refuses the operation."},
           "require_source_digest": {"type": "string", "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."},
@@ -563,6 +587,8 @@
       "input_schema": {
         "type": "object",
         "properties": {
+          "selection": {"type": "string", "description": "Evaluated binding, instance ID or reference; optional binding:, instance: or reference: namespace. Queries do not change the visible model."},
+          "configuration": {"type": "string", "description": "Named assembly configuration; defaults to the displayed configuration. Physical checks refuse presentation-only configurations."},
           "accept_last_completed": {"type": "boolean", "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."},
           "require_source_version": {"type": "integer", "description": "Require this completed buffer revision; mismatch refuses the operation."},
           "require_source_digest": {"type": "string", "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."},
@@ -661,7 +687,7 @@
     },
     {
       "name": "minerva_cad_model",
-      "description": "List completed assembly definitions, instances and configurations, or explicitly show a configuration/selection using cached geometry. Does not edit source. If source needs a build, records the choice and reports build_required instead of overriding Manual mode. Empty configuration selects the source render target. Presentation-only configurations cannot pass physical validation.",
+      "description": "List completed assembly definitions, instances and configurations; inspect a selection with bounds, counts and provenance; or explicitly show a configuration/selection using cached geometry. Does not edit source. If source needs a build, records the choice and reports build_required instead of overriding Manual mode. Empty configuration selects the source render target. Presentation-only configurations cannot pass physical validation.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
@@ -673,6 +699,7 @@
             "type": "string",
             "enum": [
               "list",
+              "inspect",
               "show"
             ],
             "default": "list"
@@ -682,7 +709,10 @@
           },
           "selection": {
             "type": "string"
-          }
+          },
+          "accept_last_completed": {"type": "boolean"},
+          "require_source_version": {"type": "integer"},
+          "require_source_digest": {"type": "string"}
         }
       }
     },
@@ -856,6 +886,8 @@
           "ui/tools/cad_edge_number_tool.gd",
         "ui/scripts/build_controls.gd",
         "ui/scripts/model_views.gd",
+          "ui/scripts/query_context.gd",
+          "ui/scripts/scoped_queries.gd",
         "ui/scripts/dependencies.gd",
         "ui/scripts/evaluation_state.gd"
         ],

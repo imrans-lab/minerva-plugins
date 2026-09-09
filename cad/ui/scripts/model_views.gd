@@ -30,8 +30,24 @@ func handle(args: Dictionary) -> Dictionary:
 	var model: Dictionary = panel.get_evaluation_state().get("model", {})
 	if str(args.get("action", "list")) == "list":
 		return {"success": true, "model": model, "requested": arguments()}
+	if str(args.get("action", "")) == "inspect":
+		var read := preload("evaluation_state.gd")
+		var before: Dictionary = read.preflight(panel, args, true)
+		if not before.get("success", false):
+			return before
+		var request := {"source": before.document.get("source", ""), "summary": true,
+			"selection": args.get("selection", model.get("selection", "")),
+			"configuration": args.get("configuration", model.get("configuration", ""))}
+		var inspected: Dictionary = preload("worker_reply.gd").unwrap(
+			await panel.call_backend("cad.evaluate", request, 600000), "model inspection")
+		inspected["success"] = not inspected.has("error")
+		inspected["source_version"] = before.document.get("source_version", -1)
+		inspected["document_id"] = before.document.get("document_id", "")
+		inspected["evaluated_at"] = before.document.get("evaluated_at", 0.0)
+		inspected["evaluation_status"] = before.freshness.get("evaluation_status", "")
+		return read.finish(panel, inspected, before.freshness)
 	if str(args.get("action", "")) != "show":
-		return {"success": false, "error": "action must be list or show"}
+		return {"success": false, "error": "action must be list, inspect or show"}
 	panel.verify_dependencies()
 	var next := str(args.get("configuration", ""))
 	if not next.is_empty():
@@ -79,11 +95,10 @@ static func prepare_measurement(args: Dictionary, tool: String) -> String:
 	var document: Dictionary = args.get("_evaluated_document", {})
 	var model: Dictionary = document.get("model", {})
 	var active := str(model.get("configuration", ""))
-	if args.has("configuration") and str(args.configuration) != active:
-		return "Requested configuration is not displayed. Show it with minerva_cad_model, then run this check."
-	args["configuration"] = active
+	if not args.has("configuration"):
+		args["configuration"] = active
 	if not args.has("selection"):
 		args["selection"] = str(model.get("selection", ""))
-	if tool.begins_with("minerva_cad_check_") and not bool(model.get("physical", true)):
+	if str(args.configuration) == active and tool.begins_with("minerva_cad_check_") and not bool(model.get("physical", true)):
 		return "Presentation-only configuration cannot pass physical validation. Select a physical configuration."
 	return ""

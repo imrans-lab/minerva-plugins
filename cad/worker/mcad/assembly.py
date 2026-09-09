@@ -147,6 +147,19 @@ def evaluate_assembly(value: Assembly | Instance) -> tuple[Any, list[dict], dict
             shape.label = item.id
             shapes[item.id] = shape
         instances.append(row)
+    groups = []
+
+    def group_members(item: Instance, prefix: str = "") -> None:
+        name = prefix + item.id
+        if isinstance(item.value, Assembly):
+            groups.append({"id": name, "instances": [row["id"] for row in instances
+                           if row["id"].startswith(name + "/")]})
+            for child in item.value.instances:
+                group_members(child, name + "/")
+
+    for item in value.instances if isinstance(value, Assembly) else (value,):
+        group_members(item)
     compound = Compound(children=list(shapes.values())) if shapes else None
     return compound, references, shapes, {"definitions": list(definitions.values()),
-        "instances": instances, "physical": value.physical if isinstance(value, Assembly) else True}
+        "instances": instances, "groups": groups,
+        "physical": value.physical if isinstance(value, Assembly) else True}

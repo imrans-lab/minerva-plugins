@@ -90,3 +90,24 @@ scene=assembly([post(2,"first"),post(3,"second")])
     assert reply["ok"], reply
     assert len(reply["result"]["model"]["definitions"]) == 2
     assert reply["result"]["body_count"] == 2
+
+
+def test_binding_selection_preserves_presentation_configuration_eligibility():
+    reply = methods._evaluate({"source": SOURCE, "selection": "binding:block", "configuration": "exploded"})
+    assert reply["ok"], reply
+    assert reply["result"]["model"]["configuration"] == "exploded"
+    assert reply["result"]["model"]["physical"] is False
+
+
+def test_nested_group_selection_keeps_world_placement_and_members():
+    source = '''piece=cube(2)
+sub=assembly([instance(piece,id="one"),translate([4,0,0],instance(piece,id="two"))])
+scene=assembly([translate([30,0,0],instance(sub,id="rack"))])
+'''
+    reply = methods._evaluate({"source": source, "selection": "instance:rack", "summary": True})
+    assert reply["ok"], reply
+    result = reply["result"]
+    assert result["bbox"]["min"] == [30, 0, 0]
+    assert result["bbox"]["max"] == [36, 2, 2]
+    assert result["body_count"] == 2
+    assert result["model"]["groups"] == [{"id": "rack", "instances": ["rack/one", "rack/two"]}]

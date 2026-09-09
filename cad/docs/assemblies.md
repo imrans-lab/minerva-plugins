@@ -30,7 +30,7 @@ Configurations replace existing instance placements and optionally select an
 `physical=false`; ordinary assemblies default to physical. The source's existing
 last-binding/trailing-expression rule selects its default view.
 
-The configuration menu and `minerva_cad_model` (`action=list|show`) share the same
+The configuration menu and `minerva_cad_model` (`action=list|inspect|show`) share the same
 completed model. Showing a view never rewrites the DSL. If edits need a build,
 show records the choice and reports `build_required`; it does not override Manual
 mode. The next explicit build uses that choice.
@@ -42,10 +42,15 @@ or `reference:` to resolve ambiguity. Missing or ambiguous names fail explicitly
 Selection never appends an expression to the source, and all consumers reuse the
 same compiled document and geometry. Export jobs pin selection and configuration.
 
-Physical panel checks require the named configuration to be displayed, and refuse
-presentation configurations. Select a physical view before checking it. Exports
-can select any configuration without changing the viewport. Cross-configuration
-checks against independently posed imported references are not yet implemented.
+Inspection, checks, fitted/posed captures and exports accept explicit selection
+and configuration without changing the viewport or source. Nested group selectors
+retain their world placements. Physical checks refuse presentation configurations,
+including when selecting an ordinary solid binding within one.
+
+Scoped panel queries own private reference poses and colliders while sharing
+loaded geometry. Captures allocate their own world only when needed. Long-running
+clearance tickets retain their context for 15 minutes; collect the returned ticket
+through the same document. At most four such contexts are retained per document.
 
 Imported files use the host file watcher, including opt-in removal events. Changes
 mark the completed model stale independently of source revisions. Automatic mode

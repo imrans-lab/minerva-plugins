@@ -149,6 +149,16 @@ func clear_cache() -> void:
 	_reader.clear_stamps()
 
 
+## Independent mounted records with shared immutable load/conversion artifacts.
+func fork() -> RefCounted:
+	var other: RefCounted = get_script().new()
+	other._cache = _cache
+	other.outline_triangle_budget = outline_triangle_budget
+	other.max_triangles = max_triangles
+	other.max_file_bytes = max_file_bytes
+	return other
+
+
 func refresh_stamps() -> void:
 	_reader.clear_stamps()
 

@@ -161,7 +161,12 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 	var pair_call: bool = PAIR_VERBS.has(tool_name) and _ReferenceVerbs.is_pair_call(args)
 	if not pair_call and not _Freshness.accepts_stale(args) and _Freshness.blocks(tool_name, freshness):
 		return _Freshness.refusal(freshness)
-	var reply: Dictionary = await _dispatch(panel, tool_name, args)
+	var scopes := preload("scripts/scoped_queries.gd")
+	var reply: Dictionary
+	if scopes.applies(tool_name, args):
+		reply = await scopes.run(panel, tool_name, args, _dispatch)
+	else:
+		reply = await _dispatch(panel, tool_name, args)
 	if tool_name in ["minerva_cad_build", "minerva_cad_model"]:
 		return reply
 	# Read AGAIN: the document can change while a measurement runs. A reply
@@ -179,7 +184,7 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 static func _dispatch(panel, tool_name: String, args: Dictionary) -> Dictionary:
 	match tool_name:
 		"minerva_cad_model":
-			return panel._model_views.handle(args)
+			return await panel._model_views.handle(args)
 		"minerva_cad_build":
 			match str(args.get("action", "status")):
 				"status": return panel.build_status()

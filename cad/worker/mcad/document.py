@@ -59,6 +59,14 @@ class EvaluatedDocument:
                 candidates.append((key, value, [], {}))
         if kind in ("", "instance") and key in instances:
             candidates.append((key, instances[key], [], metadata))
+        if kind in ("", "instance"):
+            from build123d import Compound
+            for group in metadata.get("groups", []):
+                if group["id"] == key:
+                    members = set(group["instances"])
+                    solids = [s for n, s in instances.items() if n in members]
+                    refs = [r for r in references if r.get("name") in members]
+                    candidates.append((key, Compound(children=solids) if solids else None, refs, metadata))
         if kind in ("", "reference", "instance"):
             for ref in references:
                 if ref.get("name") == key and (kind != "instance" or metadata):
@@ -68,7 +76,13 @@ class EvaluatedDocument:
         if len(candidates) != 1:
             state = "ambiguous" if candidates else "unknown"
             raise ValueError(f"{state} selection {selection!r}; use binding:, instance: or reference: explicitly")
-        return candidates[0]
+        chosen, solid, refs, selected_model = candidates[0]
+        # Selection cannot turn a presentation configuration into a physical
+        # one, even when it addresses an ordinary binding outside the assembly.
+        selected_model = {**selected_model}
+        if metadata:
+            selected_model["physical"] = bool(metadata.get("physical", True)) and bool(selected_model.get("physical", True))
+        return chosen, solid, refs, selected_model
 
     def render(self, selection: str = "", configuration: str = "", *,
                tolerance: float = 0.1, angular_tolerance: float = 0.1):
