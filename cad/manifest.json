@@ -11,6 +11,86 @@
   },
   "tools": [
     {
+      "name": "minerva_cad_check_motion",
+      "executor": "panel",
+      "description": "Check a declared translation path for insertion, removal or tool access against explicit solid obstacle selectors. Pass requires every interval certified; budget-limited coverage is unknown. Physical configurations only; mesh bodies and rotations unsupported. path_mm offsets apply to current evaluated placement. Source, rendering and manual build state are preserved.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {
+            "type": "string",
+            "description": "Name of the CAD editor tab (as returned by minerva_list_editors)."
+          },
+          "require_source_version": {
+            "type": "integer",
+            "description": "Require this completed buffer revision; mismatch refuses the operation."
+          },
+          "require_source_digest": {
+            "type": "string",
+            "description": "Require this SHA-256 of evaluated DSL source, including for unbacked documents."
+          },
+          "accept_last_completed": {
+            "type": "boolean",
+            "description": "Explicitly allow the last completed geometry while source edits are pending. Replies still report stale provenance."
+          },
+          "selection": {
+            "type": "string",
+            "description": "Moving solid instance, group, or binding selector."
+          },
+          "configuration": {
+            "type": "string",
+            "description": "Physical assembly configuration; presentation-only views are refused."
+          },
+          "against": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": {
+              "type": "string"
+            },
+            "description": "Explicit obstacle selectors. Objects outside this set are not checked."
+          },
+          "path_mm": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 64,
+            "items": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 3,
+              "items": {
+                "type": "number"
+              }
+            },
+            "description": "Piecewise-linear translation offsets from evaluated placement, in world millimetres. No rotations."
+          },
+          "required_mm": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Minimum clearance throughout the path; default 0."
+          },
+          "numeric_tolerance_mm": {
+            "type": "number",
+            "minimum": 1e-07,
+            "maximum": 0.01,
+            "description": "Kernel numerical allowance; default 0.000001 mm. Not manufacturing tolerance."
+          },
+          "max_samples": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 512,
+            "description": "Adaptive pose budget; default 64. Exhaustion gives unknown, never a sampled pass."
+          }
+        },
+        "required": [
+          "editor_name",
+          "selection",
+          "against",
+          "path_mm"
+        ]
+      }
+    },
+    {
       "name": "minerva_cad_validation",
       "description": "Read a versioned CAD validation specification from disk and run its named checks through the existing engines. Defaults to <CAD source path>.checks.json. Requirements stay in the authored file; full results are retained in a content-addressed evidence file. run joins one identified job; collect uses its ticket; report reads saved evidence (detail=full for all rows). No source or viewport edits.",
       "executor": "panel",
@@ -930,6 +1010,7 @@
           "ui/scripts/fit_capture.gd",
           "ui/scripts/keepout_dsl.gd",
           "ui/scripts/material_probe.gd",
+          "ui/scripts/motion_check.gd",
           "ui/scripts/ortho_silhouette.gd",
           "ui/scripts/part_cache.gd",
           "ui/scripts/part_scope.gd",
@@ -966,6 +1047,7 @@
           "cad.clearance",
           "cad.cylindrical_features",
           "cad.material",
+          "cad.motion",
           "cad.reference_pairs"
         ],
         "save_mode": "host_owned"
@@ -982,6 +1064,7 @@
       "cad.clearance",
       "cad.cylindrical_features",
       "cad.material",
+          "cad.motion",
       "cad.reference_pairs"
     ]
   },

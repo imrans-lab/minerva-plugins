@@ -205,6 +205,8 @@ static func _dispatch(panel, tool_name: String, args: Dictionary) -> Dictionary:
 			return await _fresh(panel, args, _gauge)
 		"minerva_cad_probe":
 			return await _fresh(panel, args, _probe)
+		"minerva_cad_check_motion":
+			return await preload("scripts/motion_check.gd").check_path(panel, args)
 		"minerva_cad_material":
 			# Per part like the other measuring verbs.
 			return await _per_part(panel, args, _material)

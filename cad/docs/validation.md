@@ -52,3 +52,5 @@ the underlying engine response when provided.
 Evidence remains bounded by the engines' existing coverage and tolerance rules.
 Absent targets, missing references, unbounded tolerance and uncertified intended
 contacts remain visible. A requirement is not proof that its check passed.
+
+`motion` checks use the same specification/report lifecycle; see [declared translation paths](motion.md).

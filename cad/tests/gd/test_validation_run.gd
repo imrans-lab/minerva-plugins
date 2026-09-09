@@ -14,10 +14,13 @@ func _run() -> void:
 	_reply(rig, str(_evaluations(rig.dispatched)[-1].reply_id), answer)
 	await process_frame
 	panel.request.connect(_answer_query.bind(rig))
+	panel.request.connect(_answer_motion.bind(rig))
 	var specification := {"schema": ValidationSpec.SCHEMA, "checks": [
 		{"id": "missing", "kind": "interference", "selection": "missing", "configuration": "assembled", "args": {}},
 		{"id": "unmeasured", "kind": "design", "selection": "instance:post", "configuration": "assembled", "args": {"required_mm": 1}},
-		{"id": "presentation", "kind": "interference", "selection": "instance:post", "configuration": "presentation", "args": {}}]}
+		{"id": "presentation", "kind": "interference", "selection": "instance:post", "configuration": "presentation", "args": {}},
+		{"id": "path", "kind": "motion", "selection": "instance:post", "configuration": "assembled",
+			"args": {"against": ["instance:obstacle"], "path_mm": [[0,0,0],[10,0,0]], "max_samples": 2}}]}
 	# The authored artifact crosses JSON: numbers become floats on read.
 	specification = JSON.parse_string(JSON.stringify(specification))
 	var path := _document_path + ".checks.json"
@@ -26,14 +29,14 @@ func _run() -> void:
 	file.close()
 	var inspected: Dictionary = await PanelTools.handle(panel, "minerva_cad_validation", {"action": "inspect"})
 	check("reopened specification validates against shipped tool schemas", inspected.get("success", false)
-		and inspected.specification.checks.size() == 3, str(inspected))
+		and inspected.specification.checks.size() == 4, str(inspected))
 	var started: Dictionary = await PanelTools.handle(panel, "minerva_cad_validation", {"action": "run", "wait_ms": 0})
 	check("validation returns an identified pending operation", started.get("status") == "running"
 		and str(started.get("ticket", "")).begins_with("validation-"), str(started))
 	var finished: Dictionary = await PanelTools.handle(panel, "minerva_cad_validation", {
 		"action": "collect", "ticket": started.ticket, "wait_ms": 5000})
 	check("missing, unmeasured and presentation-only checks remain unknown", finished.get("status") == "completed"
-		and finished.get("counts", {}).get("unknown") == 3 and finished.get("verdict") == "unknown", str(finished))
+		and finished.get("counts", {}).get("unknown") == 4 and finished.get("verdict") == "unknown", str(finished))
 	var evidence: Dictionary = await PanelTools.handle(panel, "minerva_cad_validation", {
 		"action": "report", "report_path": finished.evidence.path, "sha256": finished.evidence.sha256, "detail": "full"})
 	check("evidence retains requirements, targets and source without duplicating mesh arrays", evidence.get("success", false)
@@ -53,5 +56,18 @@ func _run() -> void:
 	var mismatch: Dictionary = await PanelTools.handle(panel, "minerva_cad_snapshot_posed", {
 		"selection": "instance:post", "configuration": "assembled", "require_reference_digest": "different"})
 	check("a reproduced view refuses mismatched imported evidence", mismatch.get("error_code") == "evidence_mismatch", str(mismatch))
+	var motion_calls: Array = rig.dispatched.filter(func(entry): return entry.channel == "cad.motion")
+	check("motion requirements cross the host bridge with canonical source and scope",
+			motion_calls.size() == 1 and motion_calls[0].payload.source == SOURCE
+			and motion_calls[0].payload.selection == "instance:post"
+			and motion_calls[0].payload.against == ["instance:obstacle"]
+			and motion_calls[0].payload.max_samples == 2, str(motion_calls))
 	await process_frame
 	_teardown(rig)
+
+
+func _answer_motion(channel: String, _payload: Dictionary, reply_id: String, rig: Dictionary) -> void:
+	if channel == "cad.motion":
+		_reply.call_deferred(rig, reply_id, {"ok": true, "result": {
+			"checked": true, "pass": null, "verdict": "unknown", "samples": 2,
+			"unmeasured_intervals": [{"segment": 0}]}})

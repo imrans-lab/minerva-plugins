@@ -45,6 +45,7 @@ extends RefCounted
 const MEASURING_VERBS: Array = [
 	"minerva_cad_gauge",
 	"minerva_cad_material",
+	"minerva_cad_check_motion",
 	"minerva_cad_check_interference",
 	"minerva_cad_check_clearance",
 	"minerva_cad_check_fasteners",

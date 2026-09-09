@@ -221,6 +221,7 @@ func initRegistry() {
 	registry.Register(tools.Clearance, tools.HandleClearance)
 	registry.Register(tools.CylindricalFeatures, tools.HandleCylindricalFeatures)
 	registry.Register(tools.Material, tools.HandleMaterial)
+	registry.Register(tools.Motion, tools.HandleMotion)
 	registry.Register(tools.ReferencePairs, tools.HandleReferencePairs)
 	// cad.cancel_eval is registered here so it appears in tools/list, but its
 	// handler is intercepted in handleToolsCall before registry dispatch (it

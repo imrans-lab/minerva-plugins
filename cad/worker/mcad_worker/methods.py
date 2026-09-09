@@ -904,6 +904,12 @@ def handle_request(req: dict) -> dict | None:
         result["id"] = req_id
         return result
 
+    if method == "motion":
+        from .motion import motion
+        result = motion(req.get("params") or {})
+        result["id"] = req_id
+        return result
+
     if method == "cylindrical_features":
         from .features import cylindrical_features
         result = cylindrical_features(req.get("params") or {})

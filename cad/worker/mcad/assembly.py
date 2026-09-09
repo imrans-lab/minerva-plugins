@@ -162,4 +162,5 @@ def evaluate_assembly(value: Assembly | Instance) -> tuple[Any, list[dict], dict
     compound = Compound(children=list(shapes.values())) if shapes else None
     return compound, references, shapes, {"definitions": list(definitions.values()),
         "instances": instances, "groups": groups,
-        "physical": value.physical if isinstance(value, Assembly) else True}
+        "physical": (value.physical if isinstance(value, Assembly) else
+                     value.value.physical if isinstance(value.value, Assembly) else True)}

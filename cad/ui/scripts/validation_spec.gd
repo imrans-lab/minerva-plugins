@@ -4,7 +4,8 @@ const SCHEMA := "minerva.cad.validation/v1"
 const MAX_BYTES := 262144
 const MAX_CHECKS := 64
 const KINDS := {"design": "minerva_cad_check_design", "clearance": "minerva_cad_check_clearance",
-	"interference": "minerva_cad_check_interference", "fasteners": "minerva_cad_check_fasteners"}
+	"interference": "minerva_cad_check_interference", "fasteners": "minerva_cad_check_fasteners",
+	"motion": "minerva_cad_check_motion"}
 const OWNED := ["editor_name", "ticket", "source", "mesh", "parts", "wait_ms", "accept_last_completed",
 	"require_source_version", "require_source_digest", "require_reference_digest", "selection", "configuration"]
 var _schemas: Dictionary = {}
@@ -107,7 +108,7 @@ func _argument_error(value: Variant, schema: Dictionary, path: String, root_args
 			if not error.is_empty():
 				return error
 		for required in schema.get("required", []):
-			if root_args and required == "editor_name":
+			if root_args and required in ["editor_name", "selection", "configuration"]:
 				continue
 			if not value.has(required):
 				return path + " requires " + str(required)
