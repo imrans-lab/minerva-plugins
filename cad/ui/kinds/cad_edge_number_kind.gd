@@ -72,13 +72,12 @@ func _init() -> void:
 	owning_plugin = &"cad"
 	primitives_optional = true
 	default_payload = {"text": "", "box_offset": [0.0, 0.0, 0.0]}
-	# Toolbar icon: small SVG with a numbered bubble + leader dot.
-	# ImageTexture.create_from_image is not available in headless tests without
-	# a display, so we guard with a null check.
-	var icon_img := Image.new()
-	var err := icon_img.load("res://../../plugins/cad/ui/icons/edge_number.svg")
-	if err == OK and icon_img != null:
+	# Load beside the installed script; plugin assets are outside the host import database.
+	var icon_path: String = get_script().resource_path.get_base_dir().path_join("../icons/edge_number.svg")
+	var icon_img := Image.load_from_file(ProjectSettings.globalize_path(icon_path))
+	if icon_img != null:
 		toolbar_icon = ImageTexture.create_from_image(icon_img)
+
 
 
 # ── Payload compatibility (accept-old-on-read) ────────────────────────────────
