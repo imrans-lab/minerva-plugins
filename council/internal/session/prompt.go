@@ -51,20 +51,25 @@ type section struct {
 	label     string
 	body      string
 	droppable bool
+	anchors   map[string]bool
 }
 
 // assemble renders the sections and brings the result inside budget by dropping
 // droppable material from the tail, newest first, each replaced by a line
 // saying what is missing. Truncation is visible in the prompt itself: a member
 // that was not given everything must be able to say so.
-func assemble(sections []section, maxBytes int) string {
-	render := func(keep int) string {
+func assemble(sections []section, maxBytes int) (string, map[string]bool) {
+	render := func(keep int) (string, map[string]bool) {
+		allowed := map[string]bool{}
 		var b strings.Builder
 		dropped := 0
 		for i, s := range sections {
 			if s.droppable && i >= keep {
 				dropped++
 				continue
+			}
+			for key := range s.anchors {
+				allowed[key] = true
 			}
 			b.WriteString("## ")
 			b.WriteString(s.label)
@@ -75,23 +80,23 @@ func assemble(sections []section, maxBytes int) string {
 		if dropped > 0 {
 			fmt.Fprintf(&b, "## Omitted\n%d block(s) of material were left out to stay inside this council's per-call size limit. Say so if the question cannot be answered without them.\n", dropped)
 		}
-		return strings.TrimRight(b.String(), "\n") + "\n"
+		return strings.TrimRight(b.String(), "\n") + "\n", allowed
 	}
 
-	out := render(len(sections))
+	out, allowed := render(len(sections))
 	if len(out) <= maxBytes {
-		return out
+		return out, allowed
 	}
 	// Drop droppable sections one at a time from the end. Everything
 	// non-droppable is kept whatever happens: a prompt that no longer names the
 	// question would be a different consultation, not a cheaper one.
 	for keep := len(sections) - 1; keep >= 0; keep-- {
-		out = render(keep)
+		out, allowed = render(keep)
 		if len(out) <= maxBytes {
-			return out
+			return out, allowed
 		}
 	}
-	return out
+	return "", nil // Required material cannot fit; refuse the call.
 }
 
 // memberSystem states who this member is and what it is answerable for. It is
@@ -124,8 +129,7 @@ func memberSystem(member, seat map[string]any) string {
 // Only the pinned revisions are rendered. A newer capture of the same source
 // sitting beside it in the council is not this member's material until somebody
 // adopts it, and handing it over here would make member_revision a lie.
-func groundingSections(def, member map[string]any) ([]section, map[string]bool) {
-	allowed := map[string]bool{}
+func groundingSections(def, member map[string]any) []section {
 	var out []section
 	for _, g := range arr(member["grounding"]) {
 		ref := obj(g)
@@ -142,6 +146,7 @@ func groundingSections(def, member map[string]any) ([]section, map[string]bool) 
 			})
 			continue
 		}
+		allowed := map[string]bool{}
 		var b strings.Builder
 		fmt.Fprintf(&b, "Title: %s\n", str(src["title"]))
 		if author := str(src["author"]); author != "" {
@@ -166,27 +171,12 @@ func groundingSections(def, member map[string]any) ([]section, map[string]bool) 
 		}
 		out = append(out, section{
 			label:     fmt.Sprintf("Source %s, capture %d", id, revision),
+			anchors:   allowed,
 			body:      strings.TrimRight(b.String(), "\n"),
 			droppable: true,
 		})
 	}
-	return out, allowed
-}
-
-// allAnchors is the chair's citation set. The chair has no grounding of its own
-// and reads the members' answers, so what it may cite is every anchor the
-// session's own definition snapshot holds — which is exactly the union of what
-// the members could cite.
-func allAnchors(def map[string]any) map[string]bool {
-	allowed := map[string]bool{}
-	for _, s := range arr(def["sources"]) {
-		src := obj(s)
-		id, revision := str(src["source_id"]), int(num(src["source_revision"]))
-		for _, a := range arr(src["anchors"]) {
-			allowed[citationKey(id, revision, str(obj(a)["anchor_id"]))] = true
-		}
-	}
-	return allowed
+	return out
 }
 
 func citationKey(sourceID string, revision int, anchorID string) string {

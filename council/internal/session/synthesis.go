@@ -41,7 +41,7 @@ func (s *Store) synthesise(parent context.Context, control *runControl, sessionI
 
 	ctx, cancel := context.WithTimeout(parent, rules.MemberTimeout)
 	defer cancel()
-	reply, err := s.chatHost().Generate(ctx, plan.planned.call)
+	reply, err := s.generate(ctx, plan.planned.call, rules.PromptBytes)
 	s.commitRunOutcome(control, sessionID, runID, err, reply, plan)
 }
 
@@ -90,6 +90,8 @@ func (s *Store) planSynthesis(control *runControl, sessionID, runID string, rule
 			"No member answered, so there is nothing to synthesise. "+joinLines(missing), true)}, true
 	}
 
+	system := chairSystem(chair, chairSeat, def)
+	user, allowed := chairPrompt(session, run, missing, rules.PromptBytes-len(system))
 	return chairPlan{
 		missing: missing,
 		planned: plannedCall{
@@ -101,10 +103,10 @@ func (s *Store) planSynthesis(control *runControl, sessionID, runID string, rule
 				MemberRevision: int(num(chair["member_revision"])),
 				Role:           "chair",
 				Model:          modelFor(run, str(chairSeat["seat_id"]), chair),
-				System:         chairSystem(chair, chairSeat, def),
-				User:           chairPrompt(session, run, missing, rules.PromptBytes),
+				System:         system,
+				User:           user,
 			},
-			allowed: allAnchors(def),
+			allowed: allowed,
 		},
 	}, true
 }
@@ -144,7 +146,7 @@ func chairSystem(chair, seat, def map[string]any) string {
 
 // chairPrompt gives the chair the round: every completed contribution in full,
 // with its claims and citations, and a plain statement of who did not answer.
-func chairPrompt(session, run map[string]any, missing []string, maxBytes int) string {
+func chairPrompt(session, run map[string]any, missing []string, maxBytes int) (string, map[string]bool) {
 	def := obj(session["definition_snapshot"])
 	sections := []section{{label: "The question", body: str(session["question"])}}
 	if prompt := str(run["prompt"]); prompt != "" {
@@ -165,6 +167,7 @@ func chairPrompt(session, run map[string]any, missing []string, maxBytes int) st
 		}
 		seat, _ := findByID(def["seats"], "seat_id", str(contribution["seat_id"]))
 		member, _ := findByID(def["members"], "member_id", str(contribution["member_id"]))
+		allowed := map[string]bool{}
 		var b strings.Builder
 		b.WriteString(str(contribution["text"]))
 		if claims := arr(contribution["claims"]); len(claims) > 0 {
@@ -174,6 +177,7 @@ func chairPrompt(session, run map[string]any, missing []string, maxBytes int) st
 				fmt.Fprintf(&b, "  [%s] (%s) %s", str(claim["claim_id"]), str(claim["support"]), str(claim["text"]))
 				for _, ci := range arr(claim["citations"]) {
 					citation := obj(ci)
+					allowed[citationKey(str(citation["source_id"]), int(num(citation["source_revision"])), str(citation["anchor_id"]))] = true
 					fmt.Fprintf(&b, " — cites %s", citationKey(
 						str(citation["source_id"]), int(num(citation["source_revision"])), str(citation["anchor_id"])))
 				}
@@ -181,6 +185,7 @@ func chairPrompt(session, run map[string]any, missing []string, maxBytes int) st
 			}
 		}
 		sections = append(sections, section{
+			anchors:   allowed,
 			label:     fmt.Sprintf("%s (%s, %s) said", str(member["display_name"]), str(seat["seat_id"]), str(member["kind"])),
 			body:      strings.TrimRight(b.String(), "\n"),
 			droppable: true,
@@ -209,7 +214,7 @@ func (s *Store) commitRunOutcome(control *runControl, sessionID, runID string, c
 	if s.live[runKey(sessionID, runID)] != control {
 		return
 	}
-	_ = s.commit(func(snap map[string]any) *Failure {
+	f := s.commit(func(snap map[string]any) *Failure {
 		session, _ := findByID(snap["sessions"], "session_id", sessionID)
 		if session == nil {
 			return fail(CodeInternal, "the session is gone", false)
@@ -219,7 +224,7 @@ func (s *Store) commitRunOutcome(control *runControl, sessionID, runID string, c
 			return fail(CodeInternal, "the run is gone", false)
 		}
 		if str(run["status"]) != "running" {
-			return fail(CodeInternal, "the run is already at rest", false)
+			return unchanged
 		}
 		run["ended_at"] = s.now()
 
@@ -292,6 +297,9 @@ func (s *Store) commitRunOutcome(control *runControl, sessionID, runID string, c
 		bumpSession(session)
 		return nil
 	})
+	if f != nil && f != unchanged {
+		s.failResult(sessionID, runID, f)
+	}
 }
 
 func failureRecord(f *Failure) map[string]any {

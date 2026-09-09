@@ -27,6 +27,24 @@ func checkSnapshotBudget(snapshot map[string]any) error {
 			largest = len(raw)
 		}
 	}
+	failed := deepCopy(snapshot)
+	for _, entry := range arr(failed["sessions"]) {
+		session := obj(entry)
+		for _, entry := range arr(session["runs"]) {
+			run := obj(entry)
+			if status := str(run["status"]); status == "pending" || status == "running" {
+				terminalResultFailure(session, run)
+				failed["snapshot_revision"] = num(failed["snapshot_revision"]) + 1
+			}
+		}
+	}
+	raw, err = json.Marshal(failed)
+	if err != nil {
+		return err
+	}
+	if len(raw) > largest {
+		largest = len(raw)
+	}
 	if largest > MaxEnvelopeBytes {
 		return fmt.Errorf("Council needs %d bytes to save and reopen this snapshot, including interruption records; v0.1 permits %d. This change was not applied. Reduce the content or use a separate Council document", largest, MaxEnvelopeBytes)
 	}

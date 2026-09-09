@@ -681,7 +681,7 @@ user, and their view reaches a council as context or as a captured source.
 
 **What comes back.** Members answer in a small JSON shape; a reply that is not
 in it is still kept as the answer with no claims. A `source` claim keeps only
-the citations that resolve inside that member's own grounding, and a claim left
+the citations that resolve inside the grounding sections actually sent to that member, and a claim left
 with none becomes `unknown` — an interpretation is never displayed as something
 a source said, and dropping the label is the only way to keep that true without
 dropping the assertion. `model_id` and `usage` are recorded from the reply, so
@@ -693,7 +693,9 @@ the results that exist. When a member is missing, the engine appends its own
 `unknown` claim to the synthesis naming the seats that did not answer — written
 after the model's reply is read, so a chair that wrote around the gap still
 produces a labelled partial. A round with no answers at all is `failed` and
-carries no synthesis.
+carries no synthesis. The chair may cite only the citations present in completed
+member contributions retained in its prompt; unrelated or omitted source anchors
+are not eligible.
 
 **Limits are data.** `max_members_per_round`, `max_concurrent_members`,
 `max_prompt_bytes`, `run_budget_seconds`, `max_rounds_per_session` and
@@ -704,7 +706,15 @@ one; the narrowing is stored on the run, because a round is planned from the
 record and a limit that lived only in the request would be gone by the time it
 mattered. `max_rounds_per_session` is the ceiling that makes "nothing loops"
 more than a claim about control flow: the engine starts nothing on its own, and
-a client that did could still only reach that many runs.
+a client that did could still only reach that many runs. The prompt byte limit
+counts system and user text together. Optional sections and their citation
+eligibility are removed together; if required sections cannot fit, the call
+fails visibly before contacting the model.
+
+Asynchronous result writes use the same schema and snapshot budget checks as
+commands. A rejected result terminates the run with a visible, retryable failure,
+retaining already accepted contributions. The budget check reserves the exact
+failure-state representation so a full document can still record that failure.
 
 **Superseding.** Each executing run holds a `runControl`, and its *pointer* is
 the identity a landing result is checked against. A cancelled run, a document
@@ -712,7 +722,10 @@ replaced by `Load`, or a second attempt at the same seat all leave a reply with
 nowhere to land. A reply that arrives after its own run left `running` is
 recorded `stale` with full attribution and changes nothing else (§4.2), keeping
 any failure already recorded against that seat; a reply whose control is gone is
-dropped without touching the snapshot at all.
+dropped without touching the snapshot at all. Deferred commands also carry the
+store's load generation: replacing a document invalidates old planning, awaits,
+and outcome replies even when record IDs match. Reading an outcome and updating
+its idempotency entry happen under the same lock.
 
 ---
 

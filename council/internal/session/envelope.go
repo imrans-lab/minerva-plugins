@@ -59,6 +59,7 @@ const (
 // its absence is meaningful: a read command must not carry one and a mutating
 // command must.
 type Request struct {
+	generation    uint64         // Store load generation; never supplied over the wire.
 	SchemaVersion int            `json:"schema_version"`
 	Envelope      string         `json:"envelope"`
 	RequestID     string         `json:"request_id"`

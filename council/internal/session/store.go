@@ -25,11 +25,12 @@ var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
 // ledger is scoped to the loaded snapshot and is cleared by Load, because a
 // request_id is only meaningful against the snapshot it was written for.
 type Store struct {
-	mu       sync.Mutex
-	registry *contract.Registry
-	snapshot map[string]any
-	ledger   map[string]Reply
-	seq      map[string]int
+	generation uint64
+	mu         sync.Mutex
+	registry   *contract.Registry
+	snapshot   map[string]any
+	ledger     map[string]Reply
+	seq        map[string]int
 
 	// chat is the route to a host model. It is refusing by default, so a Store
 	// nobody bound a transport to reports model_unavailable rather than hanging.
@@ -126,6 +127,7 @@ func (s *Store) Load(raw []byte) (LoadReport, error) {
 	// drop the handles so anything already in flight lands on nothing: a reply
 	// for the old document must never write into the one taking its place.
 	s.cancelLive()
+	s.generation++
 
 	demoted := contract.RehydrateOnLoad(next)
 	// Demotion rewrites run and session statuses, so the document that comes
@@ -261,6 +263,7 @@ func (s *Store) dispatchLocked(raw []byte) (Reply, command, *Request, error) {
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return Reply{}, command{}, nil, err
 	}
+	req.generation = s.generation
 	if req.Envelope != "request" {
 		return errReply(req.RequestID, s.revision(), fail(CodeInternal,
 			fmt.Sprintf("the backend answers requests; it was sent a %q envelope", req.Envelope), false)), command{}, nil, nil

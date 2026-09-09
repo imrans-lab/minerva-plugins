@@ -122,9 +122,9 @@ func cmdRunStart(s *Store, snap map[string]any, req *Request) (map[string]any, *
 func afterRunStart(s *Store, req *Request, payload map[string]any) Reply {
 	sessionID := str(payload["session_id"])
 	runID := str(payload["run_id"])
-	s.startRun(sessionID, runID)
-	s.AwaitRun(sessionID, runID, req.waitFor())
-	return s.rememberOutcome(req.RequestID, sessionID, runID)
+	s.startRun(sessionID, runID, req.generation)
+	s.awaitRun(sessionID, runID, req.waitFor(), req.generation)
+	return s.readOutcome(req, sessionID, runID, true)
 }
 
 // seatThatMadeClaim resolves a claim id to the seat that argued it.
@@ -159,6 +159,9 @@ func selectSeats(session map[string]any, req *Request, addressed string, maxMemb
 	for _, x := range arr(def["seats"]) {
 		seat := obj(x)
 		byID[str(seat["seat_id"])] = seat
+		if str(seat["role"]) == "chair" && kindOf[str(seat["member_id"])] == "human" {
+			return nil, fail(CodeInternal, "This council has a human chair. Choose a model-backed chair before starting an automated round; Council cannot synthesize on the user's behalf.", false)
+		}
 		// A human member is the local user. Nothing prompts them, so they are
 		// not part of the bench a round consults; their view reaches the
 		// council as context or as a captured source, written by them.
@@ -285,8 +288,8 @@ func cmdRunAwait(s *Store, snap map[string]any, req *Request) (map[string]any, *
 // the wait ends is reported as it stands, with resting:false, and the caller
 // asks again.
 func afterRunAwait(s *Store, req *Request, payload map[string]any) Reply {
-	resting := s.AwaitRun(str(payload["session_id"]), str(payload["run_id"]), req.waitFor())
-	reply := s.readOutcome(req.RequestID, str(payload["session_id"]), str(payload["run_id"]))
+	resting := s.awaitRun(str(payload["session_id"]), str(payload["run_id"]), req.waitFor(), req.generation)
+	reply := s.readOutcome(req, str(payload["session_id"]), str(payload["run_id"]), false)
 	if reply.OK {
 		reply.Payload["resting"] = resting
 	}
@@ -493,9 +496,13 @@ func cmdOutcomeRetain(s *Store, snap map[string]any, req *Request) (map[string]a
 // readOutcome renders a run as it now stands. It is the reply shape both
 // run.start and run.await answer with, so the two cannot describe the same run
 // differently.
-func (s *Store) readOutcome(requestID, sessionID, runID string) Reply {
+func (s *Store) readOutcome(req *Request, sessionID, runID string, remember bool) Reply {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	requestID := req.RequestID
+	if req.generation != s.generation {
+		return errReply(requestID, s.revision(), fail(CodeStaleRevision, "The document was replaced while this request was in flight; re-read before retrying.", true))
+	}
 	session, _ := findByID(s.snapshot["sessions"], "session_id", sessionID)
 	if session == nil {
 		return errReply(requestID, s.revision(), fail(CodeInternal,
@@ -543,18 +550,9 @@ func (s *Store) readOutcome(requestID, sessionID, runID string) Reply {
 	if failure := obj(run["failure"]); failure != nil {
 		payload["failure"] = failure
 	}
-	return okReply(requestID, s.revision(), payload)
-}
-
-// rememberOutcome answers with the finished run and replaces the ledger entry
-// for this request_id, so a caller that lost the reply and repeats the command
-// is given the answer rather than a second round.
-func (s *Store) rememberOutcome(requestID, sessionID, runID string) Reply {
-	reply := s.readOutcome(requestID, sessionID, runID)
-	if reply.OK {
-		s.mu.Lock()
+	reply := okReply(requestID, s.revision(), payload)
+	if remember {
 		s.ledger[requestID] = reply
-		s.mu.Unlock()
 	}
 	return reply
 }

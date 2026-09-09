@@ -70,8 +70,8 @@ type runPlan struct {
 // It returns once the run is REGISTERED, not once it is finished, which is what
 // lets the command that started it wait on the run rather than race it: by the
 // time this returns, AwaitRun can see the round.
-func (s *Store) startRun(sessionID, runID string) {
-	plan, ok := s.planRun(sessionID, runID)
+func (s *Store) startRun(sessionID, runID string, generation uint64) {
+	plan, ok := s.planRun(sessionID, runID, generation)
 	if !ok {
 		return
 	}
@@ -108,7 +108,7 @@ func (s *Store) executeRun(plan runPlan, sessionID, runID string) {
 
 			callCtx, cancelCall := context.WithTimeout(plan.ctx, plan.rules.MemberTimeout)
 			defer cancelCall()
-			reply, err := s.chatHost().Generate(callCtx, planned.call)
+			reply, err := s.generate(callCtx, planned.call, plan.rules.PromptBytes)
 			s.applyMemberResult(plan.control, sessionID, runID, planned, reply, err)
 		}(planned)
 	}
@@ -123,10 +123,13 @@ func (s *Store) executeRun(plan runPlan, sessionID, runID string) {
 // snapshot as it stands, and registers the control the results are checked
 // against. It reports false when there is nothing to run — a run somebody
 // cancelled before it started, or one a replaced snapshot no longer holds.
-func (s *Store) planRun(sessionID, runID string) (runPlan, bool) {
+func (s *Store) planRun(sessionID, runID string, generation uint64) (runPlan, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if generation != s.generation {
+		return runPlan{}, false
+	}
 	session, _ := findByID(s.snapshot["sessions"], "session_id", sessionID)
 	if session == nil {
 		return runPlan{}, false
@@ -162,7 +165,9 @@ func (s *Store) planRun(sessionID, runID string) (runPlan, bool) {
 		if seat == nil || member == nil {
 			continue
 		}
-		grounding, allowed := groundingSections(def, member)
+		grounding := groundingSections(def, member)
+		system := memberSystem(member, seat)
+		user, allowed := advisorPrompt(session, run, grounding, rules.PromptBytes-len(system))
 		calls = append(calls, plannedCall{
 			call: ModelCall{
 				RunID:          runID,
@@ -172,8 +177,8 @@ func (s *Store) planRun(sessionID, runID string) (runPlan, bool) {
 				MemberRevision: int(num(member["member_revision"])),
 				Role:           "advisor",
 				Model:          modelFor(run, str(seat["seat_id"]), member),
-				System:         memberSystem(member, seat),
-				User:           advisorPrompt(session, run, grounding, rules.PromptBytes),
+				System:         system,
+				User:           user,
 			},
 			allowed: allowed,
 		})
@@ -185,6 +190,7 @@ func (s *Store) planRun(sessionID, runID string) (runPlan, bool) {
 	if f := s.commit(func(snap map[string]any) *Failure {
 		return markRunning(snap, sessionID, runID)
 	}); f != nil {
+		s.failResult(sessionID, runID, f)
 		return runPlan{}, false
 	}
 
@@ -229,7 +235,7 @@ func modelFor(run map[string]any, seatID string, member map[string]any) string {
 // advisorPrompt is what one member is sent. It carries the question, the shared
 // context snapshot, this member's own grounding, and — on a follow-up — what
 // this member itself said before. It never carries another member's answer.
-func advisorPrompt(session, run map[string]any, grounding []section, maxBytes int) string {
+func advisorPrompt(session, run map[string]any, grounding []section, maxBytes int) (string, map[string]bool) {
 	question := str(session["question"])
 	sections := []section{{
 		label: "The question",
@@ -340,7 +346,7 @@ func (s *Store) applyMemberResult(control *runControl, sessionID, runID string, 
 	if s.live[runKey(sessionID, runID)] != control {
 		return
 	}
-	_ = s.commit(func(snap map[string]any) *Failure {
+	f := s.commit(func(snap map[string]any) *Failure {
 		session, _ := findByID(snap["sessions"], "session_id", sessionID)
 		if session == nil {
 			return fail(CodeInternal, "the session is gone", false)
@@ -360,7 +366,7 @@ func (s *Store) applyMemberResult(control *runControl, sessionID, runID string, 
 		// synthesis. An error at this point is not news and is dropped.
 		if str(run["status"]) != "running" {
 			if err != nil {
-				return fail(CodeInternal, "nothing to record", false)
+				return unchanged
 			}
 			// The failure already recorded against this seat stays: the round
 			// really did fail it, and the late text is added beside that rather
@@ -384,6 +390,9 @@ func (s *Store) applyMemberResult(control *runControl, sessionID, runID string, 
 		bumpSession(session)
 		return nil
 	})
+	if f != nil && f != unchanged {
+		s.failResult(sessionID, runID, f)
+	}
 }
 
 // writeAnswer records what a model said: the text, the model that produced it,
@@ -518,11 +527,18 @@ func (s *Store) chatHost() ChatHost {
 // run that finished, or whose document was replaced, deserves an answer rather
 // than a timeout.
 func (s *Store) AwaitRun(sessionID, runID string, timeout time.Duration) bool {
+	s.mu.Lock()
+	generation := s.generation
+	s.mu.Unlock()
+	return s.awaitRun(sessionID, runID, timeout, generation)
+}
+
+func (s *Store) awaitRun(sessionID, runID string, timeout time.Duration, generation uint64) bool {
 	deadline := time.Now().Add(timeout)
 	for {
 		s.mu.Lock()
 		control := s.live[runKey(sessionID, runID)]
-		live := s.runIsLive(sessionID, runID)
+		live := generation == s.generation && s.runIsLive(sessionID, runID)
 		s.mu.Unlock()
 		if !live {
 			return true

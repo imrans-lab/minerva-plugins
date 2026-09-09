@@ -143,3 +143,12 @@ func failureCodeOf(err error) string {
 	}
 	return CodeModelError
 }
+
+// generate enforces the combined system/user budget before contacting a model.
+// An empty user prompt means its required sections could not fit.
+func (s *Store) generate(ctx context.Context, call ModelCall, maxBytes int) (ModelReply, error) {
+	if call.User == "" || len(call.System)+len(call.User) > maxBytes {
+		return ModelReply{}, HostFailure(CodePayloadTooLarge, "Required prompt material exceeds this council's per-call byte limit; shorten the question or increase the limit.")
+	}
+	return s.chatHost().Generate(ctx, call)
+}
