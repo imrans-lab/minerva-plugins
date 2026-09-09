@@ -230,8 +230,10 @@ func checkPayload(p map[string]any, at string, errs *[]string) (inline string, h
 func checkSession(s map[string]any, at string, errs *[]string) {
 	add := adder(at, errs)
 
-	// chat_binding is not checked here: the schema makes it a required property,
-	// so a session without one never reaches the invariants.
+	// chat_binding is optional in the schema — a session a chat was moved away
+	// from has none — so its SHAPE is all the schema can say. The rule that
+	// matters is snapshot-wide and lives in checkSnapshot: one chat, one
+	// session.
 
 	def, ok := s["definition_snapshot"].(map[string]any)
 	if !ok {
@@ -420,12 +422,25 @@ func checkSnapshot(p map[string]any, errs *[]string) {
 		checkDefinition(do, fmt.Sprintf("/definitions/%d", i), errs)
 	}
 	sessions := map[string]bool{}
+	// One chat, one session. A chat_id on two sessions has no correct
+	// resolution: the chat provider routes by that id alone, and whichever
+	// session it picked would be array order deciding where a user's follow-up
+	// lands. Binding a chat to a second session therefore takes the binding off
+	// the first, and this is the oracle that says so.
+	chats := map[string]string{}
 	for i, s := range arr(p["sessions"]) {
 		so := obj(s)
 		if sessions[str(so["session_id"])] {
 			add("/sessions/%d: duplicate session_id %q", i, str(so["session_id"]))
 		}
 		sessions[str(so["session_id"])] = true
+		if chat := str(obj(so["chat_binding"])["chat_id"]); chat != "" {
+			if owner, taken := chats[chat]; taken {
+				add("/sessions/%d: chat %q is already bound to session %q; one chat has one session",
+					i, chat, owner)
+			}
+			chats[chat] = str(so["session_id"])
+		}
 		checkSession(so, fmt.Sprintf("/sessions/%d", i), errs)
 	}
 	if v, ok := p["view"].(map[string]any); ok {

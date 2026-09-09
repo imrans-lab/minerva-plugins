@@ -60,9 +60,9 @@
     "expect": "synthesis"
   },
   {
-    "file": "session_without_chat_binding.json",
-    "record": "council_session",
-    "expect": "chat_binding"
+    "file": "snapshot_two_sessions_one_chat.json",
+    "record": "council_project_snapshot",
+    "expect": "one chat has one session"
   },
   {
     "file": "request_mutation_without_base_revision.json",

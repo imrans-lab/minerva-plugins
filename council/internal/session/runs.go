@@ -77,6 +77,11 @@ func cmdRunStart(s *Store, snap map[string]any, req *Request) (map[string]any, *
 	if f != nil {
 		return nil, f
 	}
+	// Before the run exists, and so before anything can be spent or cancelled:
+	// every model this round would ask for has to be one the host has enabled.
+	if f := s.checkRunModels(session, obj(req.Payload["model_overrides"]), seats); f != nil {
+		return nil, f
+	}
 	run, contributionIDs := s.newRun(session, req.RequestID, kind, prompt, addressed, seats)
 	if claimID != "" {
 		run["addressed_claim_id"] = claimID
@@ -413,6 +418,12 @@ func cmdRunRetry(s *Store, snap map[string]any, req *Request) (map[string]any, *
 	if len(seats) == 0 {
 		return nil, fail(CodeInternal,
 			fmt.Sprintf("every seat in run %q answered; there is nothing to retry", str(previous["run_id"])), false)
+	}
+	// A retry inherits the previous run's overrides, so it is checked against
+	// the catalogue as it stands now: a model that has since been disabled must
+	// stop the retry rather than fail every seat in it.
+	if f := s.checkRunModels(session, obj(previous["model_overrides"]), seats); f != nil {
+		return nil, f
 	}
 
 	run, contributionIDs := s.newRun(session, req.RequestID, "retry", str(previous["prompt"]), str(previous["addressed_seat_id"]), seats)

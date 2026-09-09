@@ -218,6 +218,119 @@ almost certainly not a chat on your machine.
       naming the binding — and **nothing sent to whichever chat tab is open.**
       A message landing in the focused chat is the failure this check exists for.
 
+## Chat provider — Council in the chooser
+
+Everything below is the live half of §5.3 of `docs/architecture.md`. The
+protocol tests drive a fake host; nothing in them proves the entry actually
+reaches Minerva's provider chooser, which is the one thing this section is for.
+
+Do this with a Council document open that holds **one** council with at least
+one model-backed advisor and a model-backed chair, and with at least one model
+enabled in Minerva's settings.
+
+### It appears
+
+- [ ] Open a new chat and drop the provider chooser. **Council** is listed,
+      after the native providers.
+- [ ] Check the Minerva log for `registered the Council chat provider entry`
+      and, on the host side, `[CapabilityBroker] Plugin 'council' registered
+      chat provider 'council'`. If the entry is missing from the chooser, this
+      line says whether registration was refused or never attempted.
+- [ ] Stop the Council plugin from the Plugin Manager. Council disappears from
+      the chooser. Start it again: it comes back without restarting Minerva.
+
+### It answers
+
+- [ ] Select Council and ask a real question. Within a minute and a half either
+      the chair's synthesis appears as the assistant message, or a reply saying
+      the council is still deliberating and naming the run. **A turn that hangs
+      until the chat times out is a failure**; so is an empty assistant message.
+- [ ] The reply ends by pointing at the Council editor. Open it: the session is
+      there, its question is the one you typed, and each member's own argument
+      is listed separately with its sources.
+- [ ] Ask a second question in the SAME chat. It becomes a second run on the
+      same session, not a new session.
+
+### It binds by chat, not by tab
+
+- [ ] With the Council chat still open, open a second chat, also on Council, and
+      ask a different question. Two sessions now exist, each bound to its own
+      chat.
+- [ ] Go back to the first chat and ask again. The answer continues the FIRST
+      session. Switching Council editor tabs in between must change nothing.
+- [ ] Open a second project with its own Council document, and ask again in the
+      first project's chat. Expected: a visible refusal saying the chat belongs
+      to a session in a document that is not the one open — **not** a new
+      session, and not an answer in the wrong project.
+
+### Choosing, when there is a choice
+
+- [ ] Add a second council to the document. Ask a question in a fresh chat.
+      Expected: Council replies with the councils as clickable options rather
+      than picking one.
+- [ ] Click one. The round runs on that council, and the session's question is
+      the one you typed originally — you should not have had to type it twice.
+
+### Cancel
+
+- [ ] Ask something, and press stop while it is still running. The chat turn
+      resolves promptly as cancelled.
+- [ ] In the Council editor, the run reads cancelled and the session offers a
+      retry. Nothing restarts on its own, and no further tokens are spent —
+      check the cost readout before and after.
+
+### Model choice
+
+- [ ] Run `minerva_council_models` (or read the Council editor's member pane):
+      the list matches the models enabled in Minerva's settings.
+- [ ] Give a member a `model_hint` that is not on that list. Expected: an
+      immediate refusal naming the models you do have, and **no round starts**.
+- [ ] Disable every model in Minerva's settings and ask a question. Expected: a
+      visible failure that says so, recoverable by enabling a model and asking
+      again.
+
+### Restart
+
+- [ ] Mid-answer, stop the Council plugin. The chat turn ends with a visible
+      error rather than hanging.
+- [ ] Start the plugin, reopen the document. The interrupted run reads failed
+      with an explicit retry; it does not resume and does not spend anything.
+      Asking again in the same chat continues the same session.
+
+#### The known hole — confirm it is still only this big
+
+The cross-project refusal above lives in the backend's memory, not in the
+record, so a restart forgets it. This step exercises that deliberately: the
+expected result is the *documented* behaviour, not a pass.
+
+- [ ] With project A's Council document open, ask something in a chat so it
+      binds to a session there.
+- [ ] Stop and start the Council plugin.
+- [ ] Open project B's Council document, and ask again in that same chat.
+- [ ] Expected **today**: a new session opens in project B, because after a
+      restart the chat looks new. Confirm project A's session is untouched and
+      still records the binding, and that nothing in B references A's content.
+- [ ] Record what you saw. If B's session carries anything from A, that is a
+      different and much worse bug — file it. Otherwise this is the limitation
+      T09 closes with a durable project identity in the snapshot
+      (`docs/architecture.md` §5.3.2).
+
+### One chat, one session
+
+- [ ] In a chat already consulting a session, use the Council editor to point
+      that chat at a *different* existing session. The editor's old session
+      should stop showing the chat as its destination.
+- [ ] Ask a follow-up in that chat. It must land on the **new** session — check
+      the run count on both. A follow-up arriving on the old one is the failure
+      this check exists for.
+
+### Ordinary chat is untouched
+
+- [ ] Switch the same chat back to a native provider and ask something. It
+      answers normally.
+- [ ] A chat that never had Council selected behaves exactly as before —
+      history, cost, notes injection, stop.
+
 ## What to record
 
 The Minerva build and plugin version, the install lane, a screenshot of the

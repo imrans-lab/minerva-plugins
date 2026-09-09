@@ -56,7 +56,6 @@
     "session_id",
     "session_revision",
     "definition_snapshot",
-    "chat_binding",
     "question",
     "status",
     "runs",
@@ -78,7 +77,7 @@
     },
     "ChatBinding": {
       "type": "object",
-      "description": "The explicit, persisted association between this session and a native chat. Council routes replies by this binding alone; it never infers a destination from whichever tab happens to be focused.",
+      "description": "The explicit, persisted association between this session and a native chat. Council routes replies by this binding alone; it never infers a destination from whichever tab happens to be focused. It is OPTIONAL because a chat has exactly one session: binding a chat to a second session takes the binding off the first, which then has no chat until somebody gives it one. Every session created from chat has one; only a session a chat was moved away from does not.",
       "properties": {
         "chat_id": {
           "$ref": "common.schema.json#/$defs/Id"

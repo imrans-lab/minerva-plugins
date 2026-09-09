@@ -39,9 +39,17 @@ type ModelCall struct {
 	// two if it ever needs to; the prompts already differ.
 	Role string
 
-	// Model is the host model id to ask for. Empty means the council expressed
-	// no preference and the adapter should use the host's default.
+	// Model is the host model name to ask for, resolved against the host's
+	// enabled-model catalogue where one could be read (models.go). Empty means
+	// Council could not see a catalogue and expressed no preference, which is
+	// the adapter's cue to fall back to the host's default route.
 	Model string
+
+	// Provider disambiguates a model_name two enabled providers both offer. It
+	// is the provider's DISPLAY name lowercased by the host before comparison,
+	// not the stable key host.models.list_providers returns beside it. Empty
+	// when the model is unambiguous or unresolved.
+	Provider string
 
 	// System and User are the assembled prompt. An initial member call carries
 	// no other member's answer in either of them — that is the independence

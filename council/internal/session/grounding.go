@@ -252,6 +252,12 @@ func cmdMemberUpsert(s *Store, snap map[string]any, req *Request) (map[string]an
 	if def == nil {
 		return nil, missingDefinition(defID)
 	}
+	// A model hint the host does not have is refused HERE, where the user is
+	// still editing an identity, rather than discovered as a per-member failure
+	// once a round is already running and paid for.
+	if f := s.checkModelHint(str(member["model_hint"]), fmt.Sprintf("member %q", memberID)); f != nil {
+		return nil, f
+	}
 
 	next := deepCopy(member)
 	existing, at := findByID(def["members"], "member_id", memberID)

@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/ipeerbhai/plugins/council/internal/session"
 )
 
 // The manifest is what the host mounts the panel from, and every claim in it is
@@ -163,4 +166,101 @@ func contains(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// The manifest is what the HOST advertises. PluginToolRegistry builds the tool
+// surface Minerva exposes from manifest.tools, not from a tools/list handshake,
+// so a tool the backend answers and the manifest omits is unreachable and a
+// tool the manifest declares and the backend does not answer is a dead entry in
+// the tool list. The chat provider makes this load-bearing rather than tidy:
+// the registered entry names generate_tool and cancel_tool, and the broker
+// refuses a name that is not one of this plugin's own declared tools
+// (CapabilityBroker.gd:3568-3577).
+func TestManifestAdvertisesExactlyTheToolsTheBackendAnswers(t *testing.T) {
+	var m struct {
+		Tools []struct {
+			Name        string          `json:"name"`
+			Description string          `json:"description"`
+			InputSchema json.RawMessage `json:"input_schema"`
+		} `json:"tools"`
+		Permissions struct {
+			HostCapabilities []string `json:"host_capabilities"`
+		} `json:"permissions"`
+	}
+	raw, err := os.ReadFile("manifest.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	store, err := session.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	declared := map[string]string{}
+	declaredSchema := map[string]any{}
+	for _, tool := range m.Tools {
+		if tool.Description == "" {
+			t.Errorf("tool %q is advertised with no description; that is what a caller reads", tool.Name)
+		}
+		declared[tool.Name] = tool.Description
+		var schema any
+		if err := json.Unmarshal(tool.InputSchema, &schema); err != nil {
+			t.Fatalf("tool %q: input_schema is not JSON: %v", tool.Name, err)
+		}
+		declaredSchema[tool.Name] = schema
+	}
+
+	answered := map[string]bool{}
+	for _, spec := range newRegistry(store).specs() {
+		answered[spec.Name] = true
+		description, present := declared[spec.Name]
+		if !present {
+			t.Errorf("the backend answers %q and the manifest does not declare it, so the host never offers it", spec.Name)
+			continue
+		}
+		if description != spec.Description {
+			t.Errorf("tool %q: the manifest describes it differently from the backend, and the manifest is what a caller sees", spec.Name)
+		}
+		var live any
+		if err := json.Unmarshal(spec.InputSchema, &live); err != nil {
+			t.Fatalf("tool %q: the backend's input schema is not JSON: %v", spec.Name, err)
+		}
+		if !reflect.DeepEqual(live, declaredSchema[spec.Name]) {
+			t.Errorf("tool %q: the manifest's input_schema differs from the one the backend advertises", spec.Name)
+		}
+	}
+	for name := range declared {
+		if !answered[name] {
+			t.Errorf("the manifest declares %q, which this backend does not answer; the host would offer a tool that fails", name)
+		}
+	}
+
+	// The two tools the chat entry names must be among them, and the grants
+	// the registration and the model listings need must be declared: the
+	// broker fails closed on an undeclared capability
+	// (CapabilityBroker.gd:271-285), and host.chat_providers.unregister is
+	// gated on the REGISTER grant rather than one of its own
+	// (CapabilityBroker.gd:261-267).
+	for _, name := range []string{chatGenerateTool, chatCancelTool} {
+		if !answered[name] {
+			t.Errorf("the chat entry names %q, which the backend does not answer", name)
+		}
+	}
+	granted := map[string]bool{}
+	for _, capability := range m.Permissions.HostCapabilities {
+		granted[capability] = true
+	}
+	for _, required := range []string{
+		"host.providers.chat",
+		"host.chat_providers.register",
+		"host.models.list_providers",
+		"host.models.list_models",
+	} {
+		if !granted[required] {
+			t.Errorf("permissions.host_capabilities must declare %q or the broker refuses the call", required)
+		}
+	}
 }

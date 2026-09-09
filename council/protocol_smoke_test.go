@@ -45,7 +45,7 @@ func newFakeHost(t *testing.T, store *session.Store) *fakeHost {
 	outR, outW := io.Pipe()
 	done := make(chan error, 1)
 	go func() {
-		err := serve(inR, outW, newRegistry(store), nil)
+		err := serve(inR, outW, newRegistry(store), nil, nil)
 		_ = outW.Close()
 		done <- err
 	}()

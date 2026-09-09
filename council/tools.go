@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 
 	"github.com/ipeerbhai/plugins/council/internal/session"
 )
@@ -61,6 +63,10 @@ func (r *registry) lookup(name string) (toolHandler, bool) {
 // second, hand-maintained copy of the command enum beside the schema's.
 func newRegistry(store *session.Store) *registry {
 	r := &registry{}
+	// The two tools the registered chat entry names. They live beside the rest
+	// of the surface but answer in the host's provider envelope, not this one's
+	// — see chatprovider.go.
+	registerChatTools(r, store)
 
 	r.register(toolSpec{
 		Name:        "minerva_council_ping",
@@ -148,6 +154,15 @@ func newRegistry(store *session.Store) *registry {
 		if len(a.Snapshot) == 0 {
 			return nil, fmt.Errorf("argument \"snapshot\" is required")
 		}
+		// Opening a document is the natural moment to re-read the host's model
+		// list: it is a host call, so it has to happen with the engine lock
+		// released, and this is the last point before Load takes it. A failure
+		// is not fatal — the previous catalogue stands and hints go unchecked.
+		refresh, cancel := context.WithTimeout(context.Background(), chatDiscoveryTimeout)
+		if err := store.RefreshModels(refresh); err != nil {
+			log.Printf("could not refresh the host's enabled models on load: %v", err)
+		}
+		cancel()
 		report, err := store.Load(a.Snapshot)
 		if err != nil {
 			return nil, err
@@ -167,6 +182,39 @@ func newRegistry(store *session.Store) *registry {
 		InputSchema: json.RawMessage(`{"type": "object", "properties": {}}`),
 	}, func(json.RawMessage) ([]byte, error) {
 		return json.Marshal(map[string]any{"ok": true, "snapshot": store.Export()})
+	})
+
+	r.register(toolSpec{
+		Name: "minerva_council_models",
+		Description: "Re-read Minerva's enabled providers and models, and return them. Council offers only these as a member's model_hint and refuses one the host does not have before a round starts, " +
+			"so this is what to call after enabling a model in Minerva's settings. Returns {ok, models:[{provider_key, provider_display, model_name, display}], known}. " +
+			"known is false when the host could not be asked at all, which is the state in which a hint travels unchecked. " +
+			"THE FIRST ENTRY MATTERS: a member with no model_hint, and a run with no override for its seat, is consulted with models[0] — the alphabetically first model of the alphabetically first provider — because Council never falls back to the host's \"default\" route. " +
+			"That choice costs money and sets the answer's quality, so give a member an explicit model_hint rather than letting the list decide. " +
+			"The list holds only the providers Minerva manages dynamically; a static built-in model may be callable and still absent here, and Council refuses a hint it cannot see.",
+		InputSchema: json.RawMessage(`{"type": "object", "properties": {}}`),
+	}, func(json.RawMessage) ([]byte, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), chatDiscoveryTimeout)
+		defer cancel()
+		refreshErr := store.RefreshModels(ctx)
+		models, known := store.Models()
+		listed := []map[string]any{}
+		for _, model := range models {
+			listed = append(listed, map[string]any{
+				"provider_key":     model.ProviderKey,
+				"provider_display": model.ProviderDisplay,
+				"model_name":       model.ModelName,
+				"display":          model.ModelDisplay,
+			})
+		}
+		out := map[string]any{"ok": true, "models": listed, "known": known}
+		if refreshErr != nil {
+			// The cached list is still returned: it is what the engine is
+			// actually checking against, and hiding it would make a refusal
+			// unexplainable.
+			out["refresh_error"] = refreshErr.Error()
+		}
+		return json.Marshal(out)
 	})
 
 	r.register(toolSpec{

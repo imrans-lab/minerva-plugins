@@ -335,12 +335,36 @@ func cmdSessionBindChat(s *Store, snap map[string]any, req *Request) (map[string
 	if missing, ok := req.Payload["missing"].(bool); ok {
 		binding["missing"] = missing
 	}
+	// One chat has one session. The chat provider routes by chat_id alone, so
+	// leaving the id on a second session would leave a follow-up's destination
+	// to array order. Moving the binding is the whole of the act: the session
+	// it came from keeps its question, its runs and its outcomes, and simply
+	// stops being where that chat's replies go.
+	//
+	// checkSnapshot enforces the same rule over the finished document, so a
+	// caller reaching the snapshot any other way is refused rather than trusted.
+	released := []any{}
+	for _, x := range arr(snap["sessions"]) {
+		other := obj(x)
+		if other == nil || str(other["session_id"]) == str(session["session_id"]) {
+			continue
+		}
+		if str(obj(other["chat_binding"])["chat_id"]) != chatID {
+			continue
+		}
+		delete(other, "chat_binding")
+		bumpSession(other)
+		released = append(released, str(other["session_id"]))
+	}
 	session["chat_binding"] = binding
 	bumpSession(session)
 	return map[string]any{
 		"session_id":       str(session["session_id"]),
 		"session_revision": int(num(session["session_revision"])),
 		"chat_id":          chatID,
+		// Named rather than silent: a view showing the old session has to know
+		// it is no longer the chat's destination.
+		"released_session_ids": released,
 	}, nil
 }
 

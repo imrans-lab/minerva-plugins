@@ -13,27 +13,70 @@
   },
   "tools": [
     {
-      "description": "Liveness handshake for the Council backend. Returns {ok, plugin, version, protocol_version, snapshot_revision} and echoes the optional 'echo' string so a caller can verify round-trip integrity.",
+      "description": "Answer one turn of a native chat that has Council selected as its provider. The host calls this; it is not a tool to call by hand. Arguments are {chat_id, text, entry_id}. The chat_id is the binding: it names the session this chat is consulting, and Council never infers a destination from whichever tab is focused. A chat with no session opens one against the project's council (asking which, when the project holds more than one); a chat that already has one asks its question as a follow-up round. Returns the chair's answer as {kind:\"answer\", text, prompt_tokens, completion_tokens}; a choice as {kind:\"question\", text, options}; a visible failure as {kind:\"error\", text}. A round still deliberating when the reply is due answers rather than timing out, and says where to watch it.",
       "input_schema": {
+        "type": "object",
         "properties": {
-          "echo": {
-            "description": "Optional string echoed back verbatim.",
-            "type": "string"
+          "chat_id": {
+            "type": "string",
+            "description": "The host chat this turn belongs to. It is the session binding."
+          },
+          "text": {
+            "type": "string",
+            "description": "The newest user message."
+          },
+          "entry_id": {
+            "type": "string",
+            "description": "Which registered Council entry the host dispatched to."
           }
         },
-        "type": "object"
+        "required": [
+          "chat_id",
+          "text"
+        ]
+      },
+      "name": "minerva_council_chat_generate"
+    },
+    {
+      "description": "Abandon the round the named chat last started. The host calls this when the user stops a turn; it carries only {chat_id} and is not awaited. A cancel for a chat with nothing running, or for a round that has already stopped, is a success that changes nothing.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "chat_id": {
+            "type": "string",
+            "description": "The host chat whose round should stop."
+          }
+        },
+        "required": [
+          "chat_id"
+        ]
+      },
+      "name": "minerva_council_chat_cancel"
+    },
+    {
+      "description": "Liveness handshake for the Council backend. Returns {ok, plugin, version, protocol_version, snapshot_revision} and echoes the optional 'echo' string so a caller can verify round-trip integrity.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "echo": {
+            "type": "string",
+            "description": "Optional string echoed back verbatim."
+          }
+        }
       },
       "name": "minerva_council_ping"
     },
     {
       "description": "Apply one Council protocol command and return the reply envelope. The arguments ARE the request envelope: {request_id, command, base_revision, payload}. Mutating commands (definition.upsert, definition.import, source.upsert, source.capture, member.upsert, member.adopt_source, session.create, session.bind_chat, run.start, run.cancel, run.retry, outcome.retain) must carry base_revision equal to the current snapshot_revision; read commands (snapshot.get, source.fetch, definition.export, run.await) must not carry it. A repeated request_id returns the stored reply with replayed:true and applies nothing a second time. Every reply carries the snapshot_revision it was produced against; a failure carries {code, message, retryable}. source.fetch returns the NEWEST capture of a source when payload.source_revision is omitted; pass a source_revision to read the exact capture a past contribution was grounded in. source.capture derives a source revision's hash and excerpt spans from the raw text so the page and the engine cannot disagree about them, and repairs an inventory entry in place when the text hashes to the revision's recorded content_hash. member.upsert edits an identity and mints member_revision itself, advancing it only when kind, represents, scope, limitations or grounding change; it never touches seats. member.adopt_source is the explicit act of moving a member onto another capture, which leaves every past run reading what it actually read. definition.export takes include_content and an optional include_source_ids selection, and reports which sources' content travelled. run.start CONSULTS THE MEMBERS: it sets the round going and answers within a bounded wait (the envelope's optional wait_seconds, 1-90, default 20) with the run_id and the run's status so far, plus every contribution's status, model and usage and the chair's synthesis if it is already there. A round that outruns the wait keeps going; read it with run.await, which takes the same wait_seconds, and stop it with run.cancel. Each initial member is sent the same context snapshot and its own pinned grounding and never another member's answer. run.start's payload takes seat_ids (who is consulted), kind, prompt, addressed_seat_id or addressed_claim_id (a follow-up to a member or to one argument, routed to whoever made it, and consulting that seat alone), model_overrides keyed by seat_id, and limits, which may only NARROW the council's own max_concurrent_members, max_prompt_bytes, per_member_timeout_seconds and run_budget_seconds. run.cancel stops a run that is still running and suppresses what is in flight: a reply landing afterwards is recorded stale and moves nothing. run.retry starts a fresh run over the seats that did not answer, narrowable with seat_ids; nothing ever retries or resumes on its own.",
       "input_schema": {
+        "type": "object",
         "properties": {
-          "base_revision": {
-            "description": "The snapshot_revision this command was written against. Required by every mutating command, refused on a read.",
-            "type": "integer"
+          "request_id": {
+            "type": "string",
+            "description": "Caller-minted idempotency key. Repeating one returns the stored reply."
           },
           "command": {
+            "type": "string",
             "enum": [
               "snapshot.get",
               "definition.upsert",
@@ -51,56 +94,62 @@
               "run.cancel",
               "run.retry",
               "outcome.retain"
-            ],
-            "type": "string"
+            ]
+          },
+          "base_revision": {
+            "type": "integer",
+            "description": "The snapshot_revision this command was written against. Required by every mutating command, refused on a read."
           },
           "payload": {
-            "description": "Command arguments. See the Council architecture document for the shape each command takes.",
-            "type": "object"
-          },
-          "request_id": {
-            "description": "Caller-minted idempotency key. Repeating one returns the stored reply.",
-            "type": "string"
+            "type": "object",
+            "description": "Command arguments. See the Council architecture document for the shape each command takes."
           }
         },
         "required": [
           "request_id",
           "command",
           "payload"
-        ],
-        "type": "object"
+        ]
       },
       "name": "minerva_council_command"
     },
     {
       "description": "Hand the backend the council_project_snapshot the panel restored, replacing whatever it was working on. Runs the interruption rule: a run that was in flight when its owning process went away is demoted to a visible failed state with an explicit retry, never resumed. Returns {ok, snapshot_revision, definitions, sessions, runs_demoted}.",
       "input_schema": {
+        "type": "object",
         "properties": {
           "snapshot": {
-            "description": "A council_project_snapshot record.",
-            "type": "object"
+            "type": "object",
+            "description": "A council_project_snapshot record."
           }
         },
         "required": [
           "snapshot"
-        ],
-        "type": "object"
+        ]
       },
       "name": "minerva_council_load_snapshot"
     },
     {
       "description": "Return the acknowledged council_project_snapshot for the host to persist. This is the state the panel writes into the project and into a .mcouncil file; the backend keeps nothing durable of its own.",
       "input_schema": {
-        "properties": {},
-        "type": "object"
+        "type": "object",
+        "properties": {}
       },
       "name": "minerva_council_export_snapshot"
     },
     {
+      "description": "Re-read Minerva's enabled providers and models, and return them. Council offers only these as a member's model_hint and refuses one the host does not have before a round starts, so this is what to call after enabling a model in Minerva's settings. Returns {ok, models:[{provider_key, provider_display, model_name, display}], known}. known is false when the host could not be asked at all, which is the state in which a hint travels unchecked. THE FIRST ENTRY MATTERS: a member with no model_hint, and a run with no override for its seat, is consulted with models[0] — the alphabetically first model of the alphabetically first provider — because Council never falls back to the host's \"default\" route. That choice costs money and sets the answer's quality, so give a member an explicit model_hint rather than letting the list decide. The list holds only the providers Minerva manages dynamically; a static built-in model may be callable and still absent here, and Council refuses a hint it cannot see.",
+      "input_schema": {
+        "type": "object",
+        "properties": {}
+      },
+      "name": "minerva_council_models"
+    },
+    {
       "description": "Summarise the loaded snapshot without moving it: the councils it holds, and for each session its status, chat binding, runs and how many outcomes were retained.",
       "input_schema": {
-        "properties": {},
-        "type": "object"
+        "type": "object",
+        "properties": {}
       },
       "name": "minerva_council_status"
     }
@@ -150,7 +199,10 @@
   "permissions": {
     "host_capabilities": [
       "host.providers.chat",
-      "mcp.proxy:minerva_send_message"
+      "mcp.proxy:minerva_send_message",
+      "host.chat_providers.register",
+      "host.models.list_providers",
+      "host.models.list_models"
     ],
     "network": {
       "mode": "none"

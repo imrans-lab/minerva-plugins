@@ -181,7 +181,7 @@ type responseRouter interface {
 // exchanges. Two readers on one *bufio.Reader would each swallow bytes the
 // other was waiting for, and a handler that read stdin directly would swallow
 // the very requests it is meant to leave room for.
-func serve(in io.Reader, out io.Writer, reg *registry, chat *stdioChatHost) error {
+func serve(in io.Reader, out io.Writer, reg *registry, chat *stdioChatHost, provider *chatProvider) error {
 	writer := &stdoutWriter{enc: json.NewEncoder(out)}
 	// done releases the reader goroutine when this loop returns. Without it a
 	// shutdown leaves the reader blocked forever on a send nobody will take,
@@ -195,6 +195,10 @@ func serve(in io.Reader, out io.Writer, reg *registry, chat *stdioChatHost) erro
 		chat.bind(writer)
 		router = chat
 	}
+	// announced guards the one-shot startup handshake below. The host can send
+	// initialize more than once over a connection's life, and registering twice
+	// would be harmless but the model catalogue would be re-read for nothing.
+	announced := false
 	requests := readStdin(bufio.NewReaderSize(in, readBuffer), done, router)
 
 	send := func(response rpcResponse) {
@@ -241,6 +245,15 @@ func serve(in io.Reader, out io.Writer, reg *registry, chat *stdioChatHost) erro
 			if !isNotification {
 				send(handleInitialize(msg.ID))
 			}
+			// Council introduces itself to the host only once the host has
+			// introduced itself here: registering a chat provider means asking
+			// the host a question, and the answer arrives on the very stream
+			// this handshake just established. It runs on its own goroutine so
+			// the reply above is not held behind two host round trips.
+			if provider != nil && !announced {
+				announced = true
+				go provider.announce()
+			}
 		case "notifications/initialized":
 			// No-op: the host sends it after our initialize result.
 		case "tools/list":
@@ -261,6 +274,13 @@ func serve(in io.Reader, out io.Writer, reg *registry, chat *stdioChatHost) erro
 		case "shutdown":
 			if !isNotification {
 				send(okResponse(msg.ID, map[string]any{"ok": true}))
+			}
+			// Withdraw before returning, and while the stream is still up: once
+			// this function returns the reader stops and no reply could reach
+			// the exchange. The wait is short, so a host that has already
+			// stopped listening costs the exit a moment and no more.
+			if provider != nil {
+				provider.withdraw()
 			}
 			log.Printf("shutdown requested — exiting")
 			return nil
@@ -388,9 +408,11 @@ func main() {
 	// and bound by the protocol loop below.
 	chat := &stdioChatHost{}
 	store.SetChatHost(chat)
+	store.SetModelCatalog(&hostModelCatalog{host: chat})
+	provider := &chatProvider{host: chat, store: store}
 
 	log.Printf("starting (pid=%d, version=%s)", os.Getpid(), serverVersion)
-	if err := serve(os.Stdin, os.Stdout, reg, chat); err != nil {
+	if err := serve(os.Stdin, os.Stdout, reg, chat, provider); err != nil {
 		log.Printf("stdin read error: %v", err)
 		os.Exit(1)
 	}

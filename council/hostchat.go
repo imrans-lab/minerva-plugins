@@ -119,8 +119,11 @@ func (h *stdioChatHost) Generate(ctx context.Context, call session.ModelCall) (s
 
 	model := call.Model
 	if model == "" {
-		// The broker resolves "default" to the provider the user actually has,
-		// which is the only model id that is correct on every install.
+		// Only reached when Council could not read the host's enabled-model
+		// catalogue at all, so it has nothing to name. "default" is the host's
+		// own fallback, and it resolves to a Core provider that may have no
+		// service or action behind it — which is exactly why the engine picks
+		// an explicit model whenever it can see one (session/models.go).
 		model = "default"
 	}
 	args := map[string]any{
@@ -129,6 +132,12 @@ func (h *stdioChatHost) Generate(ctx context.Context, call session.ModelCall) (s
 			{"role": "user", "content": call.User},
 		},
 		"model": model,
+	}
+	if call.Provider != "" {
+		// Sent only when the engine resolved one. The host compares it against
+		// the provider's display name lowercased, and uses it solely to break a
+		// tie between two providers offering the same model_name.
+		args["provider"] = call.Provider
 	}
 	// max_tokens is deliberately not sent. The broker forwards it to the
 	// provider untranslated and at least one backend refuses the request

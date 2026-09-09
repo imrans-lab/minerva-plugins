@@ -166,6 +166,7 @@ func (s *Store) planRun(sessionID, runID string, generation uint64) (runPlan, bo
 			continue
 		}
 		grounding := groundingSections(def, member)
+		advisorModel, advisorProvider := s.modelFor(run, str(seat["seat_id"]), member)
 		system := memberSystem(member, seat)
 		user, allowed := advisorPrompt(session, run, grounding, rules.PromptBytes-len(system))
 		calls = append(calls, plannedCall{
@@ -176,7 +177,8 @@ func (s *Store) planRun(sessionID, runID string, generation uint64) (runPlan, bo
 				MemberID:       str(member["member_id"]),
 				MemberRevision: int(num(member["member_revision"])),
 				Role:           "advisor",
-				Model:          modelFor(run, str(seat["seat_id"]), member),
+				Model:          advisorModel,
+				Provider:       advisorProvider,
 				System:         system,
 				User:           user,
 			},
@@ -219,17 +221,6 @@ func markRunning(snap map[string]any, sessionID, runID string) *Failure {
 	session["status"] = contract.DeriveSessionStatus(session)
 	bumpSession(session)
 	return nil
-}
-
-// modelFor picks the model to ask for. The run's own override wins, then the
-// member's hint, and an empty string means the council expressed no preference
-// and the host's default answers. A hint is advisory by contract, so it is
-// never checked here: what actually answered is recorded from the reply.
-func modelFor(run map[string]any, seatID string, member map[string]any) string {
-	if override := str(obj(run["model_overrides"])[seatID]); override != "" {
-		return override
-	}
-	return str(member["model_hint"])
 }
 
 // advisorPrompt is what one member is sent. It carries the question, the shared

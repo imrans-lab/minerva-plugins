@@ -527,6 +527,184 @@ The other direction — bringing a question and selected context *to* Council fr
 elsewhere — is an MCP tool on Council's backend taking an explicit `session_id`
 (or creating one and returning it). Never an implicit destination.
 
+#### 5.3.1 What the registration actually is (implemented)
+
+One entry, registered at every process start:
+
+| field | value | why |
+|---|---|---|
+| `entry_id` | `council` | the key `plugin:council:council` is what a chat remembers across a restart (`ServiceHistory.gd:361-371`) |
+| `display_name` | `Council` | what the chooser shows (`ProviderOptionButton.gd:366-381`) |
+| `generate_tool` | `minerva_council_chat_generate` | must carry the plugin's own prefix |
+| `cancel_tool` | `minerva_council_chat_cancel` | same rule |
+| `history_mode` | `newest_only` | Council's own record is the transcript; a second unversioned copy of the chat is not something a citation could point at |
+| `timeout_sec` | `120` | the registry default is 600 (`PluginChatProviderRegistry.gd:32`); 120 keeps a Council turn on the same budget as every other tool call |
+
+Registration happens after the host's `initialize`, on its own goroutine, so the
+handshake reply is not held behind two host round trips. It is idempotent on
+`(plugin_id, entry_id)` and replaces the prior entry in place
+(`PluginChatProviderRegistry.gd:58-59`), which is the whole of "re-registers on
+restart" — there is no second mechanism.
+
+**Registration goes first, and the catalogue read never shares its deadline.**
+The catalogue is 1 + N host round trips (§5.3.3); registration is one. On a
+single budget a host slow to enumerate models would spend it before
+registration was attempted, and the failure would be Council never appearing in
+the chooser — invisible, because there is nothing to select and no error to
+read. Reading the catalogue second costs something much smaller and it says so
+out loud: a turn taken in the window before it lands has no list to check a
+hint against, so the hint travels unchecked and an absent one falls back to the
+host's default route. Neither call's failure stops the other. Cleanup on stop is already the host's:
+`plugin_stopped` and `plugin_crashed` are connected to `drop_plugin`
+(`src/Scripts/Services/Plugins/PluginManager.gd:220-221`). Council additionally
+withdraws on an orderly `shutdown`, bounded to two seconds so a host that has
+stopped listening costs the exit a moment and no more.
+
+A turn holds its reply for at most **90 s**, comfortably under the declared
+120. A round that outruns it keeps going and the chat gets an `answer` saying
+so and naming where to watch it — never a silent timeout, and never an `error`
+for work that has not failed.
+
+#### 5.3.2 chat_id → session, and the cross-project refusal
+
+The durable binding is the session's own `chat_binding.chat_id`, in the project
+snapshot. Resolution is: scan the loaded document's sessions for that chat.
+
+- **Found** → this turn is a `follow_up` run on that session.
+- **Not found, and Council has never routed this chat** → it is new; a session
+  is opened here, `question` = the user's text, `chat_id` = the binding.
+- **Not found, but Council routed this chat against an earlier load
+  generation** → *refused*. That chat belongs to a session in a document that
+  is not the one open, and opening a fresh one here would write project A's
+  consultation into project B's record.
+
+The third case needs one piece of process memory, because the snapshot alone
+cannot distinguish "a chat from another project" from "a chat nobody has used
+yet". `Store.chatSeen` records the load generation each chat was last routed
+in; it deliberately survives `Load`, and it is the only chat state that is not
+in the record.
+
+**The limitation, stated plainly.** `chatSeen` is process memory, so the
+cross-project refusal holds only for as long as one backend process has seen
+both documents. **After a plugin restart every chat looks new again**, and a
+chat bound to a session in project A, asked while project B's document is open,
+will open a *fresh session in B* rather than being refused. Nothing is
+corrupted — project A's session is untouched and still holds its own binding —
+but the user's chat has silently moved projects, and that is a real hole rather
+than a theoretical one. It is also bounded: `chatSeen` is capped
+(`pruneChatSeen`, 4096 chats, older generations evicted first), and hitting the
+cap degrades one chat to exactly this same "looks new" state.
+
+Closing it needs a durable project identity in the snapshot so a chat binding
+can name the document it belongs to, and `project_snapshot.schema.json` has
+`additionalProperties: false` with no such field today. **That is T09's**, and
+until it lands the behaviour above is what the live check exercises rather than
+what it fails on.
+
+**One chat, one session.** The provider routes by `chat_id` alone, so a chat_id
+appearing on two sessions has no correct resolution — whichever the resolver
+reached would be array order deciding where a user's follow-up lands.
+`session.bind_chat` therefore *moves* the binding: it removes `chat_binding`
+from any other session carrying that id (naming them in
+`released_session_ids`), and `checkSnapshot` refuses a document where two
+sessions share one. `chat_binding` is consequently **optional** in
+`session.schema.json`: a session a chat was moved away from keeps its question,
+its runs and its outcomes and simply has no chat until somebody gives it one.
+Relaxing the requirement is backward compatible — every session written before
+this still validates — and it replaced the invalid fixture
+`session_without_chat_binding.json` with `snapshot_two_sessions_one_chat.json`,
+which is the rule that actually matters.
+
+Which council a new session runs is the user's choice, made explicitly: the one
+council the project holds, otherwise a `question` envelope offering each by
+name. The host does not report which label was clicked — it sends the option's
+**keystroke** as an ordinary user turn on that chat
+(`ChatPane.gd:2380-2391`, `:2399-2406`) — so each option's keystroke carries the
+whole choice as `/council <definition_id>`, and the question the user already
+typed is remembered against the chat so they never type it twice.
+`/council-session <session_id>` is the same mechanism for binding a chat to a
+consultation that already exists.
+
+Cancellation arrives carrying only `chat_id`, so the backend keeps the run each
+chat last started and cancels that. A cancel for a chat with nothing running,
+or for a round that already stopped, is a success that moves nothing.
+
+**One round at a time per chat.** That same handle does a second job. A round
+can outlive the 90 s reply, and the host then hands the user their prompt back
+with no idea anything is still in flight — so a user who asks again would
+otherwise buy a second full bench over the same question and get two syntheses
+of it. While a chat's handle is live a turn dispatches `run.await`, not
+`run.start`: it reports the running round and says plainly that the new question
+was **not** asked and should be asked again once this one lands. The handle is
+released the moment the round reaches a resting state, so the next question does
+start a round of its own, and a late cancel truthfully answers "nothing was
+running".
+
+**Choosing a council is refused rather than guessed.** `/council <id>` naming a
+council the open document does not hold is an error: falling through to "the
+only council there is" would consult a different bench and present its answer as
+the one the user chose. A council *remembered* from an earlier turn that has
+since gone is not an error — the user did not name it this turn — and falls
+through to the ordinary choice. Option labels are made distinct, because
+ChatPane keys its buttons by label and keeps only the first of a repeated one
+(`ChatPane.gd:2322-2324`): two councils sharing a name would render as one
+button with the other unreachable, so a repeated name carries its
+`definition_id` and an unnamed council is shown by id.
+
+Every chat-driven step is an ordinary protocol command run through `Dispatch` —
+`session.create`, `run.start`, `run.cancel`, `session.bind_chat`. A chat turn
+therefore gets the same schema validation, idempotency ledger, revision check
+and bounded waiting as a turn driven from the panel, and there is one engine
+rather than two.
+
+### 5.3.3 Model choice is explicit, never the host's default route
+
+`member.model_hint` and `run.start`'s `model_overrides` used to be free strings
+resolved at call time, with an empty one becoming the literal `"default"`. That
+is not safe: the broker resolves `"default"` to the TurnRock/Core provider
+(`CapabilityBroker.gd:2354-2361`), which is constructible with no service and no
+action — a degraded instance the chat picker itself refuses
+(`ChatPane.gd:5244-5253`).
+
+So the backend reads the host's own catalogue at startup, on every
+`minerva_council_load_snapshot`, and on demand through
+`minerva_council_models`: `host.models.list_providers` answers
+`{providers:[{key, display}]}` and `host.models.list_models` answers
+`{provider, models:[{model_name, display}]}`
+(`CapabilityBroker.gd:565-576`, `singleton_object.gd:2058-2091`). Each grant is
+declared separately in `permissions.host_capabilities`; the policy gate refuses
+an undeclared capability before dispatch (`CapabilityBroker.gd:271-285`, with
+`:286-293` refusing everything when there is no policy engine at all), and
+`host.chat_providers.unregister` is gated on the **register** grant rather than
+one of its own (`CapabilityBroker.gd:261-267`).
+
+Two strings come out of that and they are not interchangeable.
+`host.providers.chat` matches its `model` argument against each enabled model's
+`model_name` (`CapabilityBroker.gd:2402-2416`); when two providers offer the
+same name it disambiguates with `provider`, compared against the provider's
+**display** name lowercased (`:2427-2432`) — *not* the `key` that
+`list_providers` returns beside it. Council carries both, so a call can be aimed
+unambiguously.
+
+One gap in the catalogue is worth knowing about, and it is the host's:
+`host.models.list_models` enumerates the **dynamic** provider map alone
+(`singleton_object.gd:2079-2091`), while `host.providers.chat` also matches the
+**static built-in** models (`CapabilityBroker.gd:2374-2392`). A built-in the
+user has enabled is therefore callable but absent from the list, and Council's
+check refuses a hint naming it. The refusal names the models Council *can* see,
+so the user is told what to pick rather than left guessing — but it is a
+refusal of something that would have worked.
+
+With a catalogue in hand: `member.upsert` refuses a hint the host does not have,
+`run.start` and `run.retry` refuse an override or a seat hint before the run
+record exists, and a call with no hint at all asks for the catalogue's first
+model — deterministic, because the catalogue is sorted, and visible, because
+`contribution.model_id` records what actually answered. With **no** catalogue —
+an older host, a missing grant, a call that failed — a hint travels unchecked
+and an empty one still becomes `"default"`: absence of the list is not evidence
+that a model is missing, and refusing every council because Council could not
+ask would be worse than the risk it avoids.
+
 ### 5.4 Retaining an outcome as a note
 
 Two notes, two jobs, and the distinction matters:
@@ -847,6 +1025,7 @@ run from the previous snapshot cannot apply: the run id is not present, and
 | contract tests | `GOWORK=off go test ./internal/contract/` | 5 tests, over 10 valid and 19 invalid fixtures (the populated `.mcouncil` is one of them) |
 | GDScript syntax | `godot --headless --check-only -s <file>` on every `ui/*.gd` | clean |
 | panel suite | `council/scripts/run-gd-tests.sh <minerva>` | authored, never executed — see `tests/gd/EXPECTED_SUITES` |
+| chat provider | `GOWORK=off go test -run TestCouncilAnswersAsAChatProvider ./` | authored, not executed in the task that wrote it |
 
 `council` is a `use` entry in the repo's `go.work`, so Go commands there need
 no `GOWORK=off`.

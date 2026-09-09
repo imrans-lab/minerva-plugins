@@ -36,6 +36,29 @@ type Store struct {
 	// nobody bound a transport to reports model_unavailable rather than hanging.
 	chat ChatHost
 
+	// catalog is the route to the host's enabled-model list, and models is what
+	// it last returned. modelsKnown separates "the host has none" from "Council
+	// has not been able to ask", which is the difference between refusing a
+	// hint and letting it through (models.go).
+	catalog     ModelCatalog
+	models      []HostModel
+	modelsKnown bool
+
+	// The chat routing table (chat.go). It is process memory that OUTLIVES a
+	// Load on purpose: the durable binding is each session's own chat_binding,
+	// and what these add is the knowledge that a chat Council has already
+	// routed, whose session is not in the document now loaded, belongs to
+	// another project and must not be adopted into this one.
+	//
+	// Because it is process memory, the guard does not survive a plugin
+	// restart: after one, every chat looks new again. chatSeen is bounded
+	// (pruneChatSeen) and chatRuns is dropped as each round comes to rest.
+	chatSeen    map[string]uint64
+	chatRuns    map[string]chatRun
+	chatPending map[string]string
+	chatCouncil map[string]string
+	chatSeq     int
+
 	// live holds one handle per run this engine is executing, keyed by
 	// (session_id, run_id) — a run id is only unique within its session, so the
 	// id alone would let two sessions share a handle. A result landing from a
@@ -56,13 +79,17 @@ func New() (*Store, error) {
 		return nil, err
 	}
 	return &Store{
-		registry: r,
-		snapshot: emptySnapshot(),
-		ledger:   map[string]Reply{},
-		seq:      map[string]int{},
-		chat:     unavailableChatHost{},
-		live:     map[string]*runControl{},
-		now:      func() string { return time.Now().UTC().Format("2006-01-02T15:04:05Z") },
+		registry:    r,
+		snapshot:    emptySnapshot(),
+		ledger:      map[string]Reply{},
+		seq:         map[string]int{},
+		chat:        unavailableChatHost{},
+		live:        map[string]*runControl{},
+		chatSeen:    map[string]uint64{},
+		chatRuns:    map[string]chatRun{},
+		chatPending: map[string]string{},
+		chatCouncil: map[string]string{},
+		now:         func() string { return time.Now().UTC().Format("2006-01-02T15:04:05Z") },
 	}, nil
 }
 
