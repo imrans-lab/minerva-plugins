@@ -1164,7 +1164,13 @@ run from the previous snapshot cannot apply: the run id is not present, and
 
 - The command set is the minimum the state model requires. The engine (T06) may
   add commands; it may not add a second place where state lives.
-- The presets and the production visual design are T02 / T08 / T10.
+- The shipped councils now live in `presets/` as ordinary `council_definition`
+  records with no preset-only field and no preset loader. One directory is the
+  single source: the backend embeds it for `minerva_council_presets`, and
+  `ui/build.mjs` inlines the same bytes into the page so the editor can offer
+  them with no round trip. Starting one is `definition.import` under a freshly
+  minted `definition_id`, because the shipped id names the preset and import
+  refuses an id the project already holds.
 - `project_state` / `project_export` capabilities are available and unused; if a
   later version wants the backend in the project round-trip, the channels are
   declared then, not now.

@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "record_kind": "council_definition",
+  "definition_id": "preset-grounded-example",
+  "definition_revision": 1,
+  "name": "Source-Grounded Example",
+  "purpose": "A worked example of grounding, shipped so the mechanism can be read before it is trusted. One simulant argues only from a short essay written for this file and says what that essay does not establish. Replace the source with a note of your own, re-ground the member, and the example becomes a council.",
+  "members": [
+    {
+      "member_id": "mem-chair",
+      "member_revision": 1,
+      "kind": "assistant",
+      "display_name": "Chair",
+      "scope": "Runs the round, reports where members disagree, and never adds a position of its own.",
+      "limitations": "Has no grounding of its own; everything it reports must trace to a member contribution.",
+      "grounding": []
+    },
+    {
+      "member_id": "mem-essay-reader",
+      "member_revision": 1,
+      "kind": "simulant",
+      "display_name": "Reader of the standing-commitment essay",
+      "represents": "The unnamed author of the example essay in this file. The essay was written for this example; it is nobody's published view and stands for no real person.",
+      "scope": "The argument of one short essay about what a standing commitment costs. Nothing else.",
+      "limitations": "One essay, three paragraphs. It establishes nothing about pricing method, contract law, this author's views on anything else, or your particular situation. A claim it cannot trace to the essay is its own inference and is labelled as one.",
+      "grounding": [
+        {
+          "source_id": "src-standing-commitment",
+          "source_revision": 1
+        }
+      ]
+    }
+  ],
+  "seats": [
+    {
+      "seat_id": "seat-chair",
+      "member_id": "mem-chair",
+      "responsibility": "Synthesise the round and say which claims rest on the essay and which do not.",
+      "role": "chair"
+    },
+    {
+      "seat_id": "seat-essay-reader",
+      "member_id": "mem-essay-reader",
+      "responsibility": "Argue from the captured essay and cite the span each claim rests on.",
+      "role": "advisor",
+      "relevance_tags": [
+        "commitment",
+        "cost"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "source_id": "src-standing-commitment",
+      "source_revision": 1,
+      "title": "What a standing commitment costs (example essay)",
+      "author": "Written for this Council example; not a real person",
+      "locator": "shipped with Council as presets/grounded_example.json",
+      "captured_at": "2026-09-09T00:00:00Z",
+      "content_hash": "sha256:a4c5f9404e8b41b529dbdc2a5bbd3f914f4886daff470261fb5ab64c5fb85574",
+      "payload": {
+        "content_type": "text/plain",
+        "byte_length": 655,
+        "content_hash": "sha256:a4c5f9404e8b41b529dbdc2a5bbd3f914f4886daff470261fb5ab64c5fb85574",
+        "inline": "A standing commitment is cheap on the day it is made and expensive on every day after it.\n\nThe day it is made, the work is in the future and the future looks empty. Every day after, the commitment is the first claim on the hours that other work now has to compete for, and the competition is invisible: the jobs it crowds out never arrive as complaints, because they were never accepted.\n\nSo the honest price of a standing commitment is not the cost of doing the work. It is the cost of doing the work plus the value of the best thing you will now have to refuse. That second number is the one nobody writes down, and it is usually the larger of the two.\n"
+      },
+      "anchors": [
+        {
+          "anchor_id": "anc-honest-price",
+          "quote": "the honest price of a standing commitment is not the cost of doing the work",
+          "start": 392,
+          "end": 467
+        }
+      ]
+    }
+  ],
+  "deliberation": {
+    "max_members_per_round": 2,
+    "max_concurrent_members": 2,
+    "max_prompt_bytes": 16384,
+    "run_budget_seconds": 240,
+    "max_rounds_per_session": 12,
+    "independent_initial_round": true,
+    "preserve_disagreement": true,
+    "per_member_timeout_seconds": 120
+  }
+}

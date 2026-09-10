@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "record_kind": "council_definition",
+  "definition_id": "preset-second-opinion",
+  "definition_revision": 1,
+  "name": "Second Opinion",
+  "purpose": "A general-purpose council for any question worth more than one answer: the case for, the case against, and the conditions each side depends on.",
+  "members": [
+    {
+      "member_id": "mem-chair",
+      "member_revision": 1,
+      "kind": "assistant",
+      "display_name": "Chair",
+      "scope": "Runs the round, reports where members disagree, and never adds a position of its own.",
+      "limitations": "Has no grounding of its own; everything it reports must trace to a member contribution.",
+      "grounding": []
+    },
+    {
+      "member_id": "mem-case-for",
+      "member_revision": 1,
+      "kind": "assistant",
+      "display_name": "The case for",
+      "scope": "The strongest honest argument in favour, stated without overclaiming.",
+      "limitations": "Argues one side by design. It is not a balanced view and must not be read as one.",
+      "grounding": []
+    },
+    {
+      "member_id": "mem-case-against",
+      "member_revision": 1,
+      "kind": "assistant",
+      "display_name": "The case against",
+      "scope": "The strongest honest argument opposed, including the failure nobody wants to name.",
+      "limitations": "Argues one side by design. It is not a balanced view and must not be read as one.",
+      "grounding": []
+    },
+    {
+      "member_id": "mem-preconditions",
+      "member_revision": 1,
+      "kind": "assistant",
+      "display_name": "What would have to be true",
+      "scope": "The conditions each side depends on, and which of them can be checked before deciding.",
+      "limitations": "It can name a condition; it cannot check one. Verifying any of them is work for a person.",
+      "grounding": []
+    }
+  ],
+  "seats": [
+    {
+      "seat_id": "seat-chair",
+      "member_id": "mem-chair",
+      "responsibility": "Synthesise the round and preserve disagreement rather than resolving it.",
+      "role": "chair"
+    },
+    {
+      "seat_id": "seat-case-for",
+      "member_id": "mem-case-for",
+      "responsibility": "Make the strongest case in favour.",
+      "role": "advisor",
+      "relevance_tags": ["argument"]
+    },
+    {
+      "seat_id": "seat-case-against",
+      "member_id": "mem-case-against",
+      "responsibility": "Make the strongest case against.",
+      "role": "advisor",
+      "relevance_tags": ["argument"]
+    },
+    {
+      "seat_id": "seat-preconditions",
+      "member_id": "mem-preconditions",
+      "responsibility": "Name what each side depends on and which of it is checkable now.",
+      "role": "advisor",
+      "relevance_tags": ["assumptions"]
+    }
+  ],
+  "sources": [],
+  "deliberation": {
+    "max_members_per_round": 4,
+    "max_concurrent_members": 3,
+    "max_prompt_bytes": 16384,
+    "run_budget_seconds": 240,
+    "max_rounds_per_session": 12,
+    "independent_initial_round": true,
+    "preserve_disagreement": true,
+    "per_member_timeout_seconds": 120
+  }
+}

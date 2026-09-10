@@ -46,6 +46,15 @@ const (
 	SelectSessionDirective = "/council-session "
 )
 
+// Directives returns every directive the turn reader understands, longest first
+// — which is also the order it must test them in, since "/council-session " has
+// "/council" as a prefix. Anything that documents the chat surface checks itself
+// against this rather than against a list of its own, and a directive added to
+// the reader without being added here is a directive the help may not name.
+func Directives() []string {
+	return []string{SelectSessionDirective, SelectCouncilDirective}
+}
+
 // ChatTurn is one turn handed over by the host's chat provider.
 type ChatTurn struct {
 	ChatID  string

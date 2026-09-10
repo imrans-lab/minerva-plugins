@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "record_kind": "council_definition",
+  "definition_id": "preset-decision-review",
+  "definition_revision": 1,
+  "name": "Decision Review",
+  "purpose": "Weigh one concrete business decision — take the recurring order, ship the feature, sign the lease — and say plainly what it costs, where the members disagree, and what would change the answer.",
+  "members": [
+    {
+      "member_id": "mem-chair",
+      "member_revision": 1,
+      "kind": "assistant",
+      "display_name": "Chair",
+      "scope": "Runs the round, reports where members disagree, and never adds a position of its own.",
+      "limitations": "Has no grounding of its own; everything it reports must trace to a member contribution.",
+      "grounding": []
+    },
+    {
+      "member_id": "mem-unit-economics",
+      "member_revision": 1,
+      "kind": "assistant",
+      "display_name": "Unit economics",
+      "scope": "What the decision does to margin, cash timing and the cost of serving one more unit of demand.",
+      "limitations": "Argues from the numbers in the question. It has no access to your books, so any figure it does not read in the question is an assumption and must be labelled one.",
+      "grounding": []
+    },
+    {
+      "member_id": "mem-delivery-risk",
+      "member_revision": 1,
+      "kind": "assistant",
+      "display_name": "Delivery risk",
+      "scope": "Whether the commitment can actually be met with the capacity, people and lead times on hand, and what fails first if it cannot.",
+      "limitations": "Knows nothing about the real schedule or the real supplier. It reasons about the constraints the question states and asks for the ones it is missing.",
+      "grounding": []
+    },
+    {
+      "member_id": "mem-customer-evidence",
+      "member_revision": 1,
+      "kind": "assistant",
+      "display_name": "Customer evidence",
+      "scope": "What has actually been observed about demand, and the difference between an observation and a hope.",
+      "limitations": "Has seen no customer. It can only separate the evidence in the question from the inference drawn on top of it.",
+      "grounding": []
+    },
+    {
+      "member_id": "mem-owner",
+      "member_revision": 1,
+      "kind": "human",
+      "display_name": "You (the decision owner)",
+      "scope": "The local user, supplying observed facts and correcting wrong premises.",
+      "limitations": "Nothing prompts this seat and no model answers for it. It is here so a person's own evidence has a place in the record.",
+      "grounding": []
+    }
+  ],
+  "seats": [
+    {
+      "seat_id": "seat-chair",
+      "member_id": "mem-chair",
+      "responsibility": "Synthesise the round, preserve disagreement, and end with what would change the answer.",
+      "role": "chair"
+    },
+    {
+      "seat_id": "seat-unit-economics",
+      "member_id": "mem-unit-economics",
+      "responsibility": "State what the decision costs and earns, and name every figure it had to assume.",
+      "role": "advisor",
+      "relevance_tags": ["pricing", "margin", "cash"]
+    },
+    {
+      "seat_id": "seat-delivery-risk",
+      "member_id": "mem-delivery-risk",
+      "responsibility": "State whether the commitment is deliverable and what breaks first if it is not.",
+      "role": "advisor",
+      "relevance_tags": ["capacity", "schedule", "risk"]
+    },
+    {
+      "seat_id": "seat-customer-evidence",
+      "member_id": "mem-customer-evidence",
+      "responsibility": "Separate observed demand from assumed demand and say which the decision rests on.",
+      "role": "advisor",
+      "relevance_tags": ["demand", "evidence"]
+    },
+    {
+      "seat_id": "seat-owner",
+      "member_id": "mem-owner",
+      "responsibility": "Supply observed facts about the real situation and correct wrong premises.",
+      "role": "advisor",
+      "relevance_tags": ["evidence"]
+    }
+  ],
+  "sources": [],
+  "deliberation": {
+    "max_members_per_round": 6,
+    "max_concurrent_members": 2,
+    "max_prompt_bytes": 16384,
+    "run_budget_seconds": 300,
+    "max_rounds_per_session": 12,
+    "independent_initial_round": true,
+    "preserve_disagreement": true,
+    "per_member_timeout_seconds": 120
+  }
+}

@@ -26,10 +26,32 @@
   var handlers = [];
   var log = [];
   var preferences = {};
-  var current = recorded[params.case] ? params.case : 'complete';
+  // A project with nothing in it — the state a first-time reader opens Council
+  // in, and the only one the onboarding is reachable from.
+  //
+  // It is DERIVED from a recorded document rather than written here: the
+  // recorder produces documents that hold something, and a snapshot with no
+  // councils is that same record with its councils and sessions removed. Every
+  // other field — schema version, project identity, revision — is still the
+  // backend's own, so the page is reading a shape the engine really emits.
+  var EMPTY = 'no_council';
+
+  var current = (recorded[params.case] || params.case === EMPTY) ? params.case : 'complete';
   var forceStale = false;
 
+  function emptied() {
+    var base = snapshotFor('inventory');
+    // A silent null would serve the page an empty reply and the failure would
+    // read as a page bug rather than a missing recording.
+    if (!base) { throw new Error('no recorded document named inventory to empty'); }
+    var copy = JSON.parse(JSON.stringify(base));
+    copy.definitions = [];
+    copy.sessions = [];
+    return copy;
+  }
+
   function snapshotFor(key) {
+    if (key === EMPTY) { return emptied(); }
     var entry = recorded[key];
     return entry && entry.payload ? entry.payload.snapshot : null;
   }
@@ -143,7 +165,7 @@
     // Swap the served document and tell the page the record moved — which is
     // exactly what the wrapper does, and all it does.
     advance: function (key) {
-      if (!recorded[key]) { throw new Error('no recorded document named ' + key); }
+      if (!recorded[key] && key !== EMPTY) { throw new Error('no recorded document named ' + key); }
       current = key;
       fire({ schema_version: 1, envelope: 'event', event: 'council.snapshot_changed', payload: {} });
     },

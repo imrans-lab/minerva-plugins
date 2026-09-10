@@ -4,7 +4,8 @@
 //   node council/ui/build.mjs --check    # fail if the built file has drifted
 //
 // The whole build is: read the template, replace each `/* @include <path> */`
-// line with that file's bytes, write the result. No dependencies, no network, no
+// line with that file's bytes and the `/* @presets */` line with the shipped
+// councils, write the result. No dependencies, no network, no
 // toolchain, and the same bytes from the same sources on any machine — which is
 // what lets a marketplace user install Council with no Node at all, and what
 // lets a reviewer check that the committed page really is the sources.
@@ -14,7 +15,7 @@
 // into text, so that is an error here instead of a page that renders as source
 // code on someone else's machine.
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -40,12 +41,39 @@ function withReplayBridge(page) {
 }
 
 const INCLUDE = /^[ \t]*\/\* @include ([^*]+?) \*\/[ \t]*$/;
+const PRESETS = /^[ \t]*\/\* @presets \*\/[ \t]*$/;
 const FORBIDDEN = /<\/(script|style)\b/i;
+
+// The shipped councils, as a JS array literal of the preset files' own bytes.
+//
+// JSON is a subset of JS expression syntax, so the record that ships is the
+// record the page offers — not a re-serialisation of it that could round a
+// number or reorder a key. council/presets is the single source: the Go backend
+// embeds the same files for minerva_council_presets, and the parity test asserts
+// each file's exact bytes appear in the built page.
+const presetsDir = join(here, '..', 'presets');
+
+function presetLiteral() {
+  const names = readdirSync(presetsDir).filter((n) => n.endsWith('.json')).sort();
+  if (!names.length) { throw new Error('council/presets holds no .json preset'); }
+  const bodies = names.map((name) => {
+    const text = readFileSync(join(presetsDir, name), 'utf8');
+    if (FORBIDDEN.test(text)) {
+      throw new Error(`preset ${name} contains a closing script or style tag, which would end the block it is inlined into`);
+    }
+    return text.replace(/\n+$/, '');
+  });
+  return 'window.CouncilPresets = [\n' + bodies.join(',\n') + '\n];';
+}
 
 function build() {
   const lines = readFileSync(template, 'utf8').split('\n');
   const included = [];
   const body = lines.map((line) => {
+    if (PRESETS.test(line)) {
+      included.push('../presets/*.json');
+      return presetLiteral();
+    }
     const match = INCLUDE.exec(line);
     if (!match) { return line; }
     const relative = match[1].trim();

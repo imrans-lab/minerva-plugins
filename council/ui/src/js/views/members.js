@@ -67,6 +67,36 @@
     ]);
   }
 
+  // The councils Council ships with, offered on an empty project.
+  //
+  // They are inlined into the page by ui/build.mjs from council/presets, which
+  // is the same directory the backend embeds for minerva_council_presets — so
+  // what the page offers and what an agent can import are one set of files.
+  // Starting one is an ordinary definition.import under a freshly minted id, so
+  // a preset can be started twice and neither copy is special afterwards.
+  function presetOffer() {
+    var presets = global.CouncilPresets;
+    if (!presets || !presets.length) { return null; }
+    return D.frag([
+      el('h2', { class: 'pane-title', text: 'Or start from one of these' }),
+      el('ul', { class: 'roster' }, presets.map(function (preset) {
+        return el('li', {}, [
+          el('button', {
+            class: 'entry',
+            type: 'button',
+            data: { 'use-preset': preset.definition_id }
+          }, [
+            el('div', { class: 'who' }, [
+              el('span', { class: 'name', text: preset.name }),
+              el('span', { class: 'kind', text: R.list(preset.seats).length + ' seats' })
+            ]),
+            el('div', { class: 'line2', text: preset.purpose })
+          ])
+        ]);
+      }))
+    ]);
+  }
+
   function membersPane(snapshot, session) {
     // The pane shows the PROJECT's council, which is the one that can be
     // edited. A session's embedded copy is history — it records what was
@@ -87,8 +117,15 @@
             type: 'button',
             data: { 'create-council': '1' },
             text: 'Start a council'
+          }),
+          el('button', {
+            class: 'action quiet',
+            type: 'button',
+            data: { help: '1' },
+            text: 'How Council works'
           })
-        ])
+        ]),
+        presetOffer()
       ]);
     }
 

@@ -496,6 +496,24 @@ html[data-theme="dark"] .action.primary { color: #1a1710; }
   background: var(--accent-wash);
 }
 
+/* Ordered prose — the onboarding arc and the help sheet. Indented enough to
+   read as steps and no more, because the marker eats measure a 400px pane has
+   none of. */
+.steps { margin: 8px 0 0; padding-left: 20px; }
+.steps li { margin: 6px 0; }
+
+/* The help sheet: headed sections in the detail column, tighter than the
+   reading column's prose because it is reference, not argument. */
+.sheet h4 {
+  font: 600 0.75rem/1 var(--sans);
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 20px 0 6px;
+}
+.sheet p { font: 400 0.875rem/1.55 var(--sans); margin: 0 0 8px; }
+.sheet p:last-child { margin-bottom: 0; }
+
 /* Wins over `.detail h3`, which sets the serif display size for detail titles. */
 .notice h3, .detail .notice h3 {
   font: 600 0.69rem/1 var(--sans);

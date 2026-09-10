@@ -300,6 +300,107 @@
     ]);
   }
 
+  // ---------------------------------------------------------------- help
+
+  // One headed block of the help sheet.
+  function section(heading, paragraphs) {
+    return D.frag([el('h4', { text: heading })].concat(paragraphs.map(function (text) {
+      return el('p', { text: text });
+    })));
+  }
+
+  // The shipped help, in the panel because that is where a reader is.
+  //
+  // Every claim here is one this build implements, and the limits at the end are
+  // the ones architecture.md states rather than a softened version of them: help
+  // that oversells is worse than no help, because a user only finds out at the
+  // moment the thing fails. It is deliberately one screen of reference — the
+  // README carries installation, models and troubleshooting, which are questions
+  // asked before the panel opens.
+  function helpDetail() {
+    return D.frag([
+      el('h2', { text: 'Help' }),
+      title('How Council works'),
+      el('div', { class: 'sheet' }, [
+        section('Members and seats', [
+          'A member is an identity; a seat is what that identity is responsible for in this '
+            + 'council. They are separate so renaming one never renames the other, and so the '
+            + 'same member can sit differently in two councils.',
+          'An assistant is a functional advisor and represents nobody. A simulant interprets a '
+            + 'named author and may only exist with captured material behind it, a narrow scope, '
+            + 'and its gaps stated — it is an interpretation, never a statement by that person. '
+            + 'The one human seat is you: nothing prompts it and no model answers for it.',
+          'Exactly one seat is the chair. It synthesises the round and reports disagreement; it '
+            + 'never adds a position of its own.'
+        ]),
+        section('What each member is sent', [
+          'Every member in the opening round is sent the same context — your question and the '
+            + 'session context — plus its own pinned grounding, and never another member\'s '
+            + 'answer. That is what makes agreement mean something.',
+          'A call is bounded in bytes. When the assembled prompt is too long, grounding and '
+            + 'earlier contributions are dropped from the tail with a visible marker, and a '
+            + 'member cannot cite material that was dropped before it was sent.'
+        ]),
+        section('Sources and revisions', [
+          'Capturing material creates a source revision. Changing the material creates a NEW '
+            + 'revision beside the old one; it is never an edit, so an answer given last week '
+            + 'can still be read against the bytes it actually read.',
+          'Moving a member onto a newer capture is an explicit act. Nothing re-grounds a member '
+            + 'on your behalf, and doing so advances that member\'s revision so old contributions '
+            + 'are not re-attributed to the new one.',
+          'A source with no material in this project is legitimate — that is what an import '
+            + 'without content looks like. Citations against it resolve to "material not '
+            + 'available", and Sources says so rather than hiding it.'
+        ]),
+        section('Consulting the council', [
+          'A consultation starts in a Minerva chat with Council chosen as its provider. The chat '
+            + 'is the binding: the session belongs to it, and every follow-up, retry and answer '
+            + 'stays attached to it. Council never routes by whichever tab is focused.',
+          'One question runs one bounded round of the relevant members, then the chair '
+            + 'synthesises. Ask a seat again with Follow up, or one argument with "Ask about '
+            + 'this" — a follow-up consults that seat alone and re-runs nobody else.'
+        ]),
+        section('Stopping and retrying', [
+          'Stopping a chat turn cancels the round. A member reply that lands afterwards is '
+            + 'recorded as stale and changes nothing.',
+          'Nothing retries itself. A failed or unanswered seat stays visible with an explicit '
+            + 'Retry, and a retry is a fresh round over the seats that did not answer — so a '
+            + 'partial answer is a state you can read, not an error you have to guess at.'
+        ]),
+        section('Keeping and reusing', [
+          'Save the tab as you would any Minerva document: the councils, the sessions, the '
+            + 'contributions, the source captures and the chat link are all in it, and reopening '
+            + 'brings back a round that was still running when you closed the panel.',
+          'Pick the answers worth keeping and send them to the bound chat, or keep one as a '
+            + 'native note; the link back to the contribution survives a note you later move, '
+            + 'and a note that cannot be found is reported rather than dropped.',
+          'A council can be exported and imported into another project. The export carries who '
+            + 'is on the council and what grounds them, and it has nowhere to put a question, a '
+            + 'transcript, an outcome, a note id or a chat id. Source material travels only for '
+            + 'the sources you choose, and the reply names what was withheld — so exporting is '
+            + 'a decision you make per source, not a switch that leaks everything.'
+        ]),
+        section('What this version does not do', [
+          'One project must fit in about 64 KiB in total — every council, session, contribution '
+            + 'and embedded excerpt together. The host counts that limit in UTF-16 code units '
+            + 'rather than bytes, so text outside plain ASCII costs more than it looks. It is a '
+            + 'real limit: past it the transport fails loudly rather than quietly truncating.',
+          'A chat whose document has not been opened since the plugin started is a chat Council '
+            + 'has no record of, and its first turn opens a fresh session in whatever document '
+            + 'is loaded. The original project keeps its own session untouched.',
+          'Stopping a turn in the moment between a session being created and its first round '
+            + 'starting truthfully reports that nothing was running, and the round then runs '
+            + 'once anyway. Your next turn reports it instead of spending again.',
+          'Council does not research, does not browse, and invites nobody. Every participant is '
+            + 'a model you enabled or you.'
+        ])
+      ]),
+      el('div', { class: 'row group' }, [
+        el('button', { class: 'action quiet', type: 'button', data: { back: '1' }, text: 'Close' })
+      ])
+    ]);
+  }
+
   // ------------------------------------------------------- assembly forms
 
   function createCouncilDetail() {
@@ -442,6 +543,7 @@
     compareDetail: compareDetail,
     followUpDetail: followUpDetail,
     createCouncilDetail: createCouncilDetail,
+    helpDetail: helpDetail,
     addMemberDetail: addMemberDetail,
     seatMemberDetail: seatMemberDetail,
     glance: glance,

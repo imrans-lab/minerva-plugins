@@ -521,6 +521,24 @@ html[data-theme="dark"] .action.primary { color: #1a1710; }
   background: var(--accent-wash);
 }
 
+/* Ordered prose — the onboarding arc and the help sheet. Indented enough to
+   read as steps and no more, because the marker eats measure a 400px pane has
+   none of. */
+.steps { margin: 8px 0 0; padding-left: 20px; }
+.steps li { margin: 6px 0; }
+
+/* The help sheet: headed sections in the detail column, tighter than the
+   reading column's prose because it is reference, not argument. */
+.sheet h4 {
+  font: 600 0.75rem/1 var(--sans);
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 20px 0 6px;
+}
+.sheet p { font: 400 0.875rem/1.55 var(--sans); margin: 0 0 8px; }
+.sheet p:last-child { margin-bottom: 0; }
+
 /* Wins over `.detail h3`, which sets the serif display size for detail titles. */
 .notice h3, .detail .notice h3 {
   font: 600 0.69rem/1 var(--sans);
@@ -746,6 +764,7 @@ html[data-motion="reduce"] * {
     <button type="button" class="action quiet" id="handoff">Send picked answers to the bound chat</button>
     <span id="message" role="status" aria-live="polite"></span>
     <span class="spacer"></span>
+    <button type="button" class="action quiet" id="help" data-help="1">Help</button>
     <span class="sizer" id="sizer" role="group" aria-labelledby="text-size-label"></span>
     <span id="revision"></span>
   </div>
@@ -754,6 +773,285 @@ html[data-motion="reduce"] * {
 
 <p class="visually-hidden" id="announcer" role="status" aria-live="polite"></p>
 
+<script>
+window.CouncilPresets = [
+{
+  "schema_version": 1,
+  "record_kind": "council_definition",
+  "definition_id": "preset-decision-review",
+  "definition_revision": 1,
+  "name": "Decision Review",
+  "purpose": "Weigh one concrete business decision — take the recurring order, ship the feature, sign the lease — and say plainly what it costs, where the members disagree, and what would change the answer.",
+  "members": [
+    {
+      "member_id": "mem-chair",
+      "member_revision": 1,
+      "kind": "assistant",
+      "display_name": "Chair",
+      "scope": "Runs the round, reports where members disagree, and never adds a position of its own.",
+      "limitations": "Has no grounding of its own; everything it reports must trace to a member contribution.",
+      "grounding": []
+    },
+    {
+      "member_id": "mem-unit-economics",
+      "member_revision": 1,
+      "kind": "assistant",
+      "display_name": "Unit economics",
+      "scope": "What the decision does to margin, cash timing and the cost of serving one more unit of demand.",
+      "limitations": "Argues from the numbers in the question. It has no access to your books, so any figure it does not read in the question is an assumption and must be labelled one.",
+      "grounding": []
+    },
+    {
+      "member_id": "mem-delivery-risk",
+      "member_revision": 1,
+      "kind": "assistant",
+      "display_name": "Delivery risk",
+      "scope": "Whether the commitment can actually be met with the capacity, people and lead times on hand, and what fails first if it cannot.",
+      "limitations": "Knows nothing about the real schedule or the real supplier. It reasons about the constraints the question states and asks for the ones it is missing.",
+      "grounding": []
+    },
+    {
+      "member_id": "mem-customer-evidence",
+      "member_revision": 1,
+      "kind": "assistant",
+      "display_name": "Customer evidence",
+      "scope": "What has actually been observed about demand, and the difference between an observation and a hope.",
+      "limitations": "Has seen no customer. It can only separate the evidence in the question from the inference drawn on top of it.",
+      "grounding": []
+    },
+    {
+      "member_id": "mem-owner",
+      "member_revision": 1,
+      "kind": "human",
+      "display_name": "You (the decision owner)",
+      "scope": "The local user, supplying observed facts and correcting wrong premises.",
+      "limitations": "Nothing prompts this seat and no model answers for it. It is here so a person's own evidence has a place in the record.",
+      "grounding": []
+    }
+  ],
+  "seats": [
+    {
+      "seat_id": "seat-chair",
+      "member_id": "mem-chair",
+      "responsibility": "Synthesise the round, preserve disagreement, and end with what would change the answer.",
+      "role": "chair"
+    },
+    {
+      "seat_id": "seat-unit-economics",
+      "member_id": "mem-unit-economics",
+      "responsibility": "State what the decision costs and earns, and name every figure it had to assume.",
+      "role": "advisor",
+      "relevance_tags": ["pricing", "margin", "cash"]
+    },
+    {
+      "seat_id": "seat-delivery-risk",
+      "member_id": "mem-delivery-risk",
+      "responsibility": "State whether the commitment is deliverable and what breaks first if it is not.",
+      "role": "advisor",
+      "relevance_tags": ["capacity", "schedule", "risk"]
+    },
+    {
+      "seat_id": "seat-customer-evidence",
+      "member_id": "mem-customer-evidence",
+      "responsibility": "Separate observed demand from assumed demand and say which the decision rests on.",
+      "role": "advisor",
+      "relevance_tags": ["demand", "evidence"]
+    },
+    {
+      "seat_id": "seat-owner",
+      "member_id": "mem-owner",
+      "responsibility": "Supply observed facts about the real situation and correct wrong premises.",
+      "role": "advisor",
+      "relevance_tags": ["evidence"]
+    }
+  ],
+  "sources": [],
+  "deliberation": {
+    "max_members_per_round": 6,
+    "max_concurrent_members": 2,
+    "max_prompt_bytes": 16384,
+    "run_budget_seconds": 300,
+    "max_rounds_per_session": 12,
+    "independent_initial_round": true,
+    "preserve_disagreement": true,
+    "per_member_timeout_seconds": 120
+  }
+},
+{
+  "schema_version": 1,
+  "record_kind": "council_definition",
+  "definition_id": "preset-grounded-example",
+  "definition_revision": 1,
+  "name": "Source-Grounded Example",
+  "purpose": "A worked example of grounding, shipped so the mechanism can be read before it is trusted. One simulant argues only from a short essay written for this file and says what that essay does not establish. Replace the source with a note of your own, re-ground the member, and the example becomes a council.",
+  "members": [
+    {
+      "member_id": "mem-chair",
+      "member_revision": 1,
+      "kind": "assistant",
+      "display_name": "Chair",
+      "scope": "Runs the round, reports where members disagree, and never adds a position of its own.",
+      "limitations": "Has no grounding of its own; everything it reports must trace to a member contribution.",
+      "grounding": []
+    },
+    {
+      "member_id": "mem-essay-reader",
+      "member_revision": 1,
+      "kind": "simulant",
+      "display_name": "Reader of the standing-commitment essay",
+      "represents": "The unnamed author of the example essay in this file. The essay was written for this example; it is nobody's published view and stands for no real person.",
+      "scope": "The argument of one short essay about what a standing commitment costs. Nothing else.",
+      "limitations": "One essay, three paragraphs. It establishes nothing about pricing method, contract law, this author's views on anything else, or your particular situation. A claim it cannot trace to the essay is its own inference and is labelled as one.",
+      "grounding": [
+        {
+          "source_id": "src-standing-commitment",
+          "source_revision": 1
+        }
+      ]
+    }
+  ],
+  "seats": [
+    {
+      "seat_id": "seat-chair",
+      "member_id": "mem-chair",
+      "responsibility": "Synthesise the round and say which claims rest on the essay and which do not.",
+      "role": "chair"
+    },
+    {
+      "seat_id": "seat-essay-reader",
+      "member_id": "mem-essay-reader",
+      "responsibility": "Argue from the captured essay and cite the span each claim rests on.",
+      "role": "advisor",
+      "relevance_tags": [
+        "commitment",
+        "cost"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "source_id": "src-standing-commitment",
+      "source_revision": 1,
+      "title": "What a standing commitment costs (example essay)",
+      "author": "Written for this Council example; not a real person",
+      "locator": "shipped with Council as presets/grounded_example.json",
+      "captured_at": "2026-09-09T00:00:00Z",
+      "content_hash": "sha256:a4c5f9404e8b41b529dbdc2a5bbd3f914f4886daff470261fb5ab64c5fb85574",
+      "payload": {
+        "content_type": "text/plain",
+        "byte_length": 655,
+        "content_hash": "sha256:a4c5f9404e8b41b529dbdc2a5bbd3f914f4886daff470261fb5ab64c5fb85574",
+        "inline": "A standing commitment is cheap on the day it is made and expensive on every day after it.\n\nThe day it is made, the work is in the future and the future looks empty. Every day after, the commitment is the first claim on the hours that other work now has to compete for, and the competition is invisible: the jobs it crowds out never arrive as complaints, because they were never accepted.\n\nSo the honest price of a standing commitment is not the cost of doing the work. It is the cost of doing the work plus the value of the best thing you will now have to refuse. That second number is the one nobody writes down, and it is usually the larger of the two.\n"
+      },
+      "anchors": [
+        {
+          "anchor_id": "anc-honest-price",
+          "quote": "the honest price of a standing commitment is not the cost of doing the work",
+          "start": 392,
+          "end": 467
+        }
+      ]
+    }
+  ],
+  "deliberation": {
+    "max_members_per_round": 2,
+    "max_concurrent_members": 2,
+    "max_prompt_bytes": 16384,
+    "run_budget_seconds": 240,
+    "max_rounds_per_session": 12,
+    "independent_initial_round": true,
+    "preserve_disagreement": true,
+    "per_member_timeout_seconds": 120
+  }
+},
+{
+  "schema_version": 1,
+  "record_kind": "council_definition",
+  "definition_id": "preset-second-opinion",
+  "definition_revision": 1,
+  "name": "Second Opinion",
+  "purpose": "A general-purpose council for any question worth more than one answer: the case for, the case against, and the conditions each side depends on.",
+  "members": [
+    {
+      "member_id": "mem-chair",
+      "member_revision": 1,
+      "kind": "assistant",
+      "display_name": "Chair",
+      "scope": "Runs the round, reports where members disagree, and never adds a position of its own.",
+      "limitations": "Has no grounding of its own; everything it reports must trace to a member contribution.",
+      "grounding": []
+    },
+    {
+      "member_id": "mem-case-for",
+      "member_revision": 1,
+      "kind": "assistant",
+      "display_name": "The case for",
+      "scope": "The strongest honest argument in favour, stated without overclaiming.",
+      "limitations": "Argues one side by design. It is not a balanced view and must not be read as one.",
+      "grounding": []
+    },
+    {
+      "member_id": "mem-case-against",
+      "member_revision": 1,
+      "kind": "assistant",
+      "display_name": "The case against",
+      "scope": "The strongest honest argument opposed, including the failure nobody wants to name.",
+      "limitations": "Argues one side by design. It is not a balanced view and must not be read as one.",
+      "grounding": []
+    },
+    {
+      "member_id": "mem-preconditions",
+      "member_revision": 1,
+      "kind": "assistant",
+      "display_name": "What would have to be true",
+      "scope": "The conditions each side depends on, and which of them can be checked before deciding.",
+      "limitations": "It can name a condition; it cannot check one. Verifying any of them is work for a person.",
+      "grounding": []
+    }
+  ],
+  "seats": [
+    {
+      "seat_id": "seat-chair",
+      "member_id": "mem-chair",
+      "responsibility": "Synthesise the round and preserve disagreement rather than resolving it.",
+      "role": "chair"
+    },
+    {
+      "seat_id": "seat-case-for",
+      "member_id": "mem-case-for",
+      "responsibility": "Make the strongest case in favour.",
+      "role": "advisor",
+      "relevance_tags": ["argument"]
+    },
+    {
+      "seat_id": "seat-case-against",
+      "member_id": "mem-case-against",
+      "responsibility": "Make the strongest case against.",
+      "role": "advisor",
+      "relevance_tags": ["argument"]
+    },
+    {
+      "seat_id": "seat-preconditions",
+      "member_id": "mem-preconditions",
+      "responsibility": "Name what each side depends on and which of it is checkable now.",
+      "role": "advisor",
+      "relevance_tags": ["assumptions"]
+    }
+  ],
+  "sources": [],
+  "deliberation": {
+    "max_members_per_round": 4,
+    "max_concurrent_members": 3,
+    "max_prompt_bytes": 16384,
+    "run_budget_seconds": 240,
+    "max_rounds_per_session": 12,
+    "independent_initial_round": true,
+    "preserve_disagreement": true,
+    "per_member_timeout_seconds": 120
+  }
+}
+];
+</script>
 <script>
 // Building blocks for every view, and the reason the panel has no innerHTML.
 //
@@ -1668,14 +1966,31 @@ html[data-motion="reduce"] * {
       return D.frag([
         el('p', {
           class: 'empty',
-          text: 'This project has no council yet. Assemble one in Members, then bring it a question.'
+          text: 'This project has no council yet.'
         }),
+        // The whole arc, in the order a first-time reader has to walk it. It is
+        // three steps because three is what v0.1 actually does; anything longer
+        // here would be describing a product that is not installed.
+        el('div', { class: 'notice calm' }, [
+          el('h3', { text: 'From nothing to an answer' }),
+          el('ol', { class: 'steps' }, [
+            el('li', { text: 'Assemble a council in Members, or start from one Council ships with.' }),
+            el('li', { text: 'Open a Minerva chat, choose Council as its provider, and ask your question there.' }),
+            el('li', { text: 'Read what each member argued here, follow one up, and keep what is worth keeping as a note.' })
+          ])
+        ]),
         el('div', { class: 'row group' }, [
           el('button', {
             class: 'action primary',
             type: 'button',
             data: { 'goto-pane': 'members' },
             text: 'Assemble a council'
+          }),
+          el('button', {
+            class: 'action quiet',
+            type: 'button',
+            data: { help: '1' },
+            text: 'How Council works'
           })
         ])
       ]);
@@ -1914,6 +2229,36 @@ html[data-motion="reduce"] * {
     ]);
   }
 
+  // The councils Council ships with, offered on an empty project.
+  //
+  // They are inlined into the page by ui/build.mjs from council/presets, which
+  // is the same directory the backend embeds for minerva_council_presets — so
+  // what the page offers and what an agent can import are one set of files.
+  // Starting one is an ordinary definition.import under a freshly minted id, so
+  // a preset can be started twice and neither copy is special afterwards.
+  function presetOffer() {
+    var presets = global.CouncilPresets;
+    if (!presets || !presets.length) { return null; }
+    return D.frag([
+      el('h2', { class: 'pane-title', text: 'Or start from one of these' }),
+      el('ul', { class: 'roster' }, presets.map(function (preset) {
+        return el('li', {}, [
+          el('button', {
+            class: 'entry',
+            type: 'button',
+            data: { 'use-preset': preset.definition_id }
+          }, [
+            el('div', { class: 'who' }, [
+              el('span', { class: 'name', text: preset.name }),
+              el('span', { class: 'kind', text: R.list(preset.seats).length + ' seats' })
+            ]),
+            el('div', { class: 'line2', text: preset.purpose })
+          ])
+        ]);
+      }))
+    ]);
+  }
+
   function membersPane(snapshot, session) {
     // The pane shows the PROJECT's council, which is the one that can be
     // edited. A session's embedded copy is history — it records what was
@@ -1934,8 +2279,15 @@ html[data-motion="reduce"] * {
             type: 'button',
             data: { 'create-council': '1' },
             text: 'Start a council'
+          }),
+          el('button', {
+            class: 'action quiet',
+            type: 'button',
+            data: { help: '1' },
+            text: 'How Council works'
           })
-        ])
+        ]),
+        presetOffer()
       ]);
     }
 
@@ -2363,6 +2715,107 @@ html[data-motion="reduce"] * {
     ]);
   }
 
+  // ---------------------------------------------------------------- help
+
+  // One headed block of the help sheet.
+  function section(heading, paragraphs) {
+    return D.frag([el('h4', { text: heading })].concat(paragraphs.map(function (text) {
+      return el('p', { text: text });
+    })));
+  }
+
+  // The shipped help, in the panel because that is where a reader is.
+  //
+  // Every claim here is one this build implements, and the limits at the end are
+  // the ones architecture.md states rather than a softened version of them: help
+  // that oversells is worse than no help, because a user only finds out at the
+  // moment the thing fails. It is deliberately one screen of reference — the
+  // README carries installation, models and troubleshooting, which are questions
+  // asked before the panel opens.
+  function helpDetail() {
+    return D.frag([
+      el('h2', { text: 'Help' }),
+      title('How Council works'),
+      el('div', { class: 'sheet' }, [
+        section('Members and seats', [
+          'A member is an identity; a seat is what that identity is responsible for in this '
+            + 'council. They are separate so renaming one never renames the other, and so the '
+            + 'same member can sit differently in two councils.',
+          'An assistant is a functional advisor and represents nobody. A simulant interprets a '
+            + 'named author and may only exist with captured material behind it, a narrow scope, '
+            + 'and its gaps stated — it is an interpretation, never a statement by that person. '
+            + 'The one human seat is you: nothing prompts it and no model answers for it.',
+          'Exactly one seat is the chair. It synthesises the round and reports disagreement; it '
+            + 'never adds a position of its own.'
+        ]),
+        section('What each member is sent', [
+          'Every member in the opening round is sent the same context — your question and the '
+            + 'session context — plus its own pinned grounding, and never another member\'s '
+            + 'answer. That is what makes agreement mean something.',
+          'A call is bounded in bytes. When the assembled prompt is too long, grounding and '
+            + 'earlier contributions are dropped from the tail with a visible marker, and a '
+            + 'member cannot cite material that was dropped before it was sent.'
+        ]),
+        section('Sources and revisions', [
+          'Capturing material creates a source revision. Changing the material creates a NEW '
+            + 'revision beside the old one; it is never an edit, so an answer given last week '
+            + 'can still be read against the bytes it actually read.',
+          'Moving a member onto a newer capture is an explicit act. Nothing re-grounds a member '
+            + 'on your behalf, and doing so advances that member\'s revision so old contributions '
+            + 'are not re-attributed to the new one.',
+          'A source with no material in this project is legitimate — that is what an import '
+            + 'without content looks like. Citations against it resolve to "material not '
+            + 'available", and Sources says so rather than hiding it.'
+        ]),
+        section('Consulting the council', [
+          'A consultation starts in a Minerva chat with Council chosen as its provider. The chat '
+            + 'is the binding: the session belongs to it, and every follow-up, retry and answer '
+            + 'stays attached to it. Council never routes by whichever tab is focused.',
+          'One question runs one bounded round of the relevant members, then the chair '
+            + 'synthesises. Ask a seat again with Follow up, or one argument with "Ask about '
+            + 'this" — a follow-up consults that seat alone and re-runs nobody else.'
+        ]),
+        section('Stopping and retrying', [
+          'Stopping a chat turn cancels the round. A member reply that lands afterwards is '
+            + 'recorded as stale and changes nothing.',
+          'Nothing retries itself. A failed or unanswered seat stays visible with an explicit '
+            + 'Retry, and a retry is a fresh round over the seats that did not answer — so a '
+            + 'partial answer is a state you can read, not an error you have to guess at.'
+        ]),
+        section('Keeping and reusing', [
+          'Save the tab as you would any Minerva document: the councils, the sessions, the '
+            + 'contributions, the source captures and the chat link are all in it, and reopening '
+            + 'brings back a round that was still running when you closed the panel.',
+          'Pick the answers worth keeping and send them to the bound chat, or keep one as a '
+            + 'native note; the link back to the contribution survives a note you later move, '
+            + 'and a note that cannot be found is reported rather than dropped.',
+          'A council can be exported and imported into another project. The export carries who '
+            + 'is on the council and what grounds them, and it has nowhere to put a question, a '
+            + 'transcript, an outcome, a note id or a chat id. Source material travels only for '
+            + 'the sources you choose, and the reply names what was withheld — so exporting is '
+            + 'a decision you make per source, not a switch that leaks everything.'
+        ]),
+        section('What this version does not do', [
+          'One project must fit in about 64 KiB in total — every council, session, contribution '
+            + 'and embedded excerpt together. The host counts that limit in UTF-16 code units '
+            + 'rather than bytes, so text outside plain ASCII costs more than it looks. It is a '
+            + 'real limit: past it the transport fails loudly rather than quietly truncating.',
+          'A chat whose document has not been opened since the plugin started is a chat Council '
+            + 'has no record of, and its first turn opens a fresh session in whatever document '
+            + 'is loaded. The original project keeps its own session untouched.',
+          'Stopping a turn in the moment between a session being created and its first round '
+            + 'starting truthfully reports that nothing was running, and the round then runs '
+            + 'once anyway. Your next turn reports it instead of spending again.',
+          'Council does not research, does not browse, and invites nobody. Every participant is '
+            + 'a model you enabled or you.'
+        ])
+      ]),
+      el('div', { class: 'row group' }, [
+        el('button', { class: 'action quiet', type: 'button', data: { back: '1' }, text: 'Close' })
+      ])
+    ]);
+  }
+
   // ------------------------------------------------------- assembly forms
 
   function createCouncilDetail() {
@@ -2505,6 +2958,7 @@ html[data-motion="reduce"] * {
     compareDetail: compareDetail,
     followUpDetail: followUpDetail,
     createCouncilDetail: createCouncilDetail,
+    helpDetail: helpDetail,
     addMemberDetail: addMemberDetail,
     seatMemberDetail: seatMemberDetail,
     glance: glance,
@@ -2707,6 +3161,7 @@ html[data-motion="reduce"] * {
     }
     if (detail.kind === 'compare') { return V.compareDetail(session, detail.ids); }
     if (detail.kind === 'follow_up') { return V.followUpDetail(session, detail, context); }
+    if (detail.kind === 'help') { return V.helpDetail(); }
     if (detail.kind === 'create_council') { return V.createCouncilDetail(); }
     if (detail.kind === 'add_member') { return V.addMemberDetail(context); }
     if (detail.kind === 'seat_member') { return V.seatMemberDetail(editable, detail.member_id); }
@@ -2941,6 +3396,30 @@ html[data-motion="reduce"] * {
     return true;
   }
 
+  // Starting one of the councils Council ships with.
+  //
+  // It is an ordinary definition.import of an ordinary record — the presets are
+  // inlined into this page by ui/build.mjs from council/presets, the same files
+  // the backend embeds for minerva_council_presets. The one thing changed on the
+  // way in is the definition_id: the shipped id NAMES the preset rather than
+  // claiming a slot in this project, and import refuses an id the project
+  // already holds, so minting a fresh one is what lets the same preset be
+  // started twice and edited apart.
+  function usePreset(id) {
+    var preset = null;
+    (global.CouncilPresets || []).forEach(function (candidate) {
+      if (candidate.definition_id === id) { preset = candidate; }
+    });
+    if (!preset) { say('That council is not one this build ships.'); return; }
+    var definition = JSON.parse(JSON.stringify(preset));
+    definition.definition_id = mintId('def');
+    definition.definition_revision = 1;
+    bridge.mutate('definition.import', { definition: definition }).then(function (reply) {
+      afterWrite(reply, 'Started ' + definition.name + '. Read its members before you ask anything: '
+        + 'a preset is a starting point, not a fact about your situation.');
+    });
+  }
+
   function createCouncil() {
     var name = value('council-name');
     if (!name) { say('Give the council a name first.'); return; }
@@ -3105,6 +3584,7 @@ html[data-motion="reduce"] * {
     '[data-open-source]', '[data-compare]', '[data-compare-add]', '[data-follow-up]',
     '[data-follow-claim]', '[data-send-follow-up]', '[data-retry-run]', '[data-retry-seat]',
     '[data-cancel-run]', '[data-create-council]', '[data-create-council-send]',
+    '[data-use-preset]', '[data-help]',
     '[data-add-member]', '[data-add-member-send]', '[data-seat-member]', '[data-seat-member-send]',
     '[data-save-model]', '[data-dismiss-refusal]', '[data-text-larger]',
     '[data-text-smaller]', '[data-text-reset]'].join(',');
@@ -3181,6 +3661,8 @@ html[data-motion="reduce"] * {
     }
     if (d.sendFollowUp) { sendFollowUp(d.sendFollowUp, d.claim || ''); return; }
 
+    if (d.help !== undefined) { openDetail({ kind: 'help' }, target); return; }
+    if (d.usePreset) { usePreset(d.usePreset); return; }
     if (d.createCouncil !== undefined) { openDetail({ kind: 'create_council' }, target); return; }
     if (d.createCouncilSend !== undefined) { createCouncil(); return; }
     if (d.addMember !== undefined) { openDetail({ kind: 'add_member' }, target); return; }

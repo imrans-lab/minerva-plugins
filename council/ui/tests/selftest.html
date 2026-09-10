@@ -560,6 +560,83 @@
             && !q(w, '#reading [data-ask]'));
       })
 
+      // ------------------------------------------ onboarding, from nothing
+      // The state a first-time reader opens Council in: a project with no
+      // council at all. It is the only place the onboarding is reachable, and
+      // the only place a shipped council can be started.
+      .then(function () { return open('case=no_council'); })
+
+      .then(function () {
+        check('an empty project states the whole arc and nothing longer',
+          q(w, '#reading .steps') && all(w, '#reading .steps li').length === 3,
+          all(w, '#reading .steps li').length + ' steps');
+        q(w, '#reading [data-goto-pane="members"]').click();
+        return until(function () { return q(w, '#reading [data-use-preset]'); });
+      })
+
+      .then(function () {
+        var offered = all(w, '#reading [data-use-preset]');
+        check('every council this build ships is offered on an empty project',
+          offered.length === (w.CouncilPresets || []).length && offered.length > 0,
+          offered.length + ' offered of ' + (w.CouncilPresets || []).length + ' shipped');
+
+        var shipped = w.CouncilPresets[0];
+        var before = w.__councilReplay.calls.length;
+        w.document.querySelector('[data-use-preset="' + shipped.definition_id + '"]').click();
+        return until(function () {
+          return w.__councilReplay.calls.slice(before).filter(function (call) {
+            return call.command === 'definition.import';
+          })[0];
+        }).then(function (call) {
+          var since = w.__councilReplay.calls.slice(before);
+          check('starting a shipped council is one ordinary import and nothing else',
+            since.filter(function (c) { return c.command === 'definition.import'; }).length === 1
+              && since.every(function (c) {
+                return c.command === 'definition.import' || c.command === 'snapshot.get';
+              })
+              && call.payload.definition.name === shipped.name,
+            since.map(function (c) { return c.command; }).join(' '));
+          // The shipped id NAMES the preset. Sending it unchanged would be
+          // refused the second time a user started the same council, so the
+          // fresh id is the whole reason a preset is startable twice.
+          check('the imported copy is given an id of its own',
+            call.payload.definition.definition_id !== shipped.definition_id
+              && call.payload.definition.definition_revision === 1,
+            call.payload.definition.definition_id);
+          check('the import carries the revision it was written against',
+            typeof call.base_revision === 'number');
+          return until(function () { return q(w, '#message .refusal'); });
+        });
+      })
+
+      .then(function () {
+        check('a refusal from the engine is shown rather than swallowed',
+          q(w, '#message .refusal').textContent.length > 0);
+      })
+
+      // ------------------------------------------------------ the help sheet
+      .then(function () {
+        var before = w.__councilReplay.calls.length;
+        q(w, '#help').click();
+        return until(function () { return q(w, '#detail .sheet'); }).then(function () {
+          var text = q(w, '#detail .sheet').textContent;
+          check('help opens without asking the host anything',
+            w.__councilReplay.calls.length === before);
+          check('help states the export boundary and the size limit it will hit',
+            text.indexOf('nowhere to put') > 0 && text.indexOf('64 KiB') > 0);
+          check('help promises nothing this version does not do',
+            text.indexOf('does not research') > 0
+              && text.indexOf('invites nobody') > 0);
+          q(w, '#detail [data-back]').click();
+          return until(function () { return !q(w, '#detail .sheet'); });
+        });
+      })
+
+      .then(function () {
+        check('closing help returns to what was being read',
+          q(w, '#stage').getAttribute('data-detail') === 'closed');
+      })
+
       .catch(function (error) {
         check('the harness ran to the end', false, error && error.message);
       })

@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	"github.com/ipeerbhai/plugins/council/internal/contract"
 )
@@ -49,6 +50,19 @@ var commands = map[string]command{
 	"run.retry":            {apply: cmdRunRetry, after: afterRunStart},
 	"outcome.retain":       {apply: cmdOutcomeRetain},
 	"outcome.mark_missing": {apply: cmdOutcomeMarkMissing},
+}
+
+// CommandNames returns the dispatch table's keys, sorted. It exists so that
+// anything claiming a command exists — a tool description, the shipped help, the
+// skill — can be checked against the table that actually serves them rather than
+// against a second list somebody has to remember to update.
+func CommandNames() []string {
+	out := make([]string, 0, len(commands))
+	for name := range commands {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ---------------------------------------------------------------------------

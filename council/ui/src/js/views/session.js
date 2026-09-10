@@ -25,14 +25,31 @@
       return D.frag([
         el('p', {
           class: 'empty',
-          text: 'This project has no council yet. Assemble one in Members, then bring it a question.'
+          text: 'This project has no council yet.'
         }),
+        // The whole arc, in the order a first-time reader has to walk it. It is
+        // three steps because three is what v0.1 actually does; anything longer
+        // here would be describing a product that is not installed.
+        el('div', { class: 'notice calm' }, [
+          el('h3', { text: 'From nothing to an answer' }),
+          el('ol', { class: 'steps' }, [
+            el('li', { text: 'Assemble a council in Members, or start from one Council ships with.' }),
+            el('li', { text: 'Open a Minerva chat, choose Council as its provider, and ask your question there.' }),
+            el('li', { text: 'Read what each member argued here, follow one up, and keep what is worth keeping as a note.' })
+          ])
+        ]),
         el('div', { class: 'row group' }, [
           el('button', {
             class: 'action primary',
             type: 'button',
             data: { 'goto-pane': 'members' },
             text: 'Assemble a council'
+          }),
+          el('button', {
+            class: 'action quiet',
+            type: 'button',
+            data: { help: '1' },
+            text: 'How Council works'
           })
         ])
       ]);

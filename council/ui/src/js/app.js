@@ -192,6 +192,7 @@
     }
     if (detail.kind === 'compare') { return V.compareDetail(session, detail.ids); }
     if (detail.kind === 'follow_up') { return V.followUpDetail(session, detail, context); }
+    if (detail.kind === 'help') { return V.helpDetail(); }
     if (detail.kind === 'create_council') { return V.createCouncilDetail(); }
     if (detail.kind === 'add_member') { return V.addMemberDetail(context); }
     if (detail.kind === 'seat_member') { return V.seatMemberDetail(editable, detail.member_id); }
@@ -426,6 +427,30 @@
     return true;
   }
 
+  // Starting one of the councils Council ships with.
+  //
+  // It is an ordinary definition.import of an ordinary record — the presets are
+  // inlined into this page by ui/build.mjs from council/presets, the same files
+  // the backend embeds for minerva_council_presets. The one thing changed on the
+  // way in is the definition_id: the shipped id NAMES the preset rather than
+  // claiming a slot in this project, and import refuses an id the project
+  // already holds, so minting a fresh one is what lets the same preset be
+  // started twice and edited apart.
+  function usePreset(id) {
+    var preset = null;
+    (global.CouncilPresets || []).forEach(function (candidate) {
+      if (candidate.definition_id === id) { preset = candidate; }
+    });
+    if (!preset) { say('That council is not one this build ships.'); return; }
+    var definition = JSON.parse(JSON.stringify(preset));
+    definition.definition_id = mintId('def');
+    definition.definition_revision = 1;
+    bridge.mutate('definition.import', { definition: definition }).then(function (reply) {
+      afterWrite(reply, 'Started ' + definition.name + '. Read its members before you ask anything: '
+        + 'a preset is a starting point, not a fact about your situation.');
+    });
+  }
+
   function createCouncil() {
     var name = value('council-name');
     if (!name) { say('Give the council a name first.'); return; }
@@ -590,6 +615,7 @@
     '[data-open-source]', '[data-compare]', '[data-compare-add]', '[data-follow-up]',
     '[data-follow-claim]', '[data-send-follow-up]', '[data-retry-run]', '[data-retry-seat]',
     '[data-cancel-run]', '[data-create-council]', '[data-create-council-send]',
+    '[data-use-preset]', '[data-help]',
     '[data-add-member]', '[data-add-member-send]', '[data-seat-member]', '[data-seat-member-send]',
     '[data-save-model]', '[data-dismiss-refusal]', '[data-text-larger]',
     '[data-text-smaller]', '[data-text-reset]'].join(',');
@@ -666,6 +692,8 @@
     }
     if (d.sendFollowUp) { sendFollowUp(d.sendFollowUp, d.claim || ''); return; }
 
+    if (d.help !== undefined) { openDetail({ kind: 'help' }, target); return; }
+    if (d.usePreset) { usePreset(d.usePreset); return; }
     if (d.createCouncil !== undefined) { openDetail({ kind: 'create_council' }, target); return; }
     if (d.createCouncilSend !== undefined) { createCouncil(); return; }
     if (d.addMember !== undefined) { openDetail({ kind: 'add_member' }, target); return; }

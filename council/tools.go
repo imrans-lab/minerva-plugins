@@ -7,6 +7,7 @@ import (
 	"log"
 
 	"github.com/ipeerbhai/plugins/council/internal/session"
+	"github.com/ipeerbhai/plugins/council/presets"
 )
 
 // toolSpec is one entry of the tools/list response.
@@ -232,6 +233,31 @@ func newRegistry(store *session.Store) *registry {
 			out["refresh_error"] = refreshErr.Error()
 		}
 		return json.Marshal(out)
+	})
+
+	r.register(toolSpec{
+		Name: "minerva_council_presets",
+		Description: "List the councils Council ships with, ready to import. Returns {ok, presets:[{file, definition_id, name, purpose, definition}]}, where each definition is a complete council_definition record. " +
+			"To start one, send it as the payload of a definition.import command through minerva_council_command — AFTER replacing its definition_id with a fresh one, because import refuses an id the project already holds and the shipped id is a name rather than a claim on a slot. " +
+			"The presets are ordinary councils: nothing about them is special once imported, and they are edited, seated and re-grounded like any other. " +
+			"The grounded example carries its own source material inline, so it is the one to read to see what a citation actually resolves against; its author is not a real person and the essay was written for the example.",
+		InputSchema: json.RawMessage(`{"type": "object", "properties": {}}`),
+	}, func(json.RawMessage) ([]byte, error) {
+		shipped, err := presets.All()
+		if err != nil {
+			return nil, err
+		}
+		listed := []map[string]any{}
+		for _, preset := range shipped {
+			listed = append(listed, map[string]any{
+				"file":          preset.File,
+				"definition_id": preset.DefinitionID,
+				"name":          preset.Name,
+				"purpose":       preset.Purpose,
+				"definition":    preset.Definition,
+			})
+		}
+		return json.Marshal(map[string]any{"ok": true, "presets": listed})
 	})
 
 	r.register(toolSpec{
