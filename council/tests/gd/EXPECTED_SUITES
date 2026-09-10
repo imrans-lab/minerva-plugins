@@ -7,21 +7,13 @@
 # A suite going missing (deleted, renamed, moved off the glob) or appearing
 # unregistered is a loud, named pre-flight failure in both directions.
 #
-# The assertion count is pinned from the first run that got through every
-# section with the backend up: setup 3, section 1 four, section 2 three,
-# section 3 seventeen (five assertions over each of three documents, plus two
-# after the loop), section 4 six, section 5 seven, section 6 nineteen,
-# section 7 five, section 8 eight, section 9 six, section 10 thirteen.
+# The assertion count is pinned from a run that got through every section with
+# the backend up, and ALL 106 of them were observed against the real host and
+# backend: setup 3, section 1 four, section 2 three, section 3 seventeen (five
+# assertions over each of three documents, plus two after the loop), section 4
+# six, section 5 seven, section 6 nineteen, section 7 five, section 8 eight,
+# section 9 six, section 10 thirteen, section 11 fifteen.
 #
-# 78 of them were observed against the real host and backend. Section 10 is new
-# and its thirteen are PREDICTED, counted off its `check` calls: one setup, one
-# that the direct round was accepted, four on the saved record (the round is
-# there, its contributions came with it, it is a new run, the revision
-# advanced), one that the tab was marked changed, one that the other panel is
-# untouched, three where another council is loaded into the engine behind the
-# panel's back (the setup, the refusal to adopt it, and the panel saying so),
-# and two with the backend gone (it says it is behind, and what it wrote is
-# still the council). Re-pin from the observed run.
 # A lower count means a setup guard fired rather than exercising its section.
 #
 # SETUP THIS SUITE NEEDS beyond the runner's own: section 6 drives the REAL
@@ -41,5 +33,7 @@
 # reopened onto a document the engine had already carried further, while a
 # lagging copy opened alongside another panel is replaced rather than merged;
 # and a round driven straight down the MCP tool door, with no panel in the
-# exchange, reaching the panel that owns that document before it saves.
-test_council_panel.gd assertions=91
+# exchange, reaching the panel that owns that document before it saves; and the
+# one text derivation a session hands over, held to the fixture that is its
+# oracle and proved to be the same text through both of its callers.
+test_council_panel.gd assertions=106

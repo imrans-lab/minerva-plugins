@@ -85,6 +85,21 @@ const POPULATED_FIXTURE_PATH := PLUGIN_DIR + "/fixtures/workshop_complete.mcounc
 ## A document in the shape Council wrote before the record carried a schema
 ## version or a project identity. Section 7 opens it for real.
 const OLDER_FIXTURE_PATH := PLUGIN_DIR + "/fixtures/migrations/snapshot_v0_pre_project_identity.json"
+## The record class itself, loaded at run time in section 11 so the derivation
+## can be exercised without a panel around it.
+const RECORD_SCRIPT_PATH := PLUGIN_DIR + "/ui/council_record.gd"
+## What section 11 reads out of the worked example, named here so a fixture that
+## changes shape fails the section's SETUP assertion by name instead of quietly
+## weakening every assertion after it. `con-3` and `con-5` are the two rounds'
+## syntheses, which the derivation treats as contributions of the chair's seat.
+const CONTEXT_SESSION := "ses-recurring-order"
+const COMPLETE_IDS := ["con-1", "con-3", "con-4", "con-5"]
+const INCOMPLETE_ID := "con-2"
+## Text put into that incomplete contribution to build section 11's VARIANT of
+## the fixture. The shipped one has no text at all, so in it "left out because it
+## is not complete" and "left out because there is nothing to quote" are the same
+## outcome; giving it words separates them.
+const UNFINISHED_TEXT := "The capacity seat never finished saying this."
 ## What `{"snapshot": …}` costs in the serialised form: 12 characters of key and
 ## colon plus the closing brace. It is the whole point of measuring the message
 ## rather than the record.
@@ -232,6 +247,7 @@ func _init() -> void:
 		await _section_8_interrupted_run()
 		await _section_9_recovering_a_closed_panel()
 		await _section_10_a_change_with_no_panel_in_it()
+		await _section_11_the_text_a_session_hands_over()
 
 	_cleanup()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
@@ -1123,6 +1139,195 @@ func _section_10_a_change_with_no_panel_in_it() -> void:
 			str(_run_ids(written, "ses-recurring-order")))
 
 
+## The one text a session hands over, and the two callers that must not be able
+## to disagree about it.
+##
+## THE ORACLE IS THE FIXTURE. `workshop_complete.mcouncil` is the checked-in
+## worked example, validated against the schemas by the Go contract tests: what
+## belongs in the derivation is read out of it here, never re-derived by a second
+## copy of the rule. The setup assertion pins the shape the rest of the section
+## names, so a fixture that gains a contribution fails by name rather than
+## silently making "nothing that is not complete" true of a smaller record.
+##
+## WHY IT IS LAST AND WHY IT NEEDS NO BACKEND. `context_text` reads the held
+## record and nothing else, so the record half runs on a bare CouncilRecord and
+## the panel half only needs a MOUNTED panel — the wrapper commands never reach
+## the engine. Section 10 leaves the backend disconnected, and this section is
+## the one that does not care.
+##
+## HOW THE HANDOFF'S TEXT IS OBSERVED WITHOUT A CHAT. `send_to_chat` puts the
+## text on the panel's own `request` signal, addressed to the host capability
+## `capability:mcp.proxy:minerva_send_message`; that emission IS what a chat
+## would receive, so the suite reads it there. The broker this suite built has no
+## capability_broker, so the hop then fails fast and the reply is a transport
+## error — deliberately not asserted on, because the claim under test is what was
+## handed over, not what a host that is not here would have done with it.
+func _section_11_the_text_a_session_hands_over() -> void:
+	print("\n11 the text a session hands to a chat:")
+	var record_script: GDScript = load(RECORD_SCRIPT_PATH)
+	var fixture: Dictionary = _parse(FileAccess.get_file_as_string(POPULATED_FIXTURE_PATH))
+	var session: Dictionary = _session_of(fixture, CONTEXT_SESSION)
+
+	# What the fixture says, as ids and as text. Everything below is asserted
+	# against these, so the section can only be as right as the fixture is.
+	var complete := PackedStringArray()
+	var complete_texts := PackedStringArray()
+	var incomplete := PackedStringArray()
+	for part_v in _parts_of(session):
+		var part: Dictionary = part_v
+		if str(part.get("status", "")) == "complete":
+			complete.append(str(part.get("contribution_id", "")))
+			complete_texts.append(str(part.get("text", "")).strip_edges())
+		else:
+			incomplete.append(str(part.get("contribution_id", "")))
+	var record = record_script.new()
+	check("setup: the worked example holds the four complete contributions this section names, one that is not, and adopts",
+			record.adopt(fixture)
+			and complete == PackedStringArray(COMPLETE_IDS)
+			and incomplete == PackedStringArray([INCOMPLETE_ID])
+			and not complete_texts.has("")
+			and str(_part_of(session, INCOMPLETE_ID).get("text", "")).is_empty(),
+			"complete=%s incomplete=%s" % [str(complete), str(incomplete)])
+
+	var full: String = record.context_text(CONTEXT_SESSION, PackedStringArray())
+	var lines := full.split("\n")
+	check("the derivation opens with the session's own question and its status",
+			lines.size() > 2
+			and lines[0].contains(str(session.get("question", "")))
+			and lines[1].contains(str(session.get("status", ""))),
+			full.left(160))
+
+	var absent := PackedStringArray()
+	for i in COMPLETE_IDS.size():
+		if not full.contains(complete_texts[i]):
+			absent.append(COMPLETE_IDS[i])
+	check("every complete contribution and each round's synthesis is in it, verbatim",
+			absent.is_empty(), "missing %s" % str(absent))
+	# Counting the blocks is what makes the previous assertion an "exactly":
+	# `contains` alone would pass a text that also carried something else.
+	check("and nothing that is not complete: it carries those four and no more",
+			_context_blocks(full).size() == COMPLETE_IDS.size(),
+			str(_context_blocks(full)))
+	# THE FIELDS, not just the count. This report's job is ATTRIBUTION of the
+	# arguments a user chose to send, so each block has to name the seat and the
+	# member that produced it — a block heading that lost a field, or swapped the
+	# two, would still be one line starting with "[".
+	var first: Dictionary = _part_of(session, COMPLETE_IDS[0])
+	var first_head := "[%s / %s]" % [str(first.get("seat_id", "")), str(first.get("member_id", ""))]
+	check("each block is headed by its own seat and member, in that order",
+			_context_blocks(full).has(first_head)
+			and full.contains("%s %s" % [first_head, complete_texts[0]]),
+			"%s not heading a block in %s" % [first_head, str(_context_blocks(full))])
+
+	# render-for-LLM passes no session id and the handoff passes the one the page
+	# named. If those resolved differently the two callers would be reading two
+	# sessions, and "one derivation" would say nothing. A ONE-session record
+	# cannot tell "the selected session" from "the only session", so the claim is
+	# made against a copy carrying a second one AFTER it: the fallback is the
+	# last session, and `view.selected_session_id` still names the first.
+	var two_sessions: Dictionary = _parse(FileAccess.get_file_as_string(POPULATED_FIXTURE_PATH))
+	var second: Dictionary = _session_of(two_sessions, CONTEXT_SESSION).duplicate(true)
+	second["session_id"] = "ses-second"
+	second["question"] = "A second question, in the same council"
+	(two_sessions["sessions"] as Array).append(second)
+	var two_record = record_script.new()
+	two_record.adopt(two_sessions)
+	var by_default: String = two_record.context_text("", PackedStringArray())
+	check("an empty session id resolves to the session the view selected, not the last one",
+			by_default == full and not by_default.contains(str(second["question"])),
+			"differ at %d of %d" % [_first_difference(by_default, full), full.length()])
+
+	# THE VARIANT: the same fixture with words in the contribution that failed.
+	var variant: Dictionary = _parse(FileAccess.get_file_as_string(POPULATED_FIXTURE_PATH))
+	var unfinished: Dictionary = _part_of(_session_of(variant, CONTEXT_SESSION), INCOMPLETE_ID)
+	unfinished["text"] = UNFINISHED_TEXT
+	var variant_record = record_script.new()
+	variant_record.adopt(variant)
+	var variant_full: String = variant_record.context_text(CONTEXT_SESSION, PackedStringArray())
+	check("a contribution that is not complete is left out for its status, not for want of text",
+			not variant_full.contains(UNFINISHED_TEXT)
+			and _context_blocks(variant_full).size() == COMPLETE_IDS.size(),
+			str(_context_blocks(variant_full)))
+	var picked: String = variant_record.context_text(
+			CONTEXT_SESSION, PackedStringArray([INCOMPLETE_ID]))
+	check("a selection takes the contribution it names whatever its status",
+			picked.contains(UNFINISHED_TEXT) and _context_blocks(picked).size() == 1,
+			str(_context_blocks(picked)))
+
+	var selected := PackedStringArray(["con-1", "con-4"])
+	var narrowed: String = record.context_text(CONTEXT_SESSION, selected)
+	var wrong := PackedStringArray()
+	for i in COMPLETE_IDS.size():
+		if narrowed.contains(complete_texts[i]) != selected.has(COMPLETE_IDS[i]):
+			wrong.append(COMPLETE_IDS[i])
+	check("a selection narrows to exactly the contributions it names",
+			wrong.is_empty() and _context_blocks(narrowed).size() == selected.size(),
+			"wrong %s in %s" % [str(wrong), str(_context_blocks(narrowed))])
+
+	# THE TWO CALLERS. Both read the record the panel holds, so the panel has to
+	# be holding this same document; adopting it defers a rehydrate, which is an
+	# exchange, so it drains before anything is measured.
+	_panel_b._on_panel_load_request(_document_for("", fixture.duplicate(true)))
+	await _settle_exchanges()
+	var held: Dictionary = _panel_b._on_panel_save_request()
+	var bound_chat := _chat_of(fixture, CONTEXT_SESSION)
+	# The revision is part of the setup claim: an engine that seeded or migrated
+	# this record would have handed back a later one, and the panel would then be
+	# holding a document the assertions above were not made about.
+	check("setup: the panel holds the worked example unchanged, bound to the chat the fixture names",
+			_session_ids(held) == PackedStringArray([CONTEXT_SESSION])
+			and int(held.get("snapshot_revision", -1)) == int(fixture.get("snapshot_revision", -2))
+			and _chat_of(held, CONTEXT_SESSION) == bound_chat and not bound_chat.is_empty(),
+			"%s / rev %d / %s" % [str(_session_ids(held)),
+				int(held.get("snapshot_revision", -1)), _chat_of(held, CONTEXT_SESSION)])
+
+	var rendered: Array = _panel_b._on_panel_render_for_llm({})
+	var one_text_part: bool = rendered.size() == 1 and rendered[0] is Dictionary \
+			and str((rendered[0] as Dictionary).get("type", "")) == "text"
+	var rendered_text: String = str((rendered[0] as Dictionary).get("text", "")) \
+			if one_text_part else ""
+	check("render-for-LLM hands back the record's derivation and adds nothing to it",
+			one_text_part and rendered_text == full,
+			"parts=%d, differ at %d of %d" % [rendered.size(),
+				_first_difference(rendered_text, full), full.length()])
+
+	# Everything the panel puts on the wire, filtered to the send capability:
+	# the wrapper's own exchanges travel the same signal.
+	var handed: Array[Dictionary] = []
+	var watch := func(channel: String, payload: Dictionary, _reply_id: String) -> void:
+		if channel == CouncilBackend.SEND_MESSAGE_CHANNEL:
+			handed.append(payload)
+	_panel_b.request.connect(watch)
+	await _wrapper(_panel_b, "wrapper.chat_handoff",
+			{"session_id": CONTEXT_SESSION, "contribution_ids": []})
+	var handed_text: String = str(handed[0].get("message", "")) if handed.size() == 1 else ""
+	check("the handoff hands the host exactly the text render-for-LLM returned",
+			handed.size() == 1 and handed_text == rendered_text,
+			"%d sends, differ at %d of %d" % [handed.size(),
+				_first_difference(handed_text, rendered_text), rendered_text.length()])
+	check("addressed to the chat the session itself is bound to",
+			handed.size() == 1 and str(handed[0].get("chat_id", "")) == bound_chat,
+			str(handed).left(160))
+
+	# THE UNBOUND SESSION. The binding is the only thing that changes; the text
+	# would be the same one that was just sent, so a send here would be a send to
+	# whichever chat the panel could find — the thing the backend refuses to do.
+	var unbound: Dictionary = _parse(FileAccess.get_file_as_string(POPULATED_FIXTURE_PATH))
+	_session_of(unbound, CONTEXT_SESSION).erase("chat_binding")
+	_panel_b._on_panel_load_request(_document_for("", unbound))
+	await _settle_exchanges()
+	handed.clear()
+	var refusal: Dictionary = await _wrapper(_panel_b, "wrapper.chat_handoff",
+			{"session_id": CONTEXT_SESSION, "contribution_ids": []})
+	var refused: Dictionary = refusal.get("error", {}) if refusal.get("error", {}) is Dictionary else {}
+	check("a session bound to no chat is refused by the send path, by name",
+			not bool(refusal.get("ok", true)) and str(refused.get("code", "")) == "missing_chat",
+			str(refusal).left(200))
+	check("and nothing was handed to the host",
+			handed.is_empty(), str(handed).left(160))
+	_panel_b.request.disconnect(watch)
+
+
 ## Let every panel exchange that is running or queued finish.
 ##
 ## Adopting a document DEFERS a rehydrate, and a rehydrate is an exchange on the
@@ -1236,6 +1441,18 @@ func _relay(panel: Control, request: Dictionary) -> Dictionary:
 	return await panel._relay_to_engine(request)
 
 
+## Drive one wrapper request — the panel's own operations, which never reach the
+## engine — exactly as `_on_page_message` dispatches it. The one difference is
+## that the reply is RETURNED rather than eval'd into the page: headless has no
+## bridge, so a reply sent that way would sit in the panel's outbox or vanish
+## into a CEF that may or may not have signalled ready.
+func _wrapper(panel: Control, command: String, payload: Dictionary) -> Dictionary:
+	var request_id := "gd-%s" % command
+	return await panel._wrapper_command(command, {
+		"schema_version": 1, "envelope": "request", "request_id": request_id,
+		"command": command, "payload": payload}, request_id, panel._record.revision())
+
+
 # ---------------------------------------------------------------------------
 # Fixtures and helpers
 # ---------------------------------------------------------------------------
@@ -1344,6 +1561,50 @@ func _session_ids(record: Dictionary) -> PackedStringArray:
 	for s in record.get("sessions", []):
 		ids.append(str((s as Dictionary).get("session_id", "")))
 	return ids
+
+
+## The session `session_id` names, BY REFERENCE into `record` — a caller that
+## writes into what it gets back is editing the record it came from, which is how
+## section 11 builds its variant of the fixture without a second file.
+func _session_of(record: Dictionary, session_id: String) -> Dictionary:
+	for s in record.get("sessions", []):
+		var session: Dictionary = s
+		if str(session.get("session_id", "")) == session_id:
+			return session
+	return {}
+
+
+## Everything in a session that the context derivation may quote, in the order it
+## walks them: each round's contributions, then that round's synthesis. Reading
+## the fixture, not deciding anything about it.
+func _parts_of(session: Dictionary) -> Array:
+	var parts: Array = []
+	for r_v in session.get("runs", []):
+		var run: Dictionary = r_v
+		parts.append_array(run.get("contributions", []) as Array)
+		if run.get("synthesis", null) is Dictionary:
+			parts.append(run["synthesis"])
+	return parts
+
+
+func _part_of(session: Dictionary, contribution_id: String) -> Dictionary:
+	for part_v in _parts_of(session):
+		var part: Dictionary = part_v
+		if str(part.get("contribution_id", "")) == contribution_id:
+			return part
+	return {}
+
+
+## The contribution blocks in a derived context text. Each one starts a line with
+## "[seat / member] ", which is the only line shape the derivation indents that
+## way, so counting them counts contributions — the assertion "and nothing else"
+## needs a count, and `contains` cannot give one.
+func _context_blocks(text: String) -> PackedStringArray:
+	var blocks := PackedStringArray()
+	for line in text.split("\n"):
+		if line.begins_with("["):
+			blocks.append(line.get_slice("]", 0) + "]")
+	return blocks
 
 
 func _chat_of(record: Dictionary, session_id: String) -> String:
