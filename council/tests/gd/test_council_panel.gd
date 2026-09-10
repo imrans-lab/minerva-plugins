@@ -85,6 +85,21 @@ const POPULATED_FIXTURE_PATH := PLUGIN_DIR + "/fixtures/workshop_complete.mcounc
 ## A document in the shape Council wrote before the record carried a schema
 ## version or a project identity. Section 7 opens it for real.
 const OLDER_FIXTURE_PATH := PLUGIN_DIR + "/fixtures/migrations/snapshot_v0_pre_project_identity.json"
+## The record class itself, loaded at run time in section 11 so the derivation
+## can be exercised without a panel around it.
+const RECORD_SCRIPT_PATH := PLUGIN_DIR + "/ui/council_record.gd"
+## What section 11 reads out of the worked example, named here so a fixture that
+## changes shape fails the section's SETUP assertion by name instead of quietly
+## weakening every assertion after it. `con-3` and `con-5` are the two rounds'
+## syntheses, which the derivation treats as contributions of the chair's seat.
+const CONTEXT_SESSION := "ses-recurring-order"
+const COMPLETE_IDS := ["con-1", "con-3", "con-4", "con-5"]
+const INCOMPLETE_ID := "con-2"
+## Text put into that incomplete contribution to build section 11's VARIANT of
+## the fixture. The shipped one has no text at all, so in it "left out because it
+## is not complete" and "left out because there is nothing to quote" are the same
+## outcome; giving it words separates them.
+const UNFINISHED_TEXT := "The capacity seat never finished saying this."
 ## What `{"snapshot": …}` costs in the serialised form: 12 characters of key and
 ## colon plus the closing brace. It is the whole point of measuring the message
 ## rather than the record.
@@ -123,6 +138,7 @@ const SCENE_PANEL_HOST_PATH := "res://Scripts/Services/Plugins/PluginScenePanelH
 const SCENE_PANEL_BROKER_PATH := "res://Scripts/Services/Plugins/PluginScenePanelBroker.gd"
 
 const MINERVA_IPC_PATH := "res://Scripts/Services/Plugins/MinervaIPC.gd"
+const EVENT_BROKER_PATH := "res://Scripts/Services/Plugins/PluginEventBroker.gd"
 
 ## The child node the broker attaches on registration, read off MinervaIPC's
 ## own constant in _setup (a const initialiser would be a first-pass load).
@@ -190,6 +206,13 @@ class StubManager extends RefCounted:
 	func get_connection(_plugin_id: String):
 		return conn
 
+	## What singleton_object.gd's plugin-event fan-out iterates
+	## (_push_to_plugin_panels, singleton_object.gd:745-756). The real manager
+	## fills this from panel registration; the suite mounts its two panels by
+	## hand, so it names the same two keys.
+	func get_live_panels(_plugin_id: String) -> Array:
+		return [{"panel_key": "council_panel#a"}, {"panel_key": "council_panel#b"}]
+
 	## The host calls this on whatever plugin_manager it finds when the process
 	## exits (singleton_object.gd:1538). Without it the run ends in a script
 	## error and a non-zero exit even when every assertion passed. Cleanup puts
@@ -223,6 +246,8 @@ func _init() -> void:
 		await _section_7_migration()
 		await _section_8_interrupted_run()
 		await _section_9_recovering_a_closed_panel()
+		await _section_10_a_change_with_no_panel_in_it()
+		await _section_11_the_text_a_session_hands_over()
 
 	_cleanup()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
@@ -313,12 +338,41 @@ func _start_backend():
 	if transport == null:
 		return null
 	var conn = transport.new("council-test")
+	# The connection carries the plugin id into every notification it routes;
+	# without it the event broker cannot find the definition and drops the event
+	# as an unknown plugin's (MCPServerConnection.gd:73, :984-986).
+	conn.plugin_id = PLUGIN_ID
 	conn.configure_stdio(binary, PackedStringArray())
+	# The backend's own notifications need somewhere to go. MCPServerConnection
+	# hands a `minerva/plugin_event` to whatever event_broker it was given
+	# (MCPServerConnection.gd:934, :985-988); with none it warns and drops.
+	# The broker is the REAL PluginEventBroker over the REAL PluginDefinition,
+	# so the manifest's `events` declaration is what decides whether an event
+	# name is a declared one.
+	var event_broker_script: Script = load(EVENT_BROKER_PATH)
+	if event_broker_script != null and _manager != null:
+		var events = event_broker_script.new(_manager.get_db(), null)
+		events.plugin_event.connect(_fan_out_plugin_event)
+		conn.event_broker = events
 	# connect_to_server awaits its transport (MCPServerConnection.gd:101-109);
 	# calling it without await hands back a coroutine state, not an Error.
 	if await conn.connect_to_server() != OK:
 		return null
 	return conn
+
+
+## The host's own fan-out, reproduced over this suite's registry: every live
+## panel of the plugin gets the push, addressed by its per-tab registration key
+## (singleton_object.gd:745-756). The push itself is the REAL broker call, with
+## its ownership check and its audit.
+func _fan_out_plugin_event(plugin_id: String, event_name: String, payload: Dictionary) -> void:
+	if _broker == null or _manager == null:
+		return
+	for entry in _manager.get_live_panels(plugin_id):
+		var panel_key: String = str((entry as Dictionary).get("panel_key", ""))
+		if panel_key.is_empty():
+			continue
+		_broker.push_to_panel(plugin_id, panel_key, event_name, payload)
 
 
 # ---------------------------------------------------------------------------
@@ -921,6 +975,436 @@ func _section_9_recovering_a_closed_panel() -> void:
 			str(_session_ids(seen)))
 
 
+# ---------------------------------------------------------------------------
+# 10. A change with no panel in the exchange
+# ---------------------------------------------------------------------------
+
+## The bug this section is the regression for: a chat turn and an MCP tool call
+## commit through the engine with no panel involved, and the panel used to serve
+## reads and saves from a record that knew nothing about them.
+##
+## THE ORACLE IS THE PANEL'S OWN SAVE PAYLOAD — the dictionary the host writes
+## into the project (vboxEditor.gd:494-499) and into a .mcouncil file
+## (Editor.gd:1727). The round is started straight down the MCP tool door on the
+## REAL connection, so nothing in the panel is asked to mutate anything; whatever
+## turns up in the saved record afterwards got there through the change signal,
+## the fan-out and the panel's own convergence, all of them the real ones. The
+## backend's engine decides what the round becomes: a headless run answers no
+## model call, so the contributions arrive failed, and it is their PRESENCE in
+## the saved document — a run the panel never started — that is under test.
+##
+## Ownership is asserted in both directions: the panel holding another council
+## must be byte-identical afterwards, which is what "not by whichever tab was
+## focused" means when it is measured rather than claimed.
+func _section_10_a_change_with_no_panel_in_it() -> void:
+	print("\n10 a change with no panel in it:")
+	if _conn == null or not _conn.server_connected:
+		check("10: the council-plugin binary is built and speaking", false,
+				"build it first: (cd council && go build -o council-plugin ./)")
+		return
+
+	# The other council, which must not move.
+	var elsewhere: Dictionary = _fixture_as_session("ses-untouched", "A question in another project")
+	_panel_b._on_panel_load_request(_document_for("", elsewhere))
+	await _settle_exchanges()
+	var untouched_before := JSON.stringify(_panel_b._on_panel_save_request(), "\t")
+
+	# The council the round runs in, seeded so the engine is holding it.
+	var record: Dictionary = _parse(FileAccess.get_file_as_string(POPULATED_FIXTURE_PATH))
+	record["project_id"] = "prj-gd-no-panel"
+	record.erase("view")
+	_panel_a._on_panel_load_request(_document_for("", record))
+	await _relay(_panel_a, {"schema_version": 1, "envelope": "request",
+		"request_id": "sync-seed", "command": "snapshot.get", "payload": {}})
+	# Nothing of either panel's may still be queued. The round below goes down
+	# the tool door WITHOUT the wrapper's lease — which is what an agent's MCP
+	# call is — so a panel exchange that seeds while it runs replaces the
+	# document the round is running in and the engine refuses the round (§5.5).
+	# That is the pre-existing two-panels-one-engine property, not the thing
+	# under test, and letting it fire here would test the contention instead.
+	await _settle_exchanges()
+	var before: Dictionary = _panel_a._on_panel_save_request()
+	check("setup: the engine is loaded with the document this panel holds, with nothing else queued",
+			CouncilBackend.lease_holder() == "council_panel#a"
+			and CouncilBackend.lease_taker() == ""
+			and str(before.get("project_id", "")) == "prj-gd-no-panel",
+			"holder=%s taker=%s project=%s" % [CouncilBackend.lease_holder(),
+				CouncilBackend.lease_taker(), str(before.get("project_id", ""))])
+	var runs_before := _run_ids(before, "ses-recurring-order")
+
+	# The host connects content_changed to the tab's dirty flag
+	# (Editor.gd:323-324 → :2068-2069), so counting it is how this suite sees
+	# "the document will be saved" without an Editor.
+	var marked := [0]
+	var on_change := func() -> void: marked[0] += 1
+	_panel_a.content_changed.connect(on_change)
+
+	# THE MUTATION WITH NO PANEL. A tools/call on the real connection is exactly
+	# what an agent's MCP call is, and what a chat turn reaches the same engine
+	# through. The limits are narrowed so the round fails fast on a host that
+	# answers no model call, which is every headless run.
+	var started: Dictionary = await _conn.call_tool("minerva_council_command", {
+		"schema_version": 1, "envelope": "request",
+		"request_id": "direct-round", "command": "run.start",
+		"base_revision": int(before.get("snapshot_revision", 1)),
+		"wait_seconds": 5,
+		"payload": {
+			"session_id": "ses-recurring-order", "kind": "follow_up",
+			"prompt": "Does the costing still hold if the order doubles?",
+			"limits": {"per_member_timeout_seconds": 1, "run_budget_seconds": 2}}})
+	check("the engine accepted a round nothing in the panel started",
+			bool(started.get("ok", false)), str(started).left(240))
+	var run_id := str((started.get("payload", {}) as Dictionary).get("run_id", ""))
+
+	# The signal travels over the backend's stdout, is drained by the host on its
+	# own schedule and is answered by an exchange of the panel's own, so the wait
+	# is on the RESULT rather than on a fixed number of frames.
+	# The poll reads the held record's REVISION, not the save hook and not a
+	# snapshot: save is what warns and re-schedules a convergence while the panel
+	# is behind, and a snapshot is a deep copy of the whole document — either one,
+	# once a frame for up to twenty seconds, is a lot of work to answer a question
+	# an integer answers. The record itself is read once, below.
+	var moved := func() -> bool:
+		return _panel_a._record.revision() > int(before.get("snapshot_revision", 0))
+	await _wait_until(moved, 20.0)
+	var saved: Dictionary = _panel_a._on_panel_save_request()
+	var landed: Dictionary = _run_of(saved, "ses-recurring-order", run_id)
+	check("a round driven with no panel in the exchange is in the document the panel saves",
+			not run_id.is_empty() and not landed.is_empty(),
+			"run %s in %s" % [run_id, str(_run_ids(saved, "ses-recurring-order"))])
+	check("and the contributions of that round came with it",
+			_seat_ids(landed).size() > 0, str(_seat_ids(landed)))
+	check("the round is a new one, not one the document already held",
+			not runs_before.has(run_id), "%s was already in %s" % [run_id, str(runs_before)])
+	# The round reaches rest inside the command that started it, so the reply's
+	# own snapshot_revision IS the revision the engine ended at. Asserting
+	# equality with it, rather than "higher than before", is what makes this a
+	# claim about converging ON THE ENGINE instead of about having moved at all.
+	check("the saved record is at the revision the engine reached, not the one the panel had",
+			int(saved.get("snapshot_revision", 0)) == int(started.get("snapshot_revision", 0))
+			and int(saved.get("snapshot_revision", 0)) != int(before.get("snapshot_revision", 0)),
+			"panel %d, engine %d, was %d" % [int(saved.get("snapshot_revision", 0)),
+				int(started.get("snapshot_revision", 0)),
+				int(before.get("snapshot_revision", 0))])
+	check("the tab was marked changed, so the host's save writes it",
+			marked[0] > 0, "content_changed fired %d times" % marked[0])
+	_panel_a.content_changed.disconnect(on_change)
+	check("the panel holding another council is untouched",
+			JSON.stringify(_panel_b._on_panel_save_request(), "\t") == untouched_before,
+			str(_session_ids(_panel_b._on_panel_save_request())))
+
+	# Equal revision cannot authorize a write into another document with matching
+	# session IDs. An identity check after the mutation would be too late.
+	var same_revision: Dictionary = saved.duplicate(true)
+	same_revision["project_id"] = "prj-equal-revision-foreign"
+	await _conn.call_tool("minerva_council_load_snapshot", {"snapshot": same_revision})
+	var guarded: Dictionary = await _bind_chat(_panel_a, "ses-recurring-order", "chat-must-not-bind")
+	var foreign_after: Dictionary = await _conn.call_tool("minerva_council_export_snapshot", {})
+	check("equal revision does not authorize a write into another council",
+			not bool(guarded.get("ok", false))
+			and (foreign_after.get("snapshot", {}) as Dictionary) == same_revision,
+			str(guarded).left(200))
+
+	# A delayed event must not seed A's old snapshot after B takes the engine.
+	await _relay(_panel_b, {"schema_version": 1, "envelope": "request",
+		"request_id": "sync-holder-b", "command": "snapshot.get", "payload": {}})
+	var held_b: Dictionary = await _conn.call_tool("minerva_council_export_snapshot", {})
+	_panel_a.receive("council.record_changed", {
+		"project_id": str(saved.get("project_id", "")),
+		"snapshot_revision": int(saved.get("snapshot_revision", 0)) + 1})
+	_panel_a._on_panel_save_request()
+	check("save while convergence is queued warns that the held copy is behind",
+			_panel_a._banner.visible, _panel_a._banner.text.left(120))
+	await _panel_a._converge()
+	var still_b: Dictionary = await _conn.call_tool("minerva_council_export_snapshot", {})
+	check("a delayed convergence cannot replace the current holder with an older panel copy",
+			still_b.get("snapshot", {}) == held_b.get("snapshot", {})
+			and CouncilBackend.lease_holder() == "council_panel#b"
+			and _panel_a._sync_pending,
+			"holder=%s pending=%s" % [CouncilBackend.lease_holder(), str(_panel_a._sync_pending)])
+	_panel_a._on_panel_load_request(_document_for("", saved))
+	await _settle_exchanges()
+
+	# THE LEASE IS A GODOT-SIDE FACT, AND minerva_council_load_snapshot IS A LIVE
+	# TOOL. Loading another council straight down the tool door leaves this panel
+	# still named as the engine's holder, so its next exchange skips the seed and
+	# reads back a record that is not its own. The revision is moved clear of this
+	# document's so the exchange really does try to adopt what comes back —
+	# otherwise the refusal would never be reached and the assertion would pass
+	# for the wrong reason.
+	var intruder: Dictionary = _fixture_as_session("ses-intruder", "Another council entirely")
+	intruder["snapshot_revision"] = int(saved.get("snapshot_revision", 0)) + 3
+	var displaced: Dictionary = await _conn.call_tool("minerva_council_load_snapshot",
+			{"snapshot": intruder, "mode": "replace"})
+	check("setup: another council was loaded into the engine behind the panel's back",
+			bool(displaced.get("ok", false))
+			and CouncilBackend.lease_holder() == "council_panel#a",
+			"loaded=%s holder=%s" % [str(displaced).left(120), CouncilBackend.lease_holder()])
+	_panel_a.receive("council.record_changed", {
+		"project_id": str(saved.get("project_id", "")),
+		"snapshot_revision": int(saved.get("snapshot_revision", 0)) + 1})
+	var refused := func() -> bool: return _panel_a._banner.visible
+	await _wait_until(refused, 20.0)
+	var kept: Dictionary = _panel_a._on_panel_save_request()
+	check("a record for another council is refused rather than adopted",
+			str(kept.get("project_id", "")) == "prj-gd-no-panel"
+			and _session_ids(kept) == PackedStringArray(["ses-recurring-order"]),
+			"%s / %s" % [str(kept.get("project_id", "")), str(_session_ids(kept))])
+	check("and the panel says so rather than letting the tab save it",
+			_panel_a._banner.visible and _panel_a._banner.text.contains("a different council"),
+			_panel_a._banner.text.left(140))
+
+	# THE BACKEND GONE. The panel is told the council moved and cannot read it
+	# back. `receive` is the call the host itself makes when it delivers a plugin
+	# event (PluginScenePanelBroker.gd:988); with no backend there is nothing to
+	# raise one, so the suite makes that single call and everything after it is
+	# the panel's own.
+	_conn.disconnect_from_server()
+	_manager.conn = null
+	_panel_a.receive("council.record_changed", {
+		"project_id": str(saved.get("project_id", "")),
+		"snapshot_revision": int(saved.get("snapshot_revision", 0)) + 1})
+	# The banner is already up from the leg above, so the wait is on its TEXT
+	# changing to this failure's reason rather than on it becoming visible.
+	var said_so := func() -> bool: return _panel_a._banner.text.contains("is not running")
+	await _wait_until(said_so, 20.0)
+	var written: Dictionary = _panel_a._on_panel_save_request()
+	check("with the backend gone the panel says the council is behind rather than saving quietly",
+			_panel_a._banner.visible and _panel_a._banner.text.contains("is not running"),
+			"visible=%s text=%s" % [str(_panel_a._banner.visible), _panel_a._banner.text.left(120)])
+	check("and what it wrote is still the council it holds, not an empty document",
+			not _run_of(written, "ses-recurring-order", run_id).is_empty()
+			and str(written.get("project_id", "")) == "prj-gd-no-panel",
+			str(_run_ids(written, "ses-recurring-order")))
+
+
+## The one text a session hands over, and the two callers that must not be able
+## to disagree about it.
+##
+## THE ORACLE IS THE FIXTURE. `workshop_complete.mcouncil` is the checked-in
+## worked example, validated against the schemas by the Go contract tests: what
+## belongs in the derivation is read out of it here, never re-derived by a second
+## copy of the rule. The setup assertion pins the shape the rest of the section
+## names, so a fixture that gains a contribution fails by name rather than
+## silently making "nothing that is not complete" true of a smaller record.
+##
+## WHY IT IS LAST AND WHY IT NEEDS NO BACKEND. `context_text` reads the held
+## record and nothing else, so the record half runs on a bare CouncilRecord and
+## the panel half only needs a MOUNTED panel — the wrapper commands never reach
+## the engine. Section 10 leaves the backend disconnected, and this section is
+## the one that does not care.
+##
+## HOW THE HANDOFF'S TEXT IS OBSERVED WITHOUT A CHAT. `send_to_chat` puts the
+## text on the panel's own `request` signal, addressed to the host capability
+## `capability:mcp.proxy:minerva_send_message`; that emission IS what a chat
+## would receive, so the suite reads it there. The broker this suite built has no
+## capability_broker, so the hop then fails fast and the reply is a transport
+## error — deliberately not asserted on, because the claim under test is what was
+## handed over, not what a host that is not here would have done with it.
+func _section_11_the_text_a_session_hands_over() -> void:
+	print("\n11 the text a session hands to a chat:")
+	var record_script: GDScript = load(RECORD_SCRIPT_PATH)
+	var fixture: Dictionary = _parse(FileAccess.get_file_as_string(POPULATED_FIXTURE_PATH))
+	var session: Dictionary = _session_of(fixture, CONTEXT_SESSION)
+
+	# What the fixture says, as ids and as text. Everything below is asserted
+	# against these, so the section can only be as right as the fixture is.
+	var complete := PackedStringArray()
+	var complete_texts := PackedStringArray()
+	var incomplete := PackedStringArray()
+	for part_v in _parts_of(session):
+		var part: Dictionary = part_v
+		if str(part.get("status", "")) == "complete":
+			complete.append(str(part.get("contribution_id", "")))
+			complete_texts.append(str(part.get("text", "")).strip_edges())
+		else:
+			incomplete.append(str(part.get("contribution_id", "")))
+	var record = record_script.new()
+	check("setup: the worked example holds the four complete contributions this section names, one that is not, and adopts",
+			record.adopt(fixture)
+			and complete == PackedStringArray(COMPLETE_IDS)
+			and incomplete == PackedStringArray([INCOMPLETE_ID])
+			and not complete_texts.has("")
+			and str(_part_of(session, INCOMPLETE_ID).get("text", "")).is_empty(),
+			"complete=%s incomplete=%s" % [str(complete), str(incomplete)])
+
+	var full: String = record.context_text(CONTEXT_SESSION, PackedStringArray())
+	var lines := full.split("\n")
+	check("the derivation opens with the session's own question and its status",
+			lines.size() > 2
+			and lines[0].contains(str(session.get("question", "")))
+			and lines[1].contains(str(session.get("status", ""))),
+			full.left(160))
+
+	var absent := PackedStringArray()
+	for i in COMPLETE_IDS.size():
+		if not full.contains(complete_texts[i]):
+			absent.append(COMPLETE_IDS[i])
+	check("every complete contribution and each round's synthesis is in it, verbatim",
+			absent.is_empty(), "missing %s" % str(absent))
+	# Counting the blocks is what makes the previous assertion an "exactly":
+	# `contains` alone would pass a text that also carried something else.
+	check("and nothing that is not complete: it carries those four and no more",
+			_context_blocks(full).size() == COMPLETE_IDS.size(),
+			str(_context_blocks(full)))
+	# THE FIELDS, not just the count. This report's job is ATTRIBUTION of the
+	# arguments a user chose to send, so each block has to name the seat and the
+	# member that produced it — a block heading that lost a field, or swapped the
+	# two, would still be one line starting with "[".
+	var first: Dictionary = _part_of(session, COMPLETE_IDS[0])
+	var first_head := "[%s / %s]" % [str(first.get("seat_id", "")), str(first.get("member_id", ""))]
+	check("each block is headed by its own seat and member, in that order",
+			_context_blocks(full).has(first_head)
+			and full.contains("%s %s" % [first_head, complete_texts[0]]),
+			"%s not heading a block in %s" % [first_head, str(_context_blocks(full))])
+
+	# render-for-LLM passes no session id and the handoff passes the one the page
+	# named. If those resolved differently the two callers would be reading two
+	# sessions, and "one derivation" would say nothing. A ONE-session record
+	# cannot tell "the selected session" from "the only session", so the claim is
+	# made against a copy carrying a second one AFTER it: the fallback is the
+	# last session, and `view.selected_session_id` still names the first.
+	var two_sessions: Dictionary = _parse(FileAccess.get_file_as_string(POPULATED_FIXTURE_PATH))
+	var second: Dictionary = _session_of(two_sessions, CONTEXT_SESSION).duplicate(true)
+	second["session_id"] = "ses-second"
+	second["question"] = "A second question, in the same council"
+	(two_sessions["sessions"] as Array).append(second)
+	var two_record = record_script.new()
+	two_record.adopt(two_sessions)
+	var by_default: String = two_record.context_text("", PackedStringArray())
+	check("an empty session id resolves to the session the view selected, not the last one",
+			by_default == full and not by_default.contains(str(second["question"])),
+			"differ at %d of %d" % [_first_difference(by_default, full), full.length()])
+	# …and not the FIRST one either. The fixture's view selects the session that
+	# is also sessions[0], so the assertion above passes just as well for a
+	# derivation that never reads `view` at all. Moving the selection to the
+	# appended session is what separates the three candidate rules: only a
+	# derivation that reads the view follows it.
+	(two_sessions["view"] as Dictionary)["selected_session_id"] = "ses-second"
+	two_record.adopt(two_sessions)
+	var by_selection: String = two_record.context_text("", PackedStringArray())
+	check("and it follows the view when the selected session is not the first one",
+			by_selection.contains(str(second["question"]))
+			and not by_selection.contains(str(session.get("question", ""))),
+			by_selection.left(160))
+
+	# THE VARIANT: the same fixture with words in the contribution that failed.
+	var variant: Dictionary = _parse(FileAccess.get_file_as_string(POPULATED_FIXTURE_PATH))
+	var unfinished: Dictionary = _part_of(_session_of(variant, CONTEXT_SESSION), INCOMPLETE_ID)
+	unfinished["text"] = UNFINISHED_TEXT
+	var variant_record = record_script.new()
+	variant_record.adopt(variant)
+	var variant_full: String = variant_record.context_text(CONTEXT_SESSION, PackedStringArray())
+	check("a contribution that is not complete is left out for its status, not for want of text",
+			not variant_full.contains(UNFINISHED_TEXT)
+			and _context_blocks(variant_full).size() == COMPLETE_IDS.size(),
+			str(_context_blocks(variant_full)))
+	var picked: String = variant_record.context_text(
+			CONTEXT_SESSION, PackedStringArray([INCOMPLETE_ID]))
+	check("a selection takes the contribution it names whatever its status",
+			picked.contains(UNFINISHED_TEXT) and _context_blocks(picked).size() == 1,
+			str(_context_blocks(picked)))
+
+	var selected := PackedStringArray(["con-1", "con-4"])
+	var narrowed: String = record.context_text(CONTEXT_SESSION, selected)
+	var wrong := PackedStringArray()
+	for i in COMPLETE_IDS.size():
+		if narrowed.contains(complete_texts[i]) != selected.has(COMPLETE_IDS[i]):
+			wrong.append(COMPLETE_IDS[i])
+	check("a selection narrows to exactly the contributions it names",
+			wrong.is_empty() and _context_blocks(narrowed).size() == selected.size(),
+			"wrong %s in %s" % [str(wrong), str(_context_blocks(narrowed))])
+
+	# THE TWO CALLERS. Both read the record the panel holds, so the panel has to
+	# be holding this same document; adopting it defers a rehydrate, which is an
+	# exchange, so it drains before anything is measured.
+	_panel_b._on_panel_load_request(_document_for("", fixture.duplicate(true)))
+	await _settle_exchanges()
+	var held: Dictionary = _panel_b._on_panel_save_request()
+	var bound_chat := _chat_of(fixture, CONTEXT_SESSION)
+	# The revision is part of the setup claim: an engine that seeded or migrated
+	# this record would have handed back a later one, and the panel would then be
+	# holding a document the assertions above were not made about.
+	check("setup: the panel holds the worked example unchanged, bound to the chat the fixture names",
+			_session_ids(held) == PackedStringArray([CONTEXT_SESSION])
+			and int(held.get("snapshot_revision", -1)) == int(fixture.get("snapshot_revision", -2))
+			and _chat_of(held, CONTEXT_SESSION) == bound_chat and not bound_chat.is_empty(),
+			"%s / rev %d / %s" % [str(_session_ids(held)),
+				int(held.get("snapshot_revision", -1)), _chat_of(held, CONTEXT_SESSION)])
+
+	var rendered: Array = _panel_b._on_panel_render_for_llm({})
+	var one_text_part: bool = rendered.size() == 1 and rendered[0] is Dictionary \
+			and str((rendered[0] as Dictionary).get("type", "")) == "text"
+	var rendered_text: String = str((rendered[0] as Dictionary).get("text", "")) \
+			if one_text_part else ""
+	check("render-for-LLM hands back the record's derivation and adds nothing to it",
+			one_text_part and rendered_text == full,
+			"parts=%d, differ at %d of %d" % [rendered.size(),
+				_first_difference(rendered_text, full), full.length()])
+
+	# Everything the panel puts on the wire, filtered to the send capability:
+	# the wrapper's own exchanges travel the same signal.
+	var handed: Array[Dictionary] = []
+	var watch := func(channel: String, payload: Dictionary, _reply_id: String) -> void:
+		if channel == CouncilBackend.SEND_MESSAGE_CHANNEL:
+			handed.append(payload)
+	_panel_b.request.connect(watch)
+	await _wrapper(_panel_b, "wrapper.chat_handoff",
+			{"session_id": CONTEXT_SESSION, "contribution_ids": []})
+	var handed_text: String = str(handed[0].get("message", "")) if handed.size() == 1 else ""
+	check("the handoff hands the host exactly the text render-for-LLM returned",
+			handed.size() == 1 and handed_text == rendered_text,
+			"%d sends, differ at %d of %d" % [handed.size(),
+				_first_difference(handed_text, rendered_text), rendered_text.length()])
+	check("addressed to the chat the session itself is bound to",
+			handed.size() == 1 and str(handed[0].get("chat_id", "")) == bound_chat,
+			str(handed).left(160))
+
+	# THE UNBOUND SESSION. The binding is the only thing that changes; the text
+	# would be the same one that was just sent, so a send here would be a send to
+	# whichever chat the panel could find — the thing the backend refuses to do.
+	var unbound: Dictionary = _parse(FileAccess.get_file_as_string(POPULATED_FIXTURE_PATH))
+	_session_of(unbound, CONTEXT_SESSION).erase("chat_binding")
+	_panel_b._on_panel_load_request(_document_for("", unbound))
+	await _settle_exchanges()
+	handed.clear()
+	var refusal: Dictionary = await _wrapper(_panel_b, "wrapper.chat_handoff",
+			{"session_id": CONTEXT_SESSION, "contribution_ids": []})
+	var refused: Dictionary = refusal.get("error", {}) if refusal.get("error", {}) is Dictionary else {}
+	check("a session bound to no chat is refused by the send path, by name",
+			not bool(refusal.get("ok", true)) and str(refused.get("code", "")) == "missing_chat",
+			str(refusal).left(200))
+	check("and nothing was handed to the host",
+			handed.is_empty(), str(handed).left(160))
+	_panel_b.request.disconnect(watch)
+
+
+## Let every panel exchange that is running or queued finish.
+##
+## Adopting a document DEFERS a rehydrate, and a rehydrate is an exchange on the
+## one engine that seeds it. So a step that reaches the backend outside the
+## wrapper's lease has to let those drain first, or it is racing a Load with its
+## own work. The frames come first because a deferred call has not started yet:
+## checking the lease immediately would find it free and prove nothing.
+func _settle_exchanges() -> void:
+	await process_frame
+	await process_frame
+	var idle := func() -> bool: return CouncilBackend.lease_taker() == ""
+	await _wait_until(idle, 20.0)
+
+
+## Wait for a condition the host reaches on its own schedule — a notification
+## drained from the backend's stdout, then an exchange of the panel's — rather
+## than for a fixed number of frames, which would be either flaky or slow.
+func _wait_until(condition: Callable, seconds: float) -> bool:
+	var deadline: int = Time.get_ticks_msec() + int(seconds * 1000.0)
+	while Time.get_ticks_msec() < deadline:
+		if bool(condition.call()):
+			return true
+		await process_frame
+	return bool(condition.call())
+
+
 func _restart_backend() -> void:
 	if _conn != null:
 		_conn.disconnect_from_server()
@@ -1006,6 +1490,18 @@ func _bind_chat(panel: Control, session_id: String, chat_id: String) -> Dictiona
 ## message handler, so the reply is the one the page would have seen.
 func _relay(panel: Control, request: Dictionary) -> Dictionary:
 	return await panel._relay_to_engine(request)
+
+
+## Drive one wrapper request — the panel's own operations, which never reach the
+## engine — exactly as `_on_page_message` dispatches it. The one difference is
+## that the reply is RETURNED rather than eval'd into the page: headless has no
+## bridge, so a reply sent that way would sit in the panel's outbox or vanish
+## into a CEF that may or may not have signalled ready.
+func _wrapper(panel: Control, command: String, payload: Dictionary) -> Dictionary:
+	var request_id := "gd-%s" % command
+	return await panel._wrapper_command(command, {
+		"schema_version": 1, "envelope": "request", "request_id": request_id,
+		"command": command, "payload": payload}, request_id, panel._record.revision())
 
 
 # ---------------------------------------------------------------------------
@@ -1116,6 +1612,50 @@ func _session_ids(record: Dictionary) -> PackedStringArray:
 	for s in record.get("sessions", []):
 		ids.append(str((s as Dictionary).get("session_id", "")))
 	return ids
+
+
+## The session `session_id` names, BY REFERENCE into `record` — a caller that
+## writes into what it gets back is editing the record it came from, which is how
+## section 11 builds its variant of the fixture without a second file.
+func _session_of(record: Dictionary, session_id: String) -> Dictionary:
+	for s in record.get("sessions", []):
+		var session: Dictionary = s
+		if str(session.get("session_id", "")) == session_id:
+			return session
+	return {}
+
+
+## Everything in a session that the context derivation may quote, in the order it
+## walks them: each round's contributions, then that round's synthesis. Reading
+## the fixture, not deciding anything about it.
+func _parts_of(session: Dictionary) -> Array:
+	var parts: Array = []
+	for r_v in session.get("runs", []):
+		var run: Dictionary = r_v
+		parts.append_array(run.get("contributions", []) as Array)
+		if run.get("synthesis", null) is Dictionary:
+			parts.append(run["synthesis"])
+	return parts
+
+
+func _part_of(session: Dictionary, contribution_id: String) -> Dictionary:
+	for part_v in _parts_of(session):
+		var part: Dictionary = part_v
+		if str(part.get("contribution_id", "")) == contribution_id:
+			return part
+	return {}
+
+
+## The contribution blocks in a derived context text. Each one starts a line with
+## "[seat / member] ", which is the only line shape the derivation indents that
+## way, so counting them counts contributions — the assertion "and nothing else"
+## needs a count, and `contains` cannot give one.
+func _context_blocks(text: String) -> PackedStringArray:
+	var blocks := PackedStringArray()
+	for line in text.split("\n"):
+		if line.begins_with("["):
+			blocks.append(line.get_slice("]", 0) + "]")
+	return blocks
 
 
 func _chat_of(record: Dictionary, session_id: String) -> String:

@@ -40,6 +40,10 @@ func TestManifestDeclaresExactlyThePanelThatExists(t *testing.T) {
 		EditorItems []struct {
 			Panel string `json:"panel"`
 		} `json:"editor_items"`
+		Events []struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		} `json:"events"`
 		Capabilities []string `json:"capabilities"`
 		Permissions  struct {
 			HostCapabilities []string `json:"host_capabilities"`
@@ -121,6 +125,28 @@ func TestManifestDeclaresExactlyThePanelThatExists(t *testing.T) {
 		if item.Panel != panel.Name {
 			t.Errorf("editor item names panel %q, which is not declared", item.Panel)
 		}
+	}
+
+	// The change signal's name is written twice — here as the Go constant the
+	// backend emits, and in the manifest as what the plugin declares it emits —
+	// and nothing else joins them: PluginEventBroker delivers an undeclared
+	// event anyway, with a push_warning on every emission, so a rename would
+	// leave a working panel and a lying manifest. A declared event also needs a
+	// description, because the manifest is where a reader looks for what a
+	// plugin emits.
+	announced := false
+	for _, event := range m.Events {
+		if event.Name != recordChangedEvent {
+			continue
+		}
+		announced = true
+		if strings.TrimSpace(event.Description) == "" {
+			t.Errorf("manifest declares event %q with no description", event.Name)
+		}
+	}
+	if !announced {
+		t.Errorf("the backend emits %q and the manifest declares %d event(s), none of them that one",
+			recordChangedEvent, len(m.Events))
 	}
 }
 

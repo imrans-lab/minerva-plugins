@@ -30,12 +30,16 @@ The implementation evidence below is historical. Codex reviewed `332f0d2` in
 - `01a08bb1b2f6`: Help reflects C4's cancellation fix and distinguishes a panel
   closing from backend exit. The skill places `wait_seconds` at envelope level;
   the tool schema now exposes that existing field. Generated pages were rebuilt.
-- `01a08bb2ec06` remains **open and blocks T12 and live acceptance**: chat/MCP
-  changes advance the backend but do not automatically reach the panel's local
-  record. Its Re-read is local, so saving it can omit recent results. This is a
-  code-review finding requiring a real-host reproduction and an ownership-aware
-  synchronization fix. README, Help and the skill no longer assume an open tab
-  proves direct writes are persisted. Preserve backend exports until resolved.
+- `01a08bb2ec06` is **resolved by `c1ac9cd`**: the engine announces every commit
+  as `council.record_changed` with the document's `project_id` and new revision,
+  and the panel that owns that document converges through its own exchange
+  before it saves, so a chat turn or an MCP call with no panel in it reaches the
+  file the tab writes. Ownership is by document, never by which tab is focused.
+  The evidence is the real-host regression
+  `_section_10_a_change_with_no_panel_in_it` in `tests/gd/test_council_panel.gd`
+  — a round started straight down the tool door with no panel mutation —
+  observed at 91/91 at `c1ac9cd` and 106/106 at `1577da0`. README, Help and the
+  skill no longer carry the export-and-verify workaround.
 
 Observed after the corrections: `go test -race -count=1 ./...` passed,
 `go vet ./...` passed, built-binary stdio smoke passed (initialize, nine tools,
@@ -47,6 +51,39 @@ No GDScript changed and its suite was not rerun in this review; **78/78 at C4**
 remains its last observed result. No real provider was called. The real-model
 scenario and the wrapper text-derivation test remain open. Local integration
 landing does not satisfy these release gates.
+
+---
+
+## C6 landing review addendum — 2026-09-10
+
+Codex reviewed `84b879c` in `minerva-worktrees/council-c6-review` and ran the
+submitted tree: Go race suite passed and real-host GDScript passed **107/107**.
+Review added two corrections before local integration:
+
+- `01a08d0e9dcc`: the engine checks `expected_project_id` under its command lock,
+  before reads, mutations or replay. Panel requests pin that identity. Background
+  convergence reads without seeding and cannot reload an older panel snapshot
+  over another holder. Snapshot reads return their atomic result directly;
+  adoption checks identity even at equal revision. A panel remains behind until
+  it reaches the announced revision, and queued/in-flight save also warns.
+- `01a08d0ea3c6`: `COUNCIL_STABLE_RELEASE` defaults to false. CI still produces
+  artifacts and staging prereleases, including on main. Stable publication waits
+  for recorded T13 and real-model/desktop acceptance. The workflow's actual tag
+  computation is exercised by the release tests.
+
+Final observed checks: Go race suite and vet pass; real-host/backend GDScript
+**110/110** (three added race/save assertions), page **68/68**, registry/release
+suite **10/10**, generated-page check, and archive verification with the packed
+nine-tool binary. Archives from different umasks were byte-identical. No warning
+suppressions were added. Tests used an isolated profile and a separate host cache.
+Logs: `/tmp/council-c6-go-fixed.log`, `/tmp/council-c6-gd-final.log`,
+`/tmp/council-c6-page.html`.
+
+No CI workflow, real model, or staged Minerva install ran during this review.
+T13 and `01a08a3957b6` remain open. Save is still a synchronous host hook: results
+not yet delivered to a panel cannot be included in its current snapshot, and a
+later adoption marks it dirty again. These live timing/close interactions belong
+in acceptance; automated synchronization tests are not a substitute for it.
 
 ---
 

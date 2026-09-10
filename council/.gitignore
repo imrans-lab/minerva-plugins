@@ -3,3 +3,9 @@
 # ever checked in.
 /council-plugin
 /council
+
+# Release packaging scratch. scripts/pack-release.sh assembles the staging tree
+# and the tarball here; neither is ever checked in — CI rebuilds both from
+# source on every run.
+/build/
+/dist/

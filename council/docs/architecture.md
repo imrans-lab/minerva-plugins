@@ -336,7 +336,9 @@ Four rules follow, and they are the ones that keep the model honest:
    applies a mutation, advances `snapshot_revision` and replies; the wrapper
    persists the snapshot it gets back and emits `content_changed` (which marks
    the tab dirty: `Editor.gd:323-324` connects it to `_on_editor_changed`, which sets `_plugin_scene_modified` at `Editor.gd:2068-2069`). The reply carries the new revision,
-   which is what the page renders.
+   which is what the page renders. A mutation with no panel in the exchange —
+   a chat turn, an MCP tool call — is announced instead, and the panel that
+   owns that document reads it back through the same exchange (§5.5.1).
 
 ### 3.1 Why `__panel_state` and not `project_state`
 
@@ -957,6 +959,70 @@ snapshot or an envelope in. A record that fits 65536 on its own can fail once it
 is inside `{"snapshot": …}`, so the wrapper measures the message that will
 actually travel and refuses it with `payload_too_large` — a refusal the page can
 render, rather than a message the broker drops.
+
+### 5.5.1 The change signal, and how a panel converges on the engine
+
+The lease above assumes every mutation passes through a panel. Two doors do not:
+a chat turn (`chatprovider.go`) and an MCP tool call (`tools.go`) commit through
+the same engine with no panel in the exchange. The wrapper is the durable owner,
+so an advance nobody tells it about is an advance that is not in the file the
+user saves — and `snapshot.get` is answered from the held record, so a Re-read
+would not find it either.
+
+So the engine announces. `Store.commit` is the single write path, and every
+commit calls the store's `RecordObserver` with the document's `project_id` and
+its new revision. `recordNotifier` (`notify.go`) turns that into a
+`minerva/plugin_event` notification named `council.record_changed` on the same
+stdout door every reply uses. The host fans a plugin event out to **every** live
+panel of the plugin (`singleton_object.gd:745-756` →
+`PluginScenePanelBroker.push_to_panel`, `PluginScenePanelBroker.gd:933-989`),
+which lands on `council_panel.gd`'s `receive`.
+
+**Ownership is by document.** The signal is a broadcast, and the only thing that
+makes it a panel's business is that the `project_id` it names is the identity of
+the record that panel holds. Nothing in the wrapper can learn which tab is
+focused, and a panel showing another council ignores the signal outright — the
+same rule as the chat handoff (§5.3).
+
+**A signal carries no authority.** It says a document moved and to what revision;
+it never says what the record now is. A panel whose held revision is already at
+or past the announced one has nothing to do. Otherwise it adopts through the
+exchange with a read-only `snapshot.get`. Background convergence takes the lease
+but never seeds: a delayed event cannot reload an old panel copy over another
+panel's document. Requests carry `expected_project_id`, checked inside the engine
+lock before execution or idempotent replay, even when revisions match. The read
+returns its snapshot atomically; every returned snapshot is checked for matching
+identity before adoption. An unavailable document or a revision below the announced
+target leaves the panel visibly behind. Adoption marks the tab dirty.
+
+**Why a signal rather than a poll.** Determinism first: the announcement is
+minted inside the commit that produced the revision, so the pair is consistent by
+construction and every commit produces exactly one — where a poll's answer is
+only ever as fresh as its last tick, and a poll that ran during another panel's
+exchange would read a revision belonging to a different document. What is
+consistent is what the ENGINE knows. The wrapper learns when the host delivers,
+and there is a window between the commit and that delivery in which a save
+writes the older copy with nothing said; what closes it is that the panel
+re-marks the tab as changed the moment it adopts, so the next save carries the
+result. Reliability and durability: one write path, one announcement,
+and the panel still reads the record back through the exchange that already
+proves the engine holds its document. Performance and cost: nothing is spent
+while nothing changes, and a burst of contributions inside one round is coalesced
+to the newest revision per document rather than a line per member. Debuggability:
+the notification is a line on the same stream as everything else, and the host
+audits every push to a panel. Discoverability: the event is declared in
+`manifest.json` under `events`, which is where a reader looks for what a plugin
+emits. What the wrapper drives instead of a poll is a retry — a convergence that
+fails leaves the panel marked as behind.
+
+**And when the backend cannot be reached.** Save is synchronous — the host calls
+`_on_panel_save_request()` and takes the dictionary (`vboxEditor.gd:494-499`,
+`Editor.gd:1727`) — so there is no hop it can wait for. A panel that knows it is
+behind and could not read the record back writes the copy it holds (losing it
+would be worse) and says so: a banner and a sticky refusal in the
+page naming the reason, including while convergence is still queued, plus a retry scheduled for the next frame. A read in the
+same state waits for the convergence in flight and is then answered from the
+held record, because a council must stay readable with the backend stopped.
 
 ### 5.6 The round engine, and the one call it makes
 

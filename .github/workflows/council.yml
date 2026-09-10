@@ -1,0 +1,297 @@
+name: council
+
+on:
+  push:
+    branches: [main, "dcr/**"]
+    paths:
+      - "council/**"
+      - ".github/workflows/council.yml"
+      # The whole of scripts/, not a hand-picked few: this workflow runs the
+      # shared smoke, the shared GD runner, the publish guard AND the registry
+      # parity tests, and a list that named only some of them would leave an
+      # edit to the others untested here.
+      - "scripts/**"
+    # main publishes the version tag after CI; pushing that tag must not build
+    # the same commit a second time, so tags are not a trigger here.
+  pull_request:
+    paths:
+      - "council/**"
+      - ".github/workflows/council.yml"
+      # The whole of scripts/, not a hand-picked few: this workflow runs the
+      # shared smoke, the shared GD runner, the publish guard AND the registry
+      # parity tests, and a list that named only some of them would leave an
+      # edit to the others untested here.
+      - "scripts/**"
+  workflow_dispatch:
+
+# Enable only after T13 and real-model/desktop acceptance are recorded.
+# Until then main still produces installable artifacts and staging prereleases.
+env:
+  COUNCIL_STABLE_RELEASE: "false"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: council tests
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        shell: bash
+        working-directory: council
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          # No dependency outside the standard library, so there is no go.sum
+          # to key a module cache on. The build cache still works.
+          cache: false
+
+      # Surfaces the version setup-go actually RESOLVED, so a green run can tell
+      # a correct pin from a typo silently resolved to something else.
+      - name: Show resolved Go version
+        run: go version
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: gofmt
+        run: |
+          UNFORMATTED=$(gofmt -l .)
+          if [ -n "$UNFORMATTED" ]; then
+            echo "::error::gofmt would rewrite: $UNFORMATTED"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # The engine runs one round across several members concurrently and the
+      # panel reads the record while it moves, so the detector is the gate
+      # rather than an extra: a data race here is a corrupted council document.
+      - name: go test (race detector)
+        run: go test -race -count=1 ./...
+
+      # ui/panel.html is generated from ui/src by a build with no dependencies.
+      # Marketplace users get the committed page and no Node, so a page that is
+      # not what its sources build is a shipped file nobody can reproduce.
+      - name: Page build is not drifted from its sources
+        run: node ui/build.mjs --check
+
+      # The release-parity tests, run HERE and not only in registry-check:
+      # registry-check's path filters cover registry.json, */manifest.json and
+      # scripts/*registry*.py, so an edit to THIS workflow's matrix or to
+      # scripts/pack-release.sh — the two things CouncilReleaseTests exists to
+      # hold — would never trigger the job that runs them.
+      - name: Release parity tests (tag, manifest, version, target)
+        run: python3 -m unittest discover -s ../scripts -p 'test_registry.py'
+
+  package:
+    name: council (${{ matrix.target }})
+    # ONE target on purpose. manifest.json's `release_targets` declares
+    # linux-x86_64 alone, and scripts/test_registry.py holds this matrix to that
+    # declaration in both directions — the registry advertises a download URL
+    # per declared target, so a target listed and not built is a 404 at install
+    # time, and a target built and not declared is an asset nothing points at.
+    # Adding one means validating it on that platform (the panel is a CEF
+    # surface and the binary is untested elsewhere), not editing this list.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            runs-on: ubuntu-22.04
+            goos: linux
+            goarch: amd64
+            ext: ""
+    runs-on: ${{ matrix.runs-on }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: council
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: false
+
+      - name: Show resolved Go version
+        run: go version
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        # -trimpath keeps the builder's absolute module path out of the
+        # binary, which is the last thing that would differ between two builds
+        # of one commit on two machines. The archive around it is already
+        # byte-reproducible; this makes the payload so too.
+        run: |
+          mkdir -p build
+          go build -trimpath -o "build/council-plugin${{ matrix.ext }}" .
+
+      - name: Pack release tarball
+        run: bash scripts/pack-release.sh "${{ matrix.target }}" "build/council-plugin${{ matrix.ext }}" dist
+
+      # The archive's only gate, and the one that decides the acceptance
+      # criteria: the layout against the manifest's declared paths, `setup`
+      # stripped from the packed manifest, SHA256SUMS covering every other file,
+      # a deliberately corrupted file and a deleted file both caught, and the
+      # shared MCP smoke driven against the PACKED binary from a directory
+      # holding nothing but the extracted archive, with go and node off PATH.
+      # That last part is why the smoke is here rather than in the test job:
+      # what a marketplace user runs is this binary in that directory, and a
+      # smoke against the build tree would not have shown it.
+      - name: Verify the archive a marketplace user would install
+        run: python3 scripts/verify-archive.py "dist/$(bash scripts/pack-release.sh --print-name "${{ matrix.target }}")" --smoke ../scripts/smoke/mcp_smoke.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: council-${{ matrix.target }}
+          path: council/dist/council-*-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  panel:
+    name: council panel (GD suite-registry compatibility ONLY — nothing executes)
+    # ============================================================
+    # THIS JOB IS NOT A BUILD CHECK AND NOT A TEST. READ THIS BEFORE
+    # TREATING IT AS EITHER.
+    # ============================================================
+    # Same shape and same narrow claim as cad.yml's and pcb.yml's `panel` jobs.
+    # CI does not RUN the GDScript suite: it needs a Minerva `src/` host with
+    # its native GDExtensions built, a plain checkout has no src/bin/ at all,
+    # and council's suite additionally drives the real backend over stdio.
+    #
+    # What this certifies is SUITE-REGISTRY AND HOST-CONTRACT COMPATIBILITY:
+    # the pinned host carries every file council/tests/gd/REQUIRED_HOST_FILES
+    # names, the sibling layout the suite's res:// preloads hardcode is right,
+    # and the suite set on disk matches council/tests/gd/EXPECTED_SUITES in
+    # BOTH directions. That last pair is the point — the runner's suite list is
+    # a bare `test_*.gd` glob, so without the manifest a DELETED suite is a
+    # smaller GREEN run rather than a failure.
+    #
+    # A .gd file can be syntactically invalid, fail to preload, or regress
+    # behaviourally while its filename sits in EXPECTED_SUITES and this job
+    # stays green. Execution is a LOCAL gate:
+    #   council/scripts/run-gd-tests.sh <path-to-minerva-checkout>
+    # It reaches the check through the runner's own --preflight-only flag
+    # rather than reimplementing it, so local and CI cannot drift. No Godot is
+    # downloaded — everything checked is filesystem state.
+    runs-on: ubuntu-22.04
+    env:
+      # Pinned to a commit, not a moving branch: a third-party repo changing
+      # underneath us must not turn council red without someone choosing it.
+      # THIS IS `development`, NOT `main` — Minerva's default branch is ~a year
+      # stale and the plugin system does not exist there. Same SHA cad.yml
+      # pins. If you bump it, re-check that every path in
+      # council/tests/gd/REQUIRED_HOST_FILES still exists at the new SHA.
+      MINERVA_SHA: "839516e4d5289a7473bbb66ea4d18cfb33647be2"
+    steps:
+      - name: Checkout minerva-plugins
+        uses: actions/checkout@v4
+
+      # Minerva must end up as a SIBLING of the minerva-plugins checkout: the
+      # suite preloads `res://../../minerva-plugins/council/...` resolved from
+      # <minerva>/src, so <minerva>/../minerva-plugins has to exist. On a runner
+      # the workspace is /home/runner/work/minerva-plugins/minerva-plugins, so
+      # the sibling slot is $GITHUB_WORKSPACE/../Minerva. It CANNOT be checked
+      # out there directly — actions/checkout rejects any `path` outside
+      # $GITHUB_WORKSPACE — so clone inside and relocate.
+      - name: Checkout Minerva (pinned)
+        uses: actions/checkout@v4
+        with:
+          repository: turnrocklabs/Minerva
+          ref: ${{ env.MINERVA_SHA }}
+          path: _minerva_host
+
+      - name: Place Minerva beside minerva-plugins
+        working-directory: ${{ github.workspace }}
+        run: mv _minerva_host "$GITHUB_WORKSPACE/../Minerva"
+
+      # WHAT THIS FAILS ON, i.e. what "not in a testable state" means:
+      #   - the pinned Minerva host is missing or lacks src/project.godot
+      #   - a host file council/tests/gd/REQUIRED_HOST_FILES names is absent at
+      #     the pinned SHA (the suite preloads them by res:// path)
+      #   - the sibling layout res://../../minerva-plugins/... hardcodes is wrong
+      #   - a suite was deleted or renamed and is still in EXPECTED_SUITES
+      #   - a suite was added to disk and NOT registered in EXPECTED_SUITES
+      - name: Pre-flight the GD suite registry and host wiring
+        run: bash council/scripts/run-gd-tests.sh --preflight-only ../Minerva
+
+  release:
+    name: Publish release
+    concurrency: council-release
+    needs: [test, package, panel]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the publish guard can see existing tags.
+          fetch-depth: 0
+
+      - name: Download all matrix tarballs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: council-*
+          path: artifacts/
+          merge-multiple: true
+
+      - name: List downloaded artifacts
+        run: ls -la artifacts/
+
+      # A branch build tags `-branch-<branch>` and publishes a PRERELEASE. The
+      # registry generator skips any tag carrying that sentinel, so a branch
+      # build can never become the version the marketplace advertises.
+      - name: Compute tag + prerelease flag
+        id: tag
+        shell: bash
+        run: |
+          VERSION=$(python3 -c 'import json; print(json.load(open("council/manifest.json"))["version"])')
+          if [ "$GITHUB_REF_NAME" = "main" ] && [ "$COUNCIL_STABLE_RELEASE" = "true" ]; then
+            TAG="council-v${VERSION}"
+            PRE="false"
+          else
+            SAFE_BRANCH=$(echo "$GITHUB_REF_NAME" | sed 's|/|-|g; s|[^a-zA-Z0-9_.-]|-|g')
+            TAG="council-v${VERSION}-branch-${SAFE_BRANCH}"
+            PRE="true"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRE" >> "$GITHUB_OUTPUT"
+          echo "Computed: tag=$TAG prerelease=$PRE"
+          bash scripts/release-publish-guard.sh "$TAG" "$PRE"
+
+      - name: Publish GitHub Release
+        if: steps.tag.outputs.publish == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          prerelease: ${{ steps.tag.outputs.prerelease == 'true' }}
+          target_commitish: ${{ github.sha }}
+          files: artifacts/council-*.tar.gz
+          generate_release_notes: true
+          fail_on_unmatched_files: true

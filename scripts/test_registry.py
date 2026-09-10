@@ -3,8 +3,10 @@ import copy
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
+import textwrap
 import unittest
 from unittest.mock import patch
 
@@ -98,6 +100,139 @@ class RegistryTests(unittest.TestCase):
                 else:
                     with self.assertRaises(ValueError):
                         registry.check_registry(self.root, self.selected, published=True)
+
+
+def init_repo(root):
+    """A throwaway git repo, and the `git` runner for it."""
+    def git(*args):
+        subprocess.run(["git", "-C", str(root), *args], check=True,
+                       capture_output=True, text=True)
+    git("init", "-q")
+    git("config", "user.email", "test@example.invalid")
+    git("config", "user.name", "Registry test")
+    return git
+
+
+class CouncilReleaseTests(unittest.TestCase):
+    """Hold council's tag, manifest, version and targets to one another.
+
+    Four files have to agree for a marketplace install to work, and nothing
+    else notices when they stop: the manifest's version and `release_targets`,
+    the tag the workflow computes, the archive filename the pack script writes,
+    and the download URL the generator advertises. Each assertion below joins
+    two of them against the REAL files rather than a fixture, so a drift is a
+    failure here instead of a 404 the day the registry is published.
+    """
+
+    repo = Path(__file__).resolve().parent.parent
+
+    def setUp(self):
+        self.plugin = self.repo / "council"
+        self.manifest = json.loads((self.plugin / "manifest.json").read_text())
+        self.workflow = (self.repo / ".github/workflows/council.yml").read_text()
+
+    def print_archive_name(self, target):
+        """The name the pack script itself computes — asking the script rather
+        than restating its convention is what makes this a parity check."""
+        out = subprocess.run(
+            ["bash", "scripts/pack-release.sh", "--print-name", target],
+            cwd=self.plugin, check=True, capture_output=True, text=True)
+        return out.stdout.strip()
+
+    def test_council_is_generated_and_the_directory_list_stays_sorted(self):
+        self.assertIn("council", registry.PLUGIN_DIRS)
+        self.assertEqual(registry.PLUGIN_DIRS, sorted(registry.PLUGIN_DIRS))
+        self.assertEqual(self.manifest["id"], "council")
+
+    def test_the_workflow_builds_exactly_the_targets_the_manifest_declares(self):
+        declared = self.manifest["release_targets"]
+        self.assertEqual(declared, ["linux-x86_64"],
+                         "a further target ships only with its own validation")
+        self.assertEqual([t for t in declared if t not in registry.TARGETS], [],
+                         "the marketplace does not understand this target")
+        built = re.findall(r"^\s*- target: (\S+)$", self.workflow, re.M)
+        self.assertEqual(built, declared,
+                         "the matrix and release_targets disagree: the registry would "
+                         "advertise an asset nobody built, or a build nobody points at")
+
+    def test_the_archive_gate_and_the_branch_sentinel_are_still_wired(self):
+        for fragment in ("scripts/pack-release.sh", "scripts/verify-archive.py",
+                         "release-publish-guard.sh"):
+            self.assertIn(fragment, self.workflow)
+        self.assertIn('TAG="council-v${VERSION}"', self.workflow)
+        self.assertIn("-branch-", self.workflow,
+                      "a branch build must tag the sentinel the generator skips")
+
+    def test_stable_publication_requires_completed_acceptance(self):
+        gate = re.search(r'COUNCIL_STABLE_RELEASE: "(true|false)"', self.workflow)
+        self.assertIsNotNone(gate)
+        start = self.workflow.index('          VERSION=')
+        end = self.workflow.index('          bash scripts/release-publish-guard.sh', start)
+        script = textwrap.dedent(self.workflow[start:end])
+        version = self.manifest["version"]
+        for branch, enabled, tag, prerelease in (
+            ("main", "false", f"council-v{version}-branch-main", "true"),
+            ("main", "true", f"council-v{version}", "false"),
+            ("dcr/council", "true", f"council-v{version}-branch-dcr-council", "true"),
+        ):
+            with self.subTest(branch=branch, enabled=enabled), tempfile.TemporaryDirectory() as temp:
+                output = Path(temp) / "output"
+                env = dict(os.environ, GITHUB_REF_NAME=branch,
+                           COUNCIL_STABLE_RELEASE=enabled, GITHUB_OUTPUT=str(output))
+                subprocess.run(["bash", "-c", script], cwd=self.repo, env=env,
+                               check=True, capture_output=True, text=True)
+                values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+                self.assertEqual(values, {"tag": tag, "prerelease": prerelease})
+
+    def test_tag_manifest_and_archive_name_agree_end_to_end(self):
+        version = self.manifest["version"]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            git = init_repo(root)
+            (root / "council").mkdir()
+            (root / "council/manifest.json").write_text(json.dumps(self.manifest))
+            git("add", ".")
+            git("commit", "-qm", version)
+            # The prerelease a branch build publishes, tagged first so it would
+            # win a naive "newest tag" selection.
+            git("tag", f"council-v{version}-branch-dcr-council")
+            git("tag", f"council-v{version}")
+
+            entry = registry.build_plugin_entry(root / "council", root)
+            self.assertEqual(entry["release_tag"], f"council-v{version}")
+            self.assertEqual(entry["version"], version)
+            self.assertEqual(entry["manifest_version"], version)
+            self.assertEqual(sorted(entry["downloads"]),
+                             sorted(self.manifest["release_targets"]))
+            for target, url in entry["downloads"].items():
+                self.assertEqual(url.rsplit("/", 1)[1], self.print_archive_name(target),
+                                 "the advertised download is not the file CI packs")
+            registry.check_registry(root, {"registry_version": registry.REGISTRY_VERSION,
+                                           "plugins": [entry]})
+
+    def test_before_the_first_tag_council_is_skipped_rather_than_red(self):
+        """The ordering trap: council joins PLUGIN_DIRS in the same commit that
+        adds its workflow, and its first tag cannot exist until that workflow
+        has run. A generator that demanded a tag for every listed directory
+        would leave the committed registry permanently failing --check between
+        those two moments. It skips instead, so registry.json is regenerated
+        AFTER the release exists and never before it."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            git = init_repo(root)
+            (root / "council").mkdir()
+            (root / "council/manifest.json").write_text(json.dumps(self.manifest))
+            (root / "agent-relay").mkdir()
+            (root / "agent-relay/manifest.json").write_text(json.dumps(
+                {"id": "agent_relay", "name": "Relay", "version": "1.0.0",
+                 "release_targets": ["linux-x86_64"]}))
+            git("add", ".")
+            git("commit", "-qm", "untagged council beside a released plugin")
+            git("tag", "agent_relay-v1.0.0")
+
+            selected = registry.build_registry(root)
+            self.assertEqual([p["id"] for p in selected["plugins"]], ["agent_relay"])
+            registry.check_registry(root, selected)
 
 
 if __name__ == "__main__":

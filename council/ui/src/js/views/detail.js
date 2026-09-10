@@ -398,10 +398,9 @@
           'A chat whose document has not been opened since the plugin started is a chat Council '
             + 'has no record of, and its first turn opens a fresh session in whatever document '
             + 'is loaded. The original project keeps its own session untouched.',
-          'Chat and direct tool changes can leave the panel holding an older snapshot. '
-            + 'Re-read currently reads that local copy. Until synchronization is verified, '
-            + 'do not assume saving the tab includes the latest chat answers; preserve an '
-            + 'export of the backend snapshot before closing.',
+          'A chat answer or a tool call that lands while the tab is closed is in the backend '
+            + 'and nowhere else. Reopening the council brings it in; if the backend has gone, '
+            + 'the panel says so rather than saving the older copy quietly.',
           'Council does not research, does not browse, and invites nobody. Every participant is '
             + 'a model you enabled or you.'
         ])

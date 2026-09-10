@@ -181,7 +181,8 @@ type responseRouter interface {
 // exchanges. Two readers on one *bufio.Reader would each swallow bytes the
 // other was waiting for, and a handler that read stdin directly would swallow
 // the very requests it is meant to leave room for.
-func serve(in io.Reader, out io.Writer, reg *registry, chat *stdioChatHost, provider *chatProvider) error {
+func serve(in io.Reader, out io.Writer, reg *registry, chat *stdioChatHost, provider *chatProvider,
+	notices *recordNotifier) error {
 	writer := &stdoutWriter{enc: json.NewEncoder(out)}
 	// done releases the reader goroutine when this loop returns. Without it a
 	// shutdown leaves the reader blocked forever on a send nobody will take,
@@ -189,6 +190,13 @@ func serve(in io.Reader, out io.Writer, reg *registry, chat *stdioChatHost, prov
 	// exits, and a real leak in any test that runs the loop more than once.
 	done := make(chan struct{})
 	defer close(done)
+
+	if notices != nil {
+		// The change signal shares the one stdout door, for the same reason
+		// every reply does: two encoders on one stream emit lines that are not
+		// messages. It is released with the loop by `done`.
+		notices.bind(writer, done)
+	}
 
 	var router responseRouter
 	if chat != nil {
@@ -411,8 +419,13 @@ func main() {
 	store.SetModelCatalog(&hostModelCatalog{host: chat})
 	provider := &chatProvider{host: chat, store: store}
 
+	// What tells an open panel that a chat turn or an MCP tool call moved the
+	// document it durably owns (notify.go).
+	notices := newRecordNotifier()
+	notices.observe(store)
+
 	log.Printf("starting (pid=%d, version=%s)", os.Getpid(), serverVersion)
-	if err := serve(os.Stdin, os.Stdout, reg, chat, provider); err != nil {
+	if err := serve(os.Stdin, os.Stdout, reg, chat, provider, notices); err != nil {
 		log.Printf("stdin read error: %v", err)
 		os.Exit(1)
 	}

@@ -93,12 +93,15 @@ Two ways to start one:
   project already holds, which is what stops an import from quietly overwriting
   a council you have edited.
 
-**Current persistence gate:** chat and direct MCP commands advance the backend,
-but the open panel can retain an older snapshot. Its Re-read currently reads
-that local copy. Preserve a `minerva_council_export_snapshot` result before
-closing or switching documents; verify the saved document contains those results
-before treating the consultation as saved. Backend-to-panel synchronization must
-be resolved before release.
+**Where a chat or MCP answer ends up:** the backend applies every mutation, and
+it announces each one as `council.record_changed` with the document's
+`project_id` and its new revision. The panel that holds that document reads the
+snapshot back through its own exchange, marks the tab changed, and saves what the
+engine holds — so a round driven entirely from chat is in the file the tab
+writes. A panel showing a different council ignores the announcement. If the
+backend cannot be reached when the panel goes to read it back, the panel says so
+on screen and at save: what is written is the copy it holds, and the newest
+results are still in the running backend rather than lost.
 
 ## Asking from chat
 
@@ -226,7 +229,8 @@ save; nothing is overwritten.
 | Path | What |
 |---|---|
 | `docs/architecture.md` | The contracts: records, ownership, state machines, the page↔wrapper protocol, limits. |
-| `docs/t03-live-check.md` | The human checklist for verifying a live install. |
+| `docs/t03-live-check.md` | The human checklist for verifying a live install. **Checkout only** — not in the installed plugin. |
+| `docs/release-packaging.md` | What the marketplace archive holds, and the tag/release/registry order. **Checkout only** — not in the installed plugin. |
 | `presets/` | The shipped councils. One source, used by both the backend and the page. |
 | `schemas/` | The record schemas. The backend validates against these, embedded. |
 | `ui/src/` | The panel's maintainable sources. `ui/panel.html` is generated from them. |
