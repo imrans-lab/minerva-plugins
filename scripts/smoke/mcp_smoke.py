@@ -47,12 +47,24 @@ def send(proc: subprocess.Popen, payload: dict) -> None:
     proc.stdin.flush()
 
 
-def recv(proc: subprocess.Popen, deadline: float) -> dict:
+def recv(proc: subprocess.Popen, deadline: float, expect_id) -> dict:
+    """Read until the RESPONSE to `expect_id` arrives.
+
+    A plugin may talk back: council registers itself as a chat provider by
+    sending its own `minerva/capability` REQUEST once initialize is answered,
+    and that request carries an id like any other. Matching on the presence of
+    an id alone reads the plugin's question as our answer, so a message
+    carrying `method` is skipped here (server-initiated request or
+    notification) along with any response to some other id. The smoke is a
+    client that answers nothing; the deadline bounds the wait either way.
+    """
     assert proc.stdout is not None
+    stray = None
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            fail(2, "timeout waiting for response")
+            detail = f" (saw {stray!r} and never the answer)" if stray is not None else ""
+            fail(2, f"timeout waiting for the response to id={expect_id!r}{detail}")
         line_bytes = proc.stdout.readline()
         if not line_bytes:
             rc = proc.poll()
@@ -64,9 +76,19 @@ def recv(proc: subprocess.Popen, deadline: float) -> dict:
             msg = json.loads(line)
         except json.JSONDecodeError as e:
             fail(1, f"non-JSON on stdout: {line[:200]!r} ({e})")
-        if "id" in msg or "error" in msg or "result" in msg:
+        if "method" in msg:
+            continue
+        if msg.get("id") == expect_id and ("result" in msg or "error" in msg):
             return msg
-        # Notification (no id) — skip, keep reading.
+        # A protocol-level error carries a null id — the server could not tell
+        # which request failed, so no later message will answer this one and
+        # waiting out the deadline would report a timeout instead of the reason.
+        if msg.get("id") is None and "error" in msg:
+            fail(1, f"server error with no request id: {msg['error']!r}")
+        # A response to something else. Remember the first, so a timeout can say
+        # what the plugin was talking about instead of only that nothing came.
+        if stray is None:
+            stray = msg
 
 
 def kill_after(proc: subprocess.Popen, seconds: float) -> threading.Timer:
@@ -134,9 +156,7 @@ def main(argv: list) -> int:
                 "clientInfo": {"name": "mcp_smoke", "version": "0.0"},
             },
         })
-        init_resp = recv(proc, deadline)
-        if init_resp.get("id") != 1:
-            fail(1, f"initialize: id mismatch ({init_resp.get('id')!r})")
+        init_resp = recv(proc, deadline, 1)
         if "error" in init_resp:
             fail(1, f"initialize: server error: {init_resp['error']!r}")
         result = init_resp.get("result")
@@ -163,9 +183,7 @@ def main(argv: list) -> int:
 
         # 3) tools/list
         send(proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-        tools_resp = recv(proc, deadline)
-        if tools_resp.get("id") != 2:
-            fail(1, f"tools/list: id mismatch ({tools_resp.get('id')!r})")
+        tools_resp = recv(proc, deadline, 2)
         if "error" in tools_resp:
             fail(1, f"tools/list: server error: {tools_resp['error']!r}")
         tools_result = tools_resp.get("result")
