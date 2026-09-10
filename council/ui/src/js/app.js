@@ -412,8 +412,19 @@
 
   // --------------------------------------------------------------- writing
 
+  // Every FORM lives in the detail column, and reading a form value from there
+  // is what keeps a stale control in the pane behind it from answering for the
+  // form the user is actually filling in.
   function value(id) {
     var node = ui.detail.querySelector('#' + id);
+    return node ? String(node.value || '').trim() : '';
+  }
+
+  // The same read for a control that lives in the READING column instead. A
+  // pane control has no detail to be read from, so value() would answer '' for
+  // it and the write would be refused for a reason the user cannot see.
+  function paneValue(id) {
+    var node = ui.reading.querySelector('#' + id);
     return node ? String(node.value || '').trim() : '';
   }
 
@@ -490,11 +501,18 @@
           max_members_per_round: 4,
           max_concurrent_members: 2,
           max_prompt_bytes: 16384,
-          run_budget_seconds: 300,
+          // Two waves of members, a chair, and one spare allowance, at the
+          // per-member limit below — which is set for a local model that has to
+          // load before it answers rather than for a hosted one. The spare is
+          // what keeps the two limits distinct: a budget set to the exact worst
+          // case expires while the last members are still inside their own
+          // allowance, and they are then all recorded as timed out — blaming a
+          // member for a limit the round ran out of.
+          run_budget_seconds: 1200,
           max_rounds_per_session: 12,
           independent_initial_round: true,
           preserve_disagreement: true,
-          per_member_timeout_seconds: 120
+          per_member_timeout_seconds: 300
         }
       }
     }).then(function (reply) {
@@ -553,6 +571,34 @@
         ? member.display_name + ' will be asked with ' + chosen + '.'
         : member.display_name + ' will be asked with whichever model Minerva lists first.');
       render();
+    });
+  }
+
+  // The council's per-member time limit, edited where the roster is read.
+  //
+  // It is a definition edit like any other — the whole record goes back with
+  // its revision advanced — because the deliberation rules are part of the
+  // council a user can export, not a panel preference. That does mean one
+  // number costs a round trip carrying the whole definition, inline source
+  // material included, so on a heavily grounded council this edit can be
+  // refused for exceeding the envelope limit where a narrow command would not.
+  function saveTimeout() {
+    var definition = R.editableDefinition(state.snapshot, currentSession());
+    if (!definition) { say('There is no council in this project to set a time limit on.'); return; }
+    var seconds = Number(paneValue('member-timeout'));
+    // The schema's own bounds, read from the one copy of them. Refusing here
+    // says which number is wrong; the engine would refuse the whole edit with a
+    // validation error instead.
+    var bounds = R.MEMBER_TIMEOUT;
+    if (!(seconds >= bounds.min && seconds <= bounds.max)) {
+      say('A member needs between ' + bounds.min + ' and ' + bounds.max + ' seconds.');
+      return;
+    }
+    var next = JSON.parse(JSON.stringify(definition));
+    next.deliberation.per_member_timeout_seconds = Math.round(seconds);
+    next.definition_revision = Number(next.definition_revision) + 1;
+    bridge.mutate('definition.upsert', { definition: next }).then(function (reply) {
+      afterWrite(reply, 'Each member now has ' + Math.round(seconds) + ' seconds to answer.');
     });
   }
 
@@ -621,7 +667,7 @@
     '[data-cancel-run]', '[data-create-council]', '[data-create-council-send]',
     '[data-use-preset]', '[data-help]',
     '[data-add-member]', '[data-add-member-send]', '[data-seat-member]', '[data-seat-member-send]',
-    '[data-save-model]', '[data-dismiss-refusal]', '[data-text-larger]',
+    '[data-save-model]', '[data-save-timeout]', '[data-dismiss-refusal]', '[data-text-larger]',
     '[data-text-smaller]', '[data-text-reset]'].join(',');
 
   function onClick(event) {
@@ -705,6 +751,7 @@
     if (d.seatMember) { openDetail({ kind: 'seat_member', member_id: d.seatMember }, target); return; }
     if (d.seatMemberSend) { seatMember(d.seatMemberSend); return; }
     if (d.saveModel) { saveModel(d.saveModel); return; }
+    if (d.saveTimeout) { saveTimeout(); return; }
 
     if (d.retryRun) {
       bridge.mutate('run.retry', {

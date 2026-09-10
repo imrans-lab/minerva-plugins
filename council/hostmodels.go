@@ -33,11 +33,19 @@ type providerListing struct {
 }
 
 // modelListing is host.models.list_models' result body for one provider.
+//
+// model_spec is present only for a provider whose models are not a static list.
+// Minerva sends it for the "turnrock" key, whose models are the live service
+// actions of the running Core node, and the dictionary is what
+// host.providers.chat must be handed back to reach that action — the action
+// name alone does not say which service it belongs to. Council never reads
+// inside it.
 type modelListing struct {
 	Provider string `json:"provider"`
 	Models   []struct {
-		ModelName string `json:"model_name"`
-		Display   string `json:"display"`
+		ModelName string         `json:"model_name"`
+		Display   string         `json:"display"`
+		ModelSpec map[string]any `json:"model_spec"`
 	} `json:"models"`
 }
 
@@ -77,12 +85,19 @@ func (c *hostModelCatalog) Models(ctx context.Context) ([]session.HostModel, err
 			if model.ModelName == "" {
 				continue
 			}
-			catalogue = append(catalogue, session.HostModel{
+			entry := session.HostModel{
 				ProviderKey:     provider.Key,
 				ProviderDisplay: provider.Display,
 				ModelName:       model.ModelName,
 				ModelDisplay:    model.Display,
-			})
+			}
+			// An empty object is dropped rather than carried: the broker
+			// refuses a model_spec with no kind, so sending one back would turn
+			// a callable model into a refusal.
+			if len(model.ModelSpec) > 0 {
+				entry.ModelSpec = model.ModelSpec
+			}
+			catalogue = append(catalogue, entry)
 		}
 	}
 	return catalogue, nil

@@ -67,6 +67,56 @@
     ]);
   }
 
+  // How long one member gets before the round gives up on them, and how long
+  // the whole round may take. It is a council setting rather than a hidden
+  // constant because the answer depends on who is seated: a hosted model
+  // answers in seconds, and a free local model on TurnRock/Core can spend
+  // minutes loading before its first token.
+  //
+  // The run budget is shown beside it, unedited, because it is the ceiling that
+  // actually bites: a member allowance longer than the whole round's budget is
+  // a number that never gets spent.
+  function deliberationBlock(definition, historical) {
+    var rules = definition.deliberation || {};
+    var seconds = Number(rules.per_member_timeout_seconds) || 0;
+    var budget = Number(rules.run_budget_seconds) || 0;
+    // A council from an older record, or one whose rules did not survive an
+    // import, has no budget to state — and a sentence saying the round stops
+    // after 0 seconds would be a false claim about what the engine does.
+    var note = budget > 0
+      ? 'The whole round stops after ' + budget + ' seconds, however long each member is given. '
+      : '';
+    if (historical) {
+      return D.frag([
+        el('h2', { class: 'pane-title group', text: 'How long each member gets' }),
+        el('p', { class: 'say flush', text: seconds + ' seconds. ' + note })
+      ]);
+    }
+    return D.frag([
+      el('h2', { class: 'pane-title group', text: 'How long each member gets' }),
+      el('p', { class: 'superseded', text: note
+        + 'A model running locally on this machine can take minutes to answer the first time, while it loads.' }),
+      el('div', { class: 'composer' }, [
+        el('label', { class: 'visible', for: 'member-timeout', text: 'Seconds per member' }),
+        el('input', {
+          id: 'member-timeout',
+          type: 'number',
+          min: String(R.MEMBER_TIMEOUT.min),
+          max: String(R.MEMBER_TIMEOUT.max),
+          value: String(seconds)
+        }),
+        el('div', { class: 'row' }, [
+          el('button', {
+            class: 'action',
+            type: 'button',
+            data: { 'save-timeout': '1' },
+            text: 'Save the time limit'
+          })
+        ])
+      ])
+    ]);
+  }
+
   // The councils Council ships with, offered on an empty project.
   //
   // They are inlined into the page by ui/build.mjs from council/presets, which
@@ -167,6 +217,8 @@
         return unseatedRow(definition, member);
       })));
     }
+
+    blocks.push(deliberationBlock(definition, historical));
 
     if (!historical) {
       blocks.push(el('div', { class: 'row group' }, [

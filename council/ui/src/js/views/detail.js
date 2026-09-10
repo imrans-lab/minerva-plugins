@@ -37,13 +37,23 @@
   // does and what the label says, so nobody discovers it by being billed for it.
   function modelSelect(id, models, chosen, emptyLabel) {
     var options = [el('option', { value: '', text: emptyLabel })];
+    var seen = {};
     R.list(models).forEach(function (model) {
+      // A model_name can be held twice — two Core services exposing an action
+      // of the same name. A member is stored BY NAME, so both options would
+      // save the same hint and the first entry is what answers on both sides
+      // (the engine's catalogue lookup and the host's own name-only Core
+      // resolution). The later one is labelled as such rather than left to look
+      // like a second choice, and the service in each display tells them apart.
+      var duplicate = Object.prototype.hasOwnProperty.call(seen, model.model_name);
+      seen[model.model_name] = true;
+      var label = model.display
+        ? model.display + ' (' + model.provider_display + ')'
+        : model.model_name;
       options.push(el('option', {
         value: model.model_name,
-        selected: model.model_name === chosen ? true : null,
-        text: model.display
-          ? model.display + ' (' + model.provider_display + ')'
-          : model.model_name
+        selected: model.model_name === chosen && !duplicate ? true : null,
+        text: duplicate ? label + ' — same name as an earlier entry, which is the one that answers' : label
       }));
     });
     // A hint the host no longer offers must still be visible and selected, or
@@ -340,6 +350,22 @@
           'A call is bounded in bytes. When the assembled prompt is too long, grounding and '
             + 'earlier contributions are dropped from the tail with a visible marker, and a '
             + 'member cannot cite material that was dropped before it was sent.'
+        ]),
+        section('Which model answers', [
+          'Every member is asked with one named model, and the chooser on a member offers what '
+            + 'this Minerva actually has enabled. A member with no model chosen is asked with '
+            + 'whichever model Minerva lists first, which is an alphabetical accident and a real '
+            + 'cost \u2014 so choose one.',
+          'Models running on this machine through TurnRock/Core are in that list beside the '
+            + 'hosted ones, one entry per Core action, and they cost nothing to ask. They can '
+            + 'take minutes to answer the first time while the model loads, so a council of '
+            + 'local models needs a longer per-member time limit than a council of hosted ones.',
+          'That limit is on the Members pane: it is how long each member gets before the round '
+            + 'gives up on them, and the round\u2019s own budget stops everything however long '
+            + 'the members are given.',
+          'Two Core services can offer an action with the same name. A member is stored by the '
+            + 'name, so the first of them is the one that answers \u2014 the chooser marks the '
+            + 'later entry, and the service each one belongs to is in its label.'
         ]),
         section('Sources and revisions', [
           'Capturing material creates a source revision. Changing the material creates a NEW '

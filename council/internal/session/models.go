@@ -41,6 +41,16 @@ type HostModel struct {
 	ModelName string
 	// ModelDisplay is what a chooser should show for this model.
 	ModelDisplay string
+	// ModelSpec is the structured identifier a provider hands out when its
+	// models are not a static list, and it is opaque to Council: the one rule
+	// is that it goes back to host.providers.chat verbatim, in place of
+	// choosing by name. Minerva sends one for TurnRock/Core, whose models are
+	// the live service actions of the running Core node
+	// (CapabilityBroker.gd's host.models.list_models comment), and none for a
+	// provider whose model_name is enough. Nil means "call this model the way
+	// Council always has"; an EMPTY object is never sent on, because the broker
+	// refuses a spec with no kind.
+	ModelSpec map[string]any
 }
 
 // ModelCatalog is how the engine learns what the host has enabled. One method,
@@ -48,12 +58,11 @@ type HostModel struct {
 // means, and the adapter only fetches.
 //
 // One known gap, and it is the host's: host.models.list_models enumerates the
-// DYNAMIC provider map alone (singleton_object.gd:2079-2091), while
-// host.providers.chat also matches the static built-in models
-// (CapabilityBroker.gd:2374-2392). A built-in a user has enabled is therefore
-// callable but absent from the catalogue, and the check below refuses it. The
-// refusal names the models it can see, so the user is told what to pick rather
-// than left guessing.
+// dynamic provider map and Core's live actions, while host.providers.chat also
+// matches the static built-in models (CapabilityBroker.gd:2370-2394). A
+// built-in a user has enabled is therefore callable but absent from the
+// catalogue, and the check below refuses it. The refusal names the models it
+// can see, so the user is told what to pick rather than left guessing.
 type ModelCatalog interface {
 	Models(ctx context.Context) ([]HostModel, error)
 }
@@ -86,7 +95,13 @@ func (s *Store) RefreshModels(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	sort.Slice(models, func(i, j int) bool {
+	// STABLE, because the key is not unique: two Core services may expose an
+	// action of the same name, and those entries compare equal on both fields.
+	// The host resolves a name-only Core choice to the first action in service
+	// order, so the listing's own order is what findModel must preserve — an
+	// unstable sort would make which of the two answers an implementation
+	// detail of the sort.
+	sort.SliceStable(models, func(i, j int) bool {
 		if models[i].ProviderKey != models[j].ProviderKey {
 			return models[i].ProviderKey < models[j].ProviderKey
 		}
@@ -113,8 +128,14 @@ func (s *Store) Models() ([]HostModel, bool) {
 //
 // Matching is case-insensitive because the host's own matching is — it compares
 // both the static built-ins and the dynamic entries with .to_lower() on each
-// side (CapabilityBroker.gd:2391, :2413) — so a hint that would work must not
+// side (CapabilityBroker.gd:2387, :2409) — so a hint that would work must not
 // be refused here over its capitalisation.
+//
+// A name can be held by more than one entry: two Core services may expose an
+// action of the same name, and only the model_spec tells them apart. The FIRST
+// match wins, which is the host's own rule for a name-only Core choice
+// (singleton_object.gd create_provider_for resolves in service order), so a
+// hint that names an action means the same model here and there.
 func (s *Store) findModel(hint string) (HostModel, bool) {
 	for _, model := range s.models {
 		if strings.EqualFold(model.ModelName, hint) {
@@ -159,14 +180,15 @@ func (s *Store) modelNames() string {
 	return strings.Join(names, ", ")
 }
 
-// modelFor picks the model one seat is asked with, and the provider that
-// disambiguates it. The run's own override wins, then the member's hint.
+// modelFor picks the model one seat is asked with, the provider that
+// disambiguates it, and the model_spec that identifies it exactly where the
+// host gave one. The run's own override wins, then the member's hint.
 //
 // An expressed hint is resolved against the catalogue so the call carries the
-// provider too; an unknown one is passed through unchanged, because by the time
-// a round is planned the refusal has already happened at member.upsert and
-// run.start and passing it on is more honest than substituting a model nobody
-// asked for.
+// provider and the spec too; an unknown one is passed through unchanged as a
+// bare name, because by the time a round is planned the refusal has already
+// happened at member.upsert and run.start, and passing it on is more honest
+// than substituting a model nobody asked for.
 //
 // With no hint at all the engine takes the catalogue's FIRST model rather than
 // sending "default": the host resolves "default" to a Core provider that may
@@ -175,21 +197,21 @@ func (s *Store) modelNames() string {
 // travels, which is the adapter's cue to fall back to "default".
 //
 // The caller holds the lock.
-func (s *Store) modelFor(run map[string]any, seatID string, member map[string]any) (string, string) {
+func (s *Store) modelFor(run map[string]any, seatID string, member map[string]any) (string, string, map[string]any) {
 	hint := str(obj(run["model_overrides"])[seatID])
 	if hint == "" {
 		hint = str(member["model_hint"])
 	}
 	if hint != "" {
 		if model, found := s.findModel(hint); found {
-			return model.ModelName, model.ProviderDisplay
+			return model.ModelName, model.ProviderDisplay, model.ModelSpec
 		}
-		return hint, ""
+		return hint, "", nil
 	}
 	if len(s.models) > 0 {
-		return s.models[0].ModelName, s.models[0].ProviderDisplay
+		return s.models[0].ModelName, s.models[0].ProviderDisplay, s.models[0].ModelSpec
 	}
-	return "", ""
+	return "", "", nil
 }
 
 // checkRunModels refuses a run whose seats, or whose overrides, name a model

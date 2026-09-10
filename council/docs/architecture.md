@@ -840,8 +840,8 @@ So the backend reads the host's own catalogue at startup, on every
 `minerva_council_load_snapshot`, and on demand through
 `minerva_council_models`: `host.models.list_providers` answers
 `{providers:[{key, display}]}` and `host.models.list_models` answers
-`{provider, models:[{model_name, display}]}`
-(`CapabilityBroker.gd:565-576`, `singleton_object.gd:2058-2091`). Each grant is
+`{provider, models:[{model_name, display, model_spec?}]}`
+(`CapabilityBroker.gd:565-576`, `singleton_object.gd:2058-2105`). Each grant is
 declared separately in `permissions.host_capabilities`; the policy gate refuses
 an undeclared capability before dispatch (`CapabilityBroker.gd:271-285`, with
 `:286-293` refusing everything when there is no policy engine at all), and
@@ -856,9 +856,30 @@ same name it disambiguates with `provider`, compared against the provider's
 `list_providers` returns beside it. Council carries both, so a call can be aimed
 unambiguously.
 
+A third string travels for one provider, and it is not optional there.
+TurnRock/Core has no model manager and no static list: its models are the live
+service actions of the running Core node, so `list_models("turnrock")` answers
+one entry per action carrying a `model_spec`
+(`{kind:"core_action", service_client_id, service_name, action_name}`), and
+`host.providers.chat` accepts that dictionary in place of choosing by name.
+Council stores it on the catalogue entry, never reads inside it, and forwards it
+verbatim on the call — an **empty** object is dropped rather than sent, because
+the broker reads that as a spec with no kind and refuses. The name alone would
+not do: two Core services may expose an action of the same name, and the pair is
+what resolves. A hint still names the action, and where a name is held twice the
+first entry in service order wins, which is the host's own rule for a name-only
+Core choice.
+
+Two consequences follow for a council of local models. They cost nothing to ask,
+so the reason to be explicit about them is quality rather than spend; and they
+can take **minutes** to answer the first time, while the model loads, so
+`per_member_timeout_seconds` is a setting a user has to be able to see and
+change — it is on the Members pane, it is carried in the run reply, and the
+chat's "still deliberating" line names it.
+
 One gap in the catalogue is worth knowing about, and it is the host's:
-`host.models.list_models` enumerates the **dynamic** provider map alone
-(`singleton_object.gd:2079-2091`), while `host.providers.chat` also matches the
+`host.models.list_models` enumerates the dynamic provider map and Core's
+actions, while `host.providers.chat` also matches the
 **static built-in** models (`CapabilityBroker.gd:2374-2392`). A built-in the
 user has enabled is therefore callable but absent from the list, and Council's
 check refuses a hint naming it. The refusal names the models Council *can* see,

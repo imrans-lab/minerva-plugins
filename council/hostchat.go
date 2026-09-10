@@ -139,6 +139,15 @@ func (h *stdioChatHost) Generate(ctx context.Context, call session.ModelCall) (s
 		// tie between two providers offering the same model_name.
 		args["provider"] = call.Provider
 	}
+	if len(call.ModelSpec) > 0 {
+		// The catalogue entry's own identifier, forwarded byte-for-byte. It
+		// WINS over the model string at the host, which is the point: a
+		// TurnRock/Core action is not reachable by name, because two services
+		// may expose the same action name and the broker resolves the pair.
+		// Never an empty object — the broker reads that as a spec with no kind
+		// and refuses the call (CapabilityBroker.gd's model_spec branch).
+		args["model_spec"] = call.ModelSpec
+	}
 	// max_tokens is deliberately not sent. The broker forwards it to the
 	// provider untranslated and at least one backend refuses the request
 	// outright, so a token cap here would turn a working council into a failing

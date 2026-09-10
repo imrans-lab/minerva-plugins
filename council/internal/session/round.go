@@ -166,7 +166,7 @@ func (s *Store) planRun(sessionID, runID string, generation uint64) (runPlan, bo
 			continue
 		}
 		grounding := groundingSections(def, member)
-		advisorModel, advisorProvider := s.modelFor(run, str(seat["seat_id"]), member)
+		advisorModel, advisorProvider, advisorSpec := s.modelFor(run, str(seat["seat_id"]), member)
 		system := memberSystem(member, seat)
 		user, allowed := advisorPrompt(session, run, grounding, rules.PromptBytes-len(system))
 		calls = append(calls, plannedCall{
@@ -179,6 +179,7 @@ func (s *Store) planRun(sessionID, runID string, generation uint64) (runPlan, bo
 				Role:           "advisor",
 				Model:          advisorModel,
 				Provider:       advisorProvider,
+				ModelSpec:      advisorSpec,
 				System:         system,
 				User:           user,
 			},

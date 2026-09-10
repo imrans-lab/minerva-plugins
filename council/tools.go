@@ -211,7 +211,7 @@ func newRegistry(store *session.Store) *registry {
 			"known is false when the host could not be asked at all, which is the state in which a hint travels unchecked. " +
 			"THE FIRST ENTRY MATTERS: a member with no model_hint, and a run with no override for its seat, is consulted with models[0] — the alphabetically first model of the alphabetically first provider — because Council never falls back to the host's \"default\" route. " +
 			"That choice costs money and sets the answer's quality, so give a member an explicit model_hint rather than letting the list decide. " +
-			"The list holds only the providers Minerva manages dynamically; a static built-in model may be callable and still absent here, and Council refuses a hint it cannot see.",
+			"The list holds the providers Minerva manages dynamically AND TurnRock/Core's live service actions, which appear under the \"turnrock\" provider as one model per action — those run on this machine, cost nothing, and can take minutes to answer the first time while the model loads. A static built-in model may be callable and still absent here, and Council refuses a hint it cannot see.",
 		InputSchema: json.RawMessage(`{"type": "object", "properties": {}}`),
 	}, func(json.RawMessage) ([]byte, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), chatDiscoveryTimeout)

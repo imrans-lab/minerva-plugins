@@ -452,6 +452,7 @@ window.CouncilRecorded = {
     }
    ],
    "kind": "retry",
+   "per_member_timeout_seconds": 120,
    "run_id": "run-3",
    "session_id": "ses-recurring-order",
    "session_revision": 9,
@@ -830,7 +831,7 @@ window.CouncilRecorded = {
         "prompt": "What price would buy the refusals back?",
         "request_id": "rec-4",
         "run_id": "run-3",
-        "started_at": "2026-09-09T16:40:06Z",
+        "started_at": "2026-09-10T21:35:34Z",
         "status": "running"
        }
       ],
@@ -870,6 +871,7 @@ window.CouncilRecorded = {
     }
    ],
    "kind": "retry",
+   "per_member_timeout_seconds": 120,
    "resting": true,
    "run_id": "run-3",
    "session_id": "ses-recurring-order",
@@ -1297,12 +1299,12 @@ window.CouncilRecorded = {
           }
          }
         ],
-        "ended_at": "2026-09-09T16:40:11Z",
+        "ended_at": "2026-09-10T21:35:39Z",
         "kind": "retry",
         "prompt": "What price would buy the refusals back?",
         "request_id": "rec-4",
         "run_id": "run-3",
-        "started_at": "2026-09-09T16:40:06Z",
+        "started_at": "2026-09-10T21:35:34Z",
         "status": "complete",
         "synthesis": {
          "claims": [
@@ -2131,7 +2133,7 @@ window.CouncilRecorded = {
          }
         ],
         "author": "R. Okonkwo",
-        "captured_at": "2026-09-09T16:40:11Z",
+        "captured_at": "2026-09-10T21:35:39Z",
         "content_hash": "sha256:d931f53d1ff55e2d87c7f4a8eb9d8a4c76c6bce404996134f18ab719fc557075",
         "locator": "note: margin note",
         "payload": {
@@ -2172,7 +2174,7 @@ window.CouncilRecorded = {
      }
     ],
     "author": "R. Okonkwo",
-    "captured_at": "2026-09-09T16:40:11Z",
+    "captured_at": "2026-09-10T21:35:39Z",
     "content_hash": "sha256:d931f53d1ff55e2d87c7f4a8eb9d8a4c76c6bce404996134f18ab719fc557075",
     "locator": "note: margin note",
     "payload": {
@@ -2750,7 +2752,7 @@ window.CouncilRecorded = {
           "start": 20
          }
         ],
-        "captured_at": "2026-09-09T16:40:11Z",
+        "captured_at": "2026-09-10T21:35:39Z",
         "content_hash": "sha256:6265dc6825412f9c85fa2d2b88435cec4c56a73d8d40ada48eac81bbcf7dada9",
         "payload": {
          "byte_length": 139,
@@ -3159,7 +3161,7 @@ window.CouncilRecorded = {
       "start": 20
      }
     ],
-    "captured_at": "2026-09-09T16:40:11Z",
+    "captured_at": "2026-09-10T21:35:39Z",
     "content_hash": "sha256:6265dc6825412f9c85fa2d2b88435cec4c56a73d8d40ada48eac81bbcf7dada9",
     "payload": {
      "byte_length": 139,
@@ -3198,6 +3200,12 @@ window.CouncilRecorded = {
      "model_name": "gpt-5-mini",
      "provider_display": "OpenAI",
      "provider_key": "openai"
+    },
+    {
+     "display": "model-chat (qwen3-8b)",
+     "model_name": "qwen3-8b",
+     "provider_display": "TurnRock",
+     "provider_key": "turnrock"
     }
    ],
    "known": true,

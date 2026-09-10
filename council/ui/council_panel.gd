@@ -824,9 +824,9 @@ func _read_preferences() -> Dictionary:
 		if parsed is Dictionary:
 			_preferences = parsed
 	var out := {}
-	var scale := float(_preferences.get("text_scale", 0.0))
-	if TEXT_SCALES.has(scale):
-		out["text_scale"] = scale
+	var stored_scale := float(_preferences.get("text_scale", 0.0))
+	if TEXT_SCALES.has(stored_scale):
+		out["text_scale"] = stored_scale
 	return out
 
 
@@ -834,10 +834,10 @@ func _read_preferences() -> Dictionary:
 ## a different build — or a request that arrived with something else entirely —
 ## cannot leave a size behind that no control can reach.
 func _write_preferences(payload: Dictionary) -> Dictionary:
-	var scale := float(payload.get("text_scale", 0.0))
-	if not TEXT_SCALES.has(scale):
-		return {"stored": false, "reason": "%s is not one of Council's text sizes." % str(scale)}
-	_preferences["text_scale"] = scale
+	var wanted_scale := float(payload.get("text_scale", 0.0))
+	if not TEXT_SCALES.has(wanted_scale):
+		return {"stored": false, "reason": "%s is not one of Council's text sizes." % str(wanted_scale)}
+	_preferences["text_scale"] = wanted_scale
 	var file := FileAccess.open(PREFERENCES_PATH, FileAccess.WRITE)
 	if file == null:
 		# The size is already applied in the page; only its persistence failed.

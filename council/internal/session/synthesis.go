@@ -92,7 +92,7 @@ func (s *Store) planSynthesis(control *runControl, sessionID, runID string, rule
 
 	system := chairSystem(chair, chairSeat, def)
 	user, allowed := chairPrompt(session, run, missing, rules.PromptBytes-len(system))
-	chairModel, chairProvider := s.modelFor(run, str(chairSeat["seat_id"]), chair)
+	chairModel, chairProvider, chairSpec := s.modelFor(run, str(chairSeat["seat_id"]), chair)
 	return chairPlan{
 		missing: missing,
 		planned: plannedCall{
@@ -105,6 +105,7 @@ func (s *Store) planSynthesis(control *runControl, sessionID, runID string, rule
 				Role:           "chair",
 				Model:          chairModel,
 				Provider:       chairProvider,
+				ModelSpec:      chairSpec,
 				System:         system,
 				User:           user,
 			},

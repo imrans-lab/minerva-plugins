@@ -43,6 +43,12 @@ if (!existsSync(binary)) {
 
 // --------------------------------------------------------------- the host
 
+// The turnrock entry is what a Core-backed model looks like on the wire: no
+// static model list, one entry per live service action, and a model_spec the
+// caller must send back to reach it (singleton_object.gd list_enabled_models
+// for API_PROVIDER.TURNROCK). It is here so the page is recorded against a
+// catalogue that HAS one, which is the only way its chooser can be checked
+// against a Core action at all.
 const CATALOGUE = [
   { key: 'anthropic', display: 'Anthropic', models: [
     { model_name: 'claude-sonnet-4-6', display: 'Claude Sonnet 4.6' },
@@ -50,6 +56,18 @@ const CATALOGUE = [
   ] },
   { key: 'openai', display: 'OpenAI', models: [
     { model_name: 'gpt-5-mini', display: 'GPT-5 mini' }
+  ] },
+  { key: 'turnrock', display: 'TurnRock', models: [
+    {
+      model_name: 'qwen3-8b',
+      display: 'model-chat (qwen3-8b)',
+      model_spec: {
+        kind: 'core_action',
+        service_client_id: 'model-chat',
+        service_name: 'model-chat',
+        action_name: 'qwen3-8b'
+      }
+    }
   ] }
 ];
 
@@ -79,6 +97,12 @@ function modelAnswer(prompt) {
     answer: 'Quote the order against the worst week the bench has actually cleared, and price the standing commitment separately from the units.',
     claims
   });
+}
+
+// The host's own name for a Core action, or '' for anything else.
+function coreActionName(spec) {
+  if (!spec || spec.kind !== 'core_action') { return ''; }
+  return `${spec.service_name || 'Core'} (${spec.action_name})`;
 }
 
 // ------------------------------------------------------------ the process
@@ -129,7 +153,11 @@ function answerCapability(message) {
     const prompt = JSON.stringify(args);
     setTimeout(() => {
       capabilityOk(message.id, {
-        model: args.model || 'claude-sonnet-4-6',
+        // What ANSWERED, which for a Core action is the provider's own name for
+        // it rather than the name that was asked for (CapabilityBroker.gd
+        // reports actual_model_name, and CoreProvider.model_name is
+        // "<service> (<action>)").
+        model: coreActionName(args.model_spec) || args.model || 'claude-sonnet-4-6',
         choices: [{ message: { content: modelAnswer(prompt) } }],
         usage: { prompt_tokens: 1180, completion_tokens: 240 }
       });

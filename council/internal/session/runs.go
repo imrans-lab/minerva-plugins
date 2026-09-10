@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/ipeerbhai/plugins/council/internal/contract"
 )
@@ -554,6 +555,14 @@ func (s *Store) readOutcome(req *Request, sessionID, runID string, remember bool
 		"status":           str(run["status"]),
 		"session_status":   str(session["status"]),
 		"contributions":    contributions,
+	}
+	// How long one member gets, under the limits THIS run was started with. A
+	// caller reading a round that is still going needs the number to know
+	// whether waiting is reasonable, and a local model on a cold start is the
+	// case where it is measured in minutes; deriving it here rather than in the
+	// chat renderer keeps one answer to "how long".
+	if rules, f := readLimits(obj(session["definition_snapshot"]), run); f == nil {
+		payload["per_member_timeout_seconds"] = int(rules.MemberTimeout / time.Second)
 	}
 	if synthesis := obj(run["synthesis"]); synthesis != nil {
 		payload["synthesis"] = deepCopy(synthesis)

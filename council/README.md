@@ -60,13 +60,32 @@ quality, so:
 
 1. Enable the providers and models you want in Minerva's settings.
 2. Call `minerva_council_models` (or open a member in the panel) to see exactly
-   what Council can offer. The list holds only the providers Minerva manages
-   dynamically; a built-in model that is callable elsewhere and absent here is
-   one Council will refuse.
+   what Council can offer. The list holds the providers Minerva manages
+   dynamically and TurnRock/Core's live service actions; a built-in model that
+   is callable elsewhere and absent here is one Council will refuse.
 3. Give each member an explicit model, in the panel or as `model_hint`.
 
 A hint the host does not have is refused **before** the round spends anything;
 it is never silently substituted.
+
+### Free local models
+
+Models that Minerva runs through TurnRock/Core appear in the same list, under
+the `turnrock` provider, as one entry per Core action — a `model-chat` action
+running Qwen is listed and chosen exactly like a hosted model. They cost
+nothing to ask, and Council calls them by the structured identifier the host
+listed them with, so an action is reached even when two Core services offer one
+of the same name.
+
+They are slow to start. A local model that is not resident can spend **minutes**
+loading before its first token, so a council of local models needs a longer
+per-member time limit than a council of hosted ones. The limit is
+`per_member_timeout_seconds` in the council's deliberation rules, editable on
+the panel's Members pane; the shipped councils set it to 300 seconds, with a run
+budget sized to leave one spare allowance so a slow round is stopped by the
+member that ran out of time rather than by the round's own ceiling. A member
+that runs out of time is recorded as timed out and the round is reported
+partial — nothing retries on its own.
 
 ## Shipped councils
 
@@ -177,10 +196,18 @@ plugin, then reopen the chat's provider list. Note that a plugin reload does not
 refresh the host's MCP tool registry — reconnect MCP if the tools are missing
 too.
 
-**A member has no models to choose from.** Council offers only Minerva's
-dynamically managed enabled models. A fresh Minerva profile has every provider
-disabled; enable one, then call `minerva_council_models` to re-read the
-catalogue.
+**A member has no models to choose from.** Council offers Minerva's dynamically
+managed enabled models and TurnRock/Core's service actions. A fresh Minerva
+profile has every provider disabled; enable one, then call
+`minerva_council_models` to re-read the catalogue. Core's actions appear only
+once Core is connected and its services have been fetched.
+
+**A local model times out every round.** It is loading, not stuck. Raise the
+per-member time limit on the Members pane — and raise `run_budget_seconds` with
+it, since that is the ceiling that stops the whole round. The pane STATES the
+budget but does not edit it: change it with a `definition.upsert` carrying the
+whole council, or by editing an exported council and importing it back. Or ask
+the model once outside Council so it is resident before the round starts.
 
 **A question in chat opened a new session instead of continuing.** A chat is
 bound to a session in the document it was first asked in. If that document has

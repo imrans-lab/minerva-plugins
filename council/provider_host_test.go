@@ -294,7 +294,11 @@ func (h *providerHost) answerCapability(message map[string]any) {
 			content = answerFor(args)
 		}
 		body = map[string]any{
-			"model": str(args["model"]),
+			// What ANSWERED. For a Core action that is the provider's own name
+			// for it and not the name that was asked for: CapabilityBroker.gd
+			// reports actual_model_name, which for a CoreProvider is
+			// "<service> (<action>)" (CoreProvider.gd:24).
+			"model": answeringModel(args),
 			"choices": []map[string]any{
 				{"message": map[string]any{"content": content}},
 			},
@@ -310,6 +314,57 @@ func (h *providerHost) answerCapability(message map[string]any) {
 	}
 	h.write(map[string]any{"jsonrpc": "2.0", "id": message["id"],
 		"result": map[string]any{"success": true, "result": body}})
+}
+
+// answeringModel is the name the host would report for one chat call. It reads
+// the model_spec when there is one, because a Core action is reached by spec
+// and the "model" string beside it is only what the caller happened to type.
+func answeringModel(args map[string]any) string {
+	if spec, ok := args["model_spec"].(map[string]any); ok && str(spec["kind"]) == "core_action" {
+		service := str(spec["service_name"])
+		if service == "" {
+			service = "Core"
+		}
+		return service + " (" + str(spec["action_name"]) + ")"
+	}
+	return str(args["model"])
+}
+
+// offerCoreAction adds Minerva's TurnRock/Core provider to what this host says
+// it has enabled: one model per live service action, each carrying the
+// model_spec host.providers.chat must be handed back to reach it
+// (singleton_object.gd list_enabled_models for API_PROVIDER.TURNROCK). Call it
+// before the backend's startup catalogue read.
+//
+// One action name, listed on each service given, IN THAT ORDER — because Core
+// really can expose an action of the same name on two services, and the order
+// is the whole of the tie-break: the host resolves a name-only Core choice to
+// the first match in service order. The returned specs are in the same order.
+func (h *providerHost) offerCoreAction(actionName string, serviceIDs ...string) []map[string]any {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(serviceIDs) == 0 {
+		serviceIDs = []string{"model-chat"}
+	}
+	specs := []map[string]any{}
+	listed := []map[string]any{}
+	for _, service := range serviceIDs {
+		spec := map[string]any{
+			"kind":              "core_action",
+			"service_client_id": service,
+			"service_name":      service,
+			"action_name":       actionName,
+		}
+		specs = append(specs, spec)
+		listed = append(listed, map[string]any{
+			"model_name": actionName,
+			"display":    service + " (" + actionName + ")",
+			"model_spec": spec,
+		})
+	}
+	h.providers = append(h.providers, map[string]any{"key": "turnrock", "display": "TurnRock"})
+	h.models["turnrock"] = listed
+	return specs
 }
 
 // holdChat and holdModels install a gate under the lock. They are setters

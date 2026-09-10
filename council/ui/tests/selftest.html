@@ -237,6 +237,41 @@
         check('the members pane says which model answers for a seat',
           w.document.querySelector('#reading').textContent.indexOf('Model:') >= 0);
 
+        // How long a member gets is a council setting, and the pane where the
+        // roster is read is where it has to be visible: a local model that
+        // spends minutes loading is the case this number exists for, and the
+        // run budget beside it is the ceiling that actually stops the round.
+        // The oracle is the served document's own deliberation rules.
+        var rules = w.CouncilRecorded.complete.payload.snapshot.definitions[0].deliberation;
+        var limit = q(w, '#reading #member-timeout');
+        check('the per-member time limit is shown and editable where the roster is',
+          !!limit && Number(limit.value) === rules.per_member_timeout_seconds,
+          limit ? limit.value : 'no control');
+        check('the run budget is stated beside it, because it is the real ceiling',
+          q(w, '#reading').textContent.indexOf(String(rules.run_budget_seconds) + ' seconds') >= 0);
+
+        var beforeLimit = w.__councilReplay.calls.length;
+        limit.value = '420';
+        q(w, '#reading [data-save-timeout]').click();
+        return until(function () {
+          return w.__councilReplay.calls.slice(beforeLimit).filter(function (call) {
+            return call.command === 'definition.upsert';
+          })[0];
+        });
+      })
+
+      .then(function (call) {
+        // The whole council goes back with its revision advanced — the same
+        // edit shape every other definition change uses — carrying only the
+        // limit that was typed.
+        check('saving the limit sends the council back with the new limit and the next revision',
+          call.payload.definition.deliberation.per_member_timeout_seconds === 420
+            && Number(call.payload.definition.definition_revision)
+              === Number(w.CouncilRecorded.complete.payload.snapshot.definitions[0].definition_revision) + 1,
+          JSON.stringify(call.payload.definition.deliberation));
+
+        var dismiss = q(w, '[data-dismiss-refusal]');
+        if (dismiss) { dismiss.click(); }
         q(w, '#reading [data-open-member]').click();
         // The select is rendered at once and filled when the catalogue comes
         // back, because the page re-reads it every time a chooser opens rather
@@ -249,6 +284,20 @@
         check('the host’s enabled models reach the member’s model control',
           options.indexOf('claude-sonnet-4-6') >= 0 && options.indexOf('gpt-5-mini') >= 0,
           options.join(','));
+
+        // A TurnRock/Core action is a model like any other in this control.
+        // The oracle is the recorded catalogue, which the real backend built
+        // from a host listing that carried one.
+        var core = w.CouncilRecorded.models.payload.models.filter(function (model) {
+          return model.provider_key === 'turnrock';
+        })[0];
+        var chosen = all(w, '#detail #member-model option').filter(function (option) {
+          return option.value === core.model_name;
+        })[0];
+        check('a Core action is offered beside the hosted models, named as the host named it',
+          !!chosen && chosen.textContent.indexOf(core.display) >= 0
+            && chosen.textContent.indexOf(core.provider_display) >= 0,
+          chosen ? chosen.textContent : options.join(','));
 
         // A request too large for the hop is refused before it travels.
         q(w, '[data-pane="session"]').click();

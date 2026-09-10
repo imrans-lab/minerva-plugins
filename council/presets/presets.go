@@ -6,6 +6,17 @@
 // no preset format, no preset loader and no preset-only field — a shipped
 // council is a starting point, not a species.
 //
+// One number in every shipped council is arithmetic rather than taste, and JSON
+// has nowhere to say so: run_budget_seconds is sized as
+// (waves + chair + 1) x per_member_timeout_seconds, where waves is
+// ceil(max_members_per_round / max_concurrent_members). The allowance is 300
+// seconds because a free local model on TurnRock/Core can spend minutes loading
+// before its first token, and the spare wave is there to keep the two limits
+// from being confused for one another. A budget set to the exact worst case
+// expires while the last members are still inside their own allowance, and
+// every one of them is then recorded as timed out — a member blamed for a limit
+// the ROUND ran out of, which is the wrong thing to go and raise.
+//
 // The files are the single source. The backend embeds them here for
 // minerva_council_presets, and ui/build.mjs inlines the same bytes into
 // ui/panel.html so the editor can offer them with no round trip; neither copy is

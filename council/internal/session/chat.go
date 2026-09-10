@@ -402,6 +402,18 @@ func restingStatus(status string) bool {
 	return true
 }
 
+// memberAllowance says how long each member has, when the reply carries the
+// figure. It is worth a sentence only while a round is unfinished: it is the
+// difference between "this is taking a while" and "this is stuck", and a free
+// local model starting cold spends minutes of it before its first token.
+func memberAllowance(payload map[string]any) string {
+	seconds := int(num(payload["per_member_timeout_seconds"]))
+	if seconds <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" Each member has up to %d seconds to answer, and a local model that has to load first can use most of it.", seconds)
+}
+
 // renderRound turns run.start's reply into what the chat shows.
 //
 // A round that is still going is an ANSWER and not an error: the work is not
@@ -415,8 +427,8 @@ func renderRound(payload map[string]any) ChatReply {
 		return ChatReply{
 			Kind: ChatAnswer,
 			Text: fmt.Sprintf(
-				"The council is still deliberating (run %s). This turn is not lost: the members' answers and the chair's synthesis appear in the Council editor as they land. Asking again in this chat REPORTS this round's progress rather than starting a second one — hold your next question until this lands, or stop the turn to cancel.",
-				str(payload["run_id"])),
+				"The council is still deliberating (run %s).%s This turn is not lost: the members' answers and the chair's synthesis appear in the Council editor as they land. Asking again in this chat REPORTS this round's progress rather than starting a second one — hold your next question until this lands, or stop the turn to cancel.",
+				str(payload["run_id"]), memberAllowance(payload)),
 			PromptTokens:     prompt,
 			CompletionTokens: completion,
 		}

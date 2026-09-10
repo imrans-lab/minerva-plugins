@@ -868,11 +868,11 @@ window.CouncilPresets = [
     "max_members_per_round": 6,
     "max_concurrent_members": 2,
     "max_prompt_bytes": 16384,
-    "run_budget_seconds": 300,
+    "run_budget_seconds": 1500,
     "max_rounds_per_session": 12,
     "independent_initial_round": true,
     "preserve_disagreement": true,
-    "per_member_timeout_seconds": 120
+    "per_member_timeout_seconds": 300
   }
 },
 {
@@ -955,11 +955,11 @@ window.CouncilPresets = [
     "max_members_per_round": 2,
     "max_concurrent_members": 2,
     "max_prompt_bytes": 16384,
-    "run_budget_seconds": 240,
+    "run_budget_seconds": 900,
     "max_rounds_per_session": 12,
     "independent_initial_round": true,
     "preserve_disagreement": true,
-    "per_member_timeout_seconds": 120
+    "per_member_timeout_seconds": 300
   }
 },
 {
@@ -1041,11 +1041,11 @@ window.CouncilPresets = [
     "max_members_per_round": 4,
     "max_concurrent_members": 3,
     "max_prompt_bytes": 16384,
-    "run_budget_seconds": 240,
+    "run_budget_seconds": 1200,
     "max_rounds_per_session": 12,
     "independent_initial_round": true,
     "preserve_disagreement": true,
-    "per_member_timeout_seconds": 120
+    "per_member_timeout_seconds": 300
   }
 }
 ];
@@ -1173,6 +1173,12 @@ window.CouncilPresets = [
 
   var MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
                 'August', 'September', 'October', 'November', 'December'];
+
+  // What the schema allows for per_member_timeout_seconds
+  // (council_definition.schema.json DeliberationRules). The control that offers
+  // the number and the check that refuses one must not be able to disagree
+  // about it, so there is one copy and both read it.
+  var MEMBER_TIMEOUT = { min: 5, max: 900 };
 
   function list(value) { return Array.isArray(value) ? value : []; }
 
@@ -1447,7 +1453,8 @@ window.CouncilPresets = [
     isLive: isLive,
     currentSynthesis: currentSynthesis,
     completedContributions: completedContributions,
-    runTitle: runTitle
+    runTitle: runTitle,
+    MEMBER_TIMEOUT: MEMBER_TIMEOUT
   };
 })(window);
 </script>
@@ -2229,6 +2236,56 @@ window.CouncilPresets = [
     ]);
   }
 
+  // How long one member gets before the round gives up on them, and how long
+  // the whole round may take. It is a council setting rather than a hidden
+  // constant because the answer depends on who is seated: a hosted model
+  // answers in seconds, and a free local model on TurnRock/Core can spend
+  // minutes loading before its first token.
+  //
+  // The run budget is shown beside it, unedited, because it is the ceiling that
+  // actually bites: a member allowance longer than the whole round's budget is
+  // a number that never gets spent.
+  function deliberationBlock(definition, historical) {
+    var rules = definition.deliberation || {};
+    var seconds = Number(rules.per_member_timeout_seconds) || 0;
+    var budget = Number(rules.run_budget_seconds) || 0;
+    // A council from an older record, or one whose rules did not survive an
+    // import, has no budget to state — and a sentence saying the round stops
+    // after 0 seconds would be a false claim about what the engine does.
+    var note = budget > 0
+      ? 'The whole round stops after ' + budget + ' seconds, however long each member is given. '
+      : '';
+    if (historical) {
+      return D.frag([
+        el('h2', { class: 'pane-title group', text: 'How long each member gets' }),
+        el('p', { class: 'say flush', text: seconds + ' seconds. ' + note })
+      ]);
+    }
+    return D.frag([
+      el('h2', { class: 'pane-title group', text: 'How long each member gets' }),
+      el('p', { class: 'superseded', text: note
+        + 'A model running locally on this machine can take minutes to answer the first time, while it loads.' }),
+      el('div', { class: 'composer' }, [
+        el('label', { class: 'visible', for: 'member-timeout', text: 'Seconds per member' }),
+        el('input', {
+          id: 'member-timeout',
+          type: 'number',
+          min: String(R.MEMBER_TIMEOUT.min),
+          max: String(R.MEMBER_TIMEOUT.max),
+          value: String(seconds)
+        }),
+        el('div', { class: 'row' }, [
+          el('button', {
+            class: 'action',
+            type: 'button',
+            data: { 'save-timeout': '1' },
+            text: 'Save the time limit'
+          })
+        ])
+      ])
+    ]);
+  }
+
   // The councils Council ships with, offered on an empty project.
   //
   // They are inlined into the page by ui/build.mjs from council/presets, which
@@ -2329,6 +2386,8 @@ window.CouncilPresets = [
         return unseatedRow(definition, member);
       })));
     }
+
+    blocks.push(deliberationBlock(definition, historical));
 
     if (!historical) {
       blocks.push(el('div', { class: 'row group' }, [
@@ -2452,13 +2511,23 @@ window.CouncilPresets = [
   // does and what the label says, so nobody discovers it by being billed for it.
   function modelSelect(id, models, chosen, emptyLabel) {
     var options = [el('option', { value: '', text: emptyLabel })];
+    var seen = {};
     R.list(models).forEach(function (model) {
+      // A model_name can be held twice — two Core services exposing an action
+      // of the same name. A member is stored BY NAME, so both options would
+      // save the same hint and the first entry is what answers on both sides
+      // (the engine's catalogue lookup and the host's own name-only Core
+      // resolution). The later one is labelled as such rather than left to look
+      // like a second choice, and the service in each display tells them apart.
+      var duplicate = Object.prototype.hasOwnProperty.call(seen, model.model_name);
+      seen[model.model_name] = true;
+      var label = model.display
+        ? model.display + ' (' + model.provider_display + ')'
+        : model.model_name;
       options.push(el('option', {
         value: model.model_name,
-        selected: model.model_name === chosen ? true : null,
-        text: model.display
-          ? model.display + ' (' + model.provider_display + ')'
-          : model.model_name
+        selected: model.model_name === chosen && !duplicate ? true : null,
+        text: duplicate ? label + ' — same name as an earlier entry, which is the one that answers' : label
       }));
     });
     // A hint the host no longer offers must still be visible and selected, or
@@ -2755,6 +2824,22 @@ window.CouncilPresets = [
           'A call is bounded in bytes. When the assembled prompt is too long, grounding and '
             + 'earlier contributions are dropped from the tail with a visible marker, and a '
             + 'member cannot cite material that was dropped before it was sent.'
+        ]),
+        section('Which model answers', [
+          'Every member is asked with one named model, and the chooser on a member offers what '
+            + 'this Minerva actually has enabled. A member with no model chosen is asked with '
+            + 'whichever model Minerva lists first, which is an alphabetical accident and a real '
+            + 'cost \u2014 so choose one.',
+          'Models running on this machine through TurnRock/Core are in that list beside the '
+            + 'hosted ones, one entry per Core action, and they cost nothing to ask. They can '
+            + 'take minutes to answer the first time while the model loads, so a council of '
+            + 'local models needs a longer per-member time limit than a council of hosted ones.',
+          'That limit is on the Members pane: it is how long each member gets before the round '
+            + 'gives up on them, and the round\u2019s own budget stops everything however long '
+            + 'the members are given.',
+          'Two Core services can offer an action with the same name. A member is stored by the '
+            + 'name, so the first of them is the one that answers \u2014 the chooser marks the '
+            + 'later entry, and the service each one belongs to is in its label.'
         ]),
         section('Sources and revisions', [
           'Capturing material creates a source revision. Changing the material creates a NEW '
@@ -3391,8 +3476,19 @@ window.CouncilPresets = [
 
   // --------------------------------------------------------------- writing
 
+  // Every FORM lives in the detail column, and reading a form value from there
+  // is what keeps a stale control in the pane behind it from answering for the
+  // form the user is actually filling in.
   function value(id) {
     var node = ui.detail.querySelector('#' + id);
+    return node ? String(node.value || '').trim() : '';
+  }
+
+  // The same read for a control that lives in the READING column instead. A
+  // pane control has no detail to be read from, so value() would answer '' for
+  // it and the write would be refused for a reason the user cannot see.
+  function paneValue(id) {
+    var node = ui.reading.querySelector('#' + id);
     return node ? String(node.value || '').trim() : '';
   }
 
@@ -3469,11 +3565,18 @@ window.CouncilPresets = [
           max_members_per_round: 4,
           max_concurrent_members: 2,
           max_prompt_bytes: 16384,
-          run_budget_seconds: 300,
+          // Two waves of members, a chair, and one spare allowance, at the
+          // per-member limit below — which is set for a local model that has to
+          // load before it answers rather than for a hosted one. The spare is
+          // what keeps the two limits distinct: a budget set to the exact worst
+          // case expires while the last members are still inside their own
+          // allowance, and they are then all recorded as timed out — blaming a
+          // member for a limit the round ran out of.
+          run_budget_seconds: 1200,
           max_rounds_per_session: 12,
           independent_initial_round: true,
           preserve_disagreement: true,
-          per_member_timeout_seconds: 120
+          per_member_timeout_seconds: 300
         }
       }
     }).then(function (reply) {
@@ -3532,6 +3635,34 @@ window.CouncilPresets = [
         ? member.display_name + ' will be asked with ' + chosen + '.'
         : member.display_name + ' will be asked with whichever model Minerva lists first.');
       render();
+    });
+  }
+
+  // The council's per-member time limit, edited where the roster is read.
+  //
+  // It is a definition edit like any other — the whole record goes back with
+  // its revision advanced — because the deliberation rules are part of the
+  // council a user can export, not a panel preference. That does mean one
+  // number costs a round trip carrying the whole definition, inline source
+  // material included, so on a heavily grounded council this edit can be
+  // refused for exceeding the envelope limit where a narrow command would not.
+  function saveTimeout() {
+    var definition = R.editableDefinition(state.snapshot, currentSession());
+    if (!definition) { say('There is no council in this project to set a time limit on.'); return; }
+    var seconds = Number(paneValue('member-timeout'));
+    // The schema's own bounds, read from the one copy of them. Refusing here
+    // says which number is wrong; the engine would refuse the whole edit with a
+    // validation error instead.
+    var bounds = R.MEMBER_TIMEOUT;
+    if (!(seconds >= bounds.min && seconds <= bounds.max)) {
+      say('A member needs between ' + bounds.min + ' and ' + bounds.max + ' seconds.');
+      return;
+    }
+    var next = JSON.parse(JSON.stringify(definition));
+    next.deliberation.per_member_timeout_seconds = Math.round(seconds);
+    next.definition_revision = Number(next.definition_revision) + 1;
+    bridge.mutate('definition.upsert', { definition: next }).then(function (reply) {
+      afterWrite(reply, 'Each member now has ' + Math.round(seconds) + ' seconds to answer.');
     });
   }
 
@@ -3600,7 +3731,7 @@ window.CouncilPresets = [
     '[data-cancel-run]', '[data-create-council]', '[data-create-council-send]',
     '[data-use-preset]', '[data-help]',
     '[data-add-member]', '[data-add-member-send]', '[data-seat-member]', '[data-seat-member-send]',
-    '[data-save-model]', '[data-dismiss-refusal]', '[data-text-larger]',
+    '[data-save-model]', '[data-save-timeout]', '[data-dismiss-refusal]', '[data-text-larger]',
     '[data-text-smaller]', '[data-text-reset]'].join(',');
 
   function onClick(event) {
@@ -3684,6 +3815,7 @@ window.CouncilPresets = [
     if (d.seatMember) { openDetail({ kind: 'seat_member', member_id: d.seatMember }, target); return; }
     if (d.seatMemberSend) { seatMember(d.seatMemberSend); return; }
     if (d.saveModel) { saveModel(d.saveModel); return; }
+    if (d.saveTimeout) { saveTimeout(); return; }
 
     if (d.retryRun) {
       bridge.mutate('run.retry', {

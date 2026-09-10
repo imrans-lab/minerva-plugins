@@ -15,6 +15,12 @@
   var MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
                 'August', 'September', 'October', 'November', 'December'];
 
+  // What the schema allows for per_member_timeout_seconds
+  // (council_definition.schema.json DeliberationRules). The control that offers
+  // the number and the check that refuses one must not be able to disagree
+  // about it, so there is one copy and both read it.
+  var MEMBER_TIMEOUT = { min: 5, max: 900 };
+
   function list(value) { return Array.isArray(value) ? value : []; }
 
   function text(value) {
@@ -288,6 +294,7 @@
     isLive: isLive,
     currentSynthesis: currentSynthesis,
     completedContributions: completedContributions,
-    runTitle: runTitle
+    runTitle: runTitle,
+    MEMBER_TIMEOUT: MEMBER_TIMEOUT
   };
 })(window);

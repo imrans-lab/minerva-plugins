@@ -51,6 +51,15 @@ type ModelCall struct {
 	// when the model is unambiguous or unresolved.
 	Provider string
 
+	// ModelSpec is the catalogue entry's structured identifier, carried
+	// through untouched from the listing to the call. A provider whose models
+	// are not a static list — Minerva's TurnRock/Core, whose models are the
+	// running node's service actions — is only reachable this way, because the
+	// name alone does not say which service an action belongs to. Nil for every
+	// model a name identifies, and an adapter must never send an empty object
+	// in its place.
+	ModelSpec map[string]any
+
 	// System and User are the assembled prompt. An initial member call carries
 	// no other member's answer in either of them — that is the independence
 	// rule, and it is enforced where the prompt is built rather than trusted to
