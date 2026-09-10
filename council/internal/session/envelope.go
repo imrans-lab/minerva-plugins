@@ -59,14 +59,15 @@ const (
 // its absence is meaningful: a read command must not carry one and a mutating
 // command must.
 type Request struct {
-	generation    uint64         // Store load generation; never supplied over the wire.
-	SchemaVersion int            `json:"schema_version"`
-	Envelope      string         `json:"envelope"`
-	RequestID     string         `json:"request_id"`
-	Command       string         `json:"command"`
-	BaseRevision  *int           `json:"base_revision,omitempty"`
-	WaitSeconds   *int           `json:"wait_seconds,omitempty"`
-	Payload       map[string]any `json:"payload"`
+	ExpectedProjectID string         `json:"expected_project_id,omitempty"`
+	generation        uint64         // Store load generation; never supplied over the wire.
+	SchemaVersion     int            `json:"schema_version"`
+	Envelope          string         `json:"envelope"`
+	RequestID         string         `json:"request_id"`
+	Command           string         `json:"command"`
+	BaseRevision      *int           `json:"base_revision,omitempty"`
+	WaitSeconds       *int           `json:"wait_seconds,omitempty"`
+	Payload           map[string]any `json:"payload"`
 }
 
 // waitFor reads how long this request may be held, clamped to the ceiling the

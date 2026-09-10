@@ -1093,6 +1093,38 @@ func _section_10_a_change_with_no_panel_in_it() -> void:
 			JSON.stringify(_panel_b._on_panel_save_request(), "\t") == untouched_before,
 			str(_session_ids(_panel_b._on_panel_save_request())))
 
+	# Equal revision cannot authorize a write into another document with matching
+	# session IDs. An identity check after the mutation would be too late.
+	var same_revision: Dictionary = saved.duplicate(true)
+	same_revision["project_id"] = "prj-equal-revision-foreign"
+	await _conn.call_tool("minerva_council_load_snapshot", {"snapshot": same_revision})
+	var guarded: Dictionary = await _bind_chat(_panel_a, "ses-recurring-order", "chat-must-not-bind")
+	var foreign_after: Dictionary = await _conn.call_tool("minerva_council_export_snapshot", {})
+	check("equal revision does not authorize a write into another council",
+			not bool(guarded.get("ok", false))
+			and (foreign_after.get("snapshot", {}) as Dictionary) == same_revision,
+			str(guarded).left(200))
+
+	# A delayed event must not seed A's old snapshot after B takes the engine.
+	await _relay(_panel_b, {"schema_version": 1, "envelope": "request",
+		"request_id": "sync-holder-b", "command": "snapshot.get", "payload": {}})
+	var held_b: Dictionary = await _conn.call_tool("minerva_council_export_snapshot", {})
+	_panel_a.receive("council.record_changed", {
+		"project_id": str(saved.get("project_id", "")),
+		"snapshot_revision": int(saved.get("snapshot_revision", 0)) + 1})
+	_panel_a._on_panel_save_request()
+	check("save while convergence is queued warns that the held copy is behind",
+			_panel_a._banner.visible, _panel_a._banner.text.left(120))
+	await _panel_a._converge()
+	var still_b: Dictionary = await _conn.call_tool("minerva_council_export_snapshot", {})
+	check("a delayed convergence cannot replace the current holder with an older panel copy",
+			still_b.get("snapshot", {}) == held_b.get("snapshot", {})
+			and CouncilBackend.lease_holder() == "council_panel#b"
+			and _panel_a._sync_pending,
+			"holder=%s pending=%s" % [CouncilBackend.lease_holder(), str(_panel_a._sync_pending)])
+	_panel_a._on_panel_load_request(_document_for("", saved))
+	await _settle_exchanges()
+
 	# THE LEASE IS A GODOT-SIDE FACT, AND minerva_council_load_snapshot IS A LIVE
 	# TOOL. Loading another council straight down the tool door leaves this panel
 	# still named as the engine's holder, so its next exchange skips the seed and

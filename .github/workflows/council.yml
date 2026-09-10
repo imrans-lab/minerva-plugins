@@ -24,6 +24,11 @@ on:
       - "scripts/**"
   workflow_dispatch:
 
+# Enable only after T13 and real-model/desktop acceptance are recorded.
+# Until then main still produces installable artifacts and staging prereleases.
+env:
+  COUNCIL_STABLE_RELEASE: "false"
+
 permissions:
   contents: read
 
@@ -266,7 +271,7 @@ jobs:
         shell: bash
         run: |
           VERSION=$(python3 -c 'import json; print(json.load(open("council/manifest.json"))["version"])')
-          if [ "$GITHUB_REF_NAME" = "main" ]; then
+          if [ "$GITHUB_REF_NAME" = "main" ] && [ "$COUNCIL_STABLE_RELEASE" = "true" ]; then
             TAG="council-v${VERSION}"
             PRE="false"
           else

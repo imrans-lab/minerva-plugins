@@ -54,6 +54,39 @@ landing does not satisfy these release gates.
 
 ---
 
+## C6 landing review addendum — 2026-09-10
+
+Codex reviewed `84b879c` in `minerva-worktrees/council-c6-review` and ran the
+submitted tree: Go race suite passed and real-host GDScript passed **107/107**.
+Review added two corrections before local integration:
+
+- `01a08d0e9dcc`: the engine checks `expected_project_id` under its command lock,
+  before reads, mutations or replay. Panel requests pin that identity. Background
+  convergence reads without seeding and cannot reload an older panel snapshot
+  over another holder. Snapshot reads return their atomic result directly;
+  adoption checks identity even at equal revision. A panel remains behind until
+  it reaches the announced revision, and queued/in-flight save also warns.
+- `01a08d0ea3c6`: `COUNCIL_STABLE_RELEASE` defaults to false. CI still produces
+  artifacts and staging prereleases, including on main. Stable publication waits
+  for recorded T13 and real-model/desktop acceptance. The workflow's actual tag
+  computation is exercised by the release tests.
+
+Final observed checks: Go race suite and vet pass; real-host/backend GDScript
+**110/110** (three added race/save assertions), page **68/68**, registry/release
+suite **10/10**, generated-page check, and archive verification with the packed
+nine-tool binary. Archives from different umasks were byte-identical. No warning
+suppressions were added. Tests used an isolated profile and a separate host cache.
+Logs: `/tmp/council-c6-go-fixed.log`, `/tmp/council-c6-gd-final.log`,
+`/tmp/council-c6-page.html`.
+
+No CI workflow, real model, or staged Minerva install ran during this review.
+T13 and `01a08a3957b6` remain open. Save is still a synchronous host hook: results
+not yet delivered to a panel cannot be included in its current snapshot, and a
+later adoption marks it dirty again. These live timing/close interactions belong
+in acceptance; automated synchronization tests are not a substitute for it.
+
+---
+
 ## 1. What this build is
 
 | | |

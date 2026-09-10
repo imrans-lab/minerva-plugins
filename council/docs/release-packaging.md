@@ -119,9 +119,13 @@ release that already exists. The order is fixed:
 
 1. **Merge to `main`.** The `council` workflow runs `test` and `package` on the
    push. Nothing is tagged yet.
-2. **CI computes the tag** in the `release` job: `council-v<manifest.version>`
-   on `main`, or `council-v<version>-branch-<branch>` with `prerelease: true`
-   anywhere else. `scripts/release-publish-guard.sh` refuses to move an existing
+2. **CI computes the tag** in the `release` job. While
+   `COUNCIL_STABLE_RELEASE` is `false`, every push (including `main`) produces
+   `council-v<version>-branch-<branch>` with `prerelease: true`. Artifacts and
+   staging installs remain available; the public registry skips these tags.
+   Enable the checked-in gate only after T13 and real-model/desktop acceptance
+   are recorded. Then `main` publishes `council-v<manifest.version>`; other
+   branches remain prereleases. `scripts/release-publish-guard.sh` refuses to move an existing
    stable tag — a re-run of the same commit keeps the release it already
    published, and a new release means bumping `version` in the manifest.
 3. **CI publishes the GitHub Release** and uploads

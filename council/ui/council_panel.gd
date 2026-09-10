@@ -207,14 +207,10 @@ func _on_panel_unload() -> void:
 ## holds — losing it would be worse — and the page says on screen that the file
 ## is missing what the engine has. The retry is scheduled rather than awaited.
 func _on_panel_save_request() -> Dictionary:
-	if _sync_pending:
-		# Only a convergence that has actually FAILED is reported. Between the
-		# announcement and the deferred convergence there is nothing to tell the
-		# reader yet — saying "the backend could not be reached" there would be
-		# untrue — and the retry below re-marks the tab as soon as it adopts.
+	if _sync_pending or _sync_running or _record.revision() < _sync_target:
 		if not _sync_problem.strip_edges().is_empty():
 			push_warning("[Council] " + _behind_message())
-			_report_behind()
+		_report_behind()
 		_converge.call_deferred()
 	return _record.save_payload()
 
@@ -297,8 +293,6 @@ func _on_backend_record_changed(payload: Dictionary) -> void:
 	if announced <= _record.revision():
 		return
 	_sync_target = maxi(_sync_target, announced)
-	if not _backend.engine_holds_ours_or_nobody():
-		return
 	_sync_pending = true
 	# Deferred rather than awaited: `receive` is a host call, and a coroutine
 	# here would hand the broker a state object it does not know what to do with.
@@ -308,11 +302,9 @@ func _on_backend_record_changed(payload: Dictionary) -> void:
 ## Adopt what the engine holds for this document, through the same exchange this
 ## panel's own mutations use.
 ##
-## Relaying a `snapshot.get` takes the lease, seeds if it must, reads the
-## acknowledged snapshot back and persists it — so the lease, seed and epoch
-## rules of architecture.md §5.5 apply unchanged, the wrapper still adopts rather
-## than merges, and adopting emits content_changed, which is what marks the tab
-## dirty so the host's save writes what the engine holds.
+## The exchange takes the lease but never seeds. Its expected_project_id is
+## checked inside the engine lock. A delayed event cannot reload an old snapshot
+## over another panel's work. Adoption marks the tab dirty for the host's save.
 ##
 ## A second caller waits on the one already running instead of starting a race
 ## for the same lease; a signal that arrives DURING a convergence is picked up by
@@ -336,13 +328,17 @@ func _converge() -> void:
 			"schema_version": 1, "envelope": "request",
 			"request_id": _mint_request_id("sync"),
 			"command": "snapshot.get", "payload": {},
-		})
+		}, true)
 		if epoch != _document_epoch:
 			break
-		if bool(reply.get("ok", false)):
+		if bool(reply.get("ok", false)) and _record.revision() >= _sync_target:
 			_sync_problem = ""
 			read_back = true
 			continue
+		if bool(reply.get("ok", false)):
+			_sync_pending = true
+			_sync_problem = "the backend no longer holds the announced revision"
+			break
 		# The backend could not be reached, or refused. The panel stays marked as
 		# behind so save reports it, and stops rather than spinning against a
 		# backend that is not there — the next signal, or the next save, retries.
@@ -389,13 +385,14 @@ func _clear_behind() -> void:
 
 ## What the reader is told when the engine holds more of this council than the
 ## panel does. It names the reason, says what was written, and says the results
-## are not lost while the backend is running.
+## can be recovered only while the backend or a saved snapshot still holds them.
 func _behind_message() -> String:
 	var reason := _sync_problem if not _sync_problem.strip_edges().is_empty() \
-		else "the Council backend could not be reached"
+		else "snapshot synchronization has not finished"
 	return ("This council has moved on in the Council backend and this panel could not read it back: "
 		+ reason + " What is in the project is the copy this panel holds, without the newest results. "
-		+ "They are not lost while the backend is running — reopen this council, or try again, to bring them in.")
+		+ "The newest results are not confirmed in this copy. Retry while the backend still holds them; "
+		+ "if its document was replaced, recover from a saved snapshot.")
 
 
 ## A request id of this panel's own, unique across panels and across restarts of
@@ -673,12 +670,12 @@ func _on_page_message(raw: String) -> void:
 ## Send one request to the engine and persist whatever comes back. This is the
 ## only path by which the held record changes, and content_changed is emitted
 ## only when it actually did.
-func _relay_to_engine(message: Dictionary) -> Dictionary:
+func _relay_to_engine(message: Dictionary, read_current_only := false) -> Dictionary:
 	if _backend == null:
 		return _err(str(message.get("request_id", "")), _record.revision(), "internal",
 			"This panel is not mounted, so it cannot reach the Council backend.", false)
 	var epoch := _document_epoch
-	var outcome: Dictionary = await _backend.relay(message, _record.snapshot(), _record_for_epoch.bind(epoch))
+	var outcome: Dictionary = await _backend.relay(message, _record.snapshot(), _record_for_epoch.bind(epoch), read_current_only)
 	if epoch != _document_epoch:
 		# A load or a note restore replaced the document while this was in
 		# flight. Its snapshot is the OLD document's, and adopting it would undo
@@ -688,7 +685,7 @@ func _relay_to_engine(message: Dictionary) -> Dictionary:
 			"The panel opened a different council while that request was in flight; re-read and try again.",
 			true)
 	var snapshot: Dictionary = outcome.get("snapshot", {})
-	if not snapshot.is_empty() and int(snapshot.get("snapshot_revision", 0)) != _record.revision():
+	if not snapshot.is_empty():
 		# THE RECORD THAT CAME BACK HAS TO BE THIS DOCUMENT.
 		#
 		# "The engine is seeded with my record" is a claim the wrapper's own lease
@@ -724,6 +721,8 @@ func _relay_to_engine(message: Dictionary) -> Dictionary:
 			return _err(str(message.get("request_id", "")), _record.revision(), "stale_revision",
 				"The Council backend is loaded with a different council, so this panel changed nothing. "
 				+ "Reopen this council and try again.", true)
+		if int(snapshot.get("snapshot_revision", 0)) == _record.revision():
+			return outcome.get("reply", {})
 		# View belongs to the wrapper and may have changed during the exchange.
 		var current := _record.snapshot()
 		if current.has("view"):

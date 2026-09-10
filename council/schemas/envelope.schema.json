@@ -40,6 +40,10 @@
         "envelope": { "const": "request" },
         "request_id": { "$ref": "common.schema.json#/$defs/Id" },
         "command": { "$ref": "#/$defs/Command" },
+        "expected_project_id": {
+          "$ref": "common.schema.json#/$defs/Id",
+          "description": "Optional document identity checked under the engine lock before a command or replay. A different loaded document is refused even if its revision matches."
+        },
         "base_revision": {
           "$ref": "common.schema.json#/$defs/Revision",
           "description": "Required on a mutating command. Must equal the current snapshot_revision or the reply is a stale_revision error carrying the current snapshot."

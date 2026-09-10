@@ -444,6 +444,10 @@ func (s *Store) dispatchLockedGuarded(raw []byte, guard func(*Request) *Failure)
 		return Reply{}, command{}, nil, err
 	}
 	req.generation = s.generation
+	if req.ExpectedProjectID != "" && req.ExpectedProjectID != s.projectID() {
+		return errReply(req.RequestID, s.revision(), fail(CodeStaleRevision,
+			"The backend holds a different council than this request expected. Nothing was applied.", false)), command{}, &req, nil
+	}
 	if guard != nil {
 		if failure := guard(&req); failure != nil {
 			return errReply(req.RequestID, s.revision(), failure), command{}, &req, nil

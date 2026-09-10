@@ -987,14 +987,13 @@ same rule as the chat handoff (§5.3).
 **A signal carries no authority.** It says a document moved and to what revision;
 it never says what the record now is. A panel whose held revision is already at
 or past the announced one has nothing to do. Otherwise it adopts through the
-exchange it uses for its own mutations — relay a `snapshot.get`, which takes the
-lease, seeds if it must, reads the acknowledged snapshot back and persists it —
-so the lease, seed and epoch rules above hold unchanged, the wrapper adopts and
-never merges, and `content_changed` marks the tab dirty so the host's save writes
-what the engine holds. A panel that is not the holder and is not looking at a
-free engine does nothing: the engine is loaded with somebody else's document,
-what the signal described is no longer in it, and seeding to go looking would
-only replace their working copy with this one's.
+exchange with a read-only `snapshot.get`. Background convergence takes the lease
+but never seeds: a delayed event cannot reload an old panel copy over another
+panel's document. Requests carry `expected_project_id`, checked inside the engine
+lock before execution or idempotent replay, even when revisions match. The read
+returns its snapshot atomically; every returned snapshot is checked for matching
+identity before adoption. An unavailable document or a revision below the announced
+target leaves the panel visibly behind. Adoption marks the tab dirty.
 
 **Why a signal rather than a poll.** Determinism first: the announcement is
 minted inside the commit that produced the revision, so the pair is consistent by
@@ -1020,8 +1019,8 @@ fails leaves the panel marked as behind.
 `_on_panel_save_request()` and takes the dictionary (`vboxEditor.gd:494-499`,
 `Editor.gd:1727`) — so there is no hop it can wait for. A panel that knows it is
 behind and could not read the record back writes the copy it holds (losing it
-would be worse) and says so: a warning in the log and a sticky refusal in the
-page naming the reason, plus a retry scheduled for the next frame. A read in the
+would be worse) and says so: a banner and a sticky refusal in the
+page naming the reason, including while convergence is still queued, plus a retry scheduled for the next frame. A read in the
 same state waits for the convergence in flight and is then answered from the
 held record, because a council must stay readable with the backend stopped.
 

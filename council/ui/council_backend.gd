@@ -108,7 +108,7 @@ func _init(panel: Node, panel_key: String) -> void:
 ## or {} when nothing moved>}. The caller persists the snapshot; this class
 ## never keeps one, because a second copy of the record is a second place for it
 ## to be wrong.
-func relay(request: Dictionary, record: Dictionary, current_record := Callable()) -> Dictionary:
+func relay(request: Dictionary, record: Dictionary, current_record := Callable(), read_current_only := false) -> Dictionary:
 	var request_id := str(request.get("request_id", ""))
 	await _acquire()
 	# A queued exchange must read the durable record after acquiring the store.
@@ -119,7 +119,11 @@ func relay(request: Dictionary, record: Dictionary, current_record := Callable()
 			_release()
 			return {"reply": _failure(request_id, 1, "stale_revision",
 				"The panel opened a different council; re-read and try again.", true), "snapshot": {}}
-	var seeded := await _ensure_seeded(record)
+	# Background convergence only observes. It must never load an older panel
+	# snapshot over the current engine while waiting for the lease.
+	var seeded: Dictionary = {"ok": true, "snapshot": {}}
+	if not read_current_only:
+		seeded = await _ensure_seeded(record)
 	if not bool(seeded.get("ok", false)):
 		_set_holder("")
 		_release()
@@ -132,6 +136,10 @@ func relay(request: Dictionary, record: Dictionary, current_record := Callable()
 	if not carried.is_empty():
 		revision = int(carried.get("snapshot_revision", revision))
 
+	request = request.duplicate(true)
+	var expected := str(carried.get("project_id", record.get("project_id", "")))
+	if not expected.is_empty():
+		request["expected_project_id"] = expected
 	var sent := await _send(COMMAND_CHANNEL, request)
 	if not bool(sent.get("ok", false)):
 		_set_holder("")
@@ -146,14 +154,20 @@ func relay(request: Dictionary, record: Dictionary, current_record := Callable()
 	# us (auto_reload rebuilds the binary while panels stay mounted), so the
 	# holder we believe in is a fiction and every later exchange would skip the
 	# seed and loop on stale_revision. Forget it; the next exchange re-seeds.
-	if not bool(reply.get("ok", true)) \
-			and int(reply.get("snapshot_revision", revision)) != revision:
-		_set_holder("")
+	if not bool(reply.get("ok", true)) and _holder() == _panel_key:
+		var failure: Dictionary = reply.get("error", {})
+		if int(reply.get("snapshot_revision", revision)) != revision \
+				or str(failure.get("code", "")) == "stale_revision":
+			_set_holder("")
 
 	# The engine advanced the record: read the acknowledged snapshot back, because
 	# a command reply carries its own payload and not the record. Nothing is shown
 	# as saved before this returns.
-	if bool(reply.get("ok", false)) and int(reply.get("snapshot_revision", 0)) != revision:
+	if bool(reply.get("ok", false)) and str(request.get("command", "")) == "snapshot.get":
+		# This snapshot and its identity were read atomically by the command.
+		# An extra export hop could observe a different document loaded meanwhile.
+		carried = (reply.get("payload", {}) as Dictionary).get("snapshot", {})
+	elif bool(reply.get("ok", false)) and int(reply.get("snapshot_revision", 0)) != revision:
 		var exported := await _send(EXPORT_CHANNEL, {})
 		if bool(exported.get("ok", false)) and _refusal(exported.get("body", {})).is_empty():
 			var snapshot: Variant = (exported.get("body", {}) as Dictionary).get("snapshot", null)
@@ -244,20 +258,6 @@ func _ensure_seeded(record: Dictionary) -> Dictionary:
 			if snapshot is Dictionary:
 				return {"ok": true, "snapshot": snapshot}
 	return {"ok": true, "snapshot": {}}
-
-
-## Whether an exchange started now could reach THIS panel's record in the
-## engine: either the engine is already holding it, or it is holding nobody's
-## and the seed will be a `reopen` that keeps a later state of the same document.
-##
-## It is what a convergence asks before it reacts to a change the backend
-## announced. While another panel is the holder, the engine is loaded with
-## somebody else's document: the state the announcement described is no longer in
-## it, and seeding this panel's record to go looking for it would only replace
-## the other panel's working copy with this one's.
-func engine_holds_ours_or_nobody() -> bool:
-	var holder := _holder()
-	return holder.is_empty() or holder == _panel_key
 
 
 ## Forget that the engine holds this panel's record — nothing more.

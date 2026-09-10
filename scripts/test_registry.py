@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import textwrap
 import unittest
 from unittest.mock import patch
 
@@ -161,6 +162,27 @@ class CouncilReleaseTests(unittest.TestCase):
         self.assertIn('TAG="council-v${VERSION}"', self.workflow)
         self.assertIn("-branch-", self.workflow,
                       "a branch build must tag the sentinel the generator skips")
+
+    def test_stable_publication_requires_completed_acceptance(self):
+        gate = re.search(r'COUNCIL_STABLE_RELEASE: "(true|false)"', self.workflow)
+        self.assertIsNotNone(gate)
+        start = self.workflow.index('          VERSION=')
+        end = self.workflow.index('          bash scripts/release-publish-guard.sh', start)
+        script = textwrap.dedent(self.workflow[start:end])
+        version = self.manifest["version"]
+        for branch, enabled, tag, prerelease in (
+            ("main", "false", f"council-v{version}-branch-main", "true"),
+            ("main", "true", f"council-v{version}", "false"),
+            ("dcr/council", "true", f"council-v{version}-branch-dcr-council", "true"),
+        ):
+            with self.subTest(branch=branch, enabled=enabled), tempfile.TemporaryDirectory() as temp:
+                output = Path(temp) / "output"
+                env = dict(os.environ, GITHUB_REF_NAME=branch,
+                           COUNCIL_STABLE_RELEASE=enabled, GITHUB_OUTPUT=str(output))
+                subprocess.run(["bash", "-c", script], cwd=self.repo, env=env,
+                               check=True, capture_output=True, text=True)
+                values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+                self.assertEqual(values, {"tag": tag, "prerelease": prerelease})
 
     def test_tag_manifest_and_archive_name_agree_end_to_end(self):
         version = self.manifest["version"]
