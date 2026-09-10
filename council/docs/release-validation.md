@@ -18,6 +18,38 @@ records that the live run **did not happen**, and why.
 
 ---
 
+## C5 landing review addendum — 2026-09-10
+
+The implementation evidence below is historical. Codex reviewed `332f0d2` in
+`minerva-worktrees/council-c5-review` and added these corrections before landing:
+
+- `01a08bb1acf7`: known directives now recognize missing arguments and Unicode
+  whitespace through one reader. The regression test failed before the fix:
+  tabs/newlines after `/ask` or `/bench`, and bare council-selection directives,
+  opened consultations. It now verifies those inputs leave the record unchanged.
+- `01a08bb1b2f6`: Help reflects C4's cancellation fix and distinguishes a panel
+  closing from backend exit. The skill places `wait_seconds` at envelope level;
+  the tool schema now exposes that existing field. Generated pages were rebuilt.
+- `01a08bb2ec06` remains **open and blocks T12 and live acceptance**: chat/MCP
+  changes advance the backend but do not automatically reach the panel's local
+  record. Its Re-read is local, so saving it can omit recent results. This is a
+  code-review finding requiring a real-host reproduction and an ownership-aware
+  synchronization fix. README, Help and the skill no longer assume an open tab
+  proves direct writes are persisted. Preserve backend exports until resolved.
+
+Observed after the corrections: `go test -race -count=1 ./...` passed,
+`go vet ./...` passed, built-binary stdio smoke passed (initialize, nine tools,
+malformed-line recovery, shutdown, JSON-only stdout), page self-test **68/68**,
+and `node council/ui/build.mjs --check` passed. Logs are
+`/tmp/council-c5-go-final.log` and `/tmp/council-c5-page.html`.
+
+No GDScript changed and its suite was not rerun in this review; **78/78 at C4**
+remains its last observed result. No real provider was called. The real-model
+scenario and the wrapper text-derivation test remain open. Local integration
+landing does not satisfy these release gates.
+
+---
+
 ## 1. What this build is
 
 | | |

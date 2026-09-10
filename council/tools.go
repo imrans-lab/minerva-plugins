@@ -118,7 +118,8 @@ func newRegistry(store *session.Store) *registry {
 					"run.start", "run.await", "run.cancel", "run.retry", "outcome.retain", "outcome.mark_missing"
 				]},
 				"base_revision": {"type": "integer", "description": "The snapshot_revision this command was written against. Required by every mutating command, refused on a read."},
-				"payload": {"type": "object", "description": "Command arguments. See the Council architecture document for the shape each command takes."}
+				"payload": {"type": "object", "description": "Command arguments. See the Council architecture document for the shape each command takes."},
+				"wait_seconds": {"type": "integer", "minimum": 1, "maximum": 90, "description": "Top-level bounded wait for run.start, run.await or run.retry; defaults to 20 seconds."}
 			},
 			"required": ["request_id", "command", "payload"]
 		}`),

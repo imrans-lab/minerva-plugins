@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // The chat's directive surface: the lines a user types that Council reads as
@@ -41,34 +42,27 @@ func Directives() []string {
 	return []string{SelectSessionDirective, SelectCouncilDirective, BenchDirective, AskDirective}
 }
 
-// askArgument reports whether a turn is `/ask`, and what was typed after it.
-//
-// It matches the bare word as well as the prefix, and that is the whole point:
-// a turn is trimmed before the reader sees it, so a bare "/ask" tested only as
-// the prefix "/ask " would fall through to the ordinary question path and buy a
-// full round of the bench with "/ask" as the question.
-func askArgument(text string) (string, bool) {
-	if text == strings.TrimSpace(AskDirective) {
+// directiveArgument recognizes a complete directive token, including missing
+// arguments and Unicode whitespace. A mistyped command must reach its refusal
+// path rather than become an ordinary question that starts a paid round.
+func directiveArgument(text, directive string) (string, bool) {
+	token := strings.TrimSpace(directive)
+	if text == token {
 		return "", true
 	}
-	if rest, found := strings.CutPrefix(text, AskDirective); found {
+	head, rest := cutWord(text)
+	if head == token {
 		return strings.TrimSpace(rest), true
 	}
 	return "", false
 }
 
-// benchArgument reports whether a turn is `/bench`, and any words typed after
-// it. The directive takes no argument, so the extras are reported rather than
-// silently swallowed — a user who typed a question after it needs to know it
-// was not asked.
+func askArgument(text string) (string, bool) {
+	return directiveArgument(text, AskDirective)
+}
+
 func benchArgument(text string) (string, bool) {
-	if text == BenchDirective {
-		return "", true
-	}
-	if rest, found := strings.CutPrefix(text, BenchDirective+" "); found {
-		return strings.TrimSpace(rest), true
-	}
-	return "", false
+	return directiveArgument(text, BenchDirective)
 }
 
 // ---------------------------------------------------------------------------
@@ -287,12 +281,12 @@ const maxNameWords = 8
 // a re-joined field list, so whatever spacing the user typed inside their
 // question survives into the run's prompt.
 func cutWord(text string) (string, string) {
-	text = strings.TrimLeft(text, " \t")
+	text = strings.TrimLeftFunc(text, unicode.IsSpace)
 	if text == "" {
 		return "", ""
 	}
-	if cut := strings.IndexAny(text, " \t"); cut >= 0 {
-		return text[:cut], strings.TrimLeft(text[cut:], " \t")
+	if cut := strings.IndexFunc(text, unicode.IsSpace); cut >= 0 {
+		return text[:cut], strings.TrimLeftFunc(text[cut:], unicode.IsSpace)
 	}
 	return text, ""
 }

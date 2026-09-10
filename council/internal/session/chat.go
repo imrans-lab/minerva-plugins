@@ -115,10 +115,10 @@ func (s *chatScope) turn(turn ChatTurn, wait time.Duration) ChatTurnResult {
 	// previous turn's option card, or a line the user typed to aim a question
 	// or read the bench. All of them are handled before anything else, because
 	// none of them is a question for the council.
-	if rest, found := strings.CutPrefix(text, SelectSessionDirective); found {
+	if rest, found := directiveArgument(text, SelectSessionDirective); found {
 		return ChatTurnResult{Reply: s.chatSelectSession(chatID, strings.TrimSpace(rest))}
 	}
-	if rest, found := strings.CutPrefix(text, SelectCouncilDirective); found {
+	if rest, found := directiveArgument(text, SelectCouncilDirective); found {
 		return s.chatSelectCouncil(chatID, strings.TrimSpace(rest), wait)
 	}
 	if rest, found := askArgument(text); found {

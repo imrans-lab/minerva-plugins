@@ -93,6 +93,13 @@ Two ways to start one:
   project already holds, which is what stops an import from quietly overwriting
   a council you have edited.
 
+**Current persistence gate:** chat and direct MCP commands advance the backend,
+but the open panel can retain an older snapshot. Its Re-read currently reads
+that local copy. Preserve a `minerva_council_export_snapshot` result before
+closing or switching documents; verify the saved document contains those results
+before treating the consultation as saved. Backend-to-panel synchronization must
+be resolved before release.
+
 ## Asking from chat
 
 A consultation lives in a Minerva chat with Council chosen as its provider. Most
