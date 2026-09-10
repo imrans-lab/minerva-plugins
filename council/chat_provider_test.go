@@ -591,8 +591,12 @@ func sessionStatus(t *testing.T, store *session.Store, sessionID string) string 
 	return str(sessionRecord(t, store, sessionID)["status"])
 }
 
-// TestCouncilRegistersBeforeReadingTheModelCatalogue pins the ordering of the
-// startup handshake, and the fact that the two calls do not share a deadline.
+// TestCouncilRegistersBeforeReadingTheModelCatalogueAndWithdrawsOnShutdown
+// covers the whole life of the provider entry: it appears in the chooser, and
+// it leaves again.
+//
+// The first half pins the ordering of the startup handshake, and the fact that
+// the two calls do not share a deadline.
 //
 // The catalogue is 1 + N host round trips. If registration waited behind it on
 // one budget, a host slow to enumerate models would leave Council out of the
@@ -603,7 +607,15 @@ func sessionStatus(t *testing.T, store *session.Store, sessionID string) string 
 // The listings are held open for the whole assertion, so this cannot pass by
 // racing: if registration ran second it would still be waiting when the wait
 // below expires.
-func TestCouncilRegistersBeforeReadingTheModelCatalogue(t *testing.T) {
+//
+// The second half is the other end of the same promise, and the live check
+// states it as "stop the Council plugin and Council disappears from the
+// chooser". The host drops a dead plugin's entries by itself, so what is
+// actually at stake here is the ORDERLY case: withdraw has to reach the host
+// while the stream is still up, which means before serve returns. A withdraw
+// issued after the reader stops is a call nobody receives, and the symptom
+// would be an entry that survives a clean stop and answers nothing.
+func TestCouncilRegistersBeforeReadingTheModelCatalogueAndWithdrawsOnShutdown(t *testing.T) {
 	store, err := session.New()
 	if err != nil {
 		t.Fatal(err)
@@ -623,14 +635,45 @@ func TestCouncilRegistersBeforeReadingTheModelCatalogue(t *testing.T) {
 
 	// Released, the catalogue lands on its own budget and the engine picks it up.
 	host.openModels()
+	arrived := false
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, known := store.Models(); known {
-			return
+			arrived = true
+			break
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	t.Fatal("the catalogue never arrived after the host answered")
+	if !arrived {
+		t.Fatal("the catalogue never arrived after the host answered")
+	}
+
+	// --- the orderly stop -------------------------------------------------
+	// The oracle is the host's own record of what reached it, and the ordering
+	// is what makes it meaningful: serve must not have returned yet when the
+	// unregister arrived, so the assertion is made against the calls the host
+	// had received BEFORE it saw the loop end.
+	if calls := host.capabilityCalls("host.chat_providers.unregister"); len(calls) != 0 {
+		t.Fatalf("Council withdrew its entry before anyone asked it to stop: %v", calls)
+	}
+	if reply := host.rpc(2, "shutdown", map[string]any{}); reply == nil {
+		t.Fatal("shutdown was not answered")
+	}
+	select {
+	case err := <-host.done:
+		if err != nil {
+			t.Fatalf("serve returned an error on shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve did not return after shutdown")
+	}
+	withdrawn := host.capabilityCalls("host.chat_providers.unregister")
+	if len(withdrawn) != 1 {
+		t.Fatalf("an orderly shutdown withdraws the entry exactly once, the host saw %d calls", len(withdrawn))
+	}
+	if str(withdrawn[0].Args["entry_id"]) != chatEntryID {
+		t.Errorf("the entry withdrawn is not the one registered: %v", withdrawn[0].Args)
+	}
 }
 
 // TestCouncilChatDoesNotStartASecondRoundWhileOneIsRunning covers the double
@@ -891,5 +934,141 @@ func awaitTurn(t *testing.T, replies <-chan map[string]any) map[string]any {
 	case <-time.After(30 * time.Second):
 		t.Fatal("a chat turn never returned")
 		return nil
+	}
+}
+
+// TestABrokerRefusalBecomesAVisibleMemberFailureThatCanBeRetried covers the
+// failure a user actually meets on a first run: a provider with no key, a spent
+// budget, a service that is not configured. The host declines BEFORE a model is
+// reached, so nothing is wrong with the question and nothing about the answer
+// explains it — the whole value of the path is that the record says which
+// member could not be asked and that asking again is offered.
+//
+// It is driven through the shipped stdio adapter, so the refusal travels as the
+// broker's own {"success": false, error_code, error_message} envelope rather
+// than as a Go error invented here (CapabilityBroker.gd's PluginErrors.failure).
+//
+// Oracles:
+//   - the contribution's own failure record: code model_unavailable, because
+//     from the user's side there is a thing to fix and it is not the question;
+//     and a message that still carries the host's words, because "the request
+//     was refused" with no reason is not actionable;
+//   - the run and session status, derived from the run set rather than written
+//     by this path, which is what makes a partial round still useful;
+//   - the chat turn itself, which must answer rather than error, because the
+//     member that DID answer is worth reading;
+//   - the retry's model calls, which must re-ask the refused seat and nobody
+//     else — a retry that re-asked the whole bench would spend twice for one
+//     missing answer.
+func TestABrokerRefusalBecomesAVisibleMemberFailureThatCanBeRetried(t *testing.T) {
+	store, err := session.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.SetClock(func() string { return "2026-01-01T00:00:00Z" })
+	host := newProviderHost(t, store)
+	host.answerWith(benchAnswer)
+
+	// Matched on the member's scope, which is the only thing on the wire that
+	// tells the seats apart (prompt.go memberSystem).
+	const costingScope = "against the bench time it consumes"
+	const brokerCode = "provider_key_missing"
+	const brokerMessage = "OpenAI has no API key configured."
+	refusing := true
+	host.refuseWith(func(args map[string]any) (string, string) {
+		if refusing && strings.Contains(systemOf(args), costingScope) {
+			return brokerCode, brokerMessage
+		}
+		return "", ""
+	})
+
+	host.rpc(1, "initialize", map[string]any{})
+	host.awaitCapability("host.chat_providers.register")
+	seedDefinition(t, host, store, 2, twoAdvisorCouncil(t), "req-seed")
+
+	const chatID = "chat-refused"
+	answer := host.turn(3, chatID, "Should the workshop take the recurring order?")
+	if kind := str(answer["kind"]); kind != session.ChatAnswer {
+		t.Fatalf("a round that lost one member still has an answer to give; got %v", answer)
+	}
+	sessionID := sessionBoundTo(t, store, chatID)
+	if sessionID == "" {
+		t.Fatal("the turn must leave a session bound to its chat")
+	}
+
+	run := lastRun(t, store, sessionID)
+	var refused, answered map[string]any
+	for _, x := range run["contributions"].([]any) {
+		contribution, _ := x.(map[string]any)
+		switch str(contribution["seat_id"]) {
+		case "seat-costing":
+			refused = contribution
+		case "seat-capacity":
+			answered = contribution
+		}
+	}
+	if refused == nil || answered == nil {
+		t.Fatalf("both advisors must be recorded, whatever happened to them: %v", run["contributions"])
+	}
+	if status := str(refused["status"]); status != "failed" {
+		t.Fatalf("a member the host would not ask reads failed, not %q", status)
+	}
+	failure, _ := refused["failure"].(map[string]any)
+	if code := str(failure["code"]); code != session.CodeModelUnavailable {
+		t.Errorf("a refusal before the model is reached is %q, got %q", session.CodeModelUnavailable, code)
+	}
+	// The host's own words survive the hop. Without them the user is told a
+	// member failed and given nothing to act on.
+	if message := str(failure["message"]); !strings.Contains(message, brokerCode) || !strings.Contains(message, brokerMessage) {
+		t.Errorf("the failure must carry what the host said; got %q", message)
+	}
+	if str(answered["status"]) != "complete" {
+		t.Errorf("the member that answered must be unaffected, got %q", answered["status"])
+	}
+	// Status is derived from the run set, so this is the derivation's answer to
+	// "some members answered and some did not", not a label this path wrote.
+	if status := str(run["status"]); status != "partial" {
+		t.Errorf("a round that lost one member of two is partial, got %q", status)
+	}
+	if status := sessionStatus(t, store, sessionID); status != "partial" {
+		t.Errorf("the session takes the last run's reading, got %q", status)
+	}
+	if failure["retryable"] != true {
+		t.Error("a refusal the user can fix must be marked retryable, or the panel offers no way back")
+	}
+
+	// --- and asking again, once the key is there --------------------------
+	refusing = false
+	before := len(host.modelCalls())
+	retried := host.tool(4, "minerva_council_command", map[string]any{
+		"request_id":    "req-retry",
+		"command":       "run.retry",
+		"base_revision": store.Revision(),
+		"payload":       map[string]any{"session_id": sessionID, "run_id": str(run["run_id"])},
+	})
+	if ok, _ := retried["ok"].(bool); !ok {
+		t.Fatalf("run.retry: %v", retried)
+	}
+	after := host.modelCalls()[before:]
+	seats := map[string]int{}
+	for _, call := range after {
+		system := systemOf(call)
+		switch {
+		case strings.Contains(system, "chairing a council"):
+			seats["chair"]++
+		case strings.Contains(system, costingScope):
+			seats["costing"]++
+		default:
+			seats["capacity"]++
+		}
+	}
+	if seats["costing"] != 1 || seats["capacity"] != 0 {
+		t.Fatalf("a retry re-asks only the seats that did not answer; the host saw %v", seats)
+	}
+	if seats["chair"] != 1 {
+		t.Errorf("the retry needs its own synthesis over the completed bench, got %d chair calls", seats["chair"])
+	}
+	if status := str(lastRun(t, store, sessionID)["status"]); status != "complete" {
+		t.Fatalf("the retried round completed the bench, so it reads complete, got %q", status)
 	}
 }

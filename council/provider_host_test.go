@@ -74,6 +74,14 @@ type providerHost struct {
 	// a call that arrived rather than only as one that completed.
 	chatCalls []map[string]any
 
+	// refuseFor, when a test installs one, turns a model call into a BROKER
+	// refusal instead of an answer: the {"success": false, error_code,
+	// error_message} envelope the host sends when it declines before a model is
+	// reached — no key, no budget, a provider that is not configured. It is the
+	// failure a user actually meets, and it looks nothing like a model that
+	// answered badly. An empty code means "answer this one normally".
+	refuseFor func(args map[string]any) (code string, message string)
+
 	// answerFor, when a test installs one, decides what each model call
 	// answers from the call itself. The default answers every member the same
 	// way; a test that asserts on WHO answered what has to tell them apart, and
@@ -266,10 +274,20 @@ func (h *providerHost) answerCapability(message map[string]any) {
 		// arrived.
 		h.mu.Lock()
 		h.chatCalls = append(h.chatCalls, args)
-		answerFor := h.answerFor
+		answerFor, refuseFor := h.answerFor, h.refuseFor
 		h.mu.Unlock()
 		if gate != nil {
 			<-gate
+		}
+		if refuseFor != nil {
+			if code, reason := refuseFor(args); code != "" {
+				h.write(map[string]any{"jsonrpc": "2.0", "id": message["id"], "result": map[string]any{
+					"success":       false,
+					"error_code":    code,
+					"error_message": reason,
+				}})
+				return
+			}
 		}
 		content := modelAnswer("The bench answered.")
 		if answerFor != nil {
@@ -309,6 +327,14 @@ func (h *providerHost) holdModels() {
 	defer h.mu.Unlock()
 	h.modelsGate = make(chan struct{})
 	h.modelsOpen = false
+}
+
+// refuseWith installs a per-call broker refusal, under the lock for the same
+// reason answerWith is.
+func (h *providerHost) refuseWith(refuse func(args map[string]any) (string, string)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.refuseFor = refuse
 }
 
 // answerWith installs a per-call answer. Set under the lock, like the gates,

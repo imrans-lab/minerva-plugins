@@ -176,13 +176,31 @@ func contains(values []string, want string) bool {
 // the registered entry names generate_tool and cancel_tool, and the broker
 // refuses a name that is not one of this plugin's own declared tools
 // (CapabilityBroker.gd:3568-3577).
+//
+// It also pins the three identity fields the install depends on — the id and
+// version the backend reports back at initialize, and the setup step whose
+// output has to be the file the backend stanza starts. Those drift silently:
+// an install that builds one binary and looks for another fails at start with
+// nothing in it that names the manifest.
 func TestManifestAdvertisesExactlyTheToolsTheBackendAnswers(t *testing.T) {
 	var m struct {
+		ID      string `json:"id"`
+		Version string `json:"version"`
+		Backend struct {
+			Entrypoint string `json:"entrypoint"`
+		} `json:"backend"`
 		Tools []struct {
 			Name        string          `json:"name"`
 			Description string          `json:"description"`
+			Executor    string          `json:"executor"`
 			InputSchema json.RawMessage `json:"input_schema"`
 		} `json:"tools"`
+		Setup struct {
+			Steps []struct {
+				Type   string `json:"type"`
+				Output string `json:"output"`
+			} `json:"steps"`
+		} `json:"setup"`
 		Permissions struct {
 			HostCapabilities []string `json:"host_capabilities"`
 		} `json:"permissions"`
@@ -194,6 +212,22 @@ func TestManifestAdvertisesExactlyTheToolsTheBackendAnswers(t *testing.T) {
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatal(err)
 	}
+	if m.Version != serverVersion {
+		t.Errorf("manifest version %q but the server reports %q", m.Version, serverVersion)
+	}
+	if m.ID != serverName {
+		t.Errorf("manifest id %q but the server reports %q", m.ID, serverName)
+	}
+	// The setup stanza is a promise that a clean checkout produces the
+	// entrypoint. If the two names drift, the install builds one file and looks
+	// for another.
+	if len(m.Setup.Steps) != 1 || m.Setup.Steps[0].Type != "go_build" {
+		t.Fatalf("expected one go_build setup step, got %v", m.Setup.Steps)
+	}
+	if "./"+m.Setup.Steps[0].Output != m.Backend.Entrypoint {
+		t.Errorf("the build produces %q but the backend starts %q", m.Setup.Steps[0].Output, m.Backend.Entrypoint)
+	}
+
 	store, err := session.New()
 	if err != nil {
 		t.Fatal(err)
@@ -204,6 +238,12 @@ func TestManifestAdvertisesExactlyTheToolsTheBackendAnswers(t *testing.T) {
 	for _, tool := range m.Tools {
 		if tool.Description == "" {
 			t.Errorf("tool %q is advertised with no description; that is what a caller reads", tool.Name)
+		}
+		// Every Council tool is answered by the backend process. A tool marked
+		// for the panel would be dispatched into the scene instead, which has
+		// no handler for one.
+		if tool.Executor != "" && tool.Executor != "backend" {
+			t.Errorf("tool %q declares executor %q; Council answers every tool in its backend", tool.Name, tool.Executor)
 		}
 		declared[tool.Name] = tool.Description
 		var schema any

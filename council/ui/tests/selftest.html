@@ -149,8 +149,19 @@
             return p.textContent.indexOf('Answered by') === 0;
           }), (q(w, '#reading .provenance') || {}).textContent);
 
+        // The oracle is the interactive surface, not the bundle. The page ships
+        // its JavaScript as inline <script> elements inside <body>, so a scan of
+        // body.textContent reads the SOURCE rather than the interface: it fails
+        // the moment any string in the code contains the word, and it would pass
+        // an invite button whose label said "add a seat". What "offers no invite
+        // control" means is that nothing a person can press asks for one.
         check('v0.1 offers no invite control anywhere',
-          w.document.body.textContent.toLowerCase().indexOf('invite') < 0);
+          all(w, '#panel :is(button,a,input,select,textarea,[role="button"],[onclick])')
+            .every(function (control) {
+              return [control.textContent, control.getAttribute('aria-label'),
+                control.getAttribute('title'), control.value]
+                .join(' ').toLowerCase().indexOf('invite') < 0;
+            }));
 
         check('the absent keep-as-a-note control is explained where it would be',
           q(w, '#reading').textContent.indexOf('cannot create a note itself yet') > 0

@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"io"
-	"os"
 	"reflect"
 	"strconv"
 	"strings"
@@ -564,89 +563,6 @@ func TestStdioProtocolEndToEnd(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("serve did not return after shutdown")
-	}
-}
-
-// TestManifestMatchesTheToolRegistry pins the two files that must agree for the
-// plugin to install and dispatch: manifest.json is what the host registers, and
-// the registry is what answers tools/call. The manifest is the oracle for the
-// advertised version and for the artifact the build produces.
-func TestManifestMatchesTheToolRegistry(t *testing.T) {
-	raw, err := os.ReadFile("manifest.json")
-	if err != nil {
-		t.Fatalf("read manifest.json: %v", err)
-	}
-	var manifest struct {
-		ID      string `json:"id"`
-		Version string `json:"version"`
-		Backend struct {
-			Entrypoint string `json:"entrypoint"`
-		} `json:"backend"`
-		Tools []struct {
-			Name        string          `json:"name"`
-			Description string          `json:"description"`
-			Executor    string          `json:"executor"`
-			InputSchema json.RawMessage `json:"input_schema"`
-		} `json:"tools"`
-		Setup struct {
-			Steps []struct {
-				Type   string `json:"type"`
-				Output string `json:"output"`
-			} `json:"steps"`
-		} `json:"setup"`
-	}
-	if err := json.Unmarshal(raw, &manifest); err != nil {
-		t.Fatalf("parse manifest.json: %v", err)
-	}
-
-	if manifest.Version != serverVersion {
-		t.Fatalf("manifest version %q but the server reports %q", manifest.Version, serverVersion)
-	}
-	if manifest.ID != serverName {
-		t.Fatalf("manifest id %q but the server reports %q", manifest.ID, serverName)
-	}
-	// The setup stanza is a promise that a clean checkout produces the
-	// entrypoint. If the two names drift, the install builds one file and looks
-	// for another.
-	if len(manifest.Setup.Steps) != 1 || manifest.Setup.Steps[0].Type != "go_build" {
-		t.Fatalf("expected one go_build setup step, got %v", manifest.Setup.Steps)
-	}
-	if "./"+manifest.Setup.Steps[0].Output != manifest.Backend.Entrypoint {
-		t.Fatalf("the build produces %q but the backend starts %q", manifest.Setup.Steps[0].Output, manifest.Backend.Entrypoint)
-	}
-
-	store, err := session.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	registered := map[string]toolSpec{}
-	for _, spec := range newRegistry(store).specs() {
-		registered[spec.Name] = spec
-	}
-	if len(manifest.Tools) != len(registered) {
-		t.Fatalf("manifest declares %d tools, the registry serves %d", len(manifest.Tools), len(registered))
-	}
-	for _, declared := range manifest.Tools {
-		spec, ok := registered[declared.Name]
-		if !ok {
-			t.Fatalf("manifest declares %q, which the registry does not serve", declared.Name)
-		}
-		if declared.Executor != "" && declared.Executor != "backend" {
-			t.Fatalf("%s: this build has no panel, so every tool is executor \"backend\"", declared.Name)
-		}
-		if declared.Description != spec.Description {
-			t.Fatalf("%s: manifest and registry descriptions differ", declared.Name)
-		}
-		var fromManifest, fromRegistry any
-		if err := json.Unmarshal(declared.InputSchema, &fromManifest); err != nil {
-			t.Fatalf("%s: manifest input_schema: %v", declared.Name, err)
-		}
-		if err := json.Unmarshal(spec.InputSchema, &fromRegistry); err != nil {
-			t.Fatalf("%s: registry input schema: %v", declared.Name, err)
-		}
-		if !reflect.DeepEqual(fromManifest, fromRegistry) {
-			t.Fatalf("%s: manifest and registry input schemas differ", declared.Name)
-		}
 	}
 }
 

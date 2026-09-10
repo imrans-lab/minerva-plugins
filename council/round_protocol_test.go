@@ -753,7 +753,118 @@ func TestBoundedRoundDrivenByAFakeHost(t *testing.T) {
 	}
 
 	// -------------------------------------------------------------------
-	// 9. The real adapter: a host that answers, and a host that does not
+	// 9. A round that outruns its wait, read with run.await
+	//
+	// This is the half of the transport ruling nothing above reaches. Every
+	// section so far used the default wait and the round finished inside it, so
+	// run.start could be read as "blocks until done". It is not: it answers
+	// within wait_seconds and the round keeps going behind it, which is what
+	// keeps a long council under the host's own 120 s call_tool budget.
+	//
+	// Oracles, all of them read from the record rather than from timing:
+	//   - run.start's own reply, which must say the run is still going;
+	//   - run.await's resting flag, false while the round is in flight and true
+	//     once it is not, with the finished contributions and the synthesis in
+	//     the same payload;
+	//   - the fake's call count across the whole section, which is what makes
+	//     "the reply came back early" different from "a second round started";
+	//   - the refusals, which are the classification: run.await is a READ, so a
+	//     base_revision on it is refused the way one is on snapshot.get.
+	//
+	// It is also the re-entrancy proof. The await below is a second tools/call
+	// arriving while the first round is executing; an adapter that answered
+	// requests strictly in order would not answer it until the round ended, and
+	// the resting:false assertion would fail as a timeout rather than pass.
+	//
+	// The members are held on a GATE rather than a sleep. A sleep would make
+	// "the round is still going when the wait expires" a race between two
+	// durations, and the test could then flake in either direction — green
+	// because the machine was slow, red because it was fast. With a gate the
+	// round provably cannot finish before the test opens it, so every assertion
+	// below rests on the record and none of them rests on timing.
+	// -------------------------------------------------------------------
+	slowRelease := make(chan struct{})
+	models.configure(2, func(ctx context.Context, _ session.ModelCall) (session.ModelReply, error) {
+		// Honouring the context matters: a member that ignored cancellation
+		// would outlive the test rather than fail it.
+		select {
+		case <-slowRelease:
+		case <-ctx.Done():
+			return session.ModelReply{}, ctx.Err()
+		}
+		return session.ModelReply{
+			ModelID: "fake-model-slow", PromptTokens: 10, CompletionTokens: 4, UsageReported: true,
+			Text: modelAnswer("Answered after the wait had already elapsed."),
+		}, nil
+	})
+
+	slowStart := payloadOf(t, commandWaiting("run.start", map[string]any{"session_id": "ses-recurring-order"}, 1))
+	slowRunID, _ := slowStart["run_id"].(string)
+	if slowRunID == "" {
+		t.Fatalf("run.start must name the run it set going even when it cannot report the answer: %v", slowStart)
+	}
+	switch status, _ := slowStart["status"].(string); status {
+	case "pending", "running":
+	default:
+		t.Fatalf("no member can have answered while the gate is shut; run.start said %q", status)
+	}
+
+	// A read carries no base_revision. The engine classifies by command, so a
+	// caller that sent one would be telling it this changes the document.
+	refusalSaying(t, host.command(nextID(), schemas, map[string]any{
+		"request_id":    "await-with-base",
+		"command":       "run.await",
+		"base_revision": store.Revision(),
+		"payload":       map[string]any{"session_id": "ses-recurring-order", "run_id": slowRunID},
+	}), "base_revision")
+
+	// Still going, and saying so rather than waiting forever.
+	watching := payloadOf(t, commandWaiting("run.await", map[string]any{
+		"session_id": "ses-recurring-order", "run_id": slowRunID,
+	}, 1))
+	if resting, _ := watching["resting"].(bool); resting {
+		t.Fatalf("run.await reported the round at rest while the members were still held: %v", watching)
+	}
+
+	// And now let go. The same command, given room, answers with the finished
+	// round — which is what makes it a way to READ a run rather than a second
+	// way to start one. The chair is behind the same gate, so opening it here
+	// releases the whole remaining round.
+	close(slowRelease)
+	settled := payloadOf(t, commandWaiting("run.await", map[string]any{
+		"session_id": "ses-recurring-order", "run_id": slowRunID,
+	}, 10))
+	if resting, _ := settled["resting"].(bool); !resting {
+		t.Fatalf("run.await did not reach rest inside ten seconds: %v", settled)
+	}
+	if status, _ := settled["status"].(string); status != "complete" {
+		t.Fatalf("the round finished as %q, not complete: %v", status, settled)
+	}
+	if settled["synthesis"] == nil {
+		t.Error("a completed round read through run.await must carry the chair's synthesis")
+	}
+	for _, x := range settled["contributions"].([]any) {
+		contribution, _ := x.(map[string]any)
+		if status, _ := contribution["status"].(string); status != "complete" {
+			t.Errorf("%v was left at %q by a round the await says is at rest", contribution["seat_id"], status)
+		}
+	}
+	// Two advisors and the chair, once. A run.start that had restarted the
+	// round when its wait expired, or an await that had started one of its own,
+	// shows up here and nowhere else.
+	if calls, _ := models.recorded(); len(calls) != 3 {
+		t.Fatalf("the whole section is one round: two advisors and the chair, the fake saw %d calls", len(calls))
+	}
+
+	// A run the document does not hold is answered, not waited on: the caller
+	// asking about a run that finished into a replaced document deserves a
+	// reply rather than a timeout.
+	refusalSaying(t, commandWaiting("run.await", map[string]any{
+		"session_id": "ses-recurring-order", "run_id": "run-that-never-was",
+	}, 1), "run-that-never-was")
+
+	// -------------------------------------------------------------------
+	// 10. The real adapter: a host that answers, and a host that does not
 	//
 	// Everything above answered through the fake. This section replaces it with
 	// the shipped stdioChatHost, driven by the shipped reader, so the

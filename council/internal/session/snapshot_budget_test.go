@@ -90,4 +90,32 @@ func TestLoadReservesInterruptedSnapshotGrowth(t *testing.T) {
 	if !reflect.DeepEqual(before, s.Export()) {
 		t.Fatal("refused load changed state")
 	}
+
+	// A document that is ALREADY over the hop on arrival is the other half of
+	// the same ceiling, and the one a user meets: the file opens, and the only
+	// thing they can act on is what the refusal says. So the assertion is the
+	// message — the two byte counts and what the document holds — rather than
+	// the fact of an error, which on its own would send them to a log.
+	con["text"] = strings.Repeat("x", 32768)
+	oversized, _ := json.Marshal(snap)
+	if len(oversized) <= MaxEnvelopeBytes {
+		t.Fatalf("the oversized fixture is only %d bytes, which the hop carries", len(oversized))
+	}
+	_, err = s.Load(oversized)
+	if err == nil {
+		t.Fatal("a document larger than the host's IPC hop was accepted")
+	}
+	for _, expected := range []string{
+		fmt.Sprintf("%d bytes", len(oversized)),
+		fmt.Sprintf("carries %d", MaxEnvelopeBytes),
+		fmt.Sprintf("holds %d council(s)", len(arr(snap["definitions"]))),
+		fmt.Sprintf("%d session(s)", len(arr(snap["sessions"]))),
+	} {
+		if !strings.Contains(err.Error(), expected) {
+			t.Errorf("the refusal must say %q so it is actionable; got %q", expected, err.Error())
+		}
+	}
+	if !reflect.DeepEqual(before, s.Export()) {
+		t.Fatal("a refused oversized load changed state")
+	}
 }

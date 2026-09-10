@@ -216,6 +216,89 @@ func TestGroundedMemberLifecycleOverTheProtocol(t *testing.T) {
 		t.Fatalf("the first capture of src-doubled is revision 1, got %v", doubled["source_revision"])
 	}
 
+	// --- upsert: a record the caller already built -------------------------
+	//
+	// source.upsert is the other door onto the same shelf, and it exists for a
+	// caller that has the record already — an import, a migration, a page that
+	// derived the spans itself. What separates it from capture is that nothing
+	// is derived here: the anchors are the caller's placement and the engine
+	// stores them as given. The oracle is the fetched record compared with the
+	// bytes that were sent, on the ONE case where a derivation would differ —
+	// a quote that appears twice, pinned to the FIRST occurrence, which capture
+	// refuses to guess at (above) and upsert must not silently move.
+	firstTelling := strings.Index(doubledNote, doubledQuote)
+	built := map[string]any{
+		"source_id":       "src-doubled",
+		"source_revision": 2,
+		"title":           "A note that repeats itself, placed by the caller (fixture text)",
+		"locator":         "note: doubled",
+		"captured_at":     "2026-09-08T12:00:00Z",
+		"content_hash":    sha256Of(doubledNote),
+		"payload": map[string]any{
+			"content_type": "text/plain",
+			"byte_length":  len(doubledNote),
+			"content_hash": sha256Of(doubledNote),
+			"inline":       doubledNote,
+		},
+		"anchors": []any{map[string]any{
+			"anchor_id": "anc-first-telling",
+			"quote":     doubledQuote,
+			"start":     firstTelling,
+			"end":       firstTelling + len(doubledQuote),
+		}},
+	}
+	upserted := payloadOf(t, run("source.upsert", map[string]any{
+		"definition_id": definitionID,
+		"source":        deepCopyJSON(t, built),
+	}))
+	if got, _ := upserted["source_revision"].(float64); int(got) != 2 {
+		t.Fatalf("upsert stored the revision the caller named, expected 2, got %v", upserted["source_revision"])
+	}
+	// Capturing material changes the council, whichever door it came through.
+	if got, _ := upserted["definition_revision"].(float64); int(got) <= 0 {
+		t.Fatalf("upsert must advance the definition, got %v", upserted["definition_revision"])
+	}
+
+	back := payloadOf(t, run("source.fetch", map[string]any{
+		"definition_id":   definitionID,
+		"source_id":       "src-doubled",
+		"source_revision": 2,
+	}))
+	asStored, _ := back["source"].(map[string]any)
+	storedAnchor, _ := asStored["anchors"].([]any)[0].(map[string]any)
+	if int(storedAnchor["start"].(float64)) != firstTelling {
+		t.Fatalf("upsert re-derived the anchor to %v; the caller pinned the first telling at %d",
+			storedAnchor["start"], firstTelling)
+	}
+	if kept, _ := asStored["payload"].(map[string]any)["inline"].(string); kept != doubledNote {
+		t.Fatal("upsert did not store the payload it was given")
+	}
+
+	// A revision is a capture and never an edit, so the pair cannot be reused:
+	// a past contribution has to stay inspectable against the bytes it read.
+	refusalSaying(t, run("source.upsert", map[string]any{
+		"definition_id": definitionID,
+		"source":        deepCopyJSON(t, built),
+	}), "never an edit of an old one")
+
+	// The commit path validates the whole snapshot, so a record whose declared
+	// hash does not describe the bytes beside it is refused here rather than
+	// becoming a source whose citations resolve against something else.
+	lying := deepCopyJSON(t, built)
+	lying["source_revision"] = 3
+	lying["payload"].(map[string]any)["inline"] = doubledNote + " And one more sentence."
+	refusalSaying(t, run("source.upsert", map[string]any{
+		"definition_id": definitionID,
+		"source":        lying,
+	}), "content_hash")
+
+	// And a council that is not in this project is named as such, rather than
+	// the material landing somewhere it was not meant for.
+	refusalSaying(t, run("source.upsert", map[string]any{
+		"definition_id": "def-not-here",
+		"source":        deepCopyJSON(t, built),
+	}), "is not in this project")
+
 	// --- identity: a member exists before it holds a seat -----------------
 	simulant := map[string]any{
 		"member_id":    "mem-bench",
@@ -428,14 +511,37 @@ func TestGroundedMemberLifecycleOverTheProtocol(t *testing.T) {
 		"base_revision": storeB.Revision(),
 		"payload":       map[string]any{"definition": portable},
 	}))
+	// One entry per withheld CAPTURE, not per source: src-doubled travelled as
+	// two revisions and each is a distinct set of bytes a citation can point at,
+	// so an import that collapsed them would leave one of them unrepairable.
 	missing, _ := imported["sources_without_content"].([]any)
-	named := map[string]bool{}
+	named := map[string]int{}
 	for _, x := range missing {
 		id, _ := x.(map[string]any)["source_id"].(string)
-		named[id] = true
+		named[id]++
 	}
-	if len(missing) != 2 || !named["src-private-notes"] || !named["src-doubled"] {
-		t.Fatalf("an import must name every source it could not bring: %v", missing)
+	if len(missing) != 3 || named["src-private-notes"] != 1 || named["src-doubled"] != 2 {
+		t.Fatalf("an import must name every capture it could not bring: %v", missing)
+	}
+
+	// The caller-placed anchor survived export and import as inventory: a
+	// re-derivation anywhere on that path would have moved it to the other
+	// telling of the same sentence.
+	var carried map[string]any
+	for _, x := range portable["sources"].([]any) {
+		entry, _ := x.(map[string]any)
+		id, _ := entry["source_id"].(string)
+		revision, _ := entry["source_revision"].(float64)
+		if id == "src-doubled" && int(revision) == 2 {
+			carried = entry
+		}
+	}
+	if carried == nil {
+		t.Fatal("the caller-placed capture did not travel in the export at all")
+	}
+	carriedAnchor, _ := carried["anchors"].([]any)[0].(map[string]any)
+	if got, _ := carriedAnchor["start"].(float64); int(got) != firstTelling {
+		t.Errorf("the exported inventory moved the caller's anchor to %v, not %d", carriedAnchor["start"], firstTelling)
 	}
 
 	// Material that is not what the inventory recorded is not a repair.
@@ -501,14 +607,31 @@ func TestGroundedMemberLifecycleOverTheProtocol(t *testing.T) {
 	if flag, _ := repairedDoubled["repaired"].(bool); !flag {
 		t.Fatalf("a repeated sentence must not stop a hash-proven repair: %v", repairedDoubled)
 	}
+	// Naming the revision is how a past contribution is read against the bytes
+	// it actually saw. Omitting it answers with the NEWEST capture instead —
+	// here the caller-placed revision 2, which sits on the other telling — so
+	// the two fetches are also the oracle for that distinction.
 	doubledBack := payloadOf(t, hostB.command(6, schemas, map[string]any{
 		"request_id": "b-fetch-doubled",
 		"command":    "source.fetch",
-		"payload":    map[string]any{"definition_id": definitionID, "source_id": "src-doubled"},
+		"payload":    map[string]any{"definition_id": definitionID, "source_id": "src-doubled", "source_revision": 1},
 	}))
 	doubledAnchor, _ := doubledBack["source"].(map[string]any)["anchors"].([]any)[0].(map[string]any)
 	if got := int(doubledAnchor["start"].(float64)); got != secondTelling {
 		t.Errorf("the repair moved the anchor from %d to %d; a citation now points at the other telling", secondTelling, got)
+	}
+	newestDoubled := payloadOf(t, hostB.command(7, schemas, map[string]any{
+		"request_id": "b-fetch-doubled-newest",
+		"command":    "source.fetch",
+		"payload":    map[string]any{"definition_id": definitionID, "source_id": "src-doubled"},
+	}))
+	newestCapture, _ := newestDoubled["source"].(map[string]any)
+	if got, _ := newestCapture["source_revision"].(float64); int(got) != 2 {
+		t.Fatalf("a fetch with no revision must answer with the newest capture, got revision %v", newestCapture["source_revision"])
+	}
+	newestAnchor, _ := newestCapture["anchors"].([]any)[0].(map[string]any)
+	if got, _ := newestAnchor["start"].(float64); int(got) != firstTelling {
+		t.Errorf("the newest capture's anchor is at %v; the caller placed it at %d", newestAnchor["start"], firstTelling)
 	}
 }
 
