@@ -998,10 +998,14 @@ only replace their working copy with this one's.
 
 **Why a signal rather than a poll.** Determinism first: the announcement is
 minted inside the commit that produced the revision, so the pair is consistent by
-construction and no window exists in which a change has happened and nothing
-knows it — a poll's answer is only ever as fresh as its last tick, and a poll
-that ran during another panel's exchange would read a revision belonging to a
-different document. Reliability and durability: one write path, one announcement,
+construction and every commit produces exactly one — where a poll's answer is
+only ever as fresh as its last tick, and a poll that ran during another panel's
+exchange would read a revision belonging to a different document. What is
+consistent is what the ENGINE knows. The wrapper learns when the host delivers,
+and there is a window between the commit and that delivery in which a save
+writes the older copy with nothing said; what closes it is that the panel
+re-marks the tab as changed the moment it adopts, so the next save carries the
+result. Reliability and durability: one write path, one announcement,
 and the panel still reads the record back through the exchange that already
 proves the engine holds its document. Performance and cost: nothing is spent
 while nothing changes, and a burst of contributions inside one round is coalesced

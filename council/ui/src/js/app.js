@@ -41,6 +41,10 @@
 
   var ui = {};
   var bridge = null;
+  // Whether the refusal currently up is the wrapper's "this council is behind"
+  // one. The wrapper says when that stops being true, and only that refusal is
+  // taken down then — one the reader is looking at for another reason stays.
+  var syncRefusal = false;
   var textSize = null;
 
   // ------------------------------------------------------------- messages
@@ -799,7 +803,15 @@
       // acknowledged, because what it says is that what was saved is missing
       // something.
       if (event.event === 'council.sync_warning') {
+        syncRefusal = true;
         refuse({ message: (event.payload || {}).message || 'This council is behind the Council backend.' });
+        return;
+      }
+      // And the wrapper caught up. A refusal that outlives what it was about
+      // sends a reader looking for a problem that is not there.
+      if (event.event === 'council.sync_cleared') {
+        if (syncRefusal && state.refusal) { say(''); }
+        syncRefusal = false;
         return;
       }
       // Everything else says the record moved. The page re-reads rather than

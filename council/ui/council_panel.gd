@@ -126,6 +126,19 @@ var _sync_pending: bool = false
 var _sync_running: bool = false
 var _sync_problem: String = ""
 
+## The highest revision the backend has announced for this document, and the
+## thing that keeps the panel's OWN mutations from costing a second exchange:
+## the engine announces those too, the announcement is delivered while the
+## panel's own relay is still in flight, and by the time the convergence runs
+## the reply has already brought that very revision back. A relay is only worth
+## sending while the held record is behind this.
+var _sync_target: int = 0
+
+## Whether the "this council is behind" report is on screen. It gates the clear,
+## so an ordinary convergence does not push a dismissal at a page that was never
+## told anything.
+var _behind_shown: bool = false
+
 ## Emitted when a convergence attempt ends, whether or not it succeeded.
 signal sync_settled()
 
@@ -195,8 +208,13 @@ func _on_panel_unload() -> void:
 ## is missing what the engine has. The retry is scheduled rather than awaited.
 func _on_panel_save_request() -> Dictionary:
 	if _sync_pending:
-		push_warning("[Council] " + _behind_message())
-		_report_behind()
+		# Only a convergence that has actually FAILED is reported. Between the
+		# announcement and the deferred convergence there is nothing to tell the
+		# reader yet — saying "the backend could not be reached" there would be
+		# untrue — and the retry below re-marks the tab as soon as it adopts.
+		if not _sync_problem.strip_edges().is_empty():
+			push_warning("[Council] " + _behind_message())
+			_report_behind()
 		_converge.call_deferred()
 	return _record.save_payload()
 
@@ -235,6 +253,7 @@ func _adopting_new_document() -> void:
 	# this one, and a convergence still in flight is discarded by the epoch.
 	_sync_pending = false
 	_sync_problem = ""
+	_sync_target = 0
 	_clear_behind()
 	if _backend != null:
 		_backend.forget_seed()
@@ -274,8 +293,10 @@ func _on_backend_record_changed(payload: Dictionary) -> void:
 	var project_id := _record.project_id()
 	if project_id.is_empty() or project_id != str(payload.get("project_id", "")):
 		return
-	if int(payload.get("snapshot_revision", 0)) <= _record.revision():
+	var announced := int(payload.get("snapshot_revision", 0))
+	if announced <= _record.revision():
 		return
+	_sync_target = maxi(_sync_target, announced)
 	if not _backend.engine_holds_ours_or_nobody():
 		return
 	_sync_pending = true
@@ -302,8 +323,15 @@ func _converge() -> void:
 		return
 	_sync_running = true
 	var epoch := _document_epoch
+	var read_back := false
 	while _sync_pending and epoch == _document_epoch:
 		_sync_pending = false
+		if _record.revision() >= _sync_target:
+			# Caught up while this was queued. That is the ordinary case for a
+			# mutation of this panel's own: its reply brought the record back
+			# before the announcement of the same commit was delivered.
+			_sync_problem = ""
+			continue
 		var reply: Dictionary = await _relay_to_engine({
 			"schema_version": 1, "envelope": "request",
 			"request_id": _mint_request_id("sync"),
@@ -313,6 +341,7 @@ func _converge() -> void:
 			break
 		if bool(reply.get("ok", false)):
 			_sync_problem = ""
+			read_back = true
 			continue
 		# The backend could not be reached, or refused. The panel stays marked as
 		# behind so save reports it, and stops rather than spinning against a
@@ -326,8 +355,9 @@ func _converge() -> void:
 		return
 	if _sync_pending:
 		_report_behind()
-	else:
-		_clear_behind()
+		return
+	_clear_behind()
+	if read_back:
 		_push_event("council.snapshot_changed", {})
 
 
@@ -337,16 +367,24 @@ func _converge() -> void:
 ## can be dismissed.
 func _report_behind() -> void:
 	var message := _behind_message()
+	_behind_shown = true
 	if _banner != null:
 		_banner.text = message
 		_banner.visible = true
 	_push_event("council.sync_warning", {"message": message})
 
 
-## The engine and the panel agree again.
+## The engine and the panel agree again. Both surfaces are taken down, because a
+## refusal that outlives what it was about is worse than never having said it —
+## and the page keeps its own until it is told, where the banner is the
+## wrapper's to hide.
 func _clear_behind() -> void:
+	if not _behind_shown:
+		return
+	_behind_shown = false
 	if _banner != null:
 		_banner.visible = false
+	_push_event("council.sync_cleared", {})
 
 
 ## What the reader is told when the engine holds more of this council than the
@@ -669,6 +707,16 @@ func _relay_to_engine(message: Dictionary) -> Dictionary:
 		var held := _record.project_id()
 		var answered := str(snapshot.get("project_id", ""))
 		if not held.is_empty() and answered != held:
+			# The claim that the engine holds this panel's record is now known to
+			# be false, so give it up: the next exchange seeds again instead of
+			# skipping it forever. It matters most after a backend RESTART, where
+			# session.New mints a fresh empty document (store.go:137-150) and a
+			# read-only exchange is answered ok against it — nothing else in the
+			# lease clears the holder on a reply that succeeded
+			# (council_backend.gd:145-149), so the refusal would stand until a
+			# mutation or a reopen. Seeding after this is a `reopen`, which fails
+			# its recovery test on a different identity and replaces.
+			_backend.forget_seed()
 			_sync_pending = true
 			_sync_problem = ("the backend answered with a different council (%s rather than %s), "
 				+ "so nothing it said was adopted.") % [answered, held]

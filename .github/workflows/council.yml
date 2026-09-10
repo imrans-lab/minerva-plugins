@@ -6,16 +6,22 @@ on:
     paths:
       - "council/**"
       - ".github/workflows/council.yml"
-      - "scripts/smoke/**"
-      - "scripts/release-publish-guard.sh"
+      # The whole of scripts/, not a hand-picked few: this workflow runs the
+      # shared smoke, the shared GD runner, the publish guard AND the registry
+      # parity tests, and a list that named only some of them would leave an
+      # edit to the others untested here.
+      - "scripts/**"
     # main publishes the version tag after CI; pushing that tag must not build
     # the same commit a second time, so tags are not a trigger here.
   pull_request:
     paths:
       - "council/**"
       - ".github/workflows/council.yml"
-      - "scripts/smoke/**"
-      - "scripts/release-publish-guard.sh"
+      # The whole of scripts/, not a hand-picked few: this workflow runs the
+      # shared smoke, the shared GD runner, the publish guard AND the registry
+      # parity tests, and a list that named only some of them would leave an
+      # edit to the others untested here.
+      - "scripts/**"
   workflow_dispatch:
 
 permissions:
@@ -130,9 +136,13 @@ jobs:
           CGO_ENABLED: "0"
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+        # -trimpath keeps the builder's absolute module path out of the
+        # binary, which is the last thing that would differ between two builds
+        # of one commit on two machines. The archive around it is already
+        # byte-reproducible; this makes the payload so too.
         run: |
           mkdir -p build
-          go build -o "build/council-plugin${{ matrix.ext }}" .
+          go build -trimpath -o "build/council-plugin${{ matrix.ext }}" .
 
       - name: Pack release tarball
         run: bash scripts/pack-release.sh "${{ matrix.target }}" "build/council-plugin${{ matrix.ext }}" dist

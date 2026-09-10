@@ -8,11 +8,11 @@
 # unregistered is a loud, named pre-flight failure in both directions.
 #
 # The assertion count is pinned from a run that got through every section with
-# the backend up, and ALL 106 of them were observed against the real host and
+# the backend up, and ALL 107 of them were observed against the real host and
 # backend: setup 3, section 1 four, section 2 three, section 3 seventeen (five
 # assertions over each of three documents, plus two after the loop), section 4
 # six, section 5 seven, section 6 nineteen, section 7 five, section 8 eight,
-# section 9 six, section 10 thirteen, section 11 fifteen.
+# section 9 six, section 10 thirteen, section 11 sixteen.
 #
 # A lower count means a setup guard fired rather than exercising its section.
 #
@@ -36,4 +36,4 @@
 # exchange, reaching the panel that owns that document before it saves; and the
 # one text derivation a session hands over, held to the fixture that is its
 # oracle and proved to be the same text through both of its callers.
-test_council_panel.gd assertions=106
+test_council_panel.gd assertions=107

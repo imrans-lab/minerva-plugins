@@ -30,12 +30,16 @@ The implementation evidence below is historical. Codex reviewed `332f0d2` in
 - `01a08bb1b2f6`: Help reflects C4's cancellation fix and distinguishes a panel
   closing from backend exit. The skill places `wait_seconds` at envelope level;
   the tool schema now exposes that existing field. Generated pages were rebuilt.
-- `01a08bb2ec06` remains **open and blocks T12 and live acceptance**: chat/MCP
-  changes advance the backend but do not automatically reach the panel's local
-  record. Its Re-read is local, so saving it can omit recent results. This is a
-  code-review finding requiring a real-host reproduction and an ownership-aware
-  synchronization fix. README, Help and the skill no longer assume an open tab
-  proves direct writes are persisted. Preserve backend exports until resolved.
+- `01a08bb2ec06` is **resolved by `c1ac9cd`**: the engine announces every commit
+  as `council.record_changed` with the document's `project_id` and new revision,
+  and the panel that owns that document converges through its own exchange
+  before it saves, so a chat turn or an MCP call with no panel in it reaches the
+  file the tab writes. Ownership is by document, never by which tab is focused.
+  The evidence is the real-host regression
+  `_section_10_a_change_with_no_panel_in_it` in `tests/gd/test_council_panel.gd`
+  — a round started straight down the tool door with no panel mutation —
+  observed at 91/91 at `c1ac9cd` and 106/106 at `1577da0`. README, Help and the
+  skill no longer carry the export-and-verify workaround.
 
 Observed after the corrections: `go test -race -count=1 ./...` passed,
 `go vet ./...` passed, built-binary stdio smoke passed (initialize, nine tools,

@@ -345,7 +345,7 @@ func _start_backend():
 	conn.configure_stdio(binary, PackedStringArray())
 	# The backend's own notifications need somewhere to go. MCPServerConnection
 	# hands a `minerva/plugin_event` to whatever event_broker it was given
-	# (MCPServerConnection.gd:934, :984-986); with none it warns and drops.
+	# (MCPServerConnection.gd:934, :985-988); with none it warns and drops.
 	# The broker is the REAL PluginEventBroker over the REAL PluginDefinition,
 	# so the manifest's `events` declaration is what decides whether an event
 	# name is a declared one.
@@ -1059,13 +1059,14 @@ func _section_10_a_change_with_no_panel_in_it() -> void:
 	# The signal travels over the backend's stdout, is drained by the host on its
 	# own schedule and is answered by an exchange of the panel's own, so the wait
 	# is on the RESULT rather than on a fixed number of frames.
-	# The poll reads the held record directly rather than through the save hook:
-	# save is what warns and re-schedules a convergence while the panel is behind,
-	# and a frame-by-frame poll of it would do both a thousand times.
-	var round_landed := func() -> bool:
-		return not _run_of(
-			_panel_a._record.snapshot(), "ses-recurring-order", run_id).is_empty()
-	await _wait_until(round_landed, 20.0)
+	# The poll reads the held record's REVISION, not the save hook and not a
+	# snapshot: save is what warns and re-schedules a convergence while the panel
+	# is behind, and a snapshot is a deep copy of the whole document — either one,
+	# once a frame for up to twenty seconds, is a lot of work to answer a question
+	# an integer answers. The record itself is read once, below.
+	var moved := func() -> bool:
+		return _panel_a._record.revision() > int(before.get("snapshot_revision", 0))
+	await _wait_until(moved, 20.0)
 	var saved: Dictionary = _panel_a._on_panel_save_request()
 	var landed: Dictionary = _run_of(saved, "ses-recurring-order", run_id)
 	check("a round driven with no panel in the exchange is in the document the panel saves",
@@ -1075,10 +1076,16 @@ func _section_10_a_change_with_no_panel_in_it() -> void:
 			_seat_ids(landed).size() > 0, str(_seat_ids(landed)))
 	check("the round is a new one, not one the document already held",
 			not runs_before.has(run_id), "%s was already in %s" % [run_id, str(runs_before)])
+	# The round reaches rest inside the command that started it, so the reply's
+	# own snapshot_revision IS the revision the engine ended at. Asserting
+	# equality with it, rather than "higher than before", is what makes this a
+	# claim about converging ON THE ENGINE instead of about having moved at all.
 	check("the saved record is at the revision the engine reached, not the one the panel had",
-			int(saved.get("snapshot_revision", 0)) > int(before.get("snapshot_revision", 0)),
-			"%d then %d" % [int(before.get("snapshot_revision", 0)),
-				int(saved.get("snapshot_revision", 0))])
+			int(saved.get("snapshot_revision", 0)) == int(started.get("snapshot_revision", 0))
+			and int(saved.get("snapshot_revision", 0)) != int(before.get("snapshot_revision", 0)),
+			"panel %d, engine %d, was %d" % [int(saved.get("snapshot_revision", 0)),
+				int(started.get("snapshot_revision", 0)),
+				int(before.get("snapshot_revision", 0))])
 	check("the tab was marked changed, so the host's save writes it",
 			marked[0] > 0, "content_changed fired %d times" % marked[0])
 	_panel_a.content_changed.disconnect(on_change)
@@ -1236,6 +1243,18 @@ func _section_11_the_text_a_session_hands_over() -> void:
 	check("an empty session id resolves to the session the view selected, not the last one",
 			by_default == full and not by_default.contains(str(second["question"])),
 			"differ at %d of %d" % [_first_difference(by_default, full), full.length()])
+	# …and not the FIRST one either. The fixture's view selects the session that
+	# is also sessions[0], so the assertion above passes just as well for a
+	# derivation that never reads `view` at all. Moving the selection to the
+	# appended session is what separates the three candidate rules: only a
+	# derivation that reads the view follows it.
+	(two_sessions["view"] as Dictionary)["selected_session_id"] = "ses-second"
+	two_record.adopt(two_sessions)
+	var by_selection: String = two_record.context_text("", PackedStringArray())
+	check("and it follows the view when the selected session is not the first one",
+			by_selection.contains(str(second["question"]))
+			and not by_selection.contains(str(session.get("question", ""))),
+			by_selection.left(160))
 
 	# THE VARIANT: the same fixture with words in the contribution that failed.
 	var variant: Dictionary = _parse(FileAccess.get_file_as_string(POPULATED_FIXTURE_PATH))

@@ -118,20 +118,33 @@ PY
 
 # Two spaces between the digest and the name: that is the format `sha256sum -c`
 # reads, and the verifier re-checks these sums after extraction.
+#
+# LC_ALL=C is load-bearing, not tidiness: `sort` collates by locale, so the same
+# tree yields a different SHA256SUMS line order under en_US.UTF-8 than under C,
+# and that file is itself hashed into the archive. A build machine's locale
+# would otherwise decide the archive's bytes.
 if command -v sha256sum >/dev/null 2>&1; then
-  (cd "$packdir" && find . -type f ! -name SHA256SUMS -print0 | sort -z \
-    | xargs -0 sha256sum | sed 's|  \./|  |' > SHA256SUMS)
+  (cd "$packdir" && LC_ALL=C find . -type f ! -name SHA256SUMS -print0 | LC_ALL=C sort -z \
+    | LC_ALL=C xargs -0 sha256sum | sed 's|  \./|  |' > SHA256SUMS)
 else
-  (cd "$packdir" && find . -type f ! -name SHA256SUMS -print0 | sort -z \
-    | xargs -0 shasum -a 256 | sed 's|  \./|  |' > SHA256SUMS)
+  (cd "$packdir" && LC_ALL=C find . -type f ! -name SHA256SUMS -print0 | LC_ALL=C sort -z \
+    | LC_ALL=C xargs -0 shasum -a 256 | sed 's|  \./|  |' > SHA256SUMS)
 fi
 
 # A reproducible tarball: the same tree packs to the same bytes on any machine
 # and at any time, so two builds of one commit can be compared rather than
-# trusted. --sort=name fixes member order, --mtime/--owner/--group erase the
-# timestamps and ids the staging tree happens to carry, and gzip -n keeps the
-# filename and the current time out of the gzip header — which is what -z would
-# otherwise write, and is on its own enough to make every archive unique.
-tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+# trusted. Each flag closes one channel by which the build machine leaks in:
+#   LC_ALL=C     --sort=name collates by locale too, exactly as above
+#   --sort=name  fixes member order against readdir order
+#   --mtime      erases the staging tree's timestamps
+#   --owner/--group/--numeric-owner  erase the building user
+#   --mode       erases the checkout's umask — files copied out of a working
+#                tree carry 664 under umask 002 and 644 under 022, and tar
+#                records the mode; X keeps the entrypoint executable
+#   gzip -n      keeps the filename and the current time out of the gzip
+#                header, which is what -z writes and is on its own enough to
+#                make every archive unique
+LC_ALL=C tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+  --mode=u+rwX,go+rX,go-w \
   -cf - -C "$packdir" . | gzip -n > "${outdir}/${archive}"
 echo "${outdir}/${archive}"

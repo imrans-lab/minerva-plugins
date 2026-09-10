@@ -196,8 +196,7 @@
         "minerva_plugin_list",
         "minerva_plugin_start",
         "minerva_create_plugin_editor",
-        "minerva_create_note",
-        "minerva_council_export_snapshot"
+        "minerva_create_note"
       ]
     }
   ],

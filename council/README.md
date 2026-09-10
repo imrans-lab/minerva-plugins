@@ -229,8 +229,8 @@ save; nothing is overwritten.
 | Path | What |
 |---|---|
 | `docs/architecture.md` | The contracts: records, ownership, state machines, the page↔wrapper protocol, limits. |
-| `docs/t03-live-check.md` | The human checklist for verifying a live install. |
-| `docs/release-packaging.md` | What the marketplace archive holds, and the tag/release/registry order. |
+| `docs/t03-live-check.md` | The human checklist for verifying a live install. **Checkout only** — not in the installed plugin. |
+| `docs/release-packaging.md` | What the marketplace archive holds, and the tag/release/registry order. **Checkout only** — not in the installed plugin. |
 | `presets/` | The shipped councils. One source, used by both the backend and the page. |
 | `schemas/` | The record schemas. The backend validates against these, embedded. |
 | `ui/src/` | The panel's maintainable sources. `ui/panel.html` is generated from them. |

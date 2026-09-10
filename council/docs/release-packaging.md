@@ -41,11 +41,19 @@ looks.
 | `LICENSE.md` | the repository root | covers all of the above; there is no third-party notice to carry, because the backend depends on nothing outside the Go standard library and the page loads nothing at runtime |
 | `SHA256SUMS` | generated last | one `<sha256>  <path>` line for every other file, in `sha256sum -c` format |
 
-The tarball is **reproducible**: `--sort=name --mtime=@0 --owner=0 --group=0
---numeric-owner` piped through `gzip -n`, so the same tree packs to the same
-bytes on any machine at any time and two builds of one commit can be compared
-rather than trusted. (`tar -z` writes the current time into the gzip header,
-which alone would make every archive unique.)
+The tarball is **reproducible** — the same tree packs to the same bytes on any
+machine at any time, so two builds of one commit can be compared rather than
+trusted. Every flag closes one channel by which the build machine leaks in:
+
+| | |
+|---|---|
+| `LC_ALL=C` on the `find`/`sort`/`xargs` pipeline **and** on `tar` | both `sort` and `--sort=name` collate by locale, so `en_US.UTF-8` and `C` produce different `SHA256SUMS` line orders and different member orders — and `SHA256SUMS` is itself hashed into the archive |
+| `--sort=name` | fixes member order against readdir order |
+| `--mtime=@0` | erases the staging tree's timestamps |
+| `--owner=0 --group=0 --numeric-owner` | erases the building user |
+| `--mode=u+rwX,go+rX,go-w` | erases the checkout's umask — a file copied out of a working tree is 664 under `umask 002` and 644 under `022`, and tar records the mode. `X` keeps the entrypoint executable. |
+| `gzip -n` rather than `tar -z` | `-z` writes the filename and the current time into the gzip header, which on its own makes every archive unique |
+| `go build -trimpath` | keeps the builder's absolute module path out of the binary, so the payload is comparable too |
 
 **Not** in the archive: `ui/src/` and `ui/tests/` (the panel's build sources and
 its screenshot harness — roughly 3 MB the panel never reads), any `.go` file,
@@ -70,7 +78,7 @@ Locally:
 
 ```bash
 cd council
-go build -o build/council-plugin .
+go build -trimpath -o build/council-plugin .
 bash scripts/pack-release.sh linux-x86_64 build/council-plugin dist
 python3 scripts/verify-archive.py \
   "dist/$(bash scripts/pack-release.sh --print-name linux-x86_64)" \
