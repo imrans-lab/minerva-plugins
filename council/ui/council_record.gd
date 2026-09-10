@@ -134,6 +134,18 @@ func revision() -> int:
 	return int(_snapshot.get("snapshot_revision", 1))
 
 
+## The durable project identity. It is how a panel decides that a change the
+## engine announces is about the document IT holds rather than another tab's —
+## ownership by document, never by which tab is focused.
+##
+## A brand-new council has none yet: empty_snapshot() deliberately writes the
+## oldest migratable shape and lets the engine's ladder mint the identity on the
+## first seed. Until then this is empty and no announcement can be claimed, which
+## is right — a document the engine has never been given cannot have moved.
+func project_id() -> String:
+	return str(_snapshot.get("project_id", ""))
+
+
 func is_unreadable() -> bool:
 	return not _foreign_bytes.is_empty()
 

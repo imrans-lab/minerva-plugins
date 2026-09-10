@@ -2815,10 +2815,9 @@ window.CouncilPresets = [
           'A chat whose document has not been opened since the plugin started is a chat Council '
             + 'has no record of, and its first turn opens a fresh session in whatever document '
             + 'is loaded. The original project keeps its own session untouched.',
-          'Chat and direct tool changes can leave the panel holding an older snapshot. '
-            + 'Re-read currently reads that local copy. Until synchronization is verified, '
-            + 'do not assume saving the tab includes the latest chat answers; preserve an '
-            + 'export of the backend snapshot before closing.',
+          'A chat answer or a tool call that lands while the tab is closed is in the backend '
+            + 'and nowhere else. Reopening the council brings it in; if the backend has gone, '
+            + 'the panel says so rather than saving the older copy quietly.',
           'Council does not research, does not browse, and invites nobody. Every participant is '
             + 'a model you enabled or you.'
         ])
@@ -3774,6 +3773,14 @@ window.CouncilPresets = [
       if (event.event === 'council.theme_changed') { applyTheme(event.payload); return; }
       if (event.event === 'council.focus_changed') {
         document.documentElement.setAttribute('data-focused', String(!!(event.payload || {}).focused));
+        return;
+      }
+      // The wrapper could not read back a council the engine has carried
+      // further. It is a refusal, not a status line: it stays until it is
+      // acknowledged, because what it says is that what was saved is missing
+      // something.
+      if (event.event === 'council.sync_warning') {
+        refuse({ message: (event.payload || {}).message || 'This council is behind the Council backend.' });
         return;
       }
       // Everything else says the record moved. The page re-reads rather than

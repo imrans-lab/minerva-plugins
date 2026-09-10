@@ -246,6 +246,20 @@ func _ensure_seeded(record: Dictionary) -> Dictionary:
 	return {"ok": true, "snapshot": {}}
 
 
+## Whether an exchange started now could reach THIS panel's record in the
+## engine: either the engine is already holding it, or it is holding nobody's
+## and the seed will be a `reopen` that keeps a later state of the same document.
+##
+## It is what a convergence asks before it reacts to a change the backend
+## announced. While another panel is the holder, the engine is loaded with
+## somebody else's document: the state the announcement described is no longer in
+## it, and seeding this panel's record to go looking for it would only replace
+## the other panel's working copy with this one's.
+func engine_holds_ours_or_nobody() -> bool:
+	var holder := _holder()
+	return holder.is_empty() or holder == _panel_key
+
+
 ## Forget that the engine holds this panel's record — nothing more.
 ##
 ## Called whenever the panel adopts a DIFFERENT document (a file opened, a

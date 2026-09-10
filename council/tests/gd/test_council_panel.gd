@@ -123,6 +123,7 @@ const SCENE_PANEL_HOST_PATH := "res://Scripts/Services/Plugins/PluginScenePanelH
 const SCENE_PANEL_BROKER_PATH := "res://Scripts/Services/Plugins/PluginScenePanelBroker.gd"
 
 const MINERVA_IPC_PATH := "res://Scripts/Services/Plugins/MinervaIPC.gd"
+const EVENT_BROKER_PATH := "res://Scripts/Services/Plugins/PluginEventBroker.gd"
 
 ## The child node the broker attaches on registration, read off MinervaIPC's
 ## own constant in _setup (a const initialiser would be a first-pass load).
@@ -190,6 +191,13 @@ class StubManager extends RefCounted:
 	func get_connection(_plugin_id: String):
 		return conn
 
+	## What singleton_object.gd's plugin-event fan-out iterates
+	## (_push_to_plugin_panels, singleton_object.gd:745-756). The real manager
+	## fills this from panel registration; the suite mounts its two panels by
+	## hand, so it names the same two keys.
+	func get_live_panels(_plugin_id: String) -> Array:
+		return [{"panel_key": "council_panel#a"}, {"panel_key": "council_panel#b"}]
+
 	## The host calls this on whatever plugin_manager it finds when the process
 	## exits (singleton_object.gd:1538). Without it the run ends in a script
 	## error and a non-zero exit even when every assertion passed. Cleanup puts
@@ -223,6 +231,7 @@ func _init() -> void:
 		await _section_7_migration()
 		await _section_8_interrupted_run()
 		await _section_9_recovering_a_closed_panel()
+		await _section_10_a_change_with_no_panel_in_it()
 
 	_cleanup()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
@@ -313,12 +322,41 @@ func _start_backend():
 	if transport == null:
 		return null
 	var conn = transport.new("council-test")
+	# The connection carries the plugin id into every notification it routes;
+	# without it the event broker cannot find the definition and drops the event
+	# as an unknown plugin's (MCPServerConnection.gd:73, :984-986).
+	conn.plugin_id = PLUGIN_ID
 	conn.configure_stdio(binary, PackedStringArray())
+	# The backend's own notifications need somewhere to go. MCPServerConnection
+	# hands a `minerva/plugin_event` to whatever event_broker it was given
+	# (MCPServerConnection.gd:934, :984-986); with none it warns and drops.
+	# The broker is the REAL PluginEventBroker over the REAL PluginDefinition,
+	# so the manifest's `events` declaration is what decides whether an event
+	# name is a declared one.
+	var event_broker_script: Script = load(EVENT_BROKER_PATH)
+	if event_broker_script != null and _manager != null:
+		var events = event_broker_script.new(_manager.get_db(), null)
+		events.plugin_event.connect(_fan_out_plugin_event)
+		conn.event_broker = events
 	# connect_to_server awaits its transport (MCPServerConnection.gd:101-109);
 	# calling it without await hands back a coroutine state, not an Error.
 	if await conn.connect_to_server() != OK:
 		return null
 	return conn
+
+
+## The host's own fan-out, reproduced over this suite's registry: every live
+## panel of the plugin gets the push, addressed by its per-tab registration key
+## (singleton_object.gd:745-756). The push itself is the REAL broker call, with
+## its ownership check and its audit.
+func _fan_out_plugin_event(plugin_id: String, event_name: String, payload: Dictionary) -> void:
+	if _broker == null or _manager == null:
+		return
+	for entry in _manager.get_live_panels(plugin_id):
+		var panel_key: String = str((entry as Dictionary).get("panel_key", ""))
+		if panel_key.is_empty():
+			continue
+		_broker.push_to_panel(plugin_id, panel_key, event_name, payload)
 
 
 # ---------------------------------------------------------------------------
@@ -919,6 +957,196 @@ func _section_9_recovering_a_closed_panel() -> void:
 	check("another project's document is loaded as itself, never recovered into",
 			_session_ids(seen) == PackedStringArray(["ses-elsewhere"]),
 			str(_session_ids(seen)))
+
+
+# ---------------------------------------------------------------------------
+# 10. A change with no panel in the exchange
+# ---------------------------------------------------------------------------
+
+## The bug this section is the regression for: a chat turn and an MCP tool call
+## commit through the engine with no panel involved, and the panel used to serve
+## reads and saves from a record that knew nothing about them.
+##
+## THE ORACLE IS THE PANEL'S OWN SAVE PAYLOAD — the dictionary the host writes
+## into the project (vboxEditor.gd:494-499) and into a .mcouncil file
+## (Editor.gd:1727). The round is started straight down the MCP tool door on the
+## REAL connection, so nothing in the panel is asked to mutate anything; whatever
+## turns up in the saved record afterwards got there through the change signal,
+## the fan-out and the panel's own convergence, all of them the real ones. The
+## backend's engine decides what the round becomes: a headless run answers no
+## model call, so the contributions arrive failed, and it is their PRESENCE in
+## the saved document — a run the panel never started — that is under test.
+##
+## Ownership is asserted in both directions: the panel holding another council
+## must be byte-identical afterwards, which is what "not by whichever tab was
+## focused" means when it is measured rather than claimed.
+func _section_10_a_change_with_no_panel_in_it() -> void:
+	print("\n10 a change with no panel in it:")
+	if _conn == null or not _conn.server_connected:
+		check("10: the council-plugin binary is built and speaking", false,
+				"build it first: (cd council && go build -o council-plugin ./)")
+		return
+
+	# The other council, which must not move.
+	var elsewhere: Dictionary = _fixture_as_session("ses-untouched", "A question in another project")
+	_panel_b._on_panel_load_request(_document_for("", elsewhere))
+	await _settle_exchanges()
+	var untouched_before := JSON.stringify(_panel_b._on_panel_save_request(), "\t")
+
+	# The council the round runs in, seeded so the engine is holding it.
+	var record: Dictionary = _parse(FileAccess.get_file_as_string(POPULATED_FIXTURE_PATH))
+	record["project_id"] = "prj-gd-no-panel"
+	record.erase("view")
+	_panel_a._on_panel_load_request(_document_for("", record))
+	await _relay(_panel_a, {"schema_version": 1, "envelope": "request",
+		"request_id": "sync-seed", "command": "snapshot.get", "payload": {}})
+	# Nothing of either panel's may still be queued. The round below goes down
+	# the tool door WITHOUT the wrapper's lease — which is what an agent's MCP
+	# call is — so a panel exchange that seeds while it runs replaces the
+	# document the round is running in and the engine refuses the round (§5.5).
+	# That is the pre-existing two-panels-one-engine property, not the thing
+	# under test, and letting it fire here would test the contention instead.
+	await _settle_exchanges()
+	var before: Dictionary = _panel_a._on_panel_save_request()
+	check("setup: the engine is loaded with the document this panel holds, with nothing else queued",
+			CouncilBackend.lease_holder() == "council_panel#a"
+			and CouncilBackend.lease_taker() == ""
+			and str(before.get("project_id", "")) == "prj-gd-no-panel",
+			"holder=%s taker=%s project=%s" % [CouncilBackend.lease_holder(),
+				CouncilBackend.lease_taker(), str(before.get("project_id", ""))])
+	var runs_before := _run_ids(before, "ses-recurring-order")
+
+	# The host connects content_changed to the tab's dirty flag
+	# (Editor.gd:323-324 → :2068-2069), so counting it is how this suite sees
+	# "the document will be saved" without an Editor.
+	var marked := [0]
+	var on_change := func() -> void: marked[0] += 1
+	_panel_a.content_changed.connect(on_change)
+
+	# THE MUTATION WITH NO PANEL. A tools/call on the real connection is exactly
+	# what an agent's MCP call is, and what a chat turn reaches the same engine
+	# through. The limits are narrowed so the round fails fast on a host that
+	# answers no model call, which is every headless run.
+	var started: Dictionary = await _conn.call_tool("minerva_council_command", {
+		"schema_version": 1, "envelope": "request",
+		"request_id": "direct-round", "command": "run.start",
+		"base_revision": int(before.get("snapshot_revision", 1)),
+		"wait_seconds": 5,
+		"payload": {
+			"session_id": "ses-recurring-order", "kind": "follow_up",
+			"prompt": "Does the costing still hold if the order doubles?",
+			"limits": {"per_member_timeout_seconds": 1, "run_budget_seconds": 2}}})
+	check("the engine accepted a round nothing in the panel started",
+			bool(started.get("ok", false)), str(started).left(240))
+	var run_id := str((started.get("payload", {}) as Dictionary).get("run_id", ""))
+
+	# The signal travels over the backend's stdout, is drained by the host on its
+	# own schedule and is answered by an exchange of the panel's own, so the wait
+	# is on the RESULT rather than on a fixed number of frames.
+	# The poll reads the held record directly rather than through the save hook:
+	# save is what warns and re-schedules a convergence while the panel is behind,
+	# and a frame-by-frame poll of it would do both a thousand times.
+	var round_landed := func() -> bool:
+		return not _run_of(
+			_panel_a._record.snapshot(), "ses-recurring-order", run_id).is_empty()
+	await _wait_until(round_landed, 20.0)
+	var saved: Dictionary = _panel_a._on_panel_save_request()
+	var landed: Dictionary = _run_of(saved, "ses-recurring-order", run_id)
+	check("a round driven with no panel in the exchange is in the document the panel saves",
+			not run_id.is_empty() and not landed.is_empty(),
+			"run %s in %s" % [run_id, str(_run_ids(saved, "ses-recurring-order"))])
+	check("and the contributions of that round came with it",
+			_seat_ids(landed).size() > 0, str(_seat_ids(landed)))
+	check("the round is a new one, not one the document already held",
+			not runs_before.has(run_id), "%s was already in %s" % [run_id, str(runs_before)])
+	check("the saved record is at the revision the engine reached, not the one the panel had",
+			int(saved.get("snapshot_revision", 0)) > int(before.get("snapshot_revision", 0)),
+			"%d then %d" % [int(before.get("snapshot_revision", 0)),
+				int(saved.get("snapshot_revision", 0))])
+	check("the tab was marked changed, so the host's save writes it",
+			marked[0] > 0, "content_changed fired %d times" % marked[0])
+	_panel_a.content_changed.disconnect(on_change)
+	check("the panel holding another council is untouched",
+			JSON.stringify(_panel_b._on_panel_save_request(), "\t") == untouched_before,
+			str(_session_ids(_panel_b._on_panel_save_request())))
+
+	# THE LEASE IS A GODOT-SIDE FACT, AND minerva_council_load_snapshot IS A LIVE
+	# TOOL. Loading another council straight down the tool door leaves this panel
+	# still named as the engine's holder, so its next exchange skips the seed and
+	# reads back a record that is not its own. The revision is moved clear of this
+	# document's so the exchange really does try to adopt what comes back —
+	# otherwise the refusal would never be reached and the assertion would pass
+	# for the wrong reason.
+	var intruder: Dictionary = _fixture_as_session("ses-intruder", "Another council entirely")
+	intruder["snapshot_revision"] = int(saved.get("snapshot_revision", 0)) + 3
+	var displaced: Dictionary = await _conn.call_tool("minerva_council_load_snapshot",
+			{"snapshot": intruder, "mode": "replace"})
+	check("setup: another council was loaded into the engine behind the panel's back",
+			bool(displaced.get("ok", false))
+			and CouncilBackend.lease_holder() == "council_panel#a",
+			"loaded=%s holder=%s" % [str(displaced).left(120), CouncilBackend.lease_holder()])
+	_panel_a.receive("council.record_changed", {
+		"project_id": str(saved.get("project_id", "")),
+		"snapshot_revision": int(saved.get("snapshot_revision", 0)) + 1})
+	var refused := func() -> bool: return _panel_a._banner.visible
+	await _wait_until(refused, 20.0)
+	var kept: Dictionary = _panel_a._on_panel_save_request()
+	check("a record for another council is refused rather than adopted",
+			str(kept.get("project_id", "")) == "prj-gd-no-panel"
+			and _session_ids(kept) == PackedStringArray(["ses-recurring-order"]),
+			"%s / %s" % [str(kept.get("project_id", "")), str(_session_ids(kept))])
+	check("and the panel says so rather than letting the tab save it",
+			_panel_a._banner.visible and _panel_a._banner.text.contains("a different council"),
+			_panel_a._banner.text.left(140))
+
+	# THE BACKEND GONE. The panel is told the council moved and cannot read it
+	# back. `receive` is the call the host itself makes when it delivers a plugin
+	# event (PluginScenePanelBroker.gd:988); with no backend there is nothing to
+	# raise one, so the suite makes that single call and everything after it is
+	# the panel's own.
+	_conn.disconnect_from_server()
+	_manager.conn = null
+	_panel_a.receive("council.record_changed", {
+		"project_id": str(saved.get("project_id", "")),
+		"snapshot_revision": int(saved.get("snapshot_revision", 0)) + 1})
+	# The banner is already up from the leg above, so the wait is on its TEXT
+	# changing to this failure's reason rather than on it becoming visible.
+	var said_so := func() -> bool: return _panel_a._banner.text.contains("is not running")
+	await _wait_until(said_so, 20.0)
+	var written: Dictionary = _panel_a._on_panel_save_request()
+	check("with the backend gone the panel says the council is behind rather than saving quietly",
+			_panel_a._banner.visible and _panel_a._banner.text.contains("is not running"),
+			"visible=%s text=%s" % [str(_panel_a._banner.visible), _panel_a._banner.text.left(120)])
+	check("and what it wrote is still the council it holds, not an empty document",
+			not _run_of(written, "ses-recurring-order", run_id).is_empty()
+			and str(written.get("project_id", "")) == "prj-gd-no-panel",
+			str(_run_ids(written, "ses-recurring-order")))
+
+
+## Let every panel exchange that is running or queued finish.
+##
+## Adopting a document DEFERS a rehydrate, and a rehydrate is an exchange on the
+## one engine that seeds it. So a step that reaches the backend outside the
+## wrapper's lease has to let those drain first, or it is racing a Load with its
+## own work. The frames come first because a deferred call has not started yet:
+## checking the lease immediately would find it free and prove nothing.
+func _settle_exchanges() -> void:
+	await process_frame
+	await process_frame
+	var idle := func() -> bool: return CouncilBackend.lease_taker() == ""
+	await _wait_until(idle, 20.0)
+
+
+## Wait for a condition the host reaches on its own schedule — a notification
+## drained from the backend's stdout, then an exchange of the panel's — rather
+## than for a fixed number of frames, which would be either flaky or slow.
+func _wait_until(condition: Callable, seconds: float) -> bool:
+	var deadline: int = Time.get_ticks_msec() + int(seconds * 1000.0)
+	while Time.get_ticks_msec() < deadline:
+		if bool(condition.call()):
+			return true
+		await process_frame
+	return bool(condition.call())
 
 
 func _restart_backend() -> void:

@@ -101,7 +101,7 @@ func newProviderHost(t *testing.T, store *session.Store) *providerHost {
 
 	done := make(chan error, 1)
 	go func() {
-		err := serve(inR, outW, newRegistry(store), chat, provider)
+		err := serve(inR, outW, newRegistry(store), chat, provider, nil)
 		_ = outW.Close()
 		done <- err
 	}()

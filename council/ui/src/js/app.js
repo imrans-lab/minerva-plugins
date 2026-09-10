@@ -794,6 +794,14 @@
         document.documentElement.setAttribute('data-focused', String(!!(event.payload || {}).focused));
         return;
       }
+      // The wrapper could not read back a council the engine has carried
+      // further. It is a refusal, not a status line: it stays until it is
+      // acknowledged, because what it says is that what was saved is missing
+      // something.
+      if (event.event === 'council.sync_warning') {
+        refuse({ message: (event.payload || {}).message || 'This council is behind the Council backend.' });
+        return;
+      }
       // Everything else says the record moved. The page re-reads rather than
       // trusting the payload it was handed.
       bridge.read().then(render);

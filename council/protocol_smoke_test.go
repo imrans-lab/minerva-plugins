@@ -36,6 +36,10 @@ type fakeHost struct {
 	// unaddressed carries the replies that answer no request of ours: the
 	// null-id errors a malformed line draws.
 	unaddressed chan map[string]any
+	// notices carries the backend's own notifications — a message with a method
+	// and no id. The host fans these out to panels; here they are collected so a
+	// test can assert what the backend announced and when.
+	notices chan map[string]any
 }
 
 func newFakeHost(t *testing.T, store *session.Store) *fakeHost {
@@ -43,8 +47,10 @@ func newFakeHost(t *testing.T, store *session.Store) *fakeHost {
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
 	done := make(chan error, 1)
+	notices := newRecordNotifier()
+	notices.observe(store)
 	go func() {
-		err := serve(inR, outW, newRegistry(store), nil, nil)
+		err := serve(inR, outW, newRegistry(store), nil, nil, notices)
 		_ = outW.Close()
 		done <- err
 	}()
@@ -55,6 +61,7 @@ func newFakeHost(t *testing.T, store *session.Store) *fakeHost {
 		done:        done,
 		waiting:     map[string]chan map[string]any{},
 		unaddressed: make(chan map[string]any, 8),
+		notices:     make(chan map[string]any, 64),
 	}
 	go h.route(json.NewDecoder(outR))
 	return h
@@ -73,6 +80,17 @@ func (h *fakeHost) route(dec *json.Decoder) {
 			}
 			h.mu.Unlock()
 			return
+		}
+		// A notification is a method with NO id. A message carrying both is a
+		// REQUEST from the backend — the chat adapter's minerva/capability call —
+		// and swallowing it here would leave that exchange waiting forever.
+		_, addressed := response["id"]
+		if method, ok := response["method"].(string); ok && method != "" && !addressed {
+			select {
+			case h.notices <- response:
+			default:
+			}
+			continue
 		}
 		key := ""
 		if raw, ok := response["id"].(float64); ok {

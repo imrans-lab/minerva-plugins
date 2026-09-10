@@ -43,6 +43,15 @@ const MAX_MESSAGE_CODE_UNITS := 32768
 const WRAPPER_PREFIX := "wrapper."
 const READ_LOCALLY := "snapshot.get"
 
+## The backend's change signal. The engine commits a chat turn and an MCP tool
+## call with no panel in the exchange, so it announces every commit as a plugin
+## event carrying {project_id, snapshot_revision} (council/notify.go, declared in
+## manifest.json under `events`). The host fans that out to EVERY live Council
+## panel — singleton_object.gd:745-756 → PluginScenePanelBroker.push_to_panel
+## (PluginScenePanelBroker.gd:933-989) → receive() — so the name is a broadcast
+## and the payload's project_id is what makes it one document's business.
+const RECORD_CHANGED_CHANNEL := "council.record_changed"
+
 ## The characters an Id may contain after its first (common.schema.json).
 const ID_SAFE_CHARACTERS := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-"
 
@@ -66,6 +75,13 @@ const TEXT_SCALES := [0.85, 1.0, 1.12, 1.28, 1.45, 1.7]
 @onready var _surface: SubViewportContainer = $Surface
 @onready var _browser: SubViewport = $Surface/Browser
 @onready var _notice: Label = $Notice
+
+## Says, over the page, that the engine holds more of this council than the
+## panel does. It is a scene node rather than something the wrapper draws: it
+## has to be readable when the page is not there at all — the build with no
+## embedded browser shows a notice and nothing else — and it must never take a
+## click meant for the browser underneath it.
+@onready var _banner: Label = $Banner
 
 var _ctx: Dictionary = {}
 var _record: CouncilRecord = CouncilRecord.new()
@@ -97,6 +113,21 @@ var _request_seq: int = 0
 ## it before its await and refuses to apply its result if it has moved: the
 ## answer belongs to a document this panel no longer has open.
 var _document_epoch: int = 0
+
+## What the panel knows about the engine having moved this document past the
+## record it holds.
+##
+## _sync_pending means the backend announced a higher revision for THIS document
+## and the panel has not adopted it yet. _sync_problem is why the last attempt to
+## adopt it failed, and it is what save reports instead of writing a stale copy
+## as though it were the whole council. _sync_running is the flag a read waits on
+## rather than answering from a record that is being replaced as it reads.
+var _sync_pending: bool = false
+var _sync_running: bool = false
+var _sync_problem: String = ""
+
+## Emitted when a convergence attempt ends, whether or not it succeeded.
+signal sync_settled()
 
 ## The host wires this to the tab's dirty flag: Editor.gd:323-324 connects it to
 ## _on_editor_changed, which sets _plugin_scene_modified for a PLUGIN_SCENE tab
@@ -155,7 +186,18 @@ func _on_panel_unload() -> void:
 
 ## Ctrl+S under save_mode host_owned and the project serialize path both take
 ## this dictionary verbatim, so it has to be right for both (council_record.gd).
+##
+## The host takes this SYNCHRONOUSLY (vboxEditor.gd:494-499, Editor.gd:1727), so
+## there is no hop it can wait for. What it can do is refuse to be quiet: when
+## the engine has told this panel that the council moved and the panel has not
+## been able to read it back, the record written is still the one this panel
+## holds — losing it would be worse — and the page says on screen that the file
+## is missing what the engine has. The retry is scheduled rather than awaited.
 func _on_panel_save_request() -> Dictionary:
+	if _sync_pending:
+		push_warning("[Council] " + _behind_message())
+		_report_behind()
+		_converge.call_deferred()
 	return _record.save_payload()
 
 
@@ -189,6 +231,11 @@ func _on_panel_load_request(document) -> void:
 ## The lease itself is deliberately NOT released here — see forget_seed().
 func _adopting_new_document() -> void:
 	_document_epoch += 1
+	# What was known about the OLD document's engine state says nothing about
+	# this one, and a convergence still in flight is discarded by the epoch.
+	_sync_pending = false
+	_sync_problem = ""
+	_clear_behind()
 	if _backend != null:
 		_backend.forget_seed()
 
@@ -204,6 +251,113 @@ func _rehydrate() -> void:
 		"request_id": _mint_request_id("rehydrate"),
 		"command": "snapshot.get", "payload": {},
 	})
+
+
+# ---------------------------------------------------------------------------
+# Converging on the engine
+# ---------------------------------------------------------------------------
+
+## The engine advanced a document. Decide whether it was this panel's, and if it
+## was, go and get it.
+##
+## OWNERSHIP IS BY DOCUMENT. The signal reaches every open Council panel, so the
+## only thing that makes it this panel's business is that the project identity it
+## names is the identity of the record this panel holds. Nothing here can learn
+## which tab is focused, and a panel showing another council ignores it entirely.
+##
+## The event carries no authority beyond "go and look": a revision that is not
+## ahead of the held one is already in hand, and the snapshot itself is read back
+## through the ordinary exchange rather than taken from a payload.
+func _on_backend_record_changed(payload: Dictionary) -> void:
+	if _record.is_unreadable() or _backend == null:
+		return
+	var project_id := _record.project_id()
+	if project_id.is_empty() or project_id != str(payload.get("project_id", "")):
+		return
+	if int(payload.get("snapshot_revision", 0)) <= _record.revision():
+		return
+	if not _backend.engine_holds_ours_or_nobody():
+		return
+	_sync_pending = true
+	# Deferred rather than awaited: `receive` is a host call, and a coroutine
+	# here would hand the broker a state object it does not know what to do with.
+	_converge.call_deferred()
+
+
+## Adopt what the engine holds for this document, through the same exchange this
+## panel's own mutations use.
+##
+## Relaying a `snapshot.get` takes the lease, seeds if it must, reads the
+## acknowledged snapshot back and persists it — so the lease, seed and epoch
+## rules of architecture.md §5.5 apply unchanged, the wrapper still adopts rather
+## than merges, and adopting emits content_changed, which is what marks the tab
+## dirty so the host's save writes what the engine holds.
+##
+## A second caller waits on the one already running instead of starting a race
+## for the same lease; a signal that arrives DURING a convergence is picked up by
+## the loop rather than lost.
+func _converge() -> void:
+	if _sync_running:
+		await sync_settled
+		return
+	_sync_running = true
+	var epoch := _document_epoch
+	while _sync_pending and epoch == _document_epoch:
+		_sync_pending = false
+		var reply: Dictionary = await _relay_to_engine({
+			"schema_version": 1, "envelope": "request",
+			"request_id": _mint_request_id("sync"),
+			"command": "snapshot.get", "payload": {},
+		})
+		if epoch != _document_epoch:
+			break
+		if bool(reply.get("ok", false)):
+			_sync_problem = ""
+			continue
+		# The backend could not be reached, or refused. The panel stays marked as
+		# behind so save reports it, and stops rather than spinning against a
+		# backend that is not there — the next signal, or the next save, retries.
+		_sync_pending = true
+		_sync_problem = str((reply.get("error", {}) as Dictionary).get("message", ""))
+		break
+	_sync_running = false
+	sync_settled.emit()
+	if epoch != _document_epoch:
+		return
+	if _sync_pending:
+		_report_behind()
+	else:
+		_clear_behind()
+		_push_event("council.snapshot_changed", {})
+
+
+## Say, on the panel and in the page, that this council is behind the engine.
+## One message, two places: the banner is the wrapper's own surface and survives
+## a page that is not up, and the page's refusal is where a reader is looking and
+## can be dismissed.
+func _report_behind() -> void:
+	var message := _behind_message()
+	if _banner != null:
+		_banner.text = message
+		_banner.visible = true
+	_push_event("council.sync_warning", {"message": message})
+
+
+## The engine and the panel agree again.
+func _clear_behind() -> void:
+	if _banner != null:
+		_banner.visible = false
+
+
+## What the reader is told when the engine holds more of this council than the
+## panel does. It names the reason, says what was written, and says the results
+## are not lost while the backend is running.
+func _behind_message() -> String:
+	var reason := _sync_problem if not _sync_problem.strip_edges().is_empty() \
+		else "the Council backend could not be reached"
+	return ("This council has moved on in the Council backend and this panel could not read it back: "
+		+ reason + " What is in the project is the copy this panel holds, without the newest results. "
+		+ "They are not lost while the backend is running — reopen this council, or try again, to bring them in.")
 
 
 ## A request id of this panel's own, unique across panels and across restarts of
@@ -261,6 +415,9 @@ func _on_panel_render_for_llm(_ctx_unused: Dictionary) -> Array:
 ## Either way the page is told the record moved and re-reads; an event carries
 ## no authority.
 func receive(channel: String, payload: Dictionary) -> void:
+	if channel == RECORD_CHANGED_CHANNEL:
+		_on_backend_record_changed(payload)
+		return
 	if channel == "state":
 		_push_event("council.snapshot_changed", {})
 		return
@@ -462,7 +619,15 @@ func _on_page_message(raw: String) -> void:
 			"Council will not change this document: " + _record.unreadable_reason(), false))
 		return
 	if command == READ_LOCALLY:
-		_send(_ok(request_id, revision, {"snapshot": _record.snapshot()}))
+		# A read is served from the held record, but never from one the engine
+		# has already moved past: converging first is the whole difference
+		# between Re-read and a page showing less than the council holds. When
+		# the backend cannot be reached the record is still answered — a council
+		# must stay readable with the backend stopped — and the page has already
+		# been told, by _converge, that it is behind.
+		if _sync_pending or _sync_running:
+			await _converge()
+		_send(_ok(request_id, _record.revision(), {"snapshot": _record.snapshot()}))
 		return
 	_send(await _relay_to_engine(message))
 
@@ -486,6 +651,31 @@ func _relay_to_engine(message: Dictionary) -> Dictionary:
 			true)
 	var snapshot: Dictionary = outcome.get("snapshot", {})
 	if not snapshot.is_empty() and int(snapshot.get("snapshot_revision", 0)) != _record.revision():
+		# THE RECORD THAT CAME BACK HAS TO BE THIS DOCUMENT.
+		#
+		# "The engine is seeded with my record" is a claim the wrapper's own lease
+		# maintains, and the lease is a Godot-side fact: nothing stops
+		# minerva_council_load_snapshot — a live tool anyone may call — from
+		# replacing the engine's document without it. Then the seed is skipped
+		# because this panel is still named as the holder, and the snapshot read
+		# back is another council's. Adopting it would replace this document with
+		# somebody else's and mark the tab dirty so the project saved it.
+		#
+		# A record with no identity yet is NOT refused: a brand-new council has
+		# none until the engine's migration ladder mints one on the first seed,
+		# and that is the record coming back. Once this panel holds an identity,
+		# only that identity is accepted — the engine never exports a record
+		# without one, so an empty answer would itself be a foreign record.
+		var held := _record.project_id()
+		var answered := str(snapshot.get("project_id", ""))
+		if not held.is_empty() and answered != held:
+			_sync_pending = true
+			_sync_problem = ("the backend answered with a different council (%s rather than %s), "
+				+ "so nothing it said was adopted.") % [answered, held]
+			_report_behind()
+			return _err(str(message.get("request_id", "")), _record.revision(), "stale_revision",
+				"The Council backend is loaded with a different council, so this panel changed nothing. "
+				+ "Reopen this council and try again.", true)
 		# View belongs to the wrapper and may have changed during the exchange.
 		var current := _record.snapshot()
 		if current.has("view"):

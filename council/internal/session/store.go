@@ -75,6 +75,27 @@ type Store struct {
 	// now returns the timestamp written into new records. Injectable so a test
 	// can assert an exact record rather than matching a wall clock.
 	now func() string
+
+	// observe is told about every commit, so the wrapper that durably owns the
+	// document can find out that the engine moved it. See SetRecordObserver.
+	observe RecordObserver
+}
+
+// RecordObserver is told which document the engine just advanced, and to what
+// revision, after every commit that installs a new snapshot.
+//
+// It is called WITH THE ENGINE LOCK HELD, because the commit that produced the
+// revision is the only place the pair is known to be consistent. So an
+// implementation must not block and must not call back into the Store: it
+// records what it was told and returns.
+type RecordObserver func(projectID string, revision int)
+
+// SetRecordObserver installs the observer. Production wires the notification
+// that reaches an open panel; a Store with none simply tells nobody.
+func (s *Store) SetRecordObserver(observe RecordObserver) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.observe = observe
 }
 
 // New creates a Store holding an empty snapshot at revision 1.
@@ -506,6 +527,13 @@ func (s *Store) commit(mutate func(snap map[string]any) *Failure) *Failure {
 		return fail(CodePayloadTooLarge, err.Error(), false)
 	}
 	s.snapshot = canonical
+	// One write path, one place the change is announced. A chat turn and an MCP
+	// tool call commit here with no panel in the exchange, and this is what
+	// gives the panel that durably owns the document a chance to read it back
+	// before it saves (architecture.md §5.5).
+	if s.observe != nil {
+		s.observe(str(canonical["project_id"]), s.revision())
+	}
 	return nil
 }
 
