@@ -37,7 +37,8 @@
   // does and what the label says, so nobody discovers it by being billed for it.
   function modelSelect(id, models, chosen, emptyLabel) {
     var options = [el('option', { value: '', text: emptyLabel })];
-    var seen = {};
+    var seen = Object.create(null);
+    var chosenKey = R.text(chosen).toLowerCase();
     R.list(models).forEach(function (model) {
       // A model_name can be held twice — two Core services exposing an action
       // of the same name. A member is stored BY NAME, so both options would
@@ -45,20 +46,21 @@
       // (the engine's catalogue lookup and the host's own name-only Core
       // resolution). The later one is labelled as such rather than left to look
       // like a second choice, and the service in each display tells them apart.
-      var duplicate = Object.prototype.hasOwnProperty.call(seen, model.model_name);
-      seen[model.model_name] = true;
+      var key = R.text(model.model_name).toLowerCase();
+      var duplicate = Object.prototype.hasOwnProperty.call(seen, key);
+      seen[key] = true;
       var label = model.display
         ? model.display + ' (' + model.provider_display + ')'
         : model.model_name;
       options.push(el('option', {
         value: model.model_name,
-        selected: model.model_name === chosen && !duplicate ? true : null,
+        selected: key === chosenKey && !duplicate ? true : null,
         text: duplicate ? label + ' — same name as an earlier entry, which is the one that answers' : label
       }));
     });
     // A hint the host no longer offers must still be visible and selected, or
     // saving the form would silently change which model answers.
-    if (chosen && !R.list(models).some(function (m) { return m.model_name === chosen; })) {
+    if (chosen && !R.list(models).some(function (m) { return R.text(m.model_name).toLowerCase() === chosenKey; })) {
       options.push(el('option', {
         value: chosen,
         selected: true,

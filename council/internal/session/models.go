@@ -96,7 +96,8 @@ func (s *Store) RefreshModels(ctx context.Context) error {
 		return err
 	}
 	// STABLE, because the key is not unique: two Core services may expose an
-	// action of the same name, and those entries compare equal on both fields.
+	// action of the same name, including case variants, and those entries must
+	// compare equal on both fields.
 	// The host resolves a name-only Core choice to the first action in service
 	// order, so the listing's own order is what findModel must preserve — an
 	// unstable sort would make which of the two answers an implementation
@@ -105,7 +106,7 @@ func (s *Store) RefreshModels(ctx context.Context) error {
 		if models[i].ProviderKey != models[j].ProviderKey {
 			return models[i].ProviderKey < models[j].ProviderKey
 		}
-		return models[i].ModelName < models[j].ModelName
+		return strings.ToLower(models[i].ModelName) < strings.ToLower(models[j].ModelName)
 	})
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -138,7 +139,7 @@ func (s *Store) Models() ([]HostModel, bool) {
 // hint that names an action means the same model here and there.
 func (s *Store) findModel(hint string) (HostModel, bool) {
 	for _, model := range s.models {
-		if strings.EqualFold(model.ModelName, hint) {
+		if strings.ToLower(model.ModelName) == strings.ToLower(hint) {
 			return model, true
 		}
 	}

@@ -78,6 +78,17 @@ func requireCoreActionListed(t *testing.T, host *providerHost, id int) {
 // listed, and a member on an ordinary provider model is called exactly as
 // before.
 func TestACoreActionMemberIsAskedWithTheHostsOwnModelSpec(t *testing.T) {
+	for _, mixedCase := range []bool{false, true} {
+		name := "same_case"
+		if mixedCase {
+			name = "case_variant"
+		}
+		t.Run(name, func(t *testing.T) { assertCoreMemberSpec(t, mixedCase) })
+	}
+}
+
+func assertCoreMemberSpec(t *testing.T, mixedCase bool) {
+	t.Helper()
 	store, err := session.New()
 	if err != nil {
 		t.Fatal(err)
@@ -90,6 +101,12 @@ func TestACoreActionMemberIsAskedWithTheHostsOwnModelSpec(t *testing.T) {
 	// which Core allows: the name cannot pick between them, so the listing's
 	// order has to — and the first is what both sides resolve to.
 	specs := host.offerCoreAction(coreAction, "model-chat", "model-chat-gpu")
+	if mixedCase {
+		host.mu.Lock()
+		host.models["turnrock"][1]["model_name"] = strings.ToUpper(coreAction)
+		specs[1]["action_name"] = strings.ToUpper(coreAction)
+		host.mu.Unlock()
+	}
 
 	host.rpc(1, "initialize", map[string]any{})
 	host.awaitCapability("host.chat_providers.register")
