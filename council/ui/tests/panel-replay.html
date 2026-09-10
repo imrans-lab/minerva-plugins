@@ -2774,8 +2774,9 @@ window.CouncilPresets = [
             + 'is the binding: the session belongs to it, and every follow-up, retry and answer '
             + 'stays attached to it. Council never routes by whichever tab is focused.',
           'One question runs one bounded round of the relevant members, then the chair '
-            + 'synthesises. Ask a seat again with Follow up, or one argument with "Ask about '
-            + 'this" — a follow-up consults that seat alone and re-runs nobody else.',
+            + 'synthesises. In the editor, "Ask this seat a follow-up" asks one member again '
+            + 'and "Ask about this argument" asks whoever made one claim — either way the '
+            + 'follow-up consults that seat alone and re-runs nobody else.',
           'The same two moves are typed in the chat: "/ask <member> <question>" asks one '
             + 'member alone, by display name, seat id or the id of a claim they made, and '
             + '"/bench" lists the latest round\u2019s members with their models, their claims '
@@ -2792,8 +2793,11 @@ window.CouncilPresets = [
         ]),
         section('Keeping and reusing', [
           'Save the tab as you would any Minerva document: the councils, the sessions, the '
-            + 'contributions, the source captures and the chat link are all in it, and reopening '
-            + 'brings back a round that was still running when you closed the panel.',
+            + 'contributions, the source captures and the chat link are all in it.',
+          'A round still running when the panel closed, the plugin stopped or Minerva exited '
+            + 'is NOT picked up again: the process that owned those model calls is gone. It '
+            + 'comes back as a failed round marked interrupted, with an explicit Retry, so '
+            + 'nothing spends on its own and nothing is quietly lost.',
           'Pick the answers worth keeping and send them to the bound chat, or keep one as a '
             + 'native note; the link back to the contribution survives a note you later move, '
             + 'and a note that cannot be found is reported rather than dropped.',

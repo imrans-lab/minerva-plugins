@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Council as a native chat provider.
@@ -127,10 +128,8 @@ func (s *chatScope) turn(turn ChatTurn, wait time.Duration) ChatTurnResult {
 		return ChatTurnResult{Reply: s.chatBench(chatID, extra)}
 	}
 
-	if len(text) > maxQuestionBytes {
-		return ChatTurnResult{Reply: chatErrorf(
-			"That question is %d characters and a Council session records at most %d. Shorten it, or bring the material in as a source.",
-			len(text), maxQuestionBytes)}
+	if length := questionLength(text); length > maxQuestionCharacters {
+		return ChatTurnResult{Reply: overlongQuestion(length)}
 	}
 
 	route := s.routeChat(chatID)
@@ -151,10 +150,25 @@ func (s *chatScope) turn(turn ChatTurn, wait time.Duration) ChatTurnResult {
 	return s.chatOpenSession(chatID, "", text, wait)
 }
 
-// maxQuestionBytes is session.schema.json's own ceiling on question. Checking
-// it here turns a schema rejection the user cannot read into a sentence that
-// says what to do.
-const maxQuestionBytes = 8000
+// maxQuestionCharacters is session.schema.json's own ceiling on question.
+// Checking it here turns a schema rejection the user cannot read into a
+// sentence that says what to do.
+const maxQuestionCharacters = 8000
+
+// questionLength measures a question the way the schema's maxLength does — in
+// characters, not bytes — so a question of accented or non-Latin text is
+// refused when the schema would refuse it and not a moment earlier.
+func questionLength(text string) int {
+	return utf8.RuneCountInString(text)
+}
+
+// overlongQuestion is the one refusal both the plain turn and /ask give, so a
+// question too long to record reads the same however it was asked.
+func overlongQuestion(length int) ChatReply {
+	return chatErrorf(
+		"That question is %d characters and a Council session records at most %d. Shorten it, or bring the material in as a source.",
+		length, maxQuestionCharacters)
+}
 
 // ChatCancelFor stops whatever the named chat last started.
 //

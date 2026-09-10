@@ -101,8 +101,11 @@ func (s *chatScope) chatAsk(chatID, rest string, wait time.Duration) ChatTurnRes
 		return ChatTurnResult{Reply: chatErrorf("%s", noConsultationRefusal)}
 	}
 	if rest == "" {
-		return ChatTurnResult{Reply: chatErrorf(
-			"Name the member and say what to ask them: /ask <member> <question>. /bench lists who is on this council.")}
+		// The roster travels with the refusal rather than a pointer to /bench:
+		// a session whose round has not run yet has no bench to print, so
+		// naming one would be advice that answers with nothing.
+		return ChatTurnResult{Reply: chatErrorf("%s", strings.TrimSpace(
+			"Name the member and say what to ask them: /ask <member> <question>. "+s.sessionRoster(route.sessionID)))}
 	}
 
 	target, question, refusal := s.resolveAsk(route.sessionID, rest)
@@ -113,10 +116,8 @@ func (s *chatScope) chatAsk(chatID, rest string, wait time.Duration) ChatTurnRes
 		return ChatTurnResult{Reply: chatErrorf(
 			"That line named %s and asked them nothing. Say what to ask: /ask %s <question>.", target.label, target.label)}
 	}
-	if len(question) > maxQuestionBytes {
-		return ChatTurnResult{Reply: chatErrorf(
-			"That question is %d characters and a Council session records at most %d. Shorten it, or bring the material in as a source.",
-			len(question), maxQuestionBytes)}
+	if length := questionLength(question); length > maxQuestionCharacters {
+		return ChatTurnResult{Reply: overlongQuestion(length)}
 	}
 	// A round already running for this chat is reported, never joined by a
 	// second one — the same rule a plain turn gets, for the same reason: the
@@ -255,12 +256,14 @@ func (s *Store) resolveAsk(sessionID, rest string) (askTarget, string, string) {
 			}
 		}
 	}
-	first, _ := cutWord(rest)
 	switch {
 	case len(matched) == 0:
+		// Everything the scan tried, not just its first word: a user who typed
+		// "Dr Okonkwo" needs to see that all of it was looked for and none of
+		// it found, rather than a refusal about "Dr".
 		return askTarget{}, "", fmt.Sprintf(
 			"There is nobody called %q on this council, and no argument by that id. %s",
-			first, rosterSentence(def))
+			strings.Join(taken, " "), rosterSentence(def))
 	case len(matched) > 1:
 		var ids []string
 		for _, target := range matched {
@@ -466,6 +469,17 @@ func (s *Store) seatLabel(sessionID, seatID string) string {
 		return label
 	}
 	return seatID
+}
+
+// sessionRoster is the roster of the council one session pinned.
+func (s *Store) sessionRoster(sessionID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, _ := findByID(s.snapshot["sessions"], "session_id", sessionID)
+	if session == nil {
+		return ""
+	}
+	return rosterSentence(obj(session["definition_snapshot"]))
 }
 
 // rosterSentence lists who can be asked. Every refusal to guess carries it:

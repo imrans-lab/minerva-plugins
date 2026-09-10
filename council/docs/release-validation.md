@@ -65,11 +65,26 @@ project kills it. No GDScript was changed in this task, so nothing new needs it.
        -coverpkg=./... -coverprofile=/tmp/council-t11.cov \
        && go tool cover -func=/tmp/council-t11.cov | tail -1)
 
-**38 top-level tests, 74 test functions and subtests.** Statement coverage from
-the invocation above: **83.9 % before this task, 85.2 % after** (the profile
-total across all three packages). The per-package line `go test` prints for the
+**38 top-level tests; 74 tests and subtests in total.** Both are counted from
+`go test -v`, because neither is visible in the ordinary output:
+
+    (cd council && go test -count=1 ./... -v) | grep -cE '^--- PASS'        # 38
+    (cd council && go test -count=1 ./... -v) | grep -cE '^[[:space:]]*--- PASS'   # 74
+
+The first grep is anchored at column 0, which is where a top-level result is
+printed; a subtest's result is indented, so only the second sees both.
+
+Statement coverage, from the invocation above: **83.9 % before this task,
+85.1 % after** (the profile total across all three packages). The per-package line `go test` prints for the
 main package alone moved 81.2 % → 82.4 % over the same change; the two figures
 count different denominators, so they are quoted together rather than mixed.
+
+The profile total read 85.2 % at the end of T11's own work and 85.1 % here. The
+difference is not a regression: the C5 batch folds for T10 and T10b added
+production statements to `internal/session/chat.go` and `chat_directives.go`
+after T11's tests were written, which moves the denominator. It is recorded
+rather than smoothed over, because a coverage figure with no date and no tree
+attached is not evidence of anything.
 
 What decides each area, and where:
 
@@ -94,14 +109,20 @@ What decides each area, and where:
       --virtual-time-budget=120000 --window-size=1400,900 --dump-dom \
       "file://$PWD/council/ui/tests/selftest.html" | grep -o '<title>[^<]*'
 
-**66/66 checks passed.** The first run of this task was **65/66** — see defect
-D1 in section 5.
+**68/68 checks passed.**
+
+This number moves, so it is quoted with what moved it. T11 opened at **65/66**
+— a red, defect D1 in section 5 — and closed at 66/66 once that check was given
+an oracle. The C5 batch folds for T10 then added two named checks to the same
+suite, and the count stands at **68/68** as measured here. The suite is not
+pinned anywhere the way the GD suite is, so a changed total is only meaningful
+against the change that caused it.
 
 The page is driven against `ui/tests/recorded.js`, whose envelopes are what the
 real backend returned after loading the shipped fixtures. Nothing in it is
 hand-written.
 
-`council/docs/t03-live-check.md` says this suite is "45 checks". It is 66. The
+`council/docs/t03-live-check.md` says this suite is "45 checks". It is 68. The
 number in that document is stale (defect D4).
 
 ### 2.4 What was NOT run
@@ -348,7 +369,7 @@ guess what is and is not already known:
 | I, one failed member | `TestABrokerRefusalBecomesAVisibleMemberFailureThatCanBeRetried` |
 | I, plugin restart mid-round | `TestInterruptedRunsAreNotResumed`, `TestSavedMidRunDocumentContinuesWithoutDuplicateCalls` |
 | I, close and reopen mid-round | `TestAPanelClosedMidRunRecoversItsContributions` (run here); GD section 9 — **GD (not re-run)** |
-| J, narrow / wide / dark / keyboard | `ui/tests/selftest.html` (66 checks) — synthetic events in a headless browser, **not** CefTexture's focus or native activation |
+| J, narrow / wide / dark / keyboard | `ui/tests/selftest.html` (68 checks) — synthetic events in a headless browser, **not** CefTexture's focus or native activation |
 
 **Every model in that column is a double.** The column is why the code is
 believed correct; it is not why it is believed to work.
@@ -359,10 +380,10 @@ believed correct; it is not why it is believed to work.
 
 | | What | Where | Filed |
 |---|---|---|---|
-| D1 | The page self-test's "no invite control" check had no oracle and went red on T10's help copy. It scanned `body.textContent`, which on this page includes every inline `<script>`, so it read the bundle rather than the interface. First run of this task: 65/66. Rewritten against the rendered controls; 66/66, and it falsifies on a real invite button | `ui/tests/selftest.html` | bug `01a08a391d7a` |
+| D1 | The page self-test's "no invite control" check had no oracle and went red on T10's help copy. It scanned `body.textContent`, which on this page includes every inline `<script>`, so it read the bundle rather than the interface. First run of this task: 65/66. Rewritten against the rendered controls, with a non-empty guard so an unmatched selector cannot pass vacuously; green ever since, and it falsifies on a real invite button (mutation-checked with both a `button` and a `select`) | `ui/tests/selftest.html` | bug `01a08a391d7a` |
 | D2 | `schemas/envelope.schema.json` still describes `run.start` as returning "only once the run has reached a resting state", and `run.await` as being "for the second viewer of a run somebody else started". Both were true before the C3 transport ruling and are false now — `manifest.json` and `tools.go` describe the bounded wait correctly. The new section 9 of the round test falsifies the schema's prose directly | `schemas/envelope.schema.json:34` | bug `01a08a387422` |
 | D3 | `Store.AwaitRun` has no caller anywhere. It is an exported wrapper on an `internal/` package, so no consumer outside the module can exist; the two live call sites both use the unexported `awaitRun` | `internal/session/round.go:520` | chore `01a08a38e08a` |
-| D4 | `docs/t03-live-check.md` says the page self-test is "45 checks". It is 66 | `docs/t03-live-check.md:370` | chore `01a08a38e08a` |
+| D4 | `docs/t03-live-check.md` says the page self-test is "45 checks". It is 68 | `docs/t03-live-check.md:370` | chore `01a08a38e08a` |
 | D5 | `wrapper.chat_handoff` and `CouncilRecord.context_text` have no automated coverage in any suite. `context_text` is the derivation shared with `_on_panel_render_for_llm`, so a change to one silently changes the other | `ui/council_panel.gd:551`, `ui/council_record.gd:266` | work item `01a08a38b553` |
 | D6 | The live scenario could not be run at all: no Minerva application, so no MCP. Recorded in section 4 | — | work item `01a08a3957b6` |
 

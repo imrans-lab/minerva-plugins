@@ -5,6 +5,10 @@
 // functions — `call` and `onEvent` — so the page under test is byte-for-byte the
 // page that ships. Nothing here shapes a reply: every envelope comes from
 // recorded.js, which the real backend produced (ui/tests/record-envelopes.mjs).
+// The one exception is the empty document, which is DERIVED from a recording
+// rather than invented — emptied() takes the recorded `inventory` snapshot and
+// removes its councils and sessions, because the recorder produces no document
+// with nothing in it and the onboarding is reachable from no other state.
 //
 // What it adds, for the harness only, is `window.__councilReplay`: which
 // recorded document is being served, a way to swap it and fire the event that

@@ -155,9 +155,15 @@
         // the moment any string in the code contains the word, and it would pass
         // an invite button whose label said "add a seat". What "offers no invite
         // control" means is that nothing a person can press asks for one.
+        //
+        // The length guard is not decoration: every() on an empty array is true,
+        // so a selector that stopped matching — a renamed #panel, a pane that
+        // renders no controls — would report this as passing while checking
+        // nothing at all.
+        var controls = all(w, '#panel :is(button,a,input,select,textarea,[role="button"],[onclick])');
         check('v0.1 offers no invite control anywhere',
-          all(w, '#panel :is(button,a,input,select,textarea,[role="button"],[onclick])')
-            .every(function (control) {
+          controls.length > 0
+            && controls.every(function (control) {
               return [control.textContent, control.getAttribute('aria-label'),
                 control.getAttribute('title'), control.value]
                 .join(' ').toLowerCase().indexOf('invite') < 0;
@@ -621,16 +627,23 @@
       })
 
       .then(function () {
-        check('a refusal from the engine is shown rather than swallowed',
+        check('a refusal reply is shown rather than swallowed',
           q(w, '#message .refusal').textContent.length > 0);
       })
 
       // ------------------------------------------------------ the help sheet
       .then(function () {
         var before = w.__councilReplay.calls.length;
-        q(w, '#help').click();
+        // Reached the way a reader reaches it: the footer control, found by the
+        // attribute the delegation matches, not by an id a test happens to know.
+        var opener = q(w, '.footrail [data-help]');
+        check('the footer offers a Help control', !!opener && opener.tagName === 'BUTTON');
+        opener.click();
         return until(function () { return q(w, '#detail .sheet'); }).then(function () {
           var text = q(w, '#detail .sheet').textContent;
+          check('the Help control opens the help sheet in the detail column',
+            q(w, '#detail').contains(q(w, '#detail .sheet'))
+              && q(w, '#stage').getAttribute('data-detail') === 'open');
           check('help opens without asking the host anything',
             w.__councilReplay.calls.length === before);
           check('help states the export boundary and the size limit it will hit',

@@ -974,9 +974,14 @@ func TestABrokerRefusalBecomesAVisibleMemberFailureThatCanBeRetried(t *testing.T
 	const costingScope = "against the bench time it consumes"
 	const brokerCode = "provider_key_missing"
 	const brokerMessage = "OpenAI has no API key configured."
-	refusing := true
+	// Installed and withdrawn through refuseWith, which the harness guards with
+	// its own lock. A plain bool flipped by the test body and read here would be
+	// a write on one goroutine and a read on the capability goroutine, ordered
+	// only by whatever the pipe happened to synchronise — which is not something
+	// this test should be relying on, and not something -race would keep
+	// catching if the surrounding calls changed.
 	host.refuseWith(func(args map[string]any) (string, string) {
-		if refusing && strings.Contains(systemOf(args), costingScope) {
+		if strings.Contains(systemOf(args), costingScope) {
 			return brokerCode, brokerMessage
 		}
 		return "", ""
@@ -1038,7 +1043,7 @@ func TestABrokerRefusalBecomesAVisibleMemberFailureThatCanBeRetried(t *testing.T
 	}
 
 	// --- and asking again, once the key is there --------------------------
-	refusing = false
+	host.refuseWith(nil)
 	before := len(host.modelCalls())
 	retried := host.tool(4, "minerva_council_command", map[string]any{
 		"request_id":    "req-retry",

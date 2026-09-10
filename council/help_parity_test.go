@@ -169,7 +169,7 @@ func TestShippedHelpNamesOnlyThingsThatExist(t *testing.T) {
 		}
 	}
 
-	checkToolTable(t, len(tools))
+	checkToolTable(t, tools)
 }
 
 var (
@@ -187,8 +187,9 @@ var (
 // leaves the sentence reading "eight" and the table one row short, and nothing
 // else in the build notices. So both the row count and the two numerals in the
 // sentence above it are derived from the same list the backend answers from.
-func checkToolTable(t *testing.T, answered int) {
+func checkToolTable(t *testing.T, tools map[string]bool) {
 	t.Helper()
+	answered := len(tools)
 	raw, err := os.ReadFile("README.md")
 	if err != nil {
 		t.Fatal(err)
@@ -212,13 +213,35 @@ func checkToolTable(t *testing.T, answered int) {
 	if numberWord[counts[1]] != answered {
 		t.Errorf("README.md says %q tools and the backend answers %d", counts[1], answered)
 	}
-	// The rest belong to the host (the two chat tools) and to the panel (the two
-	// snapshot hooks). Neither is a tool a caller invokes, and the sentence
-	// promises exactly that split.
-	if want := answered - 4; numberWord[counts[2]] != want {
-		t.Errorf("README.md says %q tools answer a caller; %d do, once the host's two chat tools and the panel's two snapshot hooks are set aside",
-			counts[2], want)
+	// The split is derived from the NAMES, never from arithmetic: a tool added
+	// for the host or the panel has to be listed here to be excluded, so the one
+	// that is not fails as "answers a caller" and says which. A count of four
+	// would have absorbed it silently.
+	callable := 0
+	for name := range tools {
+		if !notForCallers[name] {
+			callable++
+		}
 	}
+	for name := range notForCallers {
+		if !tools[name] {
+			t.Errorf("%q is set aside as a tool no caller invokes, and this backend does not answer it", name)
+		}
+	}
+	if numberWord[counts[2]] != callable {
+		t.Errorf("README.md says %q tools answer a caller; %d do, once the host's chat tools and the panel's snapshot hooks are set aside",
+			counts[2], callable)
+	}
+}
+
+// The tools a caller never invokes. Two are the HOST's — it calls them itself,
+// once per chat turn and once per stop — and two are the PANEL's, which is how
+// the Council tab hands its document to and from the backend.
+var notForCallers = map[string]bool{
+	chatGenerateTool:                  true,
+	chatCancelTool:                    true,
+	"minerva_council_load_snapshot":   true,
+	"minerva_council_export_snapshot": true,
 }
 
 // The shipped councils are ordinary records, and this is what "ordinary" has to
@@ -248,9 +271,14 @@ func TestShippedPresetsAreImportableCouncils(t *testing.T) {
 		if strings.TrimSpace(preset.Name) == "" || strings.TrimSpace(preset.Purpose) == "" {
 			t.Errorf("%s: a shipped council needs a name and a purpose; they are what the offer shows", preset.File)
 		}
+		// "Source-grounded" has to mean grounded: a simulant with an empty
+		// grounding list would be refused by the invariants anyway, and counting
+		// it here would let the demonstration claim pass on a preset that
+		// demonstrates nothing.
 		for _, member := range record["members"].([]any) {
 			m := member.(map[string]any)
-			if m["kind"] == "simulant" {
+			refs, _ := m["grounding"].([]any)
+			if m["kind"] == "simulant" && len(refs) > 0 {
 				grounded++
 			}
 		}

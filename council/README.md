@@ -184,8 +184,10 @@ A run interrupted by a restart is demoted to a visible failed state with an
 explicit retry.
 
 **`/ask` says it cannot place a name.** Names are matched against each seat's
-display name, its seat id and its member id. `/bench` prints all three for the
-latest round; a name two members answer to has to be resolved by seat id.
+display name, its seat id and its member id — and against the id of any claim
+made in the session. `/bench` prints the name and seat id of the seats that
+answered the latest round; a name two members answer to has to be resolved by
+seat id.
 
 **Saving fails on a large project.** v0.1 moves the whole document across the
 host's plugin IPC hop in one message, so every council, session, contribution
