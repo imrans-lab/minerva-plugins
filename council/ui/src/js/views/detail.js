@@ -358,7 +358,13 @@
             + 'stays attached to it. Council never routes by whichever tab is focused.',
           'One question runs one bounded round of the relevant members, then the chair '
             + 'synthesises. Ask a seat again with Follow up, or one argument with "Ask about '
-            + 'this" — a follow-up consults that seat alone and re-runs nobody else.'
+            + 'this" — a follow-up consults that seat alone and re-runs nobody else.',
+          'The same two moves are typed in the chat: "/ask <member> <question>" asks one '
+            + 'member alone, by display name, seat id or the id of a claim they made, and '
+            + '"/bench" lists the latest round\u2019s members with their models, their claims '
+            + 'labelled source, inference or unknown, and each one\u2019s status. A name that '
+            + 'matches nobody, or two people, is refused with the list of seats rather than '
+            + 'guessed at.'
         ]),
         section('Stopping and retrying', [
           'Stopping a chat turn cancels the round. A member reply that lands afterwards is '

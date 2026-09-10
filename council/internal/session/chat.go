@@ -33,27 +33,10 @@ const (
 	ChatError    = "error"
 )
 
-// Directives are what a question's options send back. The host does not return
-// the label a user clicked: it sends the option's KEYSTROKE as an ordinary user
-// turn (ChatPane.gd:2385-2391, :2399-2406), so an option's keystroke is a line
-// of text Council will read next turn, and these are the two it understands.
-//
-// They are exported because they are part of Council's chat surface: anything
-// building an option, in this process or in the panel, has to spell them the
-// same way the reader does.
-const (
-	SelectCouncilDirective = "/council "
-	SelectSessionDirective = "/council-session "
-)
-
-// Directives returns every directive the turn reader understands, longest first
-// — which is also the order it must test them in, since "/council-session " has
-// "/council" as a prefix. Anything that documents the chat surface checks itself
-// against this rather than against a list of its own, and a directive added to
-// the reader without being added here is a directive the help may not name.
-func Directives() []string {
-	return []string{SelectSessionDirective, SelectCouncilDirective}
-}
+// The directives a turn may carry, and the reader for each, are in
+// chat_directives.go — that file is the whole of Council's typed chat surface,
+// and keeping the table beside its readers is what stops one being added
+// without the other.
 
 // ChatTurn is one turn handed over by the host's chat provider.
 type ChatTurn struct {
@@ -127,14 +110,21 @@ func (s *chatScope) turn(turn ChatTurn, wait time.Duration) ChatTurnResult {
 		return ChatTurnResult{Reply: chatErrorf("There was no question in that turn, so nobody was consulted.")}
 	}
 
-	// A directive is a choice the user made on a previous turn's option card.
-	// It is handled before anything else, because it is an answer to Council
-	// rather than a question for the council.
+	// A directive is an instruction to Council itself — a choice made on a
+	// previous turn's option card, or a line the user typed to aim a question
+	// or read the bench. All of them are handled before anything else, because
+	// none of them is a question for the council.
 	if rest, found := strings.CutPrefix(text, SelectSessionDirective); found {
 		return ChatTurnResult{Reply: s.chatSelectSession(chatID, strings.TrimSpace(rest))}
 	}
 	if rest, found := strings.CutPrefix(text, SelectCouncilDirective); found {
 		return s.chatSelectCouncil(chatID, strings.TrimSpace(rest), wait)
+	}
+	if rest, found := askArgument(text); found {
+		return s.chatAsk(chatID, rest, wait)
+	}
+	if extra, found := benchArgument(text); found {
+		return ChatTurnResult{Reply: s.chatBench(chatID, extra)}
 	}
 
 	if len(text) > maxQuestionBytes {
@@ -240,7 +230,7 @@ func (s *chatScope) chatOpenSession(chatID, definitionID, question string, wait 
 	return s.chatRound(chatID, sessionID, map[string]any{
 		"session_id": sessionID,
 		"kind":       "initial_round",
-	}, wait)
+	}, wait, nil)
 }
 
 // chatFollowUp continues an existing consultation. The whole advisory bench is
@@ -251,7 +241,7 @@ func (s *chatScope) chatFollowUp(chatID, sessionID, prompt string, wait time.Dur
 		"session_id": sessionID,
 		"kind":       "follow_up",
 		"prompt":     prompt,
-	}, wait)
+	}, wait, nil)
 }
 
 // chatAwait watches the round this chat already has going, instead of starting
@@ -346,7 +336,11 @@ func (s *chatScope) chatSelectSession(chatID, sessionID string) ChatReply {
 // ---------------------------------------------------------------------------
 
 // chatRound starts a round and renders it as a provider reply.
-func (s *chatScope) chatRound(chatID, sessionID string, payload map[string]any, wait time.Duration) ChatTurnResult {
+//
+// note, when a caller passes one, adds a sentence derived from the run that
+// actually started — never from what the caller intended — and only once the
+// round exists, so a refusal is left as the actionable sentence it already is.
+func (s *chatScope) chatRound(chatID, sessionID string, payload map[string]any, wait time.Duration, note func(map[string]any) string) ChatTurnResult {
 	seconds := waitSecondsFor(wait)
 	reply := s.chatCommand("run.start", payload, true, &seconds)
 	if !reply.OK {
@@ -356,10 +350,16 @@ func (s *chatScope) chatRound(chatID, sessionID string, payload map[string]any, 
 		}
 	}
 	s.noteChat(chatID)
+	rendered := renderRound(reply.Payload)
+	if note != nil {
+		if line := note(reply.Payload); line != "" {
+			rendered.Text += "\n\n" + line
+		}
+	}
 	return ChatTurnResult{
 		SessionID: sessionID,
 		RunID:     str(reply.Payload["run_id"]),
-		Reply:     renderRound(reply.Payload),
+		Reply:     rendered,
 	}
 }
 

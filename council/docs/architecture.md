@@ -741,6 +741,24 @@ typed is remembered against the chat so they never type it twice.
 `/council-session <session_id>` is the same mechanism for binding a chat to a
 consultation that already exists.
 
+Two more directives are typed rather than clicked, and neither adds anything to
+the command table. `/ask <member> <question>` resolves the member against the
+session's own definition snapshot — seat id, member id, display name, or the id
+of a claim made in this session — and then dispatches exactly the `run.start`
+the panel's "Follow up" and "Ask about this" buttons dispatch: a seat travels as
+`addressed_seat_id` + `seat_ids`, an argument travels as `addressed_claim_id`
+alone, so the claim-owner rule, the chair rule and the human-seat refusal are
+the engine's single copy of those rules rather than a second reading of them in
+the chat path. The reply names who was actually consulted, read off the run
+rather than off the aim. A name matching nothing, or more than one seat, is
+refused with the roster; a running round is reported rather than joined, exactly
+as a plain turn is. `/bench` renders the latest round's contributions — seat,
+member, model, per-claim support label, status — from the loaded record under
+the engine's own lock, and runs no command at all: nothing needs to be spent to
+report what is already written down. It is a different derivation from the
+wrapper's `context_text`, which hands a chat or an LLM the arguments themselves;
+neither restates the other.
+
 Cancellation arrives carrying only `chat_id`, so the backend keeps the run each
 chat last started and cancels that. A cancel for a chat with nothing running,
 or for a round that already stopped, is a success that moves nothing.

@@ -60,7 +60,9 @@
         el('h3', { text: 'How a consultation starts' }),
         'Open a chat, choose Council as its provider, and ask your question there. '
           + 'The chat is what a session is bound to, so the answer, every follow-up '
-          + 'and every retry stay attached to it. The round appears here as it runs.'
+          + 'and every retry stay attached to it. The round appears here as it runs. '
+          + 'From that chat, "/ask <member> <question>" questions one member alone and '
+          + '"/bench" lists who answered, on what model and with what support.'
       ])
     ]);
   }

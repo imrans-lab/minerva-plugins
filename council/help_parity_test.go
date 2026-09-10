@@ -102,10 +102,14 @@ func skillProse(t *testing.T) string {
 }
 
 var (
-	toolToken      = regexp.MustCompile(`minerva_council_[a-z0-9_]+`)
-	backtickToken  = regexp.MustCompile("`([^`\n]+)`")
-	commandShape   = regexp.MustCompile(`^(snapshot|definition|source|member|session|run|outcome)\.[a-z_]+$`)
-	directiveShape = regexp.MustCompile(`^/council[a-z-]*`)
+	toolToken     = regexp.MustCompile(`minerva_council_[a-z0-9_]+`)
+	backtickToken = regexp.MustCompile("`([^`\n]+)`")
+	commandShape  = regexp.MustCompile(`^(snapshot|definition|source|member|session|run|outcome)\.[a-z_]+$`)
+	// Every directive shape the reader answers to, so a new one is covered by
+	// this sweep from the moment it is documented. A pattern narrower than the
+	// directive table is a directive that can be named in the help without
+	// anything checking it exists.
+	directiveShape = regexp.MustCompile(`^/(council[a-z-]*|ask|bench)(\s|$)`)
 )
 
 func TestShippedHelpNamesOnlyThingsThatExist(t *testing.T) {

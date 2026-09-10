@@ -93,6 +93,23 @@ Two ways to start one:
   project already holds, which is what stops an import from quietly overwriting
   a council you have edited.
 
+## Asking from chat
+
+A consultation lives in a Minerva chat with Council chosen as its provider. Most
+turns are ordinary questions; four lines are read as instructions to Council
+itself.
+
+| Line | What it does |
+|---|---|
+| `/council <definition_id>` | Picks which council takes the question, when the project holds more than one. Council offers this as a choice; clicking one sends the line. |
+| `/council-session <session_id>` | Points this chat at a consultation that already exists. A chat has exactly one session, so this MOVES the binding. |
+| `/ask <member> <question>` | Asks one member alone, by display name, seat id, or the id of a claim they made. The reply is the chair's revised synthesis, and it says who was consulted. Nobody else on the bench is re-asked. |
+| `/bench` | Lists the latest round's members with their model, their claims labelled source / inference / unknown, and each one's status. It reads the record and consults nobody. |
+
+A name that matches no member, or two, is refused with the list of seats —
+Council does not guess which member you meant. A seat held by a human member is
+the local user's own, and no round ever puts words in it.
+
 ## The tool surface
 
 Nine tools. Five answer a caller; four belong to the host and the panel and are
@@ -165,6 +182,10 @@ consultation lives in before asking again; the original session is untouched.
 it with `run.await`; a run reaches a resting state on its own budget regardless.
 A run interrupted by a restart is demoted to a visible failed state with an
 explicit retry.
+
+**`/ask` says it cannot place a name.** Names are matched against each seat's
+display name, its seat id and its member id. `/bench` prints all three for the
+latest round; a name two members answer to has to be resolved by seat id.
 
 **Saving fails on a large project.** v0.1 moves the whole document across the
 host's plugin IPC hop in one message, so every council, session, contribution
