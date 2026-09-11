@@ -98,7 +98,7 @@ func _init(panel: Node, panel_key: String) -> void:
 ## to be wrong.
 func can_adopt_unowned() -> bool:
 	var lease := _lease()
-	return (_holder().is_empty() or _holder() == _panel_key) and (not bool(lease.taken) or str(lease.taken_by) == _panel_key)
+	return str(lease.get("document_owner", "")) in ["", _panel_key] and (_holder().is_empty() or _holder() == _panel_key) and (not bool(lease.taken) or str(lease.taken_by) == _panel_key)
 
 
 func relay(request: Dictionary, record: Dictionary, current_record := Callable(), read_current_only := false) -> Dictionary:
@@ -181,6 +181,7 @@ func relay(request: Dictionary, record: Dictionary, current_record := Callable()
 				true), "snapshot": carried}
 
 	if read_current_only and str(record.get("project_id", "")).is_empty() and not str(carried.get("project_id", "")).is_empty():
+		_lease()["document_owner"] = _panel_key
 		_set_holder(_panel_key)
 	_release()
 	return {"reply": reply, "snapshot": carried}
@@ -240,6 +241,7 @@ func _ensure_seeded(record: Dictionary) -> Dictionary:
 	var refused := _refusal(body)
 	if not refused.is_empty():
 		return refused
+	_lease()["document_owner"] = _panel_key
 	_set_holder(_panel_key)
 	# The revision moving is the general signal and each of the three named
 	# reasons implies it; they are read as well so a future load that rewrites a

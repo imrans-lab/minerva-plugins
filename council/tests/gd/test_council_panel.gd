@@ -1102,6 +1102,19 @@ func _section_10_a_change_with_no_panel_in_it() -> void:
 	check("an empty panel adopts the tool-created document identity", _panel_a._record.project_id() == str(saved.project_id))
 	check("empty-panel adoption preserves complete content for save", _session_ids(_panel_a._on_panel_save_request()) == _session_ids(saved))
 
+	# An empty tab cannot acquire a closed panel's document just because the
+	# process lease was released. The prior owner may still receive tool calls.
+	_panel_a._backend.release_on_unload()
+	var other_record = _panel_b._record
+	_panel_b._record = load(RECORD_SCRIPT_PATH).new()
+	_panel_b._document_epoch += 1
+	_panel_b.receive("council.record_changed", {"project_id": saved.project_id, "snapshot_revision": saved.snapshot_revision})
+	await _panel_b._converge()
+	check("closing the owner does not authorize another empty panel to adopt", _panel_b._record.project_id().is_empty() and _session_ids(_panel_b._on_panel_save_request()).is_empty())
+	_panel_b._record = other_record
+	await _panel_a._rehydrate()
+
+
 	# Equal revision cannot authorize a write into another document with matching
 	# session IDs. An identity check after the mutation would be too late.
 	var same_revision: Dictionary = saved.duplicate(true)
