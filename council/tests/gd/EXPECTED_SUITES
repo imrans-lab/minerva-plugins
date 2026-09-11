@@ -38,4 +38,4 @@
 # oracle and proved to be the same text through both of its callers.
 # Includes three landing regressions: foreign write, pending save warning,
 # and delayed convergence after another panel becomes the holder.
-test_council_panel.gd assertions=110
+test_council_panel.gd assertions=114
