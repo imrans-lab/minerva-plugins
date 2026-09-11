@@ -170,7 +170,8 @@ signal request(channel: String, payload: Dictionary, reply_id: String)
 ## panel_key, data_directory, broker, file_path, associated_object, editor.
 func _on_panel_loaded(ctx: Dictionary) -> void:
 	_ctx = ctx
-	_backend = CouncilBackend.new(self, str(ctx.get("panel_key", ctx.get("panel_name", ""))))
+	_backend = CouncilBackend.new(self, str(ctx.get("panel_key", ctx.get("panel_name", ""))), str(ctx.get("project_id", "")))
+	_rejoin_closed_document.call_deferred()
 	_surface.focus_entered.connect(_on_surface_focus_changed.bind(true))
 	_surface.focus_exited.connect(_on_surface_focus_changed.bind(false))
 	if not ClassDB.class_exists("CefTexture"):
@@ -180,6 +181,17 @@ func _on_panel_loaded(ctx: Dictionary) -> void:
 		return
 	_mount_page()
 	_refresh_notice()
+
+
+func _rejoin_closed_document() -> void:
+	if _backend == null or _record.is_unreadable() or not _record.project_id().is_empty():
+		return
+	var document_id := _backend.adoptable_document_id()
+	if document_id.is_empty():
+		return
+	await _relay_to_engine({"schema_version": 1, "envelope": "request",
+		"request_id": _mint_request_id("rejoin"), "command": "snapshot.get", "payload": {},
+		"expected_project_id": document_id}, true)
 
 
 func _on_panel_unload() -> void:

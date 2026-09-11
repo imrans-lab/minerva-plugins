@@ -1001,6 +1001,8 @@ func _section_10_a_change_with_no_panel_in_it() -> void:
 				"build it first: (cd council && go build -o council-plugin ./)")
 		return
 
+	_panel_a._backend._host_project_id = "host-project-a"
+	_panel_b._backend._host_project_id = "host-project-b"
 	# The other council, which must not move.
 	var elsewhere: Dictionary = _fixture_as_session("ses-untouched", "A question in another project")
 	_panel_b._on_panel_load_request(_document_for("", elsewhere))
@@ -1104,6 +1106,10 @@ func _section_10_a_change_with_no_panel_in_it() -> void:
 
 	# An empty tab cannot acquire a closed panel's document just because the
 	# process lease was released. The prior owner may still receive tool calls.
+	var same_project_before = _panel_b._backend._host_project_id
+	_panel_b._backend._host_project_id = "host-project-a"
+	check("a live owner does not yield to another same-project panel", not _panel_b._backend.can_adopt_unowned())
+	_panel_b._backend._host_project_id = same_project_before
 	_panel_a._backend.release_on_unload()
 	var other_record = _panel_b._record
 	_panel_b._record = load(RECORD_SCRIPT_PATH).new()
@@ -1111,7 +1117,12 @@ func _section_10_a_change_with_no_panel_in_it() -> void:
 	_panel_b.receive("council.record_changed", {"project_id": saved.project_id, "snapshot_revision": saved.snapshot_revision})
 	await _panel_b._converge()
 	check("closing the owner does not authorize another empty panel to adopt", _panel_b._record.project_id().is_empty() and _session_ids(_panel_b._on_panel_save_request()).is_empty())
+	_panel_b._backend._host_project_id = "host-project-a"
+	await _panel_b._rejoin_closed_document()
+	check("a closed owner yields to a fresh panel in the same host project", _panel_b._record.project_id() == str(saved.project_id) and _session_ids(_panel_b._on_panel_save_request()) == _session_ids(saved))
+	_panel_b._backend._host_project_id = same_project_before
 	_panel_b._record = other_record
+	_panel_a._backend.forget_seed()
 	await _panel_a._rehydrate()
 
 

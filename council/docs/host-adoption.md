@@ -21,14 +21,14 @@ for small records; larger exchanges refuse explicitly on old hosts.
 - MCP waits are 1–25 seconds, default 20. A timeout of this bounded observation
   does not cancel a running model; subsequent awaits observe the same run.
 - An empty, unowned panel may adopt a tool-created document after an atomic
-  identity-guarded read. A panel holding another document never adopts it. The process retains the
-  prior document owner even after its lease is released, so closing a tab does
-  not authorize a different empty tab to take its document.
+  identity-guarded read. A panel holding another document never adopts it. The host supplies its project identity separately from the Council document
+  identity. A closed owner yields to another empty tab only within that same
+  host project; unknown project identity refuses automatic re-adoption.
 - Dispatch commits record the model and time a seat takes its concurrency slot.
   The panel shows queued/running/finished states, elapsed allowance, usage once
   reported, and a Cancel control. Minerva renders transient activity
   through `Editor.set_activity_status` when available. Its unsaved-state icon
-  retains priority; the tooltip includes activity. Old hosts retain panel activity.
+  retains priority; the tooltip includes activity. Old hosts retain only in-page activity; they have no tab activity indicator.
 
 Real-provider and live UX acceptance remain necessary before stable publication.
 

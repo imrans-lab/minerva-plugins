@@ -67,6 +67,7 @@ const LEASE_META := "council_backend_lease"
 
 var _panel: Node = null
 var _panel_key: String = ""
+var _host_project_id: String = ""
 var _reply_seq: int = 0
 var _seed_generation: int = 0
 
@@ -81,9 +82,10 @@ class _LeaseWaiter extends RefCounted:
 	var panel_ref: WeakRef = null
 
 
-func _init(panel: Node, panel_key: String) -> void:
+func _init(panel: Node, panel_key: String, host_project_id: String = "") -> void:
 	_panel = panel
 	_panel_key = panel_key
+	_host_project_id = host_project_id
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +100,30 @@ func _init(panel: Node, panel_key: String) -> void:
 ## to be wrong.
 func can_adopt_unowned() -> bool:
 	var lease := _lease()
-	return str(lease.get("document_owner", "")) in ["", _panel_key] and (_holder().is_empty() or _holder() == _panel_key) and (not bool(lease.taken) or str(lease.taken_by) == _panel_key)
+	var owner := str(lease.get("document_owner", ""))
+	var same_panel := owner.is_empty() or owner == _panel_key
+	var owner_ref: WeakRef = lease.get("document_owner_ref")
+	var owner_live := owner_ref != null and _is_live(owner_ref.get_ref())
+	var same_project := not _host_project_id.is_empty() and _host_project_id == str(lease.get("document_project", ""))
+	var eligible := same_panel or (same_project and not owner_live)
+	return eligible and (not bool(lease.taken) or str(lease.taken_by) == _panel_key)
+
+
+func _claim_document(document_id: String) -> void:
+	var lease := _lease()
+	lease.document_owner = _panel_key
+	lease.document_owner_ref = weakref(_panel)
+	lease.document_project = _host_project_id
+	lease.document_id = document_id
+
+
+func adoptable_document_id() -> String:
+	var lease := _lease()
+	if str(lease.get("document_owner", "")).is_empty() or not can_adopt_unowned():
+		return ""
+	if _host_project_id.is_empty() or _host_project_id != str(lease.get("document_project", "")):
+		return ""
+	return str(lease.get("document_id", ""))
 
 
 func relay(request: Dictionary, record: Dictionary, current_record := Callable(), read_current_only := false) -> Dictionary:
@@ -136,7 +161,12 @@ func relay(request: Dictionary, record: Dictionary, current_record := Callable()
 	var expected := str(carried.get("project_id", record.get("project_id", "")))
 	if not expected.is_empty():
 		request["expected_project_id"] = expected
+	var generation := _seed_generation
 	var sent := await _send(COMMAND_CHANNEL, request)
+	if generation != _seed_generation:
+		_release()
+		return {"reply": _failure(request_id, revision, "stale_revision",
+			"The panel opened a different council while the command was pending.", true), "snapshot": {}}
 	if not bool(sent.get("ok", false)):
 		_set_holder("")
 		_release()
@@ -181,7 +211,7 @@ func relay(request: Dictionary, record: Dictionary, current_record := Callable()
 				true), "snapshot": carried}
 
 	if read_current_only and str(record.get("project_id", "")).is_empty() and not str(carried.get("project_id", "")).is_empty():
-		_lease()["document_owner"] = _panel_key
+		_claim_document(str(carried.get("project_id", "")))
 		_set_holder(_panel_key)
 	_release()
 	return {"reply": reply, "snapshot": carried}
@@ -241,7 +271,7 @@ func _ensure_seeded(record: Dictionary) -> Dictionary:
 	var refused := _refusal(body)
 	if not refused.is_empty():
 		return refused
-	_lease()["document_owner"] = _panel_key
+	_claim_document(str(body.get("project_id", record.get("project_id", ""))))
 	_set_holder(_panel_key)
 	# The revision moving is the general signal and each of the three named
 	# reasons implies it; they are read as well so a future load that rewrites a
@@ -282,6 +312,8 @@ func forget_seed() -> void:
 ## The panel is going away for good: forget the seed AND give the lease up, so a
 ## queued exchange is not left waiting on a tab that no longer exists.
 func release_on_unload() -> void:
+	if str(_lease().get("document_owner", "")) == _panel_key:
+		_lease()["document_owner_ref"] = null
 	forget_seed()
 	_release()
 
