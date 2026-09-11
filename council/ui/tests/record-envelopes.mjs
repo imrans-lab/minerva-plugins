@@ -51,7 +51,7 @@ if (!existsSync(binary)) {
 // against a Core action at all.
 const CATALOGUE = [
   { key: 'anthropic', display: 'Anthropic', models: [
-    { model_name: 'claude-sonnet-4-6', display: 'Claude Sonnet 4.6' },
+    { model_name: 'claude-sonnet-4-6', display: 'Claude Sonnet 4.6', model_spec: {kind: 'dynamic', model_id: 10003} },
     { model_name: 'claude-opus-4-6', display: 'Claude Opus 4.6' }
   ] },
   { key: 'openai', display: 'OpenAI', models: [

@@ -282,7 +282,7 @@
       .then(function () {
         var options = all(w, '#detail #member-model option').map(function (o) { return o.value; });
         check('the host’s enabled models reach the member’s model control',
-          options.indexOf('claude-sonnet-4-6') >= 0 && options.indexOf('gpt-5-mini') >= 0,
+          options.some(function (value) { return value.startsWith('spec:') && JSON.parse(value.slice(5)).model_name === 'claude-sonnet-4-6' && JSON.parse(value.slice(5)).provider_key === 'anthropic'; }) && options.indexOf('gpt-5-mini') >= 0,
           options.join(','));
 
         // A TurnRock/Core action is a model like any other in this control.

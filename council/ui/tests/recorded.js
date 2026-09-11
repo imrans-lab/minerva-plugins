@@ -822,7 +822,7 @@ window.CouncilRecorded = {
          {
           "claims": [],
           "contribution_id": "con-4",
-          "dispatched_at": "2026-09-11T22:21:49Z",
+          "dispatched_at": "2026-09-11T23:30:10Z",
           "member_id": "mem-okonkwo",
           "member_revision": 2,
           "model_id": "claude-opus-4-6",
@@ -835,7 +835,7 @@ window.CouncilRecorded = {
         "prompt": "What price would buy the refusals back?",
         "request_id": "rec-4",
         "run_id": "run-3",
-        "started_at": "2026-09-11T22:21:49Z",
+        "started_at": "2026-09-11T23:30:10Z",
         "status": "running"
        }
       ],
@@ -1268,7 +1268,7 @@ window.CouncilRecorded = {
        },
        {
         "active_chair": {
-         "dispatched_at": "2026-09-11T22:21:51Z",
+         "dispatched_at": "2026-09-11T23:30:13Z",
          "model_id": "claude-opus-4-6",
          "timeout_seconds": 120
         },
@@ -1296,7 +1296,7 @@ window.CouncilRecorded = {
            }
           ],
           "contribution_id": "con-4",
-          "dispatched_at": "2026-09-11T22:21:49Z",
+          "dispatched_at": "2026-09-11T23:30:10Z",
           "member_id": "mem-okonkwo",
           "member_revision": 2,
           "model_id": "claude-opus-4-6",
@@ -1310,12 +1310,12 @@ window.CouncilRecorded = {
           }
          }
         ],
-        "ended_at": "2026-09-11T22:21:54Z",
+        "ended_at": "2026-09-11T23:30:15Z",
         "kind": "retry",
         "prompt": "What price would buy the refusals back?",
         "request_id": "rec-4",
         "run_id": "run-3",
-        "started_at": "2026-09-11T22:21:49Z",
+        "started_at": "2026-09-11T23:30:10Z",
         "status": "complete",
         "synthesis": {
          "claims": [
@@ -2144,7 +2144,7 @@ window.CouncilRecorded = {
          }
         ],
         "author": "R. Okonkwo",
-        "captured_at": "2026-09-11T22:21:54Z",
+        "captured_at": "2026-09-11T23:30:15Z",
         "content_hash": "sha256:d931f53d1ff55e2d87c7f4a8eb9d8a4c76c6bce404996134f18ab719fc557075",
         "locator": "note: margin note",
         "payload": {
@@ -2185,7 +2185,7 @@ window.CouncilRecorded = {
      }
     ],
     "author": "R. Okonkwo",
-    "captured_at": "2026-09-11T22:21:54Z",
+    "captured_at": "2026-09-11T23:30:15Z",
     "content_hash": "sha256:d931f53d1ff55e2d87c7f4a8eb9d8a4c76c6bce404996134f18ab719fc557075",
     "locator": "note: margin note",
     "payload": {
@@ -2763,7 +2763,7 @@ window.CouncilRecorded = {
           "start": 20
          }
         ],
-        "captured_at": "2026-09-11T22:21:54Z",
+        "captured_at": "2026-09-11T23:30:15Z",
         "content_hash": "sha256:6265dc6825412f9c85fa2d2b88435cec4c56a73d8d40ada48eac81bbcf7dada9",
         "payload": {
          "byte_length": 139,
@@ -3172,7 +3172,7 @@ window.CouncilRecorded = {
       "start": 20
      }
     ],
-    "captured_at": "2026-09-11T22:21:54Z",
+    "captured_at": "2026-09-11T23:30:15Z",
     "content_hash": "sha256:6265dc6825412f9c85fa2d2b88435cec4c56a73d8d40ada48eac81bbcf7dada9",
     "payload": {
      "byte_length": 139,
@@ -3203,6 +3203,12 @@ window.CouncilRecorded = {
     {
      "display": "Claude Sonnet 4.6",
      "model_name": "claude-sonnet-4-6",
+     "model_spec": {
+      "kind": "dynamic",
+      "model_id": 10003,
+      "model_name": "claude-sonnet-4-6",
+      "provider_key": "anthropic"
+     },
      "provider_display": "Anthropic",
      "provider_key": "anthropic"
     },
