@@ -134,9 +134,6 @@ var _sync_problem: String = ""
 ## sending while the held record is behind this.
 var _sync_target: int = 0
 var _sync_project_id: String = ""
-var _activity_icon: Texture2D
-var _saved_tab_icon: Texture2D
-var _activity_shown := false
 
 ## Whether the "this council is behind" report is on screen. It gates the clear,
 ## so an ordinary convergence does not push a dismissal at a page that was never
@@ -611,28 +608,13 @@ func _show_notice(message: String) -> void:
 
 func _update_activity_icon(force_idle := false) -> void:
 	var editor = _ctx.get("editor")
-	if not is_instance_valid(editor) or not editor is Control:
-		return
-	var tabs = editor.get_parent()
-	if not tabs is TabContainer:
-		return
-	var index: int = tabs.get_tab_idx_from_control(editor)
-	if index < 0:
+	if not is_instance_valid(editor) or not editor.has_method("set_activity_status"):
 		return
 	var active := false
 	for session in _record.snapshot().get("sessions", []):
 		for run in session.get("runs", []):
 			active = not force_idle and (active or run.get("status", "") in ["pending", "running"])
-	if active and not _activity_shown:
-		_saved_tab_icon = tabs.get_tab_icon(index)
-		if _activity_icon == null:
-			var pixels := Image.create(12, 12, false, Image.FORMAT_RGBA8)
-			pixels.fill(Color("46b77e"))
-			_activity_icon = ImageTexture.create_from_image(pixels)
-		tabs.set_tab_icon(index, _activity_icon)
-	elif not active and _activity_shown:
-		tabs.set_tab_icon(index, _saved_tab_icon)
-	_activity_shown = active
+	editor.set_activity_status("Council round in progress" if active else "")
 
 
 func _refresh_notice() -> void:
@@ -943,4 +925,8 @@ func _send(envelope: Dictionary) -> void:
 	if not _page_ready:
 		_outbox.append(envelope)
 		return
-	_cef.call_deferred("eval", "window.council._deliver(%s);" % JSON.stringify(envelope))
+	var serialized := JSON.stringify(envelope)
+	if serialized.to_utf8_buffer().size() > 8 * 1024 * 1024:
+		_show_notice("Council cannot display this response: it exceeds the 8 MiB page transport limit.")
+		return
+	_cef.call_deferred("eval", "window.council._deliver(%s);" % serialized)

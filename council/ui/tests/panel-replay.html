@@ -2522,16 +2522,17 @@ window.CouncilPresets = [
       }
       return R.text(value);
     }
-    var selectedKey = keyOf(chosen), found = false;
+    var selectedKey = keyOf(chosen), found = false, seen = {};
     var options = [el('option', { value: '', text: emptyLabel })];
     R.list(models).forEach(function (model) {
       var key = keyOf(model.model_spec || model.model_name);
-      var matches = !found && (key === selectedKey || (!selectedKey.startsWith('spec:') && R.text(model.model_name).toLowerCase() === selectedKey.toLowerCase()));
+      var duplicate = !!seen[key]; seen[key] = true;
+      var matches = !duplicate && !found && (key === selectedKey || (!selectedKey.startsWith('spec:') && R.text(model.model_name).toLowerCase() === selectedKey.toLowerCase()));
       if (matches) { found = true; }
-      options.push(el('option', { value: key, selected: matches ? true : null,
-        text: (model.display || model.model_name) + ' (' + model.provider_display + ')' }));
+      options.push(el('option', { value: key, disabled: duplicate ? true : null, selected: matches ? true : null,
+        text: (model.display || model.model_name) + ' (' + model.provider_display + ')' + (duplicate ? ' — unavailable: host identity duplicates an earlier option' : '') }));
     });
-    if (selectedKey && !found) { options.push(el('option', {value: selectedKey, selected: true, text: 'Unavailable: ' + selectedKey})); }
+    if (selectedKey && !found) { options.push(el('option', {value: selectedKey, selected: true, text: 'Unavailable: ' + (chosen && typeof chosen === 'object' ? (chosen.model_name || chosen.action_name || chosen.kind || 'saved model') : selectedKey)})); }
     return el('select', {id: id}, options);
   }
 

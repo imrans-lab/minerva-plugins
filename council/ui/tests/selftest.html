@@ -305,6 +305,13 @@
         var activity = w.CouncilParts.contributionBlock(definition, running, {});
         check('running member exposes model and the actual narrowed allowance', activity.textContent.indexOf('qwen-active') >= 0 && activity.querySelector('[data-allowance="25"]'));
 
+        var duplicates = w.CouncilDetail.modelSelect('duplicate-models', [
+          {model_name: 'same', provider_display: 'A'}, {model_name: 'same', provider_display: 'B'}
+        ], 'same', 'Default');
+        check('duplicate legacy identities cannot silently select the second provider', duplicates.options[1].selected && duplicates.options[2].disabled);
+        var missing = w.CouncilDetail.modelSelect('missing-model', [], {kind: 'dynamic', model_id: 10003, model_name: 'saved-model'}, 'Default');
+        check('unavailable structured selection shows its model name rather than JSON', missing.options[1].textContent === 'Unavailable: saved-model');
+
         // A request too large for the hop is refused before it travels.
         q(w, '[data-pane="session"]').click();
         return until(function () { return q(w, '#reading [data-follow-up]'); });

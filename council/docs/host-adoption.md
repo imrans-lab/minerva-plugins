@@ -9,7 +9,10 @@ for small records; larger exchanges refuse explicitly on old hosts.
   interruption records. The host bulk envelope is 8 MiB; the backend line reader
   permits 16 MiB for nested JSON wrappers and escaping. Per-field limits stay
   32 KiB. No successful change may make the document impossible to reopen.
-- Model choices persist the host's opaque `model_spec`. Legacy `model_hint`
+- Model choices persist `model_spec`. Builtin/dynamic selections additionally
+  carry the catalog model name and provider key: numeric IDs are local to an
+  installation. A mismatching or older unguarded selection must be chosen again
+  rather than silently using another model. Legacy `model_hint`
   remains readable; explicit structured identity wins over it. Run overrides
   accept either a legacy string or a structured spec. Missing identities refuse
   before a run is created. No service-name tie-break substitutes another model.
@@ -18,9 +21,22 @@ for small records; larger exchanges refuse explicitly on old hosts.
 - MCP waits are 1–25 seconds, default 20. A timeout of this bounded observation
   does not cancel a running model; subsequent awaits observe the same run.
 - An empty, unowned panel may adopt a tool-created document after an atomic
-  identity-guarded read. A panel holding another document never adopts it.
+  identity-guarded read. A panel holding another document never adopts it. The process retains the
+  prior document owner even after its lease is released, so closing a tab does
+  not authorize a different empty tab to take its document.
 - Dispatch commits record the model and time a seat takes its concurrency slot.
   The panel shows queued/running/finished states, elapsed allowance, usage once
-  reported, and a Cancel control. A green tab indicator marks active work.
+  reported, and a Cancel control. Minerva renders transient activity
+  through `Editor.set_activity_status` when available. Its unsaved-state icon
+  retains priority; the tooltip includes activity. Old hosts retain panel activity.
 
 Real-provider and live UX acceptance remain necessary before stable publication.
+
+The wrapper-to-page envelope is bounded at 8 MiB in UTF-8. Automated transport
+and browser checks do not prove live godot-cef delivery: opening and saving a
+record over 64 KiB in the installed build remains an acceptance gate.
+
+Dispatch stamps remain durable commits at actual concurrency-slot acquisition.
+Batching them before dispatch would mislabel queued seats as running; dropping
+revision bumps would break convergence and stale-write detection. Results and
+activity use the same record/revision mechanism.
