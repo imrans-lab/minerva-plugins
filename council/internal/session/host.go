@@ -26,6 +26,7 @@ type ChatHost interface {
 // engine owns what a member is told, so an adapter cannot quietly add context
 // one member should not have seen.
 type ModelCall struct {
+	GenerationOptions map[string]any
 	// Routing. These identify the contribution the reply belongs to; an adapter
 	// may log them and must not otherwise act on them.
 	RunID          string

@@ -441,12 +441,13 @@ window.CouncilRecorded = {
   "envelope": "reply",
   "request_id": "rec-4",
   "ok": true,
-  "snapshot_revision": 14,
+  "snapshot_revision": 15,
   "payload": {
    "contributions": [
     {
      "claims": 0,
      "contribution_id": "con-4",
+     "model_id": "claude-opus-4-6",
      "seat_id": "seat-capacity",
      "status": "running"
     }
@@ -455,7 +456,7 @@ window.CouncilRecorded = {
    "per_member_timeout_seconds": 120,
    "run_id": "run-3",
    "session_id": "ses-recurring-order",
-   "session_revision": 9,
+   "session_revision": 10,
    "session_status": "running",
    "status": "running"
   }
@@ -465,7 +466,7 @@ window.CouncilRecorded = {
   "envelope": "reply",
   "request_id": "",
   "ok": true,
-  "snapshot_revision": 14,
+  "snapshot_revision": 15,
   "payload": {
    "snapshot": {
     "definitions": [
@@ -821,27 +822,30 @@ window.CouncilRecorded = {
          {
           "claims": [],
           "contribution_id": "con-4",
+          "dispatched_at": "2026-09-11T22:21:49Z",
           "member_id": "mem-okonkwo",
           "member_revision": 2,
+          "model_id": "claude-opus-4-6",
           "seat_id": "seat-capacity",
-          "status": "running"
+          "status": "running",
+          "timeout_seconds": 120
          }
         ],
         "kind": "retry",
         "prompt": "What price would buy the refusals back?",
         "request_id": "rec-4",
         "run_id": "run-3",
-        "started_at": "2026-09-10T21:35:34Z",
+        "started_at": "2026-09-11T22:21:49Z",
         "status": "running"
        }
       ],
       "schema_version": 1,
       "session_id": "ses-recurring-order",
-      "session_revision": 9,
+      "session_revision": 10,
       "status": "running"
      }
     ],
-    "snapshot_revision": 14,
+    "snapshot_revision": 15,
     "view": {
      "pane": "session",
      "selected_definition_id": "def-workshop-economics",
@@ -855,7 +859,7 @@ window.CouncilRecorded = {
   "envelope": "reply",
   "request_id": "rec-7",
   "ok": true,
-  "snapshot_revision": 16,
+  "snapshot_revision": 18,
   "payload": {
    "contributions": [
     {
@@ -875,7 +879,7 @@ window.CouncilRecorded = {
    "resting": true,
    "run_id": "run-3",
    "session_id": "ses-recurring-order",
-   "session_revision": 11,
+   "session_revision": 13,
    "session_status": "complete",
    "status": "complete",
    "synthesis": {
@@ -912,7 +916,7 @@ window.CouncilRecorded = {
   "envelope": "reply",
   "request_id": "",
   "ok": true,
-  "snapshot_revision": 16,
+  "snapshot_revision": 18,
   "payload": {
    "snapshot": {
     "definitions": [
@@ -1263,6 +1267,11 @@ window.CouncilRecorded = {
         "status": "failed"
        },
        {
+        "active_chair": {
+         "dispatched_at": "2026-09-11T22:21:51Z",
+         "model_id": "claude-opus-4-6",
+         "timeout_seconds": 120
+        },
         "addressed_seat_id": "seat-capacity",
         "contributions": [
          {
@@ -1287,24 +1296,26 @@ window.CouncilRecorded = {
            }
           ],
           "contribution_id": "con-4",
+          "dispatched_at": "2026-09-11T22:21:49Z",
           "member_id": "mem-okonkwo",
           "member_revision": 2,
           "model_id": "claude-opus-4-6",
           "seat_id": "seat-capacity",
           "status": "complete",
           "text": "Quote the order against the worst week the bench has actually cleared, and price the standing commitment separately from the units.",
+          "timeout_seconds": 120,
           "usage": {
            "completion_tokens": 240,
            "prompt_tokens": 1180
           }
          }
         ],
-        "ended_at": "2026-09-10T21:35:39Z",
+        "ended_at": "2026-09-11T22:21:54Z",
         "kind": "retry",
         "prompt": "What price would buy the refusals back?",
         "request_id": "rec-4",
         "run_id": "run-3",
-        "started_at": "2026-09-10T21:35:34Z",
+        "started_at": "2026-09-11T22:21:49Z",
         "status": "complete",
         "synthesis": {
          "claims": [
@@ -1337,11 +1348,11 @@ window.CouncilRecorded = {
       ],
       "schema_version": 1,
       "session_id": "ses-recurring-order",
-      "session_revision": 11,
+      "session_revision": 13,
       "status": "complete"
      }
     ],
-    "snapshot_revision": 16,
+    "snapshot_revision": 18,
     "view": {
      "pane": "session",
      "selected_definition_id": "def-workshop-economics",
@@ -2133,7 +2144,7 @@ window.CouncilRecorded = {
          }
         ],
         "author": "R. Okonkwo",
-        "captured_at": "2026-09-10T21:35:39Z",
+        "captured_at": "2026-09-11T22:21:54Z",
         "content_hash": "sha256:d931f53d1ff55e2d87c7f4a8eb9d8a4c76c6bce404996134f18ab719fc557075",
         "locator": "note: margin note",
         "payload": {
@@ -2174,7 +2185,7 @@ window.CouncilRecorded = {
      }
     ],
     "author": "R. Okonkwo",
-    "captured_at": "2026-09-10T21:35:39Z",
+    "captured_at": "2026-09-11T22:21:54Z",
     "content_hash": "sha256:d931f53d1ff55e2d87c7f4a8eb9d8a4c76c6bce404996134f18ab719fc557075",
     "locator": "note: margin note",
     "payload": {
@@ -2752,7 +2763,7 @@ window.CouncilRecorded = {
           "start": 20
          }
         ],
-        "captured_at": "2026-09-10T21:35:39Z",
+        "captured_at": "2026-09-11T22:21:54Z",
         "content_hash": "sha256:6265dc6825412f9c85fa2d2b88435cec4c56a73d8d40ada48eac81bbcf7dada9",
         "payload": {
          "byte_length": 139,
@@ -3161,7 +3172,7 @@ window.CouncilRecorded = {
       "start": 20
      }
     ],
-    "captured_at": "2026-09-10T21:35:39Z",
+    "captured_at": "2026-09-11T22:21:54Z",
     "content_hash": "sha256:6265dc6825412f9c85fa2d2b88435cec4c56a73d8d40ada48eac81bbcf7dada9",
     "payload": {
      "byte_length": 139,
@@ -3204,6 +3215,12 @@ window.CouncilRecorded = {
     {
      "display": "model-chat (qwen3-8b)",
      "model_name": "qwen3-8b",
+     "model_spec": {
+      "action_name": "qwen3-8b",
+      "kind": "core_action",
+      "service_client_id": "model-chat",
+      "service_name": "model-chat"
+     },
      "provider_display": "TurnRock",
      "provider_key": "turnrock"
     }

@@ -34,7 +34,7 @@ type providerListing struct {
 
 // modelListing is host.models.list_models' result body for one provider.
 //
-// model_spec is present only for a provider whose models are not a static list.
+// model_spec carries the opaque stable identity supplied by the host.
 // Minerva sends it for the "turnrock" key, whose models are the live service
 // actions of the running Core node, and the dictionary is what
 // host.providers.chat must be handed back to reach that action — the action

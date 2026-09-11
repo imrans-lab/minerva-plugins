@@ -39,6 +39,10 @@ func (s *Store) synthesise(parent context.Context, control *runControl, sessionI
 		return
 	}
 
+	if err := s.markDispatched(control, sessionID, runID, plan.planned.call, int(rules.MemberTimeout.Seconds())); err != nil {
+		s.commitRunOutcome(control, sessionID, runID, err, ModelReply{}, plan)
+		return
+	}
 	ctx, cancel := context.WithTimeout(parent, rules.MemberTimeout)
 	defer cancel()
 	reply, err := s.generate(ctx, plan.planned.call, rules.PromptBytes)
@@ -97,17 +101,18 @@ func (s *Store) planSynthesis(control *runControl, sessionID, runID string, rule
 		missing: missing,
 		planned: plannedCall{
 			call: ModelCall{
-				RunID:          runID,
-				ContributionID: s.mintContributionID(session),
-				SeatID:         str(chairSeat["seat_id"]),
-				MemberID:       str(chair["member_id"]),
-				MemberRevision: int(num(chair["member_revision"])),
-				Role:           "chair",
-				Model:          chairModel,
-				Provider:       chairProvider,
-				ModelSpec:      chairSpec,
-				System:         system,
-				User:           user,
+				RunID:             runID,
+				ContributionID:    s.mintContributionID(session),
+				SeatID:            str(chairSeat["seat_id"]),
+				MemberID:          str(chair["member_id"]),
+				MemberRevision:    int(num(chair["member_revision"])),
+				Role:              "chair",
+				Model:             chairModel,
+				Provider:          chairProvider,
+				ModelSpec:         chairSpec,
+				GenerationOptions: obj(chair["generation_options"]),
+				System:            system,
+				User:              user,
 			},
 			allowed: allowed,
 		},

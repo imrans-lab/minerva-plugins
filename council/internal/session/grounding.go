@@ -255,7 +255,7 @@ func cmdMemberUpsert(s *Store, snap map[string]any, req *Request) (map[string]an
 	// A model hint the host does not have is refused HERE, where the user is
 	// still editing an identity, rather than discovered as a per-member failure
 	// once a round is already running and paid for.
-	if f := s.checkModelHint(str(member["model_hint"]), fmt.Sprintf("member %q", memberID)); f != nil {
+	if f := s.checkModelSelection(memberSelection(member), fmt.Sprintf("member %q", memberID)); f != nil {
 		return nil, f
 	}
 

@@ -12,19 +12,15 @@ package session
 
 import (
 	"time"
-
-	"github.com/ipeerbhai/plugins/council/internal/contract"
 )
 
 // SchemaVersion is the one wire/record format version this build speaks. A
 // record or envelope carrying anything else is refused rather than guessed at.
 const SchemaVersion = 1
 
-// MaxEnvelopeBytes is the largest single protocol message the engine accepts.
-// It is the host's pluginIPC request cap, of which contract.InlineLimit is
-// deliberately half so that a maximal inline payload still fits inside its
-// envelope. Deriving it here keeps one definition of the transport budget.
-const MaxEnvelopeBytes = 2 * contract.InlineLimit
+// One MiB of durable content leaves room in the host's 8 MiB bulk envelope
+// for reply wrappers, repeated snapshot fields and JSON escaping.
+const MaxEnvelopeBytes = 1 << 20
 
 // Failure codes, the closed enum from session.schema.json. A caller error that
 // is none of the specific cases lands on CodeInternal, which is the only
@@ -52,7 +48,7 @@ const (
 // on in the background, and run.await reads it.
 const (
 	DefaultWaitSeconds = 20
-	MaxWaitSeconds     = 90
+	MaxWaitSeconds     = 25
 )
 
 // Request is one inbound protocol envelope. base_revision is a pointer because

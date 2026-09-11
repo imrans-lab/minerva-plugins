@@ -24,7 +24,14 @@ func TestAcknowledgedSnapshotsRemainReloadable(t *testing.T) {
 		t.Fatal(err)
 	}
 	def["purpose"] = strings.Repeat("x", 4000)
-	for i := 0; i < 20; i++ {
+	nearLimit := s.Export()
+	nearLimit["definitions"] = []any{def}
+	padSnapshot(t, nearLimit, 24000)
+	nearRaw, _ := json.Marshal(nearLimit)
+	if _, err := s.Load(nearRaw); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 12; i++ {
 		def["definition_id"] = fmt.Sprintf("budget-%d", i)
 		before := s.Export()
 		req, _ := json.Marshal(map[string]any{"schema_version": 1, "envelope": "request", "request_id": fmt.Sprintf("import-%d", i), "command": "definition.import", "base_revision": s.Revision(), "payload": map[string]any{"definition": def}})
@@ -72,6 +79,7 @@ func TestLoadReservesInterruptedSnapshotGrowth(t *testing.T) {
 	ses["status"] = "running"
 	obj(arr(obj(arr(ses["runs"])[0])["contributions"])[0])["text"] = strings.Repeat("x", 32768)
 	con["text"] = ""
+	padSnapshot(t, snap, 20000)
 	base, _ := json.Marshal(snap)
 	padding := MaxEnvelopeBytes - len(base) - 8
 	if padding < 0 || padding > 32768 {
@@ -117,5 +125,27 @@ func TestLoadReservesInterruptedSnapshotGrowth(t *testing.T) {
 	}
 	if !reflect.DeepEqual(before, s.Export()) {
 		t.Fatal("a refused oversized load changed state")
+	}
+}
+
+// Fill with valid independent definitions, keeping a bounded final field for
+// boundary tests. This scales with the production budget instead of 64 KiB.
+func padSnapshot(t *testing.T, snap map[string]any, room int) {
+	t.Helper()
+	defs := arr(snap["definitions"])
+	template := obj(defs[0])
+	raw, _ := json.Marshal(snap)
+	size := len(raw)
+	for i := 0; ; i++ {
+		if size >= MaxEnvelopeBytes-room {
+			return
+		}
+		extra := deepCopy(template)
+		extra["definition_id"] = fmt.Sprintf("padding-%d", i)
+		extra["purpose"] = strings.Repeat("x", 4000)
+		encoded, _ := json.Marshal(extra)
+		size += len(encoded) + 1 // comma in the existing definitions array
+		defs = append(defs, extra)
+		snap["definitions"] = defs
 	}
 }

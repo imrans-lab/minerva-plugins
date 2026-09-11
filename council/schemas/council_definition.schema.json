@@ -110,6 +110,33 @@
           "type": "string",
           "maxLength": 120,
           "description": "Optional preferred host model id. Advisory: the host's enabled-model selection wins, and an unavailable hint is reported, never silently substituted."
+        },
+        "model_spec": {
+          "type": "object",
+          "description": "Exact opaque model_spec from the host catalog; takes precedence over legacy model_hint.",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        "generation_options": {
+          "type": "object",
+          "properties": {
+            "temperature": {
+              "type": "number",
+              "minimum": 0
+            },
+            "max_tokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false
         }
       },
       "required": [
@@ -289,7 +316,7 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 50,
-          "description": "How many runs one session may hold. Nothing in the engine starts a run, so this is the ceiling on what a caller can ask of one session — the reason a client loop cannot turn one question into unbounded spend."
+          "description": "How many runs one session may hold. Nothing in the engine starts a run, so this is the ceiling on what a caller can ask of one session \u2014 the reason a client loop cannot turn one question into unbounded spend."
         },
         "independent_initial_round": {
           "const": true,

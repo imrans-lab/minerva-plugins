@@ -279,6 +279,15 @@
     }
   }
 
+  // Update only clock text; rebuilding the editor would discard human drafts.
+  setInterval(function () {
+    if (document.hidden) { return; }
+    Array.prototype.forEach.call(document.querySelectorAll('[data-elapsed-since]'), function (node) {
+      var began = Date.parse(node.getAttribute('data-elapsed-since'));
+      if (Number.isFinite(began)) { node.textContent = ' · ' + Math.max(0, Math.floor((Date.now() - began) / 1000)) + ' s elapsed' + (node.getAttribute('data-allowance') ? ' / ' + node.getAttribute('data-allowance') + ' s allowance' : ''); }
+    });
+  }, 1000);
+
   function render() {
     var session = currentSession();
     var definition = R.definitionOf(session, state.snapshot);
@@ -539,7 +548,7 @@
     if (value('member-limitations')) { member.limitations = value('member-limitations'); }
     // A human is never consulted by a round, so a model hint on one would be a
     // provenance nobody can honour.
-    if (kind !== 'human' && value('member-model')) { member.model_hint = value('member-model'); }
+    if (kind !== 'human' && value('member-model')) { setMemberModel(member, value('member-model'));  }
 
     bridge.mutate('member.upsert', {
       definition_id: definition.definition_id,
@@ -547,6 +556,14 @@
     }).then(function (reply) {
       afterWrite(reply, name + ' is in the council. Give them a seat to have them consulted.');
     });
+  }
+
+  function modelSelection(value) { return value.startsWith('spec:') ? JSON.parse(value.slice(5)) : value; }
+  function setMemberModel(member, value) {
+    delete member.model_hint; delete member.model_spec;
+    if (!value) { return; }
+    var selected = modelSelection(value);
+    member[typeof selected === 'object' ? 'model_spec' : 'model_hint'] = selected;
   }
 
   function saveModel(memberId) {
@@ -560,7 +577,7 @@
       if (key !== 'member_revision') { next[key] = member[key]; }
     });
     var chosen = value('member-model');
-    if (chosen) { next.model_hint = chosen; } else { delete next.model_hint; }
+    setMemberModel(next, chosen);
 
     bridge.mutate('member.upsert', {
       definition_id: definition.definition_id,
@@ -634,7 +651,7 @@
     if (claimId) { payload.addressed_claim_id = claimId; }
     else { payload.addressed_seat_id = seatId; payload.seat_ids = [seatId]; }
     var model = value('follow-up-model');
-    if (model && seatId) { payload.model_overrides = {}; payload.model_overrides[seatId] = model; }
+    if (model && seatId) { payload.model_overrides = {}; payload.model_overrides[seatId] = modelSelection(model); }
 
     bridge.mutate('run.start', payload).then(function (reply) {
       if (!reply || !reply.ok) { return; }

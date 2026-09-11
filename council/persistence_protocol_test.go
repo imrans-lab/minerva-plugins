@@ -362,7 +362,7 @@ func TestSavedMidRunDocumentContinuesWithoutDuplicateCalls(t *testing.T) {
 	retried := payloadOf(t, afterCommand("run.retry", map[string]any{
 		"session_id": "ses-interrupted",
 		"run_id":     runID,
-	}, 30))
+	}, 25))
 	rested(t, retried)
 
 	calls, _ := afterRestart.recorded()
@@ -459,7 +459,7 @@ func TestAPanelClosedMidRunRecoversItsContributions(t *testing.T) {
 	started := payloadOf(t, command("run.start", map[string]any{
 		"session_id": "ses-closed-panel",
 		"kind":       "initial_round",
-	}, 30))
+	}, 25))
 	rested(t, started)
 	runID := str(started["run_id"])
 

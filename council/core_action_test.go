@@ -116,7 +116,19 @@ func assertCoreMemberSpec(t *testing.T, mixedCase bool) {
 	requireCoreActionListed(t, host, 2)
 	// Costing is on the Core action; capacity is on an ordinary provider model
 	// the fake host lists (providerHost's own catalogue).
-	seedDefinition(t, host, store, 3, hintedCouncil(t, coreAction, "gpt-test"), "req-seed-core")
+	definition := hintedCouncil(t, coreAction, "gpt-test")
+	expected := specs[0]
+	if mixedCase {
+		expected = specs[1]
+		for _, value := range definition["members"].([]any) {
+			member := obj2(value)
+			if str(member["model_hint"]) == coreAction {
+				member["model_spec"] = expected
+				member["generation_options"] = map[string]any{"temperature": 0, "max_tokens": 512}
+			}
+		}
+	}
+	seedDefinition(t, host, store, 3, definition, "req-seed-core")
 
 	const chatID = "chat-core"
 	answer := host.turn(4, chatID, "Should the workshop take the recurring order?")
@@ -148,26 +160,29 @@ func assertCoreMemberSpec(t *testing.T, mixedCase bool) {
 	// equality check is the whole contract: what the host listed is what the
 	// host is handed back (CapabilityBroker.gd's core_action branch resolves
 	// service_client_id + action_name).
+	if mixedCase && (core["temperature"] == nil || numOf(core["temperature"]) != 0 || numOf(core["max_tokens"]) != 512) {
+		t.Fatalf("canonical options missing: %v", core)
+	}
 	got, carried := specOf(core)
 	if !carried {
 		t.Fatalf("a member on a Core action must be called with model_spec; the call carried %v", core)
 	}
-	if !reflect.DeepEqual(got, specs[0]) {
-		t.Errorf("model_spec must be the listing's own dictionary\n got  %v\n want %v", got, specs[0])
+	if !reflect.DeepEqual(got, expected) {
+		t.Errorf("model_spec must be the listing's own dictionary\n got  %v\n want %v", got, expected)
 	}
 	// The tie-break, stated as its own claim: with the name held twice, the
 	// FIRST listed service is the one consulted — the host's rule for a
 	// name-only Core choice (singleton_object.gd create_provider_for), which
 	// Council matches by keeping the listing's order through a stable sort.
-	if service := str(got["service_client_id"]); service != "model-chat" {
+	if service := str(got["service_client_id"]); service != str(expected["service_client_id"]) {
 		t.Errorf("a name held by two services resolves to the first listed; got %q", service)
 	}
-	if reflect.DeepEqual(got, specs[1]) {
+	if !mixedCase && reflect.DeepEqual(got, specs[1]) {
 		t.Error("the second service's action must not be the one consulted")
 	}
 	// The name goes too, so a host log and a Council record agree about what was
 	// asked for, but it is the spec that does the routing.
-	if name := str(core["model"]); name != coreAction {
+	if name := str(core["model"]); name != str(expected["action_name"]) {
 		t.Errorf("the call must still name the model it asked for, got %q", name)
 	}
 
@@ -189,9 +204,12 @@ func assertCoreMemberSpec(t *testing.T, mixedCase bool) {
 		contribution, _ := x.(map[string]any)
 		if str(contribution["seat_id"]) == "seat-costing" {
 			recorded = str(contribution["model_id"])
+			if str(contribution["dispatched_at"]) == "" || numOf(contribution["timeout_seconds"]) <= 0 {
+				t.Fatalf("dispatch activity missing: %v", contribution)
+			}
 		}
 	}
-	if want := "model-chat (" + coreAction + ")"; recorded != want {
+	if want := str(expected["service_client_id"]) + " (" + str(expected["action_name"]) + ")"; recorded != want {
 		t.Errorf("the contribution records the model that answered; got %q, want %q", recorded, want)
 	}
 }

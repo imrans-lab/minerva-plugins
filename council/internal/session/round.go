@@ -106,6 +106,10 @@ func (s *Store) executeRun(plan runPlan, sessionID, runID string) {
 			}
 			defer func() { <-slots }()
 
+			if err := s.markDispatched(plan.control, sessionID, runID, planned.call, int(plan.rules.MemberTimeout.Seconds())); err != nil {
+				s.applyMemberResult(plan.control, sessionID, runID, planned, ModelReply{}, err)
+				return
+			}
 			callCtx, cancelCall := context.WithTimeout(plan.ctx, plan.rules.MemberTimeout)
 			defer cancelCall()
 			reply, err := s.generate(callCtx, planned.call, plan.rules.PromptBytes)
@@ -171,17 +175,18 @@ func (s *Store) planRun(sessionID, runID string, generation uint64) (runPlan, bo
 		user, allowed := advisorPrompt(session, run, grounding, rules.PromptBytes-len(system))
 		calls = append(calls, plannedCall{
 			call: ModelCall{
-				RunID:          runID,
-				ContributionID: str(contribution["contribution_id"]),
-				SeatID:         str(seat["seat_id"]),
-				MemberID:       str(member["member_id"]),
-				MemberRevision: int(num(member["member_revision"])),
-				Role:           "advisor",
-				Model:          advisorModel,
-				Provider:       advisorProvider,
-				ModelSpec:      advisorSpec,
-				System:         system,
-				User:           user,
+				RunID:             runID,
+				ContributionID:    str(contribution["contribution_id"]),
+				SeatID:            str(seat["seat_id"]),
+				MemberID:          str(member["member_id"]),
+				MemberRevision:    int(num(member["member_revision"])),
+				Role:              "advisor",
+				Model:             advisorModel,
+				Provider:          advisorProvider,
+				ModelSpec:         advisorSpec,
+				GenerationOptions: obj(member["generation_options"]),
+				System:            system,
+				User:              user,
 			},
 			allowed: allowed,
 		})
@@ -213,14 +218,41 @@ func markRunning(snap map[string]any, sessionID, runID string) *Failure {
 		return fail(CodeInternal, "the run went away while it was starting", false)
 	}
 	run["status"] = "running"
-	for _, x := range arr(run["contributions"]) {
-		contribution := obj(x)
-		if str(contribution["status"]) == "pending" {
-			contribution["status"] = "running"
-		}
-	}
 	session["status"] = contract.DeriveSessionStatus(session)
 	bumpSession(session)
+	return nil
+}
+
+// Persist dispatch before calling a model so the UI can distinguish queued
+// seats from running ones without guessing from a heartbeat.
+func (s *Store) markDispatched(control *runControl, sessionID, runID string, call ModelCall, timeoutSeconds int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.live[runKey(sessionID, runID)] != control || !s.runIsLive(sessionID, runID) {
+		return context.Canceled
+	}
+	f := s.commit(func(snap map[string]any) *Failure {
+		session, _ := findByID(snap["sessions"], "session_id", sessionID)
+		run, _ := findByID(session["runs"], "run_id", runID)
+		activity := map[string]any{"model_id": call.Model, "dispatched_at": s.now(), "timeout_seconds": timeoutSeconds}
+		if call.Role == "chair" {
+			run["active_chair"] = activity
+		} else {
+			contribution, _ := findByID(run["contributions"], "contribution_id", call.ContributionID)
+			if contribution == nil {
+				return fail(CodeInternal, "dispatch contribution is missing", false)
+			}
+			contribution["status"] = "running"
+			contribution["model_id"] = call.Model
+			contribution["dispatched_at"] = activity["dispatched_at"]
+			contribution["timeout_seconds"] = timeoutSeconds
+		}
+		bumpSession(session)
+		return nil
+	})
+	if f != nil && f != unchanged {
+		return errors.New(f.Message)
+	}
 	return nil
 }
 

@@ -148,11 +148,11 @@ func (h *stdioChatHost) Generate(ctx context.Context, call session.ModelCall) (s
 		// and refuses the call (CapabilityBroker.gd's model_spec branch).
 		args["model_spec"] = call.ModelSpec
 	}
-	// max_tokens is deliberately not sent. The broker forwards it to the
-	// provider untranslated and at least one backend refuses the request
-	// outright, so a token cap here would turn a working council into a failing
-	// one. Council bounds what it SENDS with max_prompt_bytes, and bounds what
-	// it waits for with the per-member timeout and the run budget.
+	for _, key := range []string{"temperature", "max_tokens"} {
+		if value, present := call.GenerationOptions[key]; present {
+			args[key] = value
+		}
+	}
 
 	raw, err := h.exchange(ctx, "host.providers.chat", args)
 	if err != nil {

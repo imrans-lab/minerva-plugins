@@ -111,7 +111,8 @@
     if (contribution.status === 'pending' || contribution.status === 'running') {
       return el('p', { class: 'waiting' }, [
         el('span', { class: 'pulse', aria: { hidden: 'true' } }),
-        contribution.status === 'running' ? 'Answering…' : 'Waiting to start'
+        contribution.status === 'running' ? 'Answering · ' + R.text(contribution.model_id) : 'Waiting for a model slot',
+        contribution.dispatched_at && el('span', {data: {'elapsed-since': contribution.dispatched_at, 'allowance': contribution.timeout_seconds || (definition.deliberation || {}).per_member_timeout_seconds || ''}, text: ' · just started'})
       ]);
     }
     if (contribution.failure) {

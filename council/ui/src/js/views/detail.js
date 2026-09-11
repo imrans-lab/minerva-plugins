@@ -36,38 +36,24 @@
   // it is "let the engine take the catalogue's first", which is what the engine
   // does and what the label says, so nobody discovers it by being billed for it.
   function modelSelect(id, models, chosen, emptyLabel) {
-    var options = [el('option', { value: '', text: emptyLabel })];
-    var seen = Object.create(null);
-    var chosenKey = R.text(chosen).toLowerCase();
-    R.list(models).forEach(function (model) {
-      // A model_name can be held twice — two Core services exposing an action
-      // of the same name. A member is stored BY NAME, so both options would
-      // save the same hint and the first entry is what answers on both sides
-      // (the engine's catalogue lookup and the host's own name-only Core
-      // resolution). The later one is labelled as such rather than left to look
-      // like a second choice, and the service in each display tells them apart.
-      var key = R.text(model.model_name).toLowerCase();
-      var duplicate = Object.prototype.hasOwnProperty.call(seen, key);
-      seen[key] = true;
-      var label = model.display
-        ? model.display + ' (' + model.provider_display + ')'
-        : model.model_name;
-      options.push(el('option', {
-        value: model.model_name,
-        selected: key === chosenKey && !duplicate ? true : null,
-        text: duplicate ? label + ' — same name as an earlier entry, which is the one that answers' : label
-      }));
-    });
-    // A hint the host no longer offers must still be visible and selected, or
-    // saving the form would silently change which model answers.
-    if (chosen && !R.list(models).some(function (m) { return R.text(m.model_name).toLowerCase() === chosenKey; })) {
-      options.push(el('option', {
-        value: chosen,
-        selected: true,
-        text: chosen + ' — not enabled in this Minerva'
-      }));
+    function keyOf(value) {
+      if (value && typeof value === 'object') {
+        var ordered = {}; Object.keys(value).sort().forEach(function (k) { ordered[k] = value[k]; });
+        return 'spec:' + JSON.stringify(ordered);
+      }
+      return R.text(value);
     }
-    return el('select', { id: id }, options);
+    var selectedKey = keyOf(chosen), found = false;
+    var options = [el('option', { value: '', text: emptyLabel })];
+    R.list(models).forEach(function (model) {
+      var key = keyOf(model.model_spec || model.model_name);
+      var matches = !found && (key === selectedKey || (!selectedKey.startsWith('spec:') && R.text(model.model_name).toLowerCase() === selectedKey.toLowerCase()));
+      if (matches) { found = true; }
+      options.push(el('option', { value: key, selected: matches ? true : null,
+        text: (model.display || model.model_name) + ' (' + model.provider_display + ')' }));
+    });
+    if (selectedKey && !found) { options.push(el('option', {value: selectedKey, selected: true, text: 'Unavailable: ' + selectedKey})); }
+    return el('select', {id: id}, options);
   }
 
   // --------------------------------------------------------------- member
@@ -110,7 +96,7 @@
       field('Grounded in', groundingBody),
       member.kind !== 'human' && context.editable && el('div', { class: 'composer' }, [
         el('label', { class: 'visible', for: 'member-model', text: 'Which model answers for this member' }),
-        modelSelect('member-model', context.models, member.model_hint,
+        modelSelect('member-model', context.models, member.model_spec || member.model_hint,
           'The first model Minerva has enabled'),
         el('div', { class: 'row' }, [
           el('button', {
@@ -420,7 +406,7 @@
         ]),
         section('What this version does not do', [
           'Council is currently for small documents: councils, sessions, contributions and '
-            + 'embedded excerpts share a 64 KiB backend limit and the host transport limit. '
+            + 'embedded excerpts share a 1 MiB backend limit and the host transport limit. '
             + 'The effective space for content is smaller because message framing also counts. '
             + 'Oversized writes are refused rather than truncated.',
           'A chat whose document has not been opened since the plugin started is a chat Council '

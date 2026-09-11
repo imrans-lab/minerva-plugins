@@ -1,3 +1,8 @@
+# Current integration
+
+[Host adoption](host-adoption.md) supersedes the earlier 64 KiB, name-only
+selection and 90-second wait assumptions described in this design history.
+
 # Council v0.1 — records, authority, and the host integration contract
 
 This document fixes three things for Council v0.1: what a Council record *is*,

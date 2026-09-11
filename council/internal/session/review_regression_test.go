@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ipeerbhai/plugins/council/fixtures"
 )
@@ -47,6 +48,12 @@ func TestRejectedAsyncResultsReachReloadableRest(t *testing.T) {
 	for _, kind := range []string{"members", "chair", "invalid-model"} {
 		t.Run(kind, func(t *testing.T) {
 			s := reviewStore(t)
+			snap := s.Export()
+			padSnapshot(t, snap, 40000)
+			padded, _ := json.Marshal(snap)
+			if _, err := s.Load(padded); err != nil {
+				t.Fatal(err)
+			}
 			s.SetChatHost(reviewHost{answer: func(call ModelCall) ModelReply {
 				if kind == "invalid-model" {
 					return ModelReply{ModelID: strings.Repeat("m", 121), Text: "Answer"}
@@ -65,10 +72,13 @@ func TestRejectedAsyncResultsReachReloadableRest(t *testing.T) {
 			if !outcome.OK {
 				t.Fatalf("outcome: %+v", outcome)
 			}
-			if status := str(outcome.Payload["status"]); status == "running" || status == "pending" {
-				t.Fatalf("executor finished but record is %s", status)
+			if !s.AwaitRun("ses-recurring-order", str(outcome.Payload["run_id"]), time.Minute) {
+				t.Fatal("executor did not reach rest")
 			}
-			raw, _ := json.Marshal(s.Export())
+			snapshot := s.Export()
+			ses, _ := findByID(snapshot["sessions"], "session_id", "ses-recurring-order")
+			finished, _ := findByID(ses["runs"], "run_id", str(outcome.Payload["run_id"]))
+			raw, _ := json.Marshal(snapshot)
 			reopened, _ := New()
 			if _, err := reopened.Load(raw); err != nil {
 				t.Fatalf("cannot reopen: %v", err)
@@ -76,7 +86,7 @@ func TestRejectedAsyncResultsReachReloadableRest(t *testing.T) {
 			if kind == "chair" && !strings.Contains(string(raw), "Accepted member answer") {
 				t.Fatal("lost accepted contributions")
 			}
-			if obj(outcome.Payload["failure"]) == nil {
+			if obj(finished["failure"]) == nil {
 				t.Fatal("rejected result has no visible failure")
 			}
 		})

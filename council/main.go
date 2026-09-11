@@ -38,7 +38,7 @@ const (
 	// transport budget so an oversized request is refused by the protocol with
 	// a readable error rather than truncated by the reader. A line above it is
 	// discarded and answered; it never ends the loop.
-	maxLine = 4 << 20
+	maxLine = 16 << 20
 
 	// readBuffer is the reader's working size. A message larger than it is
 	// assembled across reads, up to maxLine.

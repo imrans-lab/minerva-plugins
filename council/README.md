@@ -226,13 +226,12 @@ made in the session. `/bench` prints the name and seat id of the seats that
 answered the latest round; a name two members answer to has to be resolved by
 seat id.
 
-**Saving fails on a large project.** v0.1 moves the whole document across the
-host's plugin IPC hop in one message, so every council, session, contribution
-and embedded excerpt must fit in it together. The hop holds about 64 KiB as the
-host counts it — the cap is 65536 UTF-16 code units of the serialised request,
-so non-ASCII text costs more than its byte length, and Council budgets half of
-it for any single field. It fails loudly rather than truncating. Trim embedded source material, or split the work across
-projects.
+**Saving fails on a large project.** Council permits 1 MiB of serialized document
+content, reserving room for reload/interruption records. Minerva's bulk route
+carries up to 8 MiB per UTF-8 envelope, leaving room for wrappers and escaping.
+Individual text fields remain capped at 32 KiB. Older hosts retain a 64 KiB
+control limit and refuse large exchanges explicitly; update Minerva before
+editing a larger document. No content is truncated.
 
 **The panel shows "this document is not one Council can edit."** The file was
 not a Council document. It is kept exactly as found and handed back unchanged on

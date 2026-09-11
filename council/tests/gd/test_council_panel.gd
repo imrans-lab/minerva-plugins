@@ -561,6 +561,7 @@ func _section_4_note() -> void:
 # ---------------------------------------------------------------------------
 
 func _section_5_envelope_size() -> void:
+	check("Unicode envelope is measured in UTF-8 bytes", CouncilBackend.measure({"text": "🙂界"}) == JSON.stringify({"text": "🙂界"}).to_utf8_buffer().size())
 	print("\n5 envelope size:")
 	# The oracle is still the host's own constant; it is read off the loaded
 	# script rather than through the class name, for the reason at the top.
@@ -574,7 +575,7 @@ func _section_5_envelope_size() -> void:
 	# put it in the message the broker measures. This is the case a payload-only
 	# check passes and the broker then drops.
 	var record: Dictionary = _record_sized_just_under(cap)
-	var alone := JSON.stringify(record).length()
+	var alone := JSON.stringify(record).to_utf8_buffer().size()
 	var wrapped := CouncilBackend.measure({"snapshot": record})
 	check("setup: the fixture landed in the window where the claim is testable",
 			alone > cap - WRAPPER_OVERHEAD and alone <= cap,
@@ -586,18 +587,15 @@ func _section_5_envelope_size() -> void:
 			_longest_contribution(record) <= 32768, "%d" % _longest_contribution(record))
 
 	var backend = CouncilBackend.new(_panel_a, "council_panel#a")
-	var before := _emitted_channels.size()
 	var outcome: Dictionary = await backend.relay({
 		"schema_version": 1, "envelope": "request", "request_id": "too-big",
 		"command": "snapshot.get", "payload": {}}, record)
 	var reply: Dictionary = outcome.get("reply", {})
-	check("an over-cap record is refused with payload_too_large, not dropped",
-			bool(reply.get("ok", true)) == false
-			and str((reply.get("error", {}) as Dictionary).get("code", "")) == "payload_too_large",
-			str(reply).left(200))
-	check("nothing was handed to the broker for it to refuse a second time",
-			_emitted_channels.size() == before,
-			"emitted %s" % str(_emitted_channels.slice(before)))
+	check("a document beyond the control cap crosses the bulk route", bool(reply.get("ok", false)), str(reply).left(200))
+	check("bulk exchange returns the complete acknowledged snapshot", CouncilBackend.measure(outcome.get("snapshot", {})) >= cap)
+	var helper = _panel_a.get_node("_MinervaIPC")
+	var excessive: Dictionary = await helper.request_bulk(CouncilBackend.LOAD_CHANNEL, {"snapshot": "🙂".repeat(2100000)}, 1000)
+	check("bulk rejects an oversized Unicode document explicitly", excessive.get("error_code") == "payload_too_large")
 
 
 # ---------------------------------------------------------------------------
@@ -1065,8 +1063,9 @@ func _section_10_a_change_with_no_panel_in_it() -> void:
 	# once a frame for up to twenty seconds, is a lot of work to answer a question
 	# an integer answers. The record itself is read once, below.
 	var moved := func() -> bool:
-		return _panel_a._record.revision() > int(before.get("snapshot_revision", 0))
+		return _panel_a._record.revision() >= int(started.get("snapshot_revision", 0))
 	await _wait_until(moved, 20.0)
+	await _settle_exchanges()
 	var saved: Dictionary = _panel_a._on_panel_save_request()
 	var landed: Dictionary = _run_of(saved, "ses-recurring-order", run_id)
 	check("a round driven with no panel in the exchange is in the document the panel saves",
@@ -1092,6 +1091,16 @@ func _section_10_a_change_with_no_panel_in_it() -> void:
 	check("the panel holding another council is untouched",
 			JSON.stringify(_panel_b._on_panel_save_request(), "\t") == untouched_before,
 			str(_session_ids(_panel_b._on_panel_save_request())))
+
+	# A tool-created document can be adopted by an unowned empty panel, but
+	# an unrelated open document is still protected by the same identity guard.
+	_panel_a._record = load(RECORD_SCRIPT_PATH).new()
+	_panel_a._document_epoch += 1
+	_panel_a._backend.forget_seed()
+	_panel_a.receive("council.record_changed", {"project_id": saved.project_id, "snapshot_revision": saved.snapshot_revision})
+	await _panel_a._converge()
+	check("an empty panel adopts the tool-created document identity", _panel_a._record.project_id() == str(saved.project_id))
+	check("empty-panel adoption preserves complete content for save", _session_ids(_panel_a._on_panel_save_request()) == _session_ids(saved))
 
 	# Equal revision cannot authorize a write into another document with matching
 	# session IDs. An identity check after the mutation would be too late.
@@ -1573,6 +1582,7 @@ func _document_from_disk(path: String) -> Dictionary:
 ## the size check refuses is one the engine would otherwise have accepted.
 func _record_sized_just_under(cap: int) -> Dictionary:
 	var record: Dictionary = _fixture()
+	record["project_id"] = "prj-gd-bulk-boundary"
 	var texts: Array = []
 	for run_v in (record["sessions"][0] as Dictionary).get("runs", []):
 		for c in (run_v as Dictionary).get("contributions", []):
@@ -1581,7 +1591,7 @@ func _record_sized_just_under(cap: int) -> Dictionary:
 		return record
 
 	var padding := 0
-	while JSON.stringify(record).length() < cap and padding < 28000:
+	while JSON.stringify(record).to_utf8_buffer().size() < cap and padding < 28000:
 		padding += 1024
 		for c in texts:
 			(c as Dictionary)["text"] = "x".repeat(padding)
@@ -1590,7 +1600,7 @@ func _record_sized_just_under(cap: int) -> Dictionary:
 	# `cap` characters. Every step is one character in and one character out.
 	var adjustable: Dictionary = texts[texts.size() - 1]
 	var length: int = str(adjustable["text"]).length()
-	var delta: int = cap - JSON.stringify(record).length()
+	var delta: int = cap - JSON.stringify(record).to_utf8_buffer().size()
 	length = maxi(0, length + delta)
 	adjustable["text"] = "x".repeat(length)
 	return record

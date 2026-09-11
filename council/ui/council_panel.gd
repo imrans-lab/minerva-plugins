@@ -133,6 +133,10 @@ var _sync_problem: String = ""
 ## the reply has already brought that very revision back. A relay is only worth
 ## sending while the held record is behind this.
 var _sync_target: int = 0
+var _sync_project_id: String = ""
+var _activity_icon: Texture2D
+var _saved_tab_icon: Texture2D
+var _activity_shown := false
 
 ## Whether the "this council is behind" report is on screen. It gates the clear,
 ## so an ordinary convergence does not push a dismissal at a page that was never
@@ -182,6 +186,7 @@ func _on_panel_loaded(ctx: Dictionary) -> void:
 
 
 func _on_panel_unload() -> void:
+	_update_activity_icon(true)
 	if _cef != null and is_instance_valid(_cef) \
 			and _cef.is_connected("ipc_message", _on_page_message):
 		_cef.disconnect("ipc_message", _on_page_message)
@@ -250,6 +255,7 @@ func _adopting_new_document() -> void:
 	_sync_pending = false
 	_sync_problem = ""
 	_sync_target = 0
+	_sync_project_id = ""
 	_clear_behind()
 	if _backend != null:
 		_backend.forget_seed()
@@ -287,8 +293,15 @@ func _on_backend_record_changed(payload: Dictionary) -> void:
 	if _record.is_unreadable() or _backend == null:
 		return
 	var project_id := _record.project_id()
-	if project_id.is_empty() or project_id != str(payload.get("project_id", "")):
+	var announced_project := str(payload.get("project_id", ""))
+	if announced_project.is_empty():
 		return
+	if project_id.is_empty():
+		if not _backend.can_adopt_unowned():
+			return
+	elif project_id != announced_project:
+		return
+	_sync_project_id = announced_project
 	var announced := int(payload.get("snapshot_revision", 0))
 	if announced <= _record.revision():
 		return
@@ -327,6 +340,7 @@ func _converge() -> void:
 		var reply: Dictionary = await _relay_to_engine({
 			"schema_version": 1, "envelope": "request",
 			"request_id": _mint_request_id("sync"),
+			"expected_project_id": _sync_project_id,
 			"command": "snapshot.get", "payload": {},
 		}, true)
 		if epoch != _document_epoch:
@@ -595,7 +609,34 @@ func _show_notice(message: String) -> void:
 	_surface.visible = false
 
 
+func _update_activity_icon(force_idle := false) -> void:
+	var editor = _ctx.get("editor")
+	if not is_instance_valid(editor) or not editor is Control:
+		return
+	var tabs = editor.get_parent()
+	if not tabs is TabContainer:
+		return
+	var index: int = tabs.get_tab_idx_from_control(editor)
+	if index < 0:
+		return
+	var active := false
+	for session in _record.snapshot().get("sessions", []):
+		for run in session.get("runs", []):
+			active = not force_idle and (active or run.get("status", "") in ["pending", "running"])
+	if active and not _activity_shown:
+		_saved_tab_icon = tabs.get_tab_icon(index)
+		if _activity_icon == null:
+			var pixels := Image.create(12, 12, false, Image.FORMAT_RGBA8)
+			pixels.fill(Color("46b77e"))
+			_activity_icon = ImageTexture.create_from_image(pixels)
+		tabs.set_tab_icon(index, _activity_icon)
+	elif not active and _activity_shown:
+		tabs.set_tab_icon(index, _saved_tab_icon)
+	_activity_shown = active
+
+
 func _refresh_notice() -> void:
+	_update_activity_icon()
 	if _record.is_unreadable():
 		_show_notice(_record.unreadable_reason())
 		return

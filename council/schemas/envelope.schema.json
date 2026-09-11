@@ -51,7 +51,7 @@
         "wait_seconds": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 90,
+          "maximum": 25,
           "description": "How long the backend may hold this reply before answering with the state so far. It applies to the commands that wait — run.start, run.retry and run.await — and is ignored by the rest. The ceiling is well under the host's own 120 s tool-call timeout, because a reply the host has stopped waiting for is a reply nobody receives; a round that outlives it keeps running and is read with run.await."
         },
         "payload": { "type": "object" }

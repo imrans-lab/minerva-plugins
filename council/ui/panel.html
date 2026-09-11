@@ -1865,7 +1865,8 @@ window.CouncilPresets = [
     if (contribution.status === 'pending' || contribution.status === 'running') {
       return el('p', { class: 'waiting' }, [
         el('span', { class: 'pulse', aria: { hidden: 'true' } }),
-        contribution.status === 'running' ? 'Answering…' : 'Waiting to start'
+        contribution.status === 'running' ? 'Answering · ' + R.text(contribution.model_id) : 'Waiting for a model slot',
+        contribution.dispatched_at && el('span', {data: {'elapsed-since': contribution.dispatched_at, 'allowance': contribution.timeout_seconds || (definition.deliberation || {}).per_member_timeout_seconds || ''}, text: ' · just started'})
       ]);
     }
     if (contribution.failure) {
@@ -2129,6 +2130,8 @@ window.CouncilPresets = [
           class: 'pane-title group',
           text: R.runTitle(session, run, index) + ' · ' + R.text(run.status)
         }),
+        R.isLive(run) && el('p', {class: 'notice calm', text: 'Round in progress — results appear as members finish.'}),
+        R.isLive(run) && run.active_chair && el('p', {text: 'Chair synthesizing · ' + run.active_chair.model_id}),
         run.prompt && el('blockquote', { class: 'quoted', text: run.prompt }),
         R.isLive(run) && el('div', { class: 'row' }, [
           el('button', {
@@ -2510,38 +2513,24 @@ window.CouncilPresets = [
   // it is "let the engine take the catalogue's first", which is what the engine
   // does and what the label says, so nobody discovers it by being billed for it.
   function modelSelect(id, models, chosen, emptyLabel) {
-    var options = [el('option', { value: '', text: emptyLabel })];
-    var seen = Object.create(null);
-    var chosenKey = R.text(chosen).toLowerCase();
-    R.list(models).forEach(function (model) {
-      // A model_name can be held twice — two Core services exposing an action
-      // of the same name. A member is stored BY NAME, so both options would
-      // save the same hint and the first entry is what answers on both sides
-      // (the engine's catalogue lookup and the host's own name-only Core
-      // resolution). The later one is labelled as such rather than left to look
-      // like a second choice, and the service in each display tells them apart.
-      var key = R.text(model.model_name).toLowerCase();
-      var duplicate = Object.prototype.hasOwnProperty.call(seen, key);
-      seen[key] = true;
-      var label = model.display
-        ? model.display + ' (' + model.provider_display + ')'
-        : model.model_name;
-      options.push(el('option', {
-        value: model.model_name,
-        selected: key === chosenKey && !duplicate ? true : null,
-        text: duplicate ? label + ' — same name as an earlier entry, which is the one that answers' : label
-      }));
-    });
-    // A hint the host no longer offers must still be visible and selected, or
-    // saving the form would silently change which model answers.
-    if (chosen && !R.list(models).some(function (m) { return R.text(m.model_name).toLowerCase() === chosenKey; })) {
-      options.push(el('option', {
-        value: chosen,
-        selected: true,
-        text: chosen + ' — not enabled in this Minerva'
-      }));
+    function keyOf(value) {
+      if (value && typeof value === 'object') {
+        var ordered = {}; Object.keys(value).sort().forEach(function (k) { ordered[k] = value[k]; });
+        return 'spec:' + JSON.stringify(ordered);
+      }
+      return R.text(value);
     }
-    return el('select', { id: id }, options);
+    var selectedKey = keyOf(chosen), found = false;
+    var options = [el('option', { value: '', text: emptyLabel })];
+    R.list(models).forEach(function (model) {
+      var key = keyOf(model.model_spec || model.model_name);
+      var matches = !found && (key === selectedKey || (!selectedKey.startsWith('spec:') && R.text(model.model_name).toLowerCase() === selectedKey.toLowerCase()));
+      if (matches) { found = true; }
+      options.push(el('option', { value: key, selected: matches ? true : null,
+        text: (model.display || model.model_name) + ' (' + model.provider_display + ')' }));
+    });
+    if (selectedKey && !found) { options.push(el('option', {value: selectedKey, selected: true, text: 'Unavailable: ' + selectedKey})); }
+    return el('select', {id: id}, options);
   }
 
   // --------------------------------------------------------------- member
@@ -2584,7 +2573,7 @@ window.CouncilPresets = [
       field('Grounded in', groundingBody),
       member.kind !== 'human' && context.editable && el('div', { class: 'composer' }, [
         el('label', { class: 'visible', for: 'member-model', text: 'Which model answers for this member' }),
-        modelSelect('member-model', context.models, member.model_hint,
+        modelSelect('member-model', context.models, member.model_spec || member.model_hint,
           'The first model Minerva has enabled'),
         el('div', { class: 'row' }, [
           el('button', {
@@ -2894,7 +2883,7 @@ window.CouncilPresets = [
         ]),
         section('What this version does not do', [
           'Council is currently for small documents: councils, sessions, contributions and '
-            + 'embedded excerpts share a 64 KiB backend limit and the host transport limit. '
+            + 'embedded excerpts share a 1 MiB backend limit and the host transport limit. '
             + 'The effective space for content is smaller because message framing also counts. '
             + 'Oversized writes are refused rather than truncated.',
           'A chat whose document has not been opened since the plugin started is a chat Council '
@@ -3345,6 +3334,15 @@ window.CouncilPresets = [
     }
   }
 
+  // Update only clock text; rebuilding the editor would discard human drafts.
+  setInterval(function () {
+    if (document.hidden) { return; }
+    Array.prototype.forEach.call(document.querySelectorAll('[data-elapsed-since]'), function (node) {
+      var began = Date.parse(node.getAttribute('data-elapsed-since'));
+      if (Number.isFinite(began)) { node.textContent = ' · ' + Math.max(0, Math.floor((Date.now() - began) / 1000)) + ' s elapsed' + (node.getAttribute('data-allowance') ? ' / ' + node.getAttribute('data-allowance') + ' s allowance' : ''); }
+    });
+  }, 1000);
+
   function render() {
     var session = currentSession();
     var definition = R.definitionOf(session, state.snapshot);
@@ -3605,7 +3603,7 @@ window.CouncilPresets = [
     if (value('member-limitations')) { member.limitations = value('member-limitations'); }
     // A human is never consulted by a round, so a model hint on one would be a
     // provenance nobody can honour.
-    if (kind !== 'human' && value('member-model')) { member.model_hint = value('member-model'); }
+    if (kind !== 'human' && value('member-model')) { setMemberModel(member, value('member-model'));  }
 
     bridge.mutate('member.upsert', {
       definition_id: definition.definition_id,
@@ -3613,6 +3611,14 @@ window.CouncilPresets = [
     }).then(function (reply) {
       afterWrite(reply, name + ' is in the council. Give them a seat to have them consulted.');
     });
+  }
+
+  function modelSelection(value) { return value.startsWith('spec:') ? JSON.parse(value.slice(5)) : value; }
+  function setMemberModel(member, value) {
+    delete member.model_hint; delete member.model_spec;
+    if (!value) { return; }
+    var selected = modelSelection(value);
+    member[typeof selected === 'object' ? 'model_spec' : 'model_hint'] = selected;
   }
 
   function saveModel(memberId) {
@@ -3626,7 +3632,7 @@ window.CouncilPresets = [
       if (key !== 'member_revision') { next[key] = member[key]; }
     });
     var chosen = value('member-model');
-    if (chosen) { next.model_hint = chosen; } else { delete next.model_hint; }
+    setMemberModel(next, chosen);
 
     bridge.mutate('member.upsert', {
       definition_id: definition.definition_id,
@@ -3700,7 +3706,7 @@ window.CouncilPresets = [
     if (claimId) { payload.addressed_claim_id = claimId; }
     else { payload.addressed_seat_id = seatId; payload.seat_ids = [seatId]; }
     var model = value('follow-up-model');
-    if (model && seatId) { payload.model_overrides = {}; payload.model_overrides[seatId] = model; }
+    if (model && seatId) { payload.model_overrides = {}; payload.model_overrides[seatId] = modelSelection(model); }
 
     bridge.mutate('run.start', payload).then(function (reply) {
       if (!reply || !reply.ok) { return; }

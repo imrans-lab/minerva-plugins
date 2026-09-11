@@ -106,7 +106,7 @@
     },
     "Run": {
       "type": "object",
-      "description": "One bounded execution: an independent member round plus chair synthesis, or a focused follow-up. request_id makes the run idempotent — a repeated start command with the same request_id returns the existing run instead of spending tokens again.",
+      "description": "One bounded execution: an independent member round plus chair synthesis, or a focused follow-up. request_id makes the run idempotent \u2014 a repeated start command with the same request_id returns the existing run instead of spending tokens again.",
       "properties": {
         "run_id": {
           "$ref": "common.schema.json#/$defs/Id"
@@ -157,7 +157,26 @@
         },
         "model_overrides": {
           "type": "object",
-          "description": "Host model ids chosen for this run, keyed by seat_id. Present only where the caller overrode the member's own model_hint. The keys are the council's seats rather than a fixed set, so the shape is an open map; an entry naming a seat this run did not consult is simply unused."
+          "description": "Host model ids chosen for this run, keyed by seat_id. Present only where the caller overrode the member's own model_hint. The keys are the council's seats rather than a fixed set, so the shape is an open map; an entry naming a seat this run did not consult is simply unused.",
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          }
         },
         "contributions": {
           "type": "array",
@@ -171,6 +190,22 @@
         },
         "failure": {
           "$ref": "#/$defs/Failure"
+        },
+        "active_chair": {
+          "type": "object",
+          "properties": {
+            "model_id": {
+              "type": "string"
+            },
+            "dispatched_at": {
+              "type": "string"
+            },
+            "timeout_seconds": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false
         }
       },
       "required": [
@@ -254,6 +289,14 @@
         },
         "failure": {
           "$ref": "#/$defs/Failure"
+        },
+        "dispatched_at": {
+          "type": "string",
+          "description": "UTC timestamp when this model call took a concurrency slot."
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1
         }
       },
       "required": [

@@ -140,8 +140,8 @@ func revision() -> int:
 ##
 ## A brand-new council has none yet: empty_snapshot() deliberately writes the
 ## oldest migratable shape and lets the engine's ladder mint the identity on the
-## first seed. Until then this is empty and no announcement can be claimed, which
-## is right — a document the engine has never been given cannot have moved.
+## first seed. An unowned empty panel can also adopt a tool-created identity
+## through the backend lease and an identity-guarded read.
 func project_id() -> String:
 	return str(_snapshot.get("project_id", ""))
 

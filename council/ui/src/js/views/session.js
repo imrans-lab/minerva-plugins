@@ -183,6 +183,8 @@
           class: 'pane-title group',
           text: R.runTitle(session, run, index) + ' · ' + R.text(run.status)
         }),
+        R.isLive(run) && el('p', {class: 'notice calm', text: 'Round in progress — results appear as members finish.'}),
+        R.isLive(run) && run.active_chair && el('p', {text: 'Chair synthesizing · ' + run.active_chair.model_id}),
         run.prompt && el('blockquote', { class: 'quoted', text: run.prompt }),
         R.isLive(run) && el('div', { class: 'row' }, [
           el('button', {

@@ -292,12 +292,18 @@
           return model.provider_key === 'turnrock';
         })[0];
         var chosen = all(w, '#detail #member-model option').filter(function (option) {
-          return option.value === core.model_name;
+          return option.value.startsWith("spec:") && JSON.parse(option.value.slice(5)).service_client_id === core.model_spec.service_client_id;
         })[0];
         check('a Core action is offered beside the hosted models, named as the host named it',
           !!chosen && chosen.textContent.indexOf(core.display) >= 0
             && chosen.textContent.indexOf(core.provider_display) >= 0,
           chosen ? chosen.textContent : options.join(','));
+
+        var definition = w.CouncilRecorded.complete.payload.snapshot.definitions[0];
+        var sample = w.CouncilRecorded.complete.payload.snapshot.sessions[0].runs[0].contributions[0];
+        var running = Object.assign({}, sample, {status: 'running', model_id: 'qwen-active', dispatched_at: '2026-09-11T00:00:00Z', timeout_seconds: 25});
+        var activity = w.CouncilParts.contributionBlock(definition, running, {});
+        check('running member exposes model and the actual narrowed allowance', activity.textContent.indexOf('qwen-active') >= 0 && activity.querySelector('[data-allowance="25"]'));
 
         // A request too large for the hop is refused before it travels.
         q(w, '[data-pane="session"]').click();
@@ -696,7 +702,7 @@
           check('help opens without asking the host anything',
             w.__councilReplay.calls.length === before);
           check('help states the export boundary and the size limit it will hit',
-            text.indexOf('nowhere to put') > 0 && text.indexOf('64 KiB') > 0);
+            text.indexOf('nowhere to put') > 0 && text.indexOf('1 MiB') > 0);
           check('help promises nothing this version does not do',
             text.indexOf('does not research') > 0
               && text.indexOf('invites nobody') > 0);

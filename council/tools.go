@@ -104,7 +104,7 @@ func newRegistry(store *session.Store) *registry {
 			"Every reply carries the snapshot_revision it was produced against; a failure carries {code, message, retryable}. " +
 			"source.fetch returns the NEWEST capture of a source when payload.source_revision is omitted; pass a source_revision to read the exact capture a past contribution was grounded in." +
 			" source.capture derives a source revision's hash and excerpt spans from the raw text so the page and the engine cannot disagree about them, and repairs an inventory entry in place when the text hashes to the revision's recorded content_hash. member.upsert edits an identity and mints member_revision itself, advancing it only when kind, represents, scope, limitations or grounding change; it never touches seats. member.adopt_source is the explicit act of moving a member onto another capture, which leaves every past run reading what it actually read. definition.export takes include_content and an optional include_source_ids selection, and reports which sources' content travelled." +
-			" run.start CONSULTS THE MEMBERS: it sets the round going and answers within a bounded wait (the envelope's optional wait_seconds, 1-90, default 20) with the run_id and the run's status so far, plus every contribution's status, model and usage and the chair's synthesis if it is already there. A round that outruns the wait keeps going; read it with run.await, which takes the same wait_seconds, and stop it with run.cancel. Each initial member is sent the same context snapshot and its own pinned grounding and never another member's answer. run.start's payload takes seat_ids (who is consulted), kind, prompt, addressed_seat_id or addressed_claim_id (a follow-up to a member or to one argument, routed to whoever made it, and consulting that seat alone), model_overrides keyed by seat_id, and limits, which may only NARROW the council's own max_concurrent_members, max_prompt_bytes, per_member_timeout_seconds and run_budget_seconds. run.cancel stops a run that is still running and suppresses what is in flight: a reply landing afterwards is recorded stale and moves nothing. run.retry starts a fresh run over the seats that did not answer, narrowable with seat_ids; nothing ever retries or resumes on its own." +
+			" run.start CONSULTS THE MEMBERS: it sets the round going and answers within a bounded wait (the envelope's optional wait_seconds, 1-25, default 20) with the run_id and the run's status so far, plus every contribution's status, model and usage and the chair's synthesis if it is already there. A round that outruns the wait keeps going; read it with run.await, which takes the same wait_seconds, and stop it with run.cancel. Each initial member is sent the same context snapshot and its own pinned grounding and never another member's answer. run.start's payload takes seat_ids (who is consulted), kind, prompt, addressed_seat_id or addressed_claim_id (a follow-up to a member or to one argument, routed to whoever made it, and consulting that seat alone), model_overrides keyed by seat_id, and limits, which may only NARROW the council's own max_concurrent_members, max_prompt_bytes, per_member_timeout_seconds and run_budget_seconds. run.cancel stops a run that is still running and suppresses what is in flight: a reply landing afterwards is recorded stale and moves nothing. run.retry starts a fresh run over the seats that did not answer, narrowable with seat_ids; nothing ever retries or resumes on its own." +
 			" outcome.mark_missing records that a retained note could not be resolved, or that it has come back; the reference is kept either way, because a note the user moved or deleted is a recoverable state and never a reason to lose the link back to the contribution.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
@@ -120,7 +120,7 @@ func newRegistry(store *session.Store) *registry {
 				"expected_project_id": {"type": "string", "description": "Pin the command to this document identity; a different loaded document is refused before execution."},
 				"base_revision": {"type": "integer", "description": "The snapshot_revision this command was written against. Required by every mutating command, refused on a read."},
 				"payload": {"type": "object", "description": "Command arguments. See the Council architecture document for the shape each command takes."},
-				"wait_seconds": {"type": "integer", "minimum": 1, "maximum": 90, "description": "Top-level bounded wait for run.start, run.await or run.retry; defaults to 20 seconds."}
+				"wait_seconds": {"type": "integer", "minimum": 1, "maximum": 25, "description": "Top-level bounded wait for run.start, run.await or run.retry; defaults to 20 seconds."}
 			},
 			"required": ["request_id", "command", "payload"]
 		}`),
@@ -206,8 +206,8 @@ func newRegistry(store *session.Store) *registry {
 
 	r.register(toolSpec{
 		Name: "minerva_council_models",
-		Description: "Re-read Minerva's enabled providers and models, and return them. Council offers only these as a member's model_hint and refuses one the host does not have before a round starts, " +
-			"so this is what to call after enabling a model in Minerva's settings. Returns {ok, models:[{provider_key, provider_display, model_name, display}], known}. " +
+		Description: "Re-read Minerva's enabled providers and models, and return them. Council offers these as a member's model_spec (legacy model_hint is supported) and refuses one the host does not have before a round starts, " +
+			"so this is what to call after enabling a model in Minerva's settings. Returns {ok, models:[{provider_key, provider_display, model_name, display, model_spec?}], known}. " +
 			"known is false when the host could not be asked at all, which is the state in which a hint travels unchecked. " +
 			"THE FIRST ENTRY MATTERS: a member with no model_hint, and a run with no override for its seat, is consulted with models[0] — the alphabetically first model of the alphabetically first provider — because Council never falls back to the host's \"default\" route. " +
 			"That choice costs money and sets the answer's quality, so give a member an explicit model_hint rather than letting the list decide. " +
@@ -220,12 +220,16 @@ func newRegistry(store *session.Store) *registry {
 		models, known := store.Models()
 		listed := []map[string]any{}
 		for _, model := range models {
-			listed = append(listed, map[string]any{
+			row := map[string]any{
 				"provider_key":     model.ProviderKey,
 				"provider_display": model.ProviderDisplay,
 				"model_name":       model.ModelName,
 				"display":          model.ModelDisplay,
-			})
+			}
+			if len(model.ModelSpec) > 0 {
+				row["model_spec"] = model.ModelSpec
+			}
+			listed = append(listed, row)
 		}
 		out := map[string]any{"ok": true, "models": listed, "known": known}
 		if refreshErr != nil {

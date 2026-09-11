@@ -19,20 +19,8 @@ extends RefCounted
 ## happen; a panel whose exchange fails clears the holder so the next one
 ## re-seeds instead of trusting a working copy nobody can name.
 ##
-## SIZE IS MEASURED WHERE IT IS ENFORCED. The host caps a scene request at
-## `JSON.stringify(payload).length()` — the WHOLE argument dictionary, including
-## the keys this class wraps a snapshot or an envelope in
-## (PluginScenePanelBroker.gd `MAX_PAYLOAD_BYTES`, checked at its step 6). A
-## check against the record alone would pass a message the broker then drops, so
-## the measurement here is of the serialised payload that will actually travel.
-
-## The host's cap on one scene request, in UTF-16 code units — the unit
-## `String.length()` returns, which is the unit the host's own check uses
-## despite its constant being named MAX_PAYLOAD_BYTES.
-## Mirrors PluginScenePanelBroker.MAX_PAYLOAD_BYTES; a plugin cannot preload a
-## host script (it must load outside the project for the syntax gate), so the
-## value is duplicated here and pinned against the host's own constant by
-## tests/gd/test_council_panel.gd.
+## Old hosts retain the 64 KiB control route. New hosts advertise their bulk
+## byte limit; every document exchange uses that same route in both directions.
 const HOST_IPC_PAYLOAD_LIMIT := 65536
 
 ## Backend channels, which are the backend's MCP tool names (the broker calls
@@ -108,6 +96,11 @@ func _init(panel: Node, panel_key: String) -> void:
 ## or {} when nothing moved>}. The caller persists the snapshot; this class
 ## never keeps one, because a second copy of the record is a second place for it
 ## to be wrong.
+func can_adopt_unowned() -> bool:
+	var lease := _lease()
+	return (_holder().is_empty() or _holder() == _panel_key) and (not bool(lease.taken) or str(lease.taken_by) == _panel_key)
+
+
 func relay(request: Dictionary, record: Dictionary, current_record := Callable(), read_current_only := false) -> Dictionary:
 	var request_id := str(request.get("request_id", ""))
 	await _acquire()
@@ -119,6 +112,9 @@ func relay(request: Dictionary, record: Dictionary, current_record := Callable()
 			_release()
 			return {"reply": _failure(request_id, 1, "stale_revision",
 				"The panel opened a different council; re-read and try again.", true), "snapshot": {}}
+	if read_current_only and str(record.get("project_id", "")).is_empty() and not can_adopt_unowned():
+		_release()
+		return {"reply": _failure(request_id, 1, "stale_revision", "Another panel owns the backend document.", false), "snapshot": {}}
 	# Background convergence only observes. It must never load an older panel
 	# snapshot over the current engine while waiting for the lease.
 	var seeded: Dictionary = {"ok": true, "snapshot": {}}
@@ -184,6 +180,8 @@ func relay(request: Dictionary, record: Dictionary, current_record := Callable()
 				+ "Reopen the panel to re-read it. (" + str(exported.get("message", "")) + ")",
 				true), "snapshot": carried}
 
+	if read_current_only and str(record.get("project_id", "")).is_empty() and not str(carried.get("project_id", "")).is_empty():
+		_set_holder(_panel_key)
 	_release()
 	return {"reply": reply, "snapshot": carried}
 
@@ -327,27 +325,29 @@ func _send(channel: String, payload: Dictionary) -> Dictionary:
 	if _panel == null or not is_instance_valid(_panel):
 		return {"ok": false, "code": "internal", "message": "The panel is gone.", "retryable": false}
 
-	var measured := measure(payload)
-	if measured > HOST_IPC_PAYLOAD_LIMIT:
-		return {"ok": false, "code": "payload_too_large", "retryable": false,
-			"message": ("This Council document needs %d units in one message and the host carries %d. "
-				+ "Nothing was changed. Move some material into its own Council document.")
-				% [measured, HOST_IPC_PAYLOAD_LIMIT]}
-
 	var helper: Node = _panel.get_node_or_null("_MinervaIPC")
 	if helper == null:
 		return {"ok": false, "code": "internal", "retryable": false,
-			"message": "This panel is not registered with the host, so it cannot reach the Council backend."}
-
-	_reply_seq += 1
-	var reply_id := "%s-%d" % [_panel_key, _reply_seq]
-	_panel.request.emit(channel, payload, reply_id)
-	var result: Dictionary = await helper.await_reply(reply_id, HOP_TIMEOUT_MS)
+			"message": "This panel is not registered with the host."}
+	var bulk := not channel.begins_with("capability:") and helper.has_method("request_bulk") and helper.has_method("get_bulk_payload_limit")
+	var limit: int = helper.get_bulk_payload_limit() if bulk else HOST_IPC_PAYLOAD_LIMIT
+	var measured := measure(payload)
+	if measured > limit:
+		return {"ok": false, "code": "payload_too_large", "retryable": false,
+			"message": "Council needs %d UTF-8 bytes; this host carries %d. Update Minerva or reduce the document before retrying." % [measured, limit]}
+	var result: Dictionary
+	if bulk:
+		result = await helper.request_bulk(channel, payload, HOP_TIMEOUT_MS)
+	else:
+		_reply_seq += 1
+		var reply_id := "%s-%d" % [_panel_key, _reply_seq]
+		_panel.request.emit(channel, payload, reply_id)
+		result = await helper.await_reply(reply_id, HOP_TIMEOUT_MS)
 
 	if not bool(result.get("success", false)):
 		var code: String = str(result.get("error_code", ""))
 		return {"ok": false, "retryable": code != "permission_denied",
-			"code": "timeout" if code == "timeout" else "internal",
+			"code": code if code in ["timeout", "payload_too_large"] else "internal",
 			"message": _explain_transport_failure(code, str(result.get("error_message", "")))}
 
 	var body: Variant = result.get("result", {})
@@ -372,7 +372,7 @@ func _refusal(body: Dictionary) -> Dictionary:
 ## What the host will measure this payload as: the serialised argument
 ## dictionary, wrapper keys included, in the units the broker counts.
 static func measure(payload: Dictionary) -> int:
-	return JSON.stringify(payload).length()
+	return JSON.stringify(payload).to_utf8_buffer().size()
 
 
 func _explain_transport_failure(code: String, message: String) -> String:

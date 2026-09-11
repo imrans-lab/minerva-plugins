@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -41,15 +42,8 @@ type HostModel struct {
 	ModelName string
 	// ModelDisplay is what a chooser should show for this model.
 	ModelDisplay string
-	// ModelSpec is the structured identifier a provider hands out when its
-	// models are not a static list, and it is opaque to Council: the one rule
-	// is that it goes back to host.providers.chat verbatim, in place of
-	// choosing by name. Minerva sends one for TurnRock/Core, whose models are
-	// the live service actions of the running Core node
-	// (CapabilityBroker.gd's host.models.list_models comment), and none for a
-	// provider whose model_name is enough. Nil means "call this model the way
-	// Council always has"; an EMPTY object is never sent on, because the broker
-	// refuses a spec with no kind.
+	// ModelSpec is the host's opaque stable identity. New hosts provide one
+	// for every model; older hosts may omit it, requiring a legacy name hint.
 	ModelSpec map[string]any
 }
 
@@ -164,6 +158,38 @@ func (s *Store) checkModelHint(hint, where string) *Failure {
 		where, hint, s.modelNames()), false)
 }
 
+// Structured selections compare their canonical JSON identities, never labels.
+func (s *Store) findModelSpec(spec map[string]any) (HostModel, bool) {
+	wanted, _ := json.Marshal(spec)
+	for _, model := range s.models {
+		actual, _ := json.Marshal(model.ModelSpec)
+		if string(actual) == string(wanted) {
+			return model, true
+		}
+	}
+	return HostModel{}, false
+}
+
+func memberSelection(member map[string]any) any {
+	if spec, present := member["model_spec"].(map[string]any); present {
+		return spec
+	}
+	return member["model_hint"]
+}
+
+func (s *Store) checkModelSelection(selection any, where string) *Failure {
+	if spec, ok := selection.(map[string]any); ok {
+		if !s.modelsKnown {
+			return nil
+		}
+		if _, found := s.findModelSpec(spec); found {
+			return nil
+		}
+		return fail(CodeModelUnavailable, where+" selects a model identity that is no longer enabled. Refresh models and choose it explicitly.", false)
+	}
+	return s.checkModelHint(str(selection), where)
+}
+
 // modelNames renders the catalogue for a refusal message, capped so a host with
 // a long list cannot push a multi-kilobyte error through the transport.
 func (s *Store) modelNames() string {
@@ -199,10 +225,17 @@ func (s *Store) modelNames() string {
 //
 // The caller holds the lock.
 func (s *Store) modelFor(run map[string]any, seatID string, member map[string]any) (string, string, map[string]any) {
-	hint := str(obj(run["model_overrides"])[seatID])
-	if hint == "" {
-		hint = str(member["model_hint"])
+	selection := obj(run["model_overrides"])[seatID]
+	if selection == nil || selection == "" {
+		selection = memberSelection(member)
 	}
+	if spec, ok := selection.(map[string]any); ok {
+		if model, found := s.findModelSpec(spec); found {
+			return model.ModelName, model.ProviderDisplay, model.ModelSpec
+		}
+		return "", "", spec
+	}
+	hint := str(selection)
 	if hint != "" {
 		if model, found := s.findModel(hint); found {
 			return model.ModelName, model.ProviderDisplay, model.ModelSpec
@@ -226,7 +259,7 @@ func (s *Store) checkRunModels(session map[string]any, overrides map[string]any,
 	// Every override is checked, including one for a seat this round does not
 	// consult: it is stored on the run and a retry reads it back.
 	for seatID, value := range overrides {
-		if f := s.checkModelHint(str(value), fmt.Sprintf("the model override for seat %q", seatID)); f != nil {
+		if f := s.checkModelSelection(value, fmt.Sprintf("the model override for seat %q", seatID)); f != nil {
 			return f
 		}
 	}
@@ -238,14 +271,14 @@ func (s *Store) checkRunModels(session map[string]any, overrides map[string]any,
 			continue
 		}
 		seatID := str(seat["seat_id"])
-		if str(overrides[seatID]) != "" {
+		if overrides[seatID] != nil && overrides[seatID] != "" {
 			continue
 		}
 		member, _ := findByID(def["members"], "member_id", str(seat["member_id"]))
 		if member == nil {
 			continue
 		}
-		if f := s.checkModelHint(str(member["model_hint"]),
+		if f := s.checkModelSelection(memberSelection(member),
 			fmt.Sprintf("the member in seat %q", seatID)); f != nil {
 			return f
 		}
