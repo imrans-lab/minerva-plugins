@@ -33,6 +33,7 @@
 # exchange, reaching the panel that owns that document before it saves; and the
 # one text derivation a session hands over, held to the fixture that is its
 # oracle and proved to be the same text through both of its callers.
-# Includes three landing regressions: foreign write, pending save warning,
-# and delayed convergence after another panel becomes the holder.
-test_council_panel.gd assertions=115
+# Includes four landing regressions: foreign write, pending save warning,
+# delayed convergence after another panel becomes the holder, and empty-panel
+# project-scoped adoption after its prior owner closes.
+test_council_panel.gd assertions=117
