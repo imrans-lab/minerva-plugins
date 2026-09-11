@@ -102,6 +102,20 @@ func (s *Store) RefreshModels(ctx context.Context) error {
 		}
 		return strings.ToLower(models[i].ModelName) < strings.ToLower(models[j].ModelName)
 	})
+	// Numeric host IDs are installation-local. Persist a name/provider guard
+	// in the selection so the same ID on another machine cannot substitute a model.
+	for i := range models {
+		spec := models[i].ModelSpec
+		if spec["kind"] == "builtin" || spec["kind"] == "dynamic" {
+			guarded := make(map[string]any, len(spec)+2)
+			for key, value := range spec {
+				guarded[key] = value
+			}
+			guarded["model_name"] = models[i].ModelName
+			guarded["provider_key"] = models[i].ProviderKey
+			models[i].ModelSpec = guarded
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.models = models
@@ -185,7 +199,7 @@ func (s *Store) checkModelSelection(selection any, where string) *Failure {
 		if _, found := s.findModelSpec(spec); found {
 			return nil
 		}
-		return fail(CodeModelUnavailable, where+" selects a model identity that is no longer enabled. Refresh models and choose it explicitly.", false)
+		return fail(CodeModelUnavailable, where+" selects a model identity that is unavailable or has a different name on this installation. Refresh models and choose it explicitly.", false)
 	}
 	return s.checkModelHint(str(selection), where)
 }
