@@ -42,6 +42,17 @@
       }
     },
     {
+      "id": "council",
+      "name": "Council",
+      "version": "0.1.0",
+      "manifest_version": "0.1.0",
+      "release_tag": "council-v0.1.0",
+      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/council-v0.1.0/council/manifest.json",
+      "downloads": {
+        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/council-v0.1.0/council-0.1.0-linux-x86_64.tar.gz"
+      }
+    },
+    {
       "id": "drive",
       "name": "Drive",
       "version": "0.0.1",
