@@ -1,7 +1,7 @@
 {
   "id": "codetools",
   "name": "Code Tools",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "host_api_version": "1",
   "release_targets": [
     "linux-x86_64",
@@ -824,7 +824,10 @@
     "host_capabilities": [
       "mcp.proxy:minerva_doc_read",
       "mcp.proxy:minerva_doc_write",
-      "mcp.proxy:minerva_doc_edit"
+      "mcp.proxy:minerva_doc_edit",
+      "mcp.proxy:minerva_editor_review_content",
+      "mcp.proxy:minerva_annotations_list",
+      "mcp.proxy:minerva_annotations_add"
     ],
     "network": {
       "mode": "none"
