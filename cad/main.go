@@ -178,6 +178,11 @@ func initWorker() {
 		EmbeddedBundle: cadruntime.EmbeddedBundle,
 		EmbeddedSHA256: cadruntime.EmbeddedSHA256,
 		WorkerDir:      workerDir,
+		// A manifest/source install creates worker/.venv from this checkout.
+		// Prefer it over a same-version embedded-runtime cache so reinstalling
+		// actually runs the worker source beside the rebuilt wrapper. Release
+		// tarballs ship no worker tree and therefore fall through to the embed.
+		PreferVenv:     true,
 		PluginID:       serverName,
 		PluginVersion:  serverVersion,
 	})

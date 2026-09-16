@@ -3,11 +3,59 @@ package runtime
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestPythonPath_PreferVenvBypassesValidEmbeddedCache(t *testing.T) {
+	pluginID := fmt.Sprintf("prefer-venv-%d", os.Getpid())
+	pluginVersion := "source-test"
+	dataDir := DataDir(pluginID)
+	if err := os.RemoveAll(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dataDir) })
+
+	workerDir := t.TempDir()
+	venvPath := filepath.Join(workerDir, ".venv", "bin", "python")
+	if goruntime.GOOS == "windows" {
+		venvPath = filepath.Join(workerDir, ".venv", "Scripts", "python.exe")
+	}
+	if err := os.MkdirAll(filepath.Dir(venvPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(venvPath, []byte("source interpreter"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	bundle, sum := makeSyntheticBundle(t)
+	req := PythonPathRequest{
+		EmbeddedBundle: bundle, EmbeddedSHA256: sum, WorkerDir: workerDir,
+		PluginID: pluginID, PluginVersion: pluginVersion,
+	}
+	embeddedPath, err := PythonPath(req)
+	if err != nil {
+		t.Fatalf("prime embedded runtime cache: %v", err)
+	}
+	if embeddedPath == venvPath {
+		t.Fatal("default resolution unexpectedly preferred the worker venv")
+	}
+
+	req.PreferVenv = true
+	got, err := PythonPath(req)
+	if err != nil {
+		t.Fatalf("prefer source venv: %v", err)
+	}
+	if got != venvPath {
+		t.Fatalf("PreferVenv returned %q, want %q (embedded cache was %q)",
+			got, venvPath, embeddedPath)
+	}
+}
 
 // --- resolvePythonOnPath: candidate-selection logic (acceptance criteria 1-5) ---
 //

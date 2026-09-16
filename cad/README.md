@@ -8,11 +8,28 @@ annotation host.
 
 ## Build (local development)
 
+Source installs require Go 1.22+ and CPython 3.12. The worker currently declares
+`>=3.12,<3.13`, so point Minerva's `python` toolchain override at a 3.12
+interpreter when another Python is first on the GUI application's search path.
+
 ```bash
 cd cad
+python3.12 -m venv worker/.venv
+worker/.venv/bin/python -m pip install -e worker
 CGO_ENABLED=0 go build -o cad-plugin .
-# Side-load via the manifest path.
 ```
+
+Normally Minerva performs those steps: side-loading `cad/manifest.json` creates
+or refreshes the editable `worker/.venv`, then builds `cad-plugin`. The setup
+pipeline runs on every manifest reinstall; pip and Go retain their own caches,
+so unchanged reinstalls are incremental. The first worker install downloads
+build123d and its compiled OCCT dependencies and can take several minutes.
+
+The source-built wrapper deliberately prefers `worker/.venv` when it exists,
+even if an embedded runtime from the same plugin version is already cached.
+This makes a reinstall use the worker in the selected checkout. Marketplace
+archives contain no source worker or setup stanza and continue to use the
+runtime embedded in their release binary.
 
 Run the test suite:
 
@@ -46,8 +63,9 @@ git commit -m "registry: cad 0.2.0"
 
 ## Install in Minerva
 
-**Side-load (development):** point Minerva's Plugin Manager at the local
-`manifest.json` path.
+**Side-load (development):** install the local `cad/manifest.json` in Minerva's
+Plugin Manager. Resolve any Go/Python preflight error, then wait for both setup
+steps to finish before starting the plugin.
 
 **Marketplace (end-users):** Minerva fetches
 `raw.githubusercontent.com/imrans-lab/minerva-plugins/main/registry.json`

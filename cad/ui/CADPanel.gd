@@ -781,24 +781,23 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 			err_msg if err_msg != "" else err_code])
 		return
 
-	# PluginScenePanelBroker wraps the worker payload in PluginErrors.success(),
+	# PluginScenePanelBroker wraps the worker payload in backend_success(),
 	# so the visible shape is:
 	#   result = {success:true, result: <worker_payload>}
 	# where <worker_payload> is the raw worker dict {ok, result|error}.
-	var worker_payload: Dictionary = result.get("result", {})
-	if not (worker_payload is Dictionary):
-		_last_eval_result = {
-			"status": "error",
-			"error_kind": "missing_worker_payload",
-			"error_message": "cad.evaluate reply had no Dictionary payload",
-			"request_id": request_id,
-			"ts": Time.get_unix_time_from_system(),
-		}
-		push_warning("[CADPanel] cad.evaluate: missing worker payload")
-		_show_eval_error("CAD evaluation failed — the worker reply was malformed.")
+	var worker_value: Variant = result.get("result")
+	if not worker_value is Dictionary:
+		_reject_malformed_worker_payload(
+			"scene reply result must be a Dictionary", request_id, {})
+		return
+	var worker_payload: Dictionary = worker_value
+	var worker_ok: Variant = worker_payload.get("ok")
+	if not worker_ok is bool:
+		_reject_malformed_worker_payload(
+			"worker payload field 'ok' must be boolean", request_id, worker_payload)
 		return
 
-	if not bool(worker_payload.get("ok", false)):
+	if not bool(worker_ok):
 		# Worker may emit `error` as either a structured dict {kind, message} or a
 		# bare string for older/parse-stage error paths. Defend against both.
 		var err_var: Variant = worker_payload.get("error", {})
@@ -838,7 +837,13 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 		_show_eval_error(banner)
 		return
 
-	var eval_result: Dictionary = worker_payload.get("result", {}) as Dictionary
+	var eval_value: Variant = worker_payload.get("result")
+	if not eval_value is Dictionary:
+		_reject_malformed_worker_payload(
+			"successful worker payload result must be a Dictionary",
+			request_id, worker_payload)
+		return
+	var eval_result: Dictionary = eval_value
 	var prepared_annotations: Dictionary = _annotation_host.prepare_source_annotations(eval_result.get("annotations", []))
 	if prepared_annotations.has("error"):
 		_last_eval_result = {"status": "error", "error_kind": "annotations",
@@ -964,6 +969,22 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 
 	if not lines.is_empty():
 		_show_eval_error("\n".join(lines))
+
+
+## Record a malformed reply without copying geometry or source into logs. Keys
+## are enough to diagnose an envelope mismatch and stay bounded for huge meshes.
+func _reject_malformed_worker_payload(message: String, request_id: String,
+		payload: Dictionary) -> void:
+	var detail := "%s; keys=%s" % [message, str(payload.keys()).left(256)]
+	_last_eval_result = {
+		"status": "error",
+		"error_kind": "malformed_worker_payload",
+		"error_message": detail,
+		"request_id": request_id,
+		"ts": Time.get_unix_time_from_system(),
+	}
+	push_warning("[CADPanel] cad.evaluate: %s" % detail)
+	_show_eval_error("CAD evaluation failed — malformed worker reply: %s" % detail)
 
 
 ## Say what this evaluation found. Called from _evaluate_and_render's failure

@@ -1,7 +1,7 @@
 // Package runtime — resolve.go: resolves the path of the Python interpreter and
 // worker entrypoint for a plugin's worker subprocess.
 //
-// Priority order (production → dev fallback):
+// Default priority order (production → dev fallback):
 //
 //  1. Extracted embedded PBS runtime under <data_dir>/runtime/<plugin_version>/
 //     (the path resolved by EnsureRuntime / the caller-supplied EmbeddedBundle).
@@ -42,6 +42,10 @@ type PythonPathRequest struct {
 	// WorkerDir is the plugin's worker source tree, used for the dev-mode venv
 	// fallback. May be empty to skip that tier.
 	WorkerDir string
+	// PreferVenv makes a present worker-local venv the first tier. Source
+	// installs use this to avoid an older same-version embedded-runtime cache;
+	// release installs that ship no worker tree retain the normal embedded tier.
+	PreferVenv bool
 	// PluginID + PluginVersion locate the per-plugin extracted runtime under
 	// the data directory (e.g. <data>/plugins/<PluginID>/runtime/<PluginVersion>/).
 	PluginID      string
@@ -58,6 +62,11 @@ type PythonPathRequest struct {
 // developers running un-bundled builds rely on them.
 func PythonPath(req PythonPathRequest) (string, error) {
 	workerDir := req.WorkerDir
+	if req.PreferVenv && workerDir != "" {
+		if p := venvPython(workerDir); p != "" {
+			return p, nil
+		}
+	}
 	// Tier 1: extracted embedded runtime.
 	ensureReq := EnsureRuntimeRequest{
 		EmbeddedBundle: req.EmbeddedBundle,
@@ -75,7 +84,9 @@ func PythonPath(req PythonPathRequest) (string, error) {
 	// indistinguishable from a working install until its first worker call.
 	log.Printf("[runtime] embedded runtime unavailable (%v) — falling back to venv / PATH python", err)
 
-	// Tier 2: dev venv next to the worker source.
+	// Tier 2: dev venv next to the worker source. Rechecking after an opted-in
+	// miss keeps PreferVenv a priority choice rather than a required-via-venv
+	// mode; packaged releases continue to use their embedded interpreter.
 	if workerDir != "" {
 		if p := venvPython(workerDir); p != "" {
 			return p, nil
