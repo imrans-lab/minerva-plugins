@@ -5,12 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Name Tags</title>
 <!--
-  Name Tags panel (round 3) — single self-contained HTML file.
-  Data flow: CSV + icon PNG -> minerva.call('minerva_nametag_maker_nametag_generate')
-             -> preview every page with PDF.js
-             -> Save via minerva.call('minerva_nametag_maker_nametag_save')
-                (backend regenerates + picks/grants/writes; PDF bytes never cross
-                 the 64 KiB-capped webview IPC channel)
+  Name Tags panel — single self-contained HTML file.
+
+  Every message on this bridge is bounded at 64 KiB in BOTH directions and a
+  webview panel has no bulk route, so neither the icon nor the PDF may travel
+  inline. Paths cross instead:
+  Data flow: CSV + an icon PATH (nametag_pick_icon pops a host dialog)
+             -> nametag_generate with deliver_to_file -> {path, byte_size, page_count}
+             -> nametag_read_chunk in a loop -> the PDF bytes, preview every page
+                with PDF.js
+             -> Save via nametag_save (backend regenerates + picks + writes)
              -> human-in-the-loop print acceptance.
 
   PDF.js is vendored INLINE below (see ui/README.md for version/source/provenance).
@@ -78,8 +82,8 @@ Alan Turing,Computation,1,A-101
 Grace Hopper,Compilers,2,B-205</textarea>
   <div class="hint">First row must be the header. Empty cells are omitted from the tag.</div>
 
-  <label for="icon">Icon (PNG, required)</label>
-  <input type="file" id="icon" accept="image/png">
+  <label>Icon (PNG, required)</label>
+  <div class="btnrow"><button id="iconBtn" class="secondary">Choose icon…</button></div>
   <div class="hint" id="iconStatus">No icon selected.</div>
 
   <h2>Options</h2>
@@ -208,6 +212,8 @@ Grace Hopper,Compilers,2,B-205</textarea>
 
   var TOOL = "minerva_nametag_maker_nametag_generate";
   var SAVE_TOOL = "minerva_nametag_maker_nametag_save";
+  var CHUNK_TOOL = "minerva_nametag_maker_nametag_read_chunk";
+  var PICK_ICON_TOOL = "minerva_nametag_maker_nametag_pick_icon";
   var PDFJS_VERSION = "3.11.174";
 
   // ---- PDF.js worker wired via a Blob URL (single-file friendly) -------------
@@ -234,11 +240,18 @@ Grace Hopper,Compilers,2,B-205</textarea>
   }
 
   // ---- state -----------------------------------------------------------------
-  var iconB64 = null;       // bare base64 PNG (no data: prefix)
-  var lastPdfB64 = null;    // base64 from the last successful generate
+  var iconPath = null;      // path of the picked icon PNG (never its bytes)
   var lastArgs = null;      // the args object of the last successful generate
                             // (reused for nametag_save — backend regenerates the
                             //  PDF deterministically; bytes never cross IPC)
+
+  // ---- failure detail --------------------------------------------------------
+  function toolDetail(res) {
+    if (!res) { return " [unknown_error]: no reply"; }
+    var code = res.error_code ? res.error_code : "unknown_error";
+    return " [" + code + "]: " + (res.error_message || "no detail");
+  }
+  function errText(e) { return e && e.message ? e.message : String(e); }
 
   var REQUIRED_HEADERS = ["name", "class", "group #", "room assignment"];
 
@@ -258,22 +271,28 @@ Grace Hopper,Compilers,2,B-205</textarea>
     return null;
   }
 
-  // ---- icon loading ----------------------------------------------------------
-  $("icon").addEventListener("change", function (e) {
-    var f = e.target.files && e.target.files[0];
-    if (!f) { iconB64 = null; $("iconStatus").textContent = "No icon selected."; return; }
-    if (f.type && f.type !== "image/png") {
-      iconB64 = null; $("iconStatus").textContent = "Please choose a PNG file."; return;
+  // ---- icon picking ----------------------------------------------------------
+  // A host open-dialog, not a file input: the backend reads the PNG itself, so
+  // an icon of any size is usable without its bytes crossing the capped bridge.
+  $("iconBtn").addEventListener("click", async function () {
+    if (!bridgeReady()) { $("iconStatus").textContent = "Minerva bridge not available yet."; return; }
+    $("iconBtn").disabled = true;
+    try {
+      var res = await window.minerva.call(PICK_ICON_TOOL, {});
+      if (res && res.cancelled === true) { return; }
+      if (!res || res.success !== true || !res.path) {
+        iconPath = null;
+        $("iconStatus").textContent = "Could not choose an icon" + toolDetail(res);
+        return;
+      }
+      iconPath = res.path;
+      $("iconStatus").textContent = "Icon: " + res.path;
+    } catch (e) {
+      iconPath = null;
+      $("iconStatus").textContent = "Could not choose an icon: " + errText(e);
+    } finally {
+      $("iconBtn").disabled = false;
     }
-    var reader = new FileReader();
-    reader.onload = function () {
-      var s = String(reader.result || "");
-      var comma = s.indexOf(",");           // strip "data:image/png;base64," prefix
-      iconB64 = comma >= 0 ? s.slice(comma + 1) : s;
-      $("iconStatus").textContent = "Icon loaded: " + f.name + " (" + Math.round(f.size / 1024) + " KB)";
-    };
-    reader.onerror = function () { iconB64 = null; $("iconStatus").textContent = "Failed to read icon file."; };
-    reader.readAsDataURL(f);
   });
 
   // ---- base64 -> Uint8Array --------------------------------------------------
@@ -285,11 +304,41 @@ Grace Hopper,Compilers,2,B-205</textarea>
     return bytes;
   }
 
+  // ---- pull a generated PDF back in bridge-sized slices -----------------------
+  // Every reply is bounded at 64 KiB, so the backend writes the PDF to a file
+  // and hands back its path; this walks the file with nametag_read_chunk, which
+  // reports the length it carries and the total, until eof.
+  async function fetchPdfBytes(path, expectedTotal) {
+    var parts = [], received = 0, total = expectedTotal || 0, guard = 0;
+    while (true) {
+      if (++guard > 4096) {
+        throw new Error("chunk transfer did not finish (" + received + " of " + total + " bytes)");
+      }
+      var res = await window.minerva.call(CHUNK_TOOL, { path: path, offset: received });
+      if (!res || res.success !== true || typeof res.bytes_b64 !== "string") {
+        throw new Error("reading the generated PDF failed" + toolDetail(res));
+      }
+      var bytes = b64ToBytes(res.bytes_b64);
+      if (typeof res.total_bytes === "number") { total = res.total_bytes; }
+      if (bytes.length === 0 && res.eof !== true) {
+        throw new Error("reading the generated PDF stalled at offset " + received);
+      }
+      parts.push(bytes);
+      received += bytes.length;
+      if (res.eof === true) { break; }
+    }
+    if (total && received !== total) {
+      throw new Error("incomplete transfer: got " + received + " of " + total + " bytes");
+    }
+    var out = new Uint8Array(received), at = 0;
+    for (var i = 0; i < parts.length; i++) { out.set(parts[i], at); at += parts[i].length; }
+    return out;
+  }
+
   // ---- preview (render ALL pages to stacked canvases) ------------------------
-  async function renderPreview(b64) {
+  async function renderPreview(data) {
     var pagesEl = $("pages");
     pagesEl.innerHTML = "";
-    var data = b64ToBytes(b64);
     var pdf = await pdfjsLib.getDocument({ data: data }).promise;
     for (var n = 1; n <= pdf.numPages; n++) {
       var page = await pdf.getPage(n);
@@ -313,7 +362,6 @@ Grace Hopper,Compilers,2,B-205</textarea>
     clearMsg($("genErr"));
     $("genInfo").textContent = "";
     // reset downstream state on a fresh generate
-    lastPdfB64 = null;
     lastArgs = null;
     hide($("saveCard")); hide($("hitlCard"));
     clearMsg($("saveErr")); clearMsg($("saveOk"));
@@ -324,11 +372,11 @@ Grace Hopper,Compilers,2,B-205</textarea>
     var csv = $("csv").value;
     var headerErr = validateCsvHeaders(csv);
     if (headerErr) { setMsg($("genErr"), headerErr); return; }
-    if (!iconB64) { setMsg($("genErr"), "An icon PNG is required. Choose a PNG above."); return; }
+    if (!iconPath) { setMsg($("genErr"), "An icon PNG is required. Choose one above."); return; }
 
     var args = {
       csv: csv,
-      icon_png_base64: iconB64,
+      icon_path: iconPath,
       back_mode: $("backMode").value,
       full_guides: $("fullGuides").checked,
       icon_width_in: parseFloat($("iconWidth").value) || 0.40,
@@ -339,37 +387,37 @@ Grace Hopper,Compilers,2,B-205</textarea>
     $("genBtn").disabled = true;
     show($("genSpinner"));
     try {
-      var res = await window.minerva.call(TOOL, args);
+      // deliver_to_file: the PDF lands on disk and the reply names it, because a
+      // real one is far larger than the 64 KiB this bridge carries.
+      var genArgs = {};
+      for (var k in args) { if (Object.prototype.hasOwnProperty.call(args, k)) { genArgs[k] = args[k]; } }
+      genArgs.deliver_to_file = true;
+      var res = await window.minerva.call(TOOL, genArgs);
       // minerva.call resolves with the parsed tool result. The tool returns either
-      // {success:true, bytes_b64, byte_size, page_count, content_type} or
+      // {success:true, path, byte_size, page_count, content_type} or
       // {success:false, error_code, error_message}. (isError:true would have thrown.)
-      if (!res || res.success !== true || !res.bytes_b64) {
-        var code = res && res.error_code ? res.error_code : "unknown_error";
-        var emsg = res && res.error_message ? res.error_message : "Generation failed with no detail.";
-        setMsg($("genErr"), "Generate failed [" + code + "]: " + emsg);
+      if (!res || res.success !== true || !res.path) {
+        setMsg($("genErr"), "Generate failed" + toolDetail(res));
         return;
       }
-      lastPdfB64 = res.bytes_b64;
       lastArgs = args;   // reused verbatim by Save (backend regenerates the PDF)
+      var bytes = await fetchPdfBytes(res.path, res.byte_size);
       $("genInfo").textContent = (res.page_count || "?") + " page(s), " +
-        Math.round((res.byte_size || 0) / 1024) + " KB.";
-      await renderPreview(lastPdfB64);
+        Math.round((res.byte_size || bytes.length) / 1024) + " KB.";
+      await renderPreview(bytes);
       show($("saveCard"));
     } catch (e) {
-      setMsg($("genErr"), "Generate failed: " + (e && e.message ? e.message : String(e)));
+      setMsg($("genErr"), "Generate failed: " + errText(e));
     } finally {
       $("genBtn").disabled = false;
       hide($("genSpinner"));
     }
   });
 
-  // ---- save (backend nametag_save: regenerate -> pick -> grant -> write) -----
-  // A real name-tag PDF base64-encodes to hundreds of KB, which exceeds the
-  // 64 KiB cap the webview IPC channel enforces on every inbound message. So
-  // Save does NOT push the bytes back through pluginIPC. Instead it calls the
-  // backend nametag_save tool over minerva.call (HTTP, no 64 KiB cap); the
-  // backend regenerates the PDF from the same args and drives the picker,
-  // grant_scope and files.write capabilities itself — the bytes stay server-side.
+  // ---- save (backend nametag_save: regenerate -> pick -> write) --------------
+  // Save pushes no bytes either way: it calls the backend nametag_save tool with
+  // the same args, and the backend regenerates the PDF and drives the picker and
+  // files.write capabilities itself, so only a path and a byte count come back.
   $("saveBtn").addEventListener("click", async function () {
     clearMsg($("saveErr")); clearMsg($("saveOk"));
     if (!lastArgs) { setMsg($("saveErr"), "Nothing to save — generate a PDF first."); return; }
@@ -396,12 +444,10 @@ Grace Hopper,Compilers,2,B-205</textarea>
         setMsg($("saveOk"), "Save cancelled.");
         return;
       }
-      var code = res && res.error_code ? res.error_code : "unknown_error";
-      var emsg = res && res.error_message ? res.error_message : "Save failed with no detail.";
-      setMsg($("saveErr"), "Save failed [" + code + "]: " + emsg);
+      setMsg($("saveErr"), "Save failed" + toolDetail(res));
     } catch (e) {
       // minerva.call rejects if the tool reported isError:true.
-      setMsg($("saveErr"), "Save failed: " + (e && e.message ? e.message : String(e)));
+      setMsg($("saveErr"), "Save failed: " + errText(e));
     } finally {
       $("saveBtn").disabled = false;
       hide($("saveSpinner"));
@@ -424,7 +470,7 @@ Grace Hopper,Compilers,2,B-205</textarea>
     setupPdfWorker();
     $("provenance").textContent = "Preview rendered with PDF.js v" + PDFJS_VERSION + " (Mozilla, Apache-2.0), vendored inline.";
   } catch (e) {
-    setMsg($("genErr"), "PDF preview engine failed to initialize: " + (e && e.message ? e.message : String(e)));
+    setMsg($("genErr"), "PDF preview engine failed to initialize: " + errText(e));
   }
 })();
 </script>

@@ -317,6 +317,12 @@ func readImageB64(client capabilityCaller, b64, path string) (string, *toolFault
 	if strings.TrimSpace(path) == "" {
 		return "", nil
 	}
+	return readFileB64(client, path)
+}
+
+// readFileB64 reads a file's raw bytes as base64 on the backend via
+// host.files.read.
+func readFileB64(client capabilityCaller, path string) (string, *toolFault) {
 	raw, capErr := client.callCapability("host.files.read", map[string]interface{}{
 		"path":     path,
 		"encoding": "base64",
@@ -501,32 +507,9 @@ func toolNametagRender(client capabilityCaller, rawArgs json.RawMessage) map[str
 		return failResult(fault)
 	}
 
-	writeRaw, capErr := client.callCapability("host.files.write", map[string]interface{}{
-		"path":           a.OutPath,
-		"content":        pdf.BytesB64,
-		"encoding":       "base64",
-		"create_parents": true,
-	})
-	if capErr != nil {
-		return failResult(&toolFault{Code: fmt.Sprintf("rpc_error_%d", capErr.Code), Msg: capErr.Message})
-	}
-	var write struct {
-		Success      bool   `json:"success"`
-		ErrorCode    string `json:"error_code,omitempty"`
-		ErrorMessage string `json:"error_message,omitempty"`
-		Result       *struct {
-			Path string `json:"path"`
-		} `json:"result,omitempty"`
-	}
-	if err := json.Unmarshal(writeRaw, &write); err != nil {
-		return failResult(&toolFault{Code: "parse_error", Msg: "parse files.write response: " + err.Error()})
-	}
-	if !write.Success {
-		return failResult(&toolFault{Code: write.ErrorCode, Msg: write.ErrorMessage})
-	}
-	outPath := a.OutPath
-	if write.Result != nil && write.Result.Path != "" {
-		outPath = write.Result.Path
+	outPath, _, fault := writePDFFile(client, a.OutPath, pdf.BytesB64)
+	if fault != nil {
+		return failResult(fault)
 	}
 	return map[string]interface{}{
 		"success": true,
@@ -547,12 +530,27 @@ func toolNametagRender(client capabilityCaller, rawArgs json.RawMessage) map[str
 // reference.
 //
 // On success returns {success, bytes_b64, byte_size, page_count, content_type}.
+// With deliver_to_file the PDF is written to a temp file instead and the result
+// carries {success, path, byte_size, page_count, content_type} with no bytes —
+// the route for callers on a size-capped channel (see panel_transfer.go).
 // On a host.pdf.generate failure, surfaces {success:false, error_code,
 // error_message}.
 func toolNametagGenerate(client capabilityCaller, rawArgs json.RawMessage) map[string]interface{} {
+	var deliver struct {
+		ToFile bool `json:"deliver_to_file"`
+	}
+	if len(rawArgs) > 0 && string(rawArgs) != "null" {
+		if err := json.Unmarshal(rawArgs, &deliver); err != nil {
+			return failResult(&toolFault{Code: "schema_validation_failed", Msg: "arguments not a JSON object: " + err.Error()})
+		}
+	}
+
 	res, fault := generatePDF(client, rawArgs)
 	if fault != nil {
 		return failResult(fault)
+	}
+	if deliver.ToFile {
+		return deliverPDFToFile(client, res)
 	}
 	out := map[string]interface{}{
 		"success":      true,
@@ -615,43 +613,15 @@ func toolNametagSave(client capabilityCaller, rawArgs json.RawMessage) map[strin
 	// 3. Write the base64 PDF bytes. Under filesystem_mode "unrestricted" the
 	// host authorizes the write from the granted host.files.write capability
 	// alone — no grant_scope handshake and no second confirmation dialog.
-	writeRaw, capErr := client.callCapability("host.files.write", map[string]interface{}{
-		"path":           path,
-		"content":        pdf.BytesB64,
-		"encoding":       "base64",
-		"create_parents": true,
-	})
-	if capErr != nil {
-		return saveErr(fmt.Sprintf("rpc_error_%d", capErr.Code), capErr.Message)
-	}
-	var write struct {
-		Success      bool   `json:"success"`
-		ErrorCode    string `json:"error_code,omitempty"`
-		ErrorMessage string `json:"error_message,omitempty"`
-		Result       *struct {
-			Path         string `json:"path"`
-			BytesWritten int    `json:"bytes_written"`
-		} `json:"result,omitempty"`
-	}
-	if err := json.Unmarshal(writeRaw, &write); err != nil {
-		return saveErr("parse_error", "parse files.write response: "+err.Error())
-	}
-	if !write.Success {
-		return saveErr(write.ErrorCode, write.ErrorMessage)
-	}
-	if write.Result == nil {
-		return saveErr("parse_error", "files.write returned success but no result")
-	}
-
-	savedPath := write.Result.Path
-	if savedPath == "" {
-		savedPath = path
+	savedPath, written, writeFault := writePDFFile(client, path, pdf.BytesB64)
+	if writeFault != nil {
+		return saveErr(writeFault.Code, writeFault.Msg)
 	}
 	out := map[string]interface{}{
 		"success":       true,
 		"saved":         true,
 		"path":          savedPath,
-		"bytes_written": write.Result.BytesWritten,
+		"bytes_written": written,
 		"page_count":    pdf.PageCount,
 	}
 	if len(pdf.Warnings) > 0 {
@@ -665,13 +635,26 @@ func toolNametagSave(client capabilityCaller, rawArgs json.RawMessage) map[strin
 // {saved:false, cancelled:true} map (user cancelled the picker) or a saveErr map.
 // Used only as the human-panel fallback when nametag_save gets no explicit path.
 func pickSavePath(client capabilityCaller) (string, map[string]interface{}) {
+	path, cancelled, fault := pickFilePath(client, "save", "Save name tags", []string{"*.pdf ; PDF Files"})
+	if fault != nil {
+		return "", saveErr(fault.Code, fault.Msg)
+	}
+	if cancelled {
+		return "", map[string]interface{}{"success": true, "saved": false, "cancelled": true}
+	}
+	return path, nil
+}
+
+// pickFilePath pops the host file dialog in "open" or "save" mode and reports
+// the chosen path, whether the user cancelled, or a structured fault.
+func pickFilePath(client capabilityCaller, mode, title string, filters []string) (string, bool, *toolFault) {
 	pickRaw, capErr := client.callCapability("host.dialogs.file_picker", map[string]interface{}{
-		"mode":    "save",
-		"title":   "Save name tags",
-		"filters": []string{"*.pdf ; PDF Files"},
+		"mode":    mode,
+		"title":   title,
+		"filters": filters,
 	})
 	if capErr != nil {
-		return "", saveErr(fmt.Sprintf("rpc_error_%d", capErr.Code), capErr.Message)
+		return "", false, &toolFault{Code: fmt.Sprintf("rpc_error_%d", capErr.Code), Msg: capErr.Message}
 	}
 	var pick struct {
 		Success      bool   `json:"success"`
@@ -683,21 +666,21 @@ func pickSavePath(client capabilityCaller) (string, map[string]interface{}) {
 		} `json:"result,omitempty"`
 	}
 	if err := json.Unmarshal(pickRaw, &pick); err != nil {
-		return "", saveErr("parse_error", "parse file_picker response: "+err.Error())
+		return "", false, &toolFault{Code: "parse_error", Msg: "parse file_picker response: " + err.Error()}
 	}
 	if !pick.Success {
-		return "", saveErr(pick.ErrorCode, pick.ErrorMessage)
+		return "", false, &toolFault{Code: pick.ErrorCode, Msg: pick.ErrorMessage}
 	}
 	if pick.Result == nil {
-		return "", saveErr("parse_error", "file_picker returned success but no result")
+		return "", false, &toolFault{Code: "parse_error", Msg: "file_picker returned success but no result"}
 	}
 	if pick.Result.Cancelled {
-		return "", map[string]interface{}{"success": true, "saved": false, "cancelled": true}
+		return "", true, nil
 	}
 	if pick.Result.Path == "" {
-		return "", saveErr("parse_error", "file_picker returned an empty path")
+		return "", false, &toolFault{Code: "parse_error", Msg: "file_picker returned an empty path"}
 	}
-	return pick.Result.Path, nil
+	return pick.Result.Path, false, nil
 }
 
 // saveErr builds a nametag_save failure map. Unlike toolErr it also carries

@@ -37,3 +37,10 @@ Re-download the two files from the source URL above and splice them into the HTM
 place of the `/*__PDFJS_MAIN_SOURCE__*/` and `/*__PDFJS_WORKER_SOURCE__*/` markers
 (the build splice asserts neither file contains a `</script` sequence that would break
 the inline island).
+
+## Tests
+
+`node tests/panel-transfer.test.js` runs the page's own script in a vm against a
+stub bridge: it asserts no request or reply exceeds the host's 65,536-byte cap
+and that the chunks the page reassembles are byte-for-byte the generated PDF.
+PDF.js, canvas rasterization and the host dialog are stubbed (no browser).

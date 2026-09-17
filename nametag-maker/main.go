@@ -302,7 +302,20 @@ func sharedProps() map[string]interface{} {
 }
 
 func generateInputSchema() map[string]interface{} {
-	return map[string]interface{}{"type": "object", "properties": sharedProps()}
+	props := sharedProps()
+	props["deliver_to_file"] = map[string]interface{}{"type": "boolean", "description": "Write the PDF to a temp file and return {path, byte_size, page_count} instead of the bytes — for callers on a size-capped channel (the HTML panel), which then pull the file back with nametag_read_chunk."}
+	return map[string]interface{}{"type": "object", "properties": props}
+}
+
+func readChunkInputSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"path":   map[string]interface{}{"type": "string", "description": "Absolute path of the file to read."},
+			"offset": map[string]interface{}{"type": "number", "description": "Byte offset of the slice (default 0)."},
+			"length": map[string]interface{}{"type": "number", "description": "Slice length in bytes; clamped to what fits one capped reply. The result reports the length actually returned."},
+		},
+	}
 }
 
 func saveInputSchema() map[string]interface{} {
@@ -364,13 +377,23 @@ func buildFromSheetInputSchema() map[string]interface{} {
 var toolList = []map[string]interface{}{
 	{
 		"name":        "nametag_generate",
-		"description": "Generate a name-tag PDF via host.pdf.generate and return the bytes. Tags are 3-3/8 x 2-1/3 in (Avery 5395), 8 per Letter sheet, corner-cut marks. Layouts: classic (icon + name/class/room/group), detailed (image + big name + detail lines), or fully generic front/back faces. A shared `back` (or per-row back) draws a second side aligned for duplex (e.g. a schedule). Returns {bytes_b64, byte_size, page_count, content_type}.",
+		"description": "Generate a name-tag PDF via host.pdf.generate and return the bytes. Tags are 3-3/8 x 2-1/3 in (Avery 5395), 8 per Letter sheet, corner-cut marks. Layouts: classic (icon + name/class/room/group), detailed (image + big name + detail lines), or fully generic front/back faces. A shared `back` (or per-row back) draws a second side aligned for duplex (e.g. a schedule). Returns {bytes_b64, byte_size, page_count, content_type}, or {path, byte_size, page_count} with deliver_to_file.",
 		"inputSchema": generateInputSchema(),
 	},
 	{
 		"name":        "nametag_save",
 		"description": "Like nametag_generate, but writes the PDF to disk on the backend (bytes never cross the 64 KiB webview channel). Pass `path` to write directly with no dialog; omit it for a save picker. Returns {saved, path, bytes_written, page_count}, or {saved:false, cancelled:true} on picker cancel.",
 		"inputSchema": saveInputSchema(),
+	},
+	{
+		"name":        "nametag_read_chunk",
+		"description": "Read one slice of a file as base64. Lets a panel bounded at 64 KiB per reply pull back a PDF written by nametag_generate (deliver_to_file) or nametag_save. Returns {bytes_b64, offset, length, total_bytes, eof}; loop from offset 0 until eof.",
+		"inputSchema": readChunkInputSchema(),
+	},
+	{
+		"name":        "nametag_pick_icon",
+		"description": "Pop a host open-dialog for a PNG icon and return its path, for passing as icon_path. Returns {path} or {cancelled:true}. Lets a panel use an icon of any size without carrying its bytes across the capped channel.",
+		"inputSchema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
 	},
 	{
 		"name":        "nametag_build_from_sheet",
@@ -395,6 +418,10 @@ func dispatchTool(client *hostClient, msg *rpcRequest) {
 		respondTool(client.enc, msg.ID, toolNametagGenerate(client, p.Arguments))
 	case "nametag_save":
 		respondTool(client.enc, msg.ID, toolNametagSave(client, p.Arguments))
+	case "nametag_read_chunk":
+		respondTool(client.enc, msg.ID, toolNametagReadChunk(client, p.Arguments))
+	case "nametag_pick_icon":
+		respondTool(client.enc, msg.ID, toolNametagPickIcon(client, p.Arguments))
 	case "nametag_build_from_sheet":
 		respondTool(client.enc, msg.ID, toolNametagBuildFromSheet(client, p.Arguments))
 	case "nametag.render":
