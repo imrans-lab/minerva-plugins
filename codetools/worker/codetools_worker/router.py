@@ -16,7 +16,7 @@ single dispatch + result contract the whole plugin shares.
 
 from __future__ import annotations
 
-from . import code_visualizer, envelope, methods, sightline_probe
+from . import code_visualizer, envelope, methods, paging, sightline_probe
 from .errors import MethodError, ToolError
 from .files.glob_handler import handle_glob
 from .files.grep_handler import handle_grep
@@ -56,12 +56,16 @@ def route(method, params):
 
     Raises MethodError for an unknown method (a protocol fault, surfaced by the
     dispatcher as ok=false). Handler ToolError becomes an error envelope.
+
+    A caller bounded by the host's control-lane cap (an HTML panel) may pass a
+    `page` argument; paging.route then delivers the envelope in parts. See
+    paging.py — handlers are unaware of it and unpaged callers see no change.
     """
     handler = ROUTES.get(method)
     if handler is None:
         raise MethodError("internal", "unknown method: %s" % method)
     try:
-        env = handler(params or {})
+        env = paging.route(method, params or {}, handler)
     except ToolError as exc:
         return envelope.error(str(exc), kind=exc.kind)
     return envelope.validate(env)

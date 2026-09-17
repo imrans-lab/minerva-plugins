@@ -97,7 +97,17 @@ var GetDiff = ToolSpec{
 			"head": {"type": "string", "description": "Head git ref. Empty = working tree (unstaged + staged)."},
 			"file": {"type": "string", "description": "Optional path filter."},
 			"repo_path": {"type": "string", "description": "Repo working tree. If empty, inferred from the first project in the store."},
-			"db_path": {"type": "string", "description": "Path to the code-visualizer SQLite store. Optional — falls back to the CODETOOLS_DB env var."}
+			"db_path": {"type": "string", "description": "Path to the code-visualizer SQLite store. Optional — falls back to the CODETOOLS_DB env var."},
+			"page": {
+				"type": "object",
+				"description": "Chunked transfer for a caller bounded by the host's 64 KiB webview cap. {\"max_bytes\": n} starts a transfer and returns part 0 plus a token; {\"token\": t, \"part\": k} returns part k. Concatenate every chunk in order and parse: the text is this tool's normal envelope. Omit for the whole reply.",
+				"properties": {
+					"max_bytes": {"type": "integer", "description": "Largest reply the caller can take, in UTF-8 bytes."},
+					"token": {"type": "string", "description": "Token from part 0."},
+					"part": {"type": "integer", "description": "Zero-based part index."}
+				},
+				"additionalProperties": false
+			}
 		},
 		"additionalProperties": false
 	}`),
@@ -233,7 +243,17 @@ var GetGraph = ToolSpec{
 	InputSchema: json.RawMessage(`{
 		"type": "object",
 		"properties": {
-			"db_path": {"type": "string", "description": "Path to the code-visualizer SQLite store. Required — or set CODETOOLS_DB env var."}
+			"db_path": {"type": "string", "description": "Path to the code-visualizer SQLite store. Required — or set CODETOOLS_DB env var."},
+			"page": {
+				"type": "object",
+				"description": "Chunked transfer for a caller bounded by the host's 64 KiB webview cap. {\"max_bytes\": n} starts a transfer and returns part 0 plus a token; {\"token\": t, \"part\": k} returns part k. Concatenate every chunk in order and parse: the text is this tool's normal envelope. Omit for the whole reply.",
+				"properties": {
+					"max_bytes": {"type": "integer", "description": "Largest reply the caller can take, in UTF-8 bytes."},
+					"token": {"type": "string", "description": "Token from part 0."},
+					"part": {"type": "integer", "description": "Zero-based part index."}
+				},
+				"additionalProperties": false
+			}
 		},
 		"required": ["db_path"],
 		"additionalProperties": false

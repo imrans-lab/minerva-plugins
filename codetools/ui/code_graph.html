@@ -189,6 +189,7 @@ button { font-family: inherit; }
   </div>
 </div>
 
+<!-- Panel logic. -->
 <script>
 "use strict";
 const KIND_COLORS = { 'function':'#4dabf7','class':'#51cf66','signal':'#fcc419','constant':'#adb5bd','enum':'#cc5de8','variable':'#868e96' };
@@ -217,8 +218,37 @@ function setStatus(m, err){ const el=document.getElementById('status'); el.textC
 
 // ── Bridge ──
 function dbPath(){ const f=(PANEL.file_path||'').trim(); if(f&&f.endsWith('.db'))return f; const d=(PANEL.data_directory||'').replace(/\/+$/,''); return d?d+'/code_visualizer.db':''; }
-function unwrapEnvelope(d){ let c=d,g=0; while(c&&typeof c==='object'&&g++<8){ if(Array.isArray(c.artifacts)||c.status)return c; if('result' in c){c=c.result;continue;} break;} return c; }
+// A plugin tool reply reaches the page as MCP content: the worker's envelope is
+// JSON text inside content[0].text, wrapped by the backend as {ok, result}.
+function unwrapEnvelope(d){ let c=d,g=0; while(c&&typeof c==='object'&&g++<8){
+  if(Array.isArray(c.artifacts)||c.status)return c;
+  if(Array.isArray(c.content)){ const t=c.content.find(p=>p&&p.type==='text'&&typeof p.text==='string'); if(!t)break; try{ c=JSON.parse(t.text); }catch(e){ break; } continue; }
+  if('result' in c){c=c.result;continue;} break;} return c; }
 async function callTool(name,args){ const env=unwrapEnvelope(await window.minerva.call(name,args||{})); if(env&&env.status&&env.status!=='ok')throw new Error((env.error&&env.error.message)||env.summary||('status='+env.status)); return (env&&env.artifacts&&env.artifacts[0])||env; }
+
+// The host bounds every webview bridge message at 64 KiB each way and gives
+// webviews no bulk route, so a graph or diff arrives in parts: each reply
+// carries a slice of the real envelope's JSON text plus a token, and the page
+// concatenates them in order. Anything that breaks the sequence throws, so a
+// short transfer surfaces as an error instead of a half-drawn panel.
+const PAGE_BYTES = 48*1024;
+async function callPaged(name,args){
+  const base = Object.assign({}, args||{});
+  const first = await callTool(name, Object.assign({}, base, {page:{max_bytes:PAGE_BYTES}}));
+  if(!first || first.type!=='paged_envelope') throw new Error(name+': expected a paged reply, got '+((first&&first.type)||typeof first));
+  const parts = first.parts|0;
+  if(parts<1) throw new Error(name+': paged reply declared '+first.parts+' part(s)');
+  let text = first.chunk||'';
+  for(let i=1;i<parts;i++){
+    setStatus('Loading… part '+(i+1)+'/'+parts);
+    const p = await callTool(name, Object.assign({}, base, {page:{token:first.token, part:i}}));
+    if(!p || p.type!=='paged_envelope' || p.part!==i) throw new Error(name+': part '+i+' of '+parts+' did not arrive');
+    text += p.chunk||'';
+  }
+  let env; try{ env=JSON.parse(text); }catch(e){ throw new Error(name+': paged reply did not reassemble ('+e.message+')'); }
+  if(env&&env.status&&env.status!=='ok') throw new Error((env.error&&env.error.message)||env.summary||('status='+env.status));
+  return (env&&env.artifacts&&env.artifacts[0])||env;
+}
 
 // ── Boot ──
 async function boot() {
@@ -226,14 +256,17 @@ async function boot() {
   if (!window.minerva || !window.minerva.call) { setStatus('Bridge unavailable', true); return; }
   const db = dbPath();
   if (!db) { setStatus('No db_path (panel context missing)', true); return; }
-  try { const a = await callTool('minerva_codetools_get_graph', { db_path: db });
+  try { const a = await callPaged('minerva_codetools_get_graph', { db_path: db });
     graphData = { nodes:a.nodes||[], edges:a.edges||[], files:a.files||[], analysis:a.analysis||{dead_code_ids:[],dry_signature_groups:{}}, stats:a.stats||{} };
     projectName = graphData.stats.project_name || 'project';
   } catch (e) { setStatus('Graph failed: '+e.message, true); return; }
-  buildOutline(); buildControls(); renderGraph(); setStatus('');
+  buildOutline(); buildControls(); renderGraph();
+  // The worker's own counts, so a short transfer is visible rather than silent.
+  const st=graphData.stats||{};
+  setStatus((st.symbols!=null?st.symbols:graphData.nodes.length)+' symbols, '+(st.edges!=null?st.edges:graphData.edges.length)+' edges');
   setCenter('graph');
   try {
-    const d = await callTool('minerva_codetools_get_diff', { db_path: db });
+    const d = await callPaged('minerva_codetools_get_diff', { db_path: db });
     const files = (d && d.files) || [];
     repoPath = (d && d.repo_path) || '';
     if (files.length) {
@@ -243,7 +276,7 @@ async function boot() {
       changedFiles.sort((a,b)=>(changeStats[b].adds+changeStats[b].dels)-(changeStats[a].adds+changeStats[a].dels));
       onDiffLoaded();
     }
-  } catch (e) { /* diff optional */ }
+  } catch (e) { setStatus('Change markers unavailable: '+e.message, true); }
 }
 
 // ── Layout (narrow-first / vertical-phone) ──
