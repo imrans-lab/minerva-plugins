@@ -150,6 +150,40 @@ class PagedTransferTest(unittest.TestCase):
             self.assertIsInstance(node["x"], (int, float))
             self.assertIsInstance(node["y"], (int, float))
 
+    def _walk(self, budget=PANEL_BUDGET):
+        """Run a whole transfer; return its token and part count."""
+        head = router.route("get_graph",
+                            {"db_path": self.db_path,
+                             "page": {"max_bytes": budget}})["artifacts"][0]
+        for part in range(1, head["parts"]):
+            router.route("get_graph",
+                         {"db_path": self.db_path,
+                          "page": {"token": head["token"], "part": part}})
+        return head["token"], head["parts"]
+
+    def test_the_final_part_frees_the_slot(self):
+        """A finished transfer must not hold a slot against active ones."""
+        token, parts = self._walk()
+        self.assertGreater(parts, 1)
+        self.assertNotIn(token, paging._CACHE,
+                         "a walked-out transfer still holds its slot")
+
+    def test_an_active_transfer_survives_a_crowd_of_new_ones(self):
+        """Panels starting transfers must not strand one already in flight."""
+        head = router.route("get_graph",
+                            {"db_path": self.db_path,
+                             "page": {"max_bytes": PANEL_BUDGET}})["artifacts"][0]
+        for _ in range(8):
+            router.route("get_graph",
+                         {"db_path": self.db_path,
+                          "page": {"max_bytes": PANEL_BUDGET}})
+        resumed = router.route("get_graph",
+                               {"db_path": self.db_path,
+                                "page": {"token": head["token"], "part": 1}})
+        self.assertEqual(resumed["status"], "ok",
+                         "an in-flight transfer was evicted by newer ones")
+        self.assertEqual(resumed["artifacts"][0]["part"], 1)
+
     def test_unpaged_callers_see_the_unchanged_reply(self):
         """Agents over stdio never pass `page` and must see the old shape."""
         art = self._unpaged()["artifacts"][0]

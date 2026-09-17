@@ -26,6 +26,7 @@ once per transfer. A token that has been evicted fails loudly
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from collections import OrderedDict
 
@@ -39,10 +40,17 @@ CONTROL_BYTES = 64 * 1024
 DEFAULT_CHUNK_BYTES = 32 * 1024
 MIN_CHUNK_BYTES = 4096
 
-# Transfers in flight. Small: a panel runs one or two (graph + diff) and each
-# entry holds a whole serialized envelope.
+# Transfers in flight, oldest touched first. A transfer is dropped the moment
+# its last part is served, so a slot is held only while a caller is still
+# walking one. 32 slots is far more than the work this plugin sees — a panel
+# runs two transfers (graph + diff) at a time, so it covers a dozen panels
+# mid-transfer at once — while still bounding memory, since each entry holds a
+# whole serialized envelope.
 _CACHE: "OrderedDict[str, dict]" = OrderedDict()
-_CACHE_LIMIT = 4
+_ACTIVE_LIMIT = 32
+# A transfer nobody has continued for this long has been abandoned (its panel
+# closed or reloaded); it is evicted before any transfer still being walked.
+_STALE_SECONDS = 300.0
 
 ARTIFACT_TYPE = "paged_envelope"
 
@@ -123,11 +131,19 @@ def _part_reply(token, entry, part):
                   entry["chunks"][part])
 
 
+def _evict_one(now):
+    """Drop the most expendable transfer: the longest-abandoned one, else the
+    least recently touched."""
+    stale = [t for t, e in _CACHE.items() if now - e["touched"] > _STALE_SECONDS]
+    _CACHE.pop(stale[0] if stale else next(iter(_CACHE)), None)
+
+
 def _remember(token, method, chunks, total_bytes):
+    now = time.monotonic()
+    while len(_CACHE) >= _ACTIVE_LIMIT:
+        _evict_one(now)
     _CACHE[token] = {"method": method, "chunks": chunks,
-                     "total_bytes": total_bytes}
-    while len(_CACHE) > _CACHE_LIMIT:
-        _CACHE.popitem(last=False)
+                     "total_bytes": total_bytes, "touched": now}
 
 
 def route(method, params, handler):
@@ -154,8 +170,15 @@ def route(method, params, handler):
             raise ToolError(
                 "page.part must be an integer in 0..%d" % (len(entry["chunks"]) - 1),
                 kind="invalid_args")
-        _CACHE.move_to_end(str(token))
-        return _part_reply(str(token), entry, part)
+        reply = _part_reply(str(token), entry, part)
+        if part == len(entry["chunks"]) - 1:
+            # The caller has everything: free the slot now rather than waiting
+            # for eviction to notice.
+            _CACHE.pop(str(token), None)
+        else:
+            entry["touched"] = time.monotonic()
+            _CACHE.move_to_end(str(token))
+        return reply
 
     budget = _clamp_budget(page)
     inner = {k: v for k, v in params.items() if k != PAGE_PARAM}
@@ -174,4 +197,8 @@ def route(method, params, handler):
             kind="invalid_args")
     chunks = _split(text, new_token, total_bytes, budget)
     _remember(new_token, method, chunks, total_bytes)
-    return _part_reply(new_token, _CACHE[new_token], 0)
+    reply = _part_reply(new_token, _CACHE[new_token], 0)
+    if len(chunks) == 1:
+        # Nothing left to fetch — the transfer never needs a slot.
+        _CACHE.pop(new_token, None)
+    return reply

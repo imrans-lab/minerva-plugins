@@ -98,9 +98,11 @@ assert.ok(Buffer.byteLength(envelopeText, 'utf8') > CONTROL_BYTES,
 
 // ---- bridge stub: the worker's paged transfer, measured against the cap ----
 // `drop` names a part the "worker" loses, so the test can check that a broken
-// transfer reaches the page as an error.
+// transfer reaches the page as an error. `expire` is how many continuations
+// the "worker" answers with paging_expired, as it does when a transfer's slot
+// was reclaimed — the page is expected to restart the transfer once.
 function makeBridge(options = {}) {
-  const state = { chunks: null, token: 'tok-' + Math.random().toString(16).slice(2), requests: [] };
+  const state = { chunks: null, token: null, requests: [], fresh: 0, expiries: 0 };
   return {
     state,
     call(tool, args) {
@@ -112,6 +114,8 @@ function makeBridge(options = {}) {
       if (!args.page) return Promise.reject(new Error('panel must ask for a paged transfer'));
 
       if (args.page.token === undefined) {
+        state.fresh += 1;
+        state.token = 'tok-' + state.fresh;
         const budget = args.page.max_bytes;
         assert.ok(budget > 0 && budget <= CONTROL_BYTES, 'budget must sit under the cap');
         // Slice like the worker does. A part is escaped twice on the way out
@@ -124,10 +128,22 @@ function makeBridge(options = {}) {
         }
         return Promise.resolve(reply(0));
       }
-      assert.equal(args.page.token, state.token, 'part request must carry the token');
+      if (state.expiries < (options.expire || 0)) {
+        state.expiries += 1;
+        return Promise.resolve(expired());
+      }
+      if (args.page.token !== state.token) return Promise.resolve(expired());
       return Promise.resolve(reply(args.page.part));
     },
   };
+
+  function expired() {
+    return wire({
+      status: 'error', summary: 'paged reply is no longer available',
+      artifacts: [], evidence_handles: [], follow_ups: [],
+      error: { kind: 'paging_expired', message: 'paged reply is no longer available' },
+    });
+  }
 
   function reply(part) {
     if (options.drop === part) {
@@ -143,15 +159,17 @@ function makeBridge(options = {}) {
         encoding: 'json', chunk: state.chunks[part],
       }],
     };
-    // What the page really receives: the backend's {ok, result} wrapper as MCP
-    // text content, re-serialized by the host — the shape window.minerva.call
-    // resolves with.
-    const payload = {
-      content: [{ type: 'text', text: JSON.stringify({ ok: true, result: envelope }) }],
-    };
+    const payload = wire(envelope);
     const size = Buffer.byteLength(JSON.stringify({ success: true, result: payload, id: 'x'.repeat(36) }), 'utf8');
     assert.ok(size <= CONTROL_BYTES, `part ${part} reply is ${size} bytes, over the cap`);
     return payload;
+  }
+
+  // What the page really receives: the backend's {ok, result} wrapper as MCP
+  // text content, re-serialized by the host — the shape window.minerva.call
+  // resolves with.
+  function wire(envelope) {
+    return { content: [{ type: 'text', text: JSON.stringify({ ok: true, result: envelope }) }] };
   }
 }
 
@@ -208,6 +226,22 @@ function load(bridge) {
     brokenPage.callPaged('minerva_codetools_get_graph', { db_path: '/tmp/ct/code_visualizer.db' }),
     /did not arrive/,
     'a missing part must reach the page as an error');
+
+  // An expired token is recoverable: the page restarts the transfer, once.
+  const lapsed = makeBridge({ expire: 1 });
+  const lapsedPage = load(lapsed);
+  const recovered = await lapsedPage.callPaged('minerva_codetools_get_graph', { db_path: '/tmp/ct/code_visualizer.db' });
+  assert.equal(recovered.nodes.length, NODE_COUNT, 'the restarted transfer must deliver the whole graph');
+  assert.equal(lapsed.state.fresh, 2, 'exactly one restart from part 0');
+
+  // A transfer that keeps expiring is a real failure after that one restart.
+  const doomed = makeBridge({ expire: 99 });
+  const doomedPage = load(doomed);
+  await assert.rejects(
+    doomedPage.callPaged('minerva_codetools_get_graph', { db_path: '/tmp/ct/code_visualizer.db' }),
+    /no longer available/,
+    'a second expiry must reach the caller');
+  assert.equal(doomed.state.fresh, 2, 'the page must not retry more than once');
 
   console.log('PASS: panel reassembles a ' + Buffer.byteLength(envelopeText, 'utf8')
     + '-byte graph from ' + parts + ' in-cap parts');

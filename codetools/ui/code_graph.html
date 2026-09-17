@@ -224,7 +224,10 @@ function unwrapEnvelope(d){ let c=d,g=0; while(c&&typeof c==='object'&&g++<8){
   if(Array.isArray(c.artifacts)||c.status)return c;
   if(Array.isArray(c.content)){ const t=c.content.find(p=>p&&p.type==='text'&&typeof p.text==='string'); if(!t)break; try{ c=JSON.parse(t.text); }catch(e){ break; } continue; }
   if('result' in c){c=c.result;continue;} break;} return c; }
-async function callTool(name,args){ const env=unwrapEnvelope(await window.minerva.call(name,args||{})); if(env&&env.status&&env.status!=='ok')throw new Error((env.error&&env.error.message)||env.summary||('status='+env.status)); return (env&&env.artifacts&&env.artifacts[0])||env; }
+// Carries the worker's error kind on the Error so callers can react to it
+// (paging_expired is recoverable; everything else is not).
+function toolError(env){ const e=new Error((env.error&&env.error.message)||env.summary||('status='+env.status)); if(env.error&&env.error.kind)e.kind=env.error.kind; return e; }
+async function callTool(name,args){ const env=unwrapEnvelope(await window.minerva.call(name,args||{})); if(env&&env.status&&env.status!=='ok')throw toolError(env); return (env&&env.artifacts&&env.artifacts[0])||env; }
 
 // The host bounds every webview bridge message at 64 KiB each way and gives
 // webviews no bulk route, so a graph or diff arrives in parts: each reply
@@ -232,7 +235,18 @@ async function callTool(name,args){ const env=unwrapEnvelope(await window.minerv
 // concatenates them in order. Anything that breaks the sequence throws, so a
 // short transfer surfaces as an error instead of a half-drawn panel.
 const PAGE_BYTES = 48*1024;
+// The worker drops a transfer whose panel went quiet, so a token can expire
+// mid-walk. Restart from part 0 exactly once — a second expiry is a real
+// failure and must reach the caller.
 async function callPaged(name,args){
+  try { return await pagedTransfer(name,args); }
+  catch(e){
+    if(!e || e.kind!=='paging_expired') throw e;
+    setStatus('Transfer expired — restarting '+name+'…');
+    return await pagedTransfer(name,args);
+  }
+}
+async function pagedTransfer(name,args){
   const base = Object.assign({}, args||{});
   const first = await callTool(name, Object.assign({}, base, {page:{max_bytes:PAGE_BYTES}}));
   if(!first || first.type!=='paged_envelope') throw new Error(name+': expected a paged reply, got '+((first&&first.type)||typeof first));
@@ -246,7 +260,7 @@ async function callPaged(name,args){
     text += p.chunk||'';
   }
   let env; try{ env=JSON.parse(text); }catch(e){ throw new Error(name+': paged reply did not reassemble ('+e.message+')'); }
-  if(env&&env.status&&env.status!=='ok') throw new Error((env.error&&env.error.message)||env.summary||('status='+env.status));
+  if(env&&env.status&&env.status!=='ok') throw toolError(env);
   return (env&&env.artifacts&&env.artifacts[0])||env;
 }
 
