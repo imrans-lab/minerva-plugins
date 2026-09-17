@@ -143,8 +143,8 @@ func expect_not_oversize_refusal(case_name: String, reply: Dictionary,
 func expect_live_backend(case_name: String, reply: Dictionary,
 		codes: Array[String] = TRANSPORT_CODES) -> bool:
 	var code := str(reply.get("error_code", ""))
-	return check("%s: the backend answered — this is the plugin's verdict, not "
-			+ "a dead connection" % case_name,
+	return check(("%s: the backend answered — this is the plugin's verdict, not "
+			+ "a dead connection") % case_name,
 			not (code in codes),
 			"transport failure error_code=%s %s" % [code, brief(reply)])
 
