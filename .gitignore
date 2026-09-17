@@ -65,3 +65,6 @@ agent-relay/agent_relay_state.json
 # gd-runner self-test sandboxes (pcb/scripts/test-gd-runner.sh) — removed on
 # exit by trap; only survive a hard kill.
 .gd-selftest.*/
+
+# Pinned gitleaks binary fetched by scripts/scan-secret-history.sh
+.dependency-cache/
