@@ -418,6 +418,10 @@ func _case_large_error_reply() -> void:
 	var weighed: Dictionary = await _weigh_health("large-errors")
 	var envelope: Dictionary = weighed.get("envelope", {})
 	guard.expect_not_oversize_refusal("large-errors", envelope)
+	# Before anything is read off it: a dead connection answers every question
+	# the same way, and the findings assertions below would then fail for a
+	# reason that has nothing to do with the ledger.
+	guard.expect_live_backend("large-errors", envelope)
 	guard.expect_success("large-errors", envelope)
 
 	var health: Dictionary = _unwrap_to(envelope, "assembly")

@@ -104,14 +104,20 @@ test_connectivity_baseline_surface.gd assertions=21
 # (envelope refusal + code, verb refusal, the board is untouched) + 4
 # small-unhappy + 7 large-happy (request under the cap, reply over it, not an
 # oversize refusal, the verb, the count twice, the clean ledger) + 5
-# large-unhappy + 6 large-with-errors + 1 teardown.
+# large-unhappy + 7 large-with-errors + 1 teardown.
+#
+# 35 -> 36: large-with-errors proves the BACKEND WAS ALIVE before it reads the
+# ledger. The first run through the real chain lost the pcb subprocess during
+# this case (the host's own io_overflow, not the plugin's doing) and the
+# findings assertions then failed as "0 findings for 32 pairs", which names the
+# wrong thing entirely.
 #
 # NOT pinned `real-worker`: this suite prints no real_worker_used field. It has
 # no canned fallback to distinguish — without the built binary it SKIPS, and
 # the pin below then fails the run, which is the honest answer for a guard that
 # could not run. The pin therefore describes a host that has built and
 # installed the plugin.
-test_contract_guard.gd assertions=35
+test_contract_guard.gd assertions=36
 # SR2FAB S6 — authored, never executed; pinned at testex like the entry
 # below it.
 test_draft_check_seam.gd

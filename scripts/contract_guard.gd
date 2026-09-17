@@ -42,6 +42,15 @@ const DEFAULT_CODE_KEYS: Array[String] = ["error_code", "code", "error_kind", "e
 ## answer to a case the plugin declares it supports at that size.
 const OVERSIZE_CODES: Array[String] = ["payload_too_large"]
 
+## Codes that mean the BACKEND was not there to answer — the connection died,
+## the subprocess is gone, the wait ran out. A case that reads one of these has
+## measured the transport, not the plugin, and a guard that let it stand as a
+## refusal would go green for the worst possible reason.
+const TRANSPORT_CODES: Array[String] = [
+	"plugin_not_running", "plugin_backend_error", "backend_error",
+	"worker_unavailable", "ipc_unavailable", "timeout",
+]
+
 var passed: int = 0
 var failed: int = 0
 
@@ -119,10 +128,25 @@ func expect_refusal(case_name: String, reply: Dictionary,
 ## The refusal is the plugin's own, not the host declining to carry the answer.
 ## A guard whose large case comes back payload_too_large is measuring the
 ## transport, not the plugin. One assertion.
-func expect_not_oversize_refusal(case_name: String, reply: Dictionary) -> bool:
+func expect_not_oversize_refusal(case_name: String, reply: Dictionary,
+		codes: Array[String] = OVERSIZE_CODES) -> bool:
 	var code := str(reply.get("error_code", ""))
 	return check("%s: the host carried the payload — no oversize refusal" % case_name,
-			not (code in OVERSIZE_CODES), "error_code=%s %s" % [code, brief(reply)])
+			not (code in codes), "error_code=%s %s" % [code, brief(reply)])
+
+
+## The backend was alive to answer. Every case — happy or unhappy — needs this
+## before its verdict means anything: a dead connection answers every question
+## with the same failure, and an unhappy case would otherwise pass on it. One
+## assertion, and it names the transport code when it fails so the run says
+## "the connection died" rather than "the refusal carries no code".
+func expect_live_backend(case_name: String, reply: Dictionary,
+		codes: Array[String] = TRANSPORT_CODES) -> bool:
+	var code := str(reply.get("error_code", ""))
+	return check("%s: the backend answered — this is the plugin's verdict, not "
+			+ "a dead connection" % case_name,
+			not (code in codes),
+			"transport failure error_code=%s %s" % [code, brief(reply)])
 
 
 ## No partial state: a value the caller could read before the unhappy case is

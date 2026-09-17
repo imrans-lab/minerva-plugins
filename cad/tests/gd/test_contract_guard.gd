@@ -42,11 +42,27 @@ extends SceneTree
 ## the real cad-plugin Go binary with its Python worker, the real CADPanel
 ## scene. Nothing between an assertion and the subprocess is a double.
 ##
-## WHERE THE REFUSALS LIVE. A worker refusal rides a SUCCESSFUL transport: the
-## broker envelope says success, and the payload inside it says {ok:false,
-## error:{kind, message}}. So the structural refusal is asserted on that
-## payload (its code is `error.kind`), and the envelope is checked separately
-## for the one thing only it can say — that the host carried the reply at all.
+## WHERE THE REFUSALS LIVE, measured through the real chain rather than assumed.
+## The worker answers a refused evaluation with {ok:false, error:{kind,
+## message}} — but that payload never reaches the panel in that shape. The host
+## reads the worker's ok:false as an MCP tool error and REPLACES the envelope
+## with {success:false, error_code:"mcp_tool_error", error_message:<the
+## worker's message>}; there is no `result` left to unwrap. So every refusal
+## here is asserted on the ENVELOPE, whose machine code is `error_code`, and on
+## the panel's own last_eval, which carries the same code as `error_kind`.
+##
+## THE COST OF THAT FLATTENING, recorded here because the guard cannot assert
+## it away: the worker's own taxonomy — `translate`, `parse`, `occt`,
+## `python`, `mesh_invalid` — does NOT survive the transport. Every one of them
+## arrives as `mcp_tool_error`, and the distinction a caller would act on
+## survives only inside the message prose, which nothing here reads. A panel
+## that wants to tell a typo from a kernel failure cannot, and no test below
+## can pretend otherwise.
+##
+## AND EVERY CASE CHECKS THE BACKEND WAS ALIVE FIRST. A dead connection answers
+## every question with a failure envelope, which an unhappy case would happily
+## read as its refusal. expect_live_backend makes that impossible: a run that
+## lost the subprocess says so by name instead of going green.
 ##
 ## ORACLE: revert the panel's bulk send seam (CADPanel._send_request preferring
 ## MinervaIPC.request_bulk) and case 4 goes red — the tessellation no longer
@@ -87,14 +103,14 @@ const EVALUATE_CHANNEL := "cad.evaluate"
 const FEATURES_CHANNEL := "cad.cylindrical_features"
 const GUARD_CHANNELS := [EVALUATE_CHANNEL, FEATURES_CHANNEL]
 
-## The worker's refusals are named, not sniffed: an unknown function is a
-## translate-time refusal, the taxonomy the worker's own committed vectors pin.
-const CODE_TRANSLATE := "translate"
+## The code EVERY cad refusal arrives under once the host has read the worker's
+## ok:false as an MCP tool error. The worker's own kind (`translate` for an
+## unknown function) is flattened into it — see the class doc.
+const CODE_REFUSED := "mcp_tool_error"
 
-## Where cad keeps the code on a refusal: the worker payload's own
-## error.kind, never the message text beside it. Every cad refusal has one, so
-## no case here has to fall back to asserting shape alone.
-const WORKER_CODE_KEYS: Array[String] = ["error.kind"]
+## Where the code lives on the shape the chain actually delivers: the envelope's
+## own error_code, never the message text beside it.
+const ENVELOPE_CODE_KEYS: Array[String] = ["error_code"]
 
 ## The fixtures. Small is a single primitive; large is the sphere whose
 ## tessellation does not fit the control lane.
@@ -328,8 +344,10 @@ func _case_small_happy() -> void:
 ## that matters either way: the model on screen is not blanked by nothing.
 func _case_null_document() -> void:
 	print("\n-- null/empty document: refused, and the viewport keeps its model --")
-	var payload: Dictionary = await _evaluate_payload(EMPTY_SOURCE, EVAL_TIMEOUT_MS)
-	guard.expect_refusal("null-document", payload, WORKER_CODE_KEYS)
+	var envelope: Dictionary = await _panel.call_backend(
+			EVALUATE_CHANNEL, {"source": EMPTY_SOURCE}, EVAL_TIMEOUT_MS)
+	guard.expect_live_backend("null-document", envelope)
+	guard.expect_refusal("null-document", envelope, ENVELOPE_CODE_KEYS)
 
 	await _push_source(EMPTY_SOURCE, EVAL_TIMEOUT_MS)
 	guard.expect_unchanged("null-document", "the vertices painted in the viewport",
@@ -342,14 +360,18 @@ func _case_null_document() -> void:
 
 func _case_small_unhappy() -> void:
 	print("\n-- small unhappy: an unknown function is refused by name --")
-	var payload: Dictionary = await _evaluate_payload(SMALL_REFUSED_SOURCE, EVAL_TIMEOUT_MS)
-	var code := guard.expect_refusal("small-unhappy", payload, WORKER_CODE_KEYS)
-	guard.check_eq("small-unhappy: the refusal is a translate-time one", code, CODE_TRANSLATE)
+	var envelope: Dictionary = await _panel.call_backend(
+			EVALUATE_CHANNEL, {"source": SMALL_REFUSED_SOURCE}, EVAL_TIMEOUT_MS)
+	guard.expect_live_backend("small-unhappy", envelope)
+	var code := guard.expect_refusal("small-unhappy", envelope, ENVELOPE_CODE_KEYS)
+	guard.check_eq("small-unhappy: the refusal arrives under the code the chain "
+			+ "mints for a worker refusal", code, CODE_REFUSED)
 
 	var last_eval: Dictionary = await _push_source(SMALL_REFUSED_SOURCE, EVAL_TIMEOUT_MS)
-	guard.check("small-unhappy: the panel reports the same refusal to its caller",
+	guard.check("small-unhappy: the panel reports the same refusal, under the "
+			+ "same code, to its caller",
 			str(last_eval.get("status", "")) == "error"
-				and str(last_eval.get("error_kind", "")) == CODE_TRANSLATE,
+				and str(last_eval.get("error_kind", "")) == CODE_REFUSED,
 			ContractGuard.brief(last_eval))
 	guard.expect_unchanged("small-unhappy", "the vertices painted in the viewport",
 			_painted(), _painted_vertices)
@@ -377,6 +399,7 @@ func _case_large_happy() -> void:
 			int(weighed["reply_bytes"]) > cap,
 			"reply=%d cap=%d" % [int(weighed["reply_bytes"]), cap])
 	guard.expect_not_oversize_refusal("large-happy", envelope)
+	guard.expect_live_backend("large-happy", envelope)
 
 	var payload: Dictionary = _worker_payload(envelope)
 	guard.expect_success("large-happy", payload)
@@ -389,6 +412,7 @@ func _case_large_happy() -> void:
 	# derivation.
 	var clean: Dictionary = await _weigh_features("large-happy(features)",
 			LARGE_SOURCE, EVAL_TIMEOUT_MS)
+	guard.expect_live_backend("large-happy(features)", clean)
 	guard.expect_success("large-happy(features)", _worker_payload(clean))
 
 
@@ -408,10 +432,10 @@ func _case_large_unhappy() -> void:
 			EVALUATE_CHANNEL, request, PLATE_TIMEOUT_MS)
 	guard.weigh("large-unhappy", request, envelope)
 	guard.expect_not_oversize_refusal("large-unhappy", envelope)
-	var code := guard.expect_refusal("large-unhappy",
-			_worker_payload(envelope), WORKER_CODE_KEYS)
-	guard.check_eq("large-unhappy: the refusal is the same translate-time one the "
-			+ "small document got", code, CODE_TRANSLATE)
+	guard.expect_live_backend("large-unhappy", envelope)
+	var code := guard.expect_refusal("large-unhappy", envelope, ENVELOPE_CODE_KEYS)
+	guard.check_eq("large-unhappy: the refusal arrives under the same code the "
+			+ "small document's did", code, CODE_REFUSED)
 
 	await _push_source(source, PLATE_TIMEOUT_MS)
 	guard.expect_unchanged("large-unhappy", "the vertices painted in the viewport",
@@ -431,6 +455,7 @@ func _case_large_error_reply() -> void:
 	var envelope: Dictionary = await _weigh_features("large-errors",
 			_plate_source(), PLATE_TIMEOUT_MS)
 	guard.expect_not_oversize_refusal("large-errors", envelope)
+	guard.expect_live_backend("large-errors", envelope)
 	var payload: Dictionary = _worker_payload(envelope)
 	guard.expect_success("large-errors", payload)
 
@@ -536,13 +561,6 @@ func _push_source(source: String, timeout_ms: int) -> Dictionary:
 	return last_eval
 
 
-## One evaluate round trip, unwrapped to the worker's own {ok, result|error}.
-func _evaluate_payload(source: String, timeout_ms: int) -> Dictionary:
-	var envelope: Dictionary = await _panel.call_backend(
-			EVALUATE_CHANNEL, {"source": source}, timeout_ms)
-	return _worker_payload(envelope)
-
-
 ## One weighed feature round trip, asked exactly as the fastener check asks it.
 func _weigh_features(case_name: String, source: String, timeout_ms: int) -> Dictionary:
 	var request := {
@@ -558,9 +576,10 @@ func _weigh_features(case_name: String, source: String, timeout_ms: int) -> Dict
 	return envelope
 
 
-## The worker's own payload inside the host's scene envelope: the broker wraps
-## {ok, result|error} in {success, result}, and a worker refusal rides a
-## SUCCESSFUL transport, so the two layers answer different questions.
+## The worker's own payload inside the host's scene envelope. On a SUCCESS the
+## broker wraps the worker's {ok, result} in {success, result}; on a refusal
+## there is no `result` at all (the host replaces the envelope — see the class
+## doc), so this answers {} and the refusal is read off the envelope instead.
 func _worker_payload(envelope: Dictionary) -> Dictionary:
 	var inner: Variant = envelope.get("result", null)
 	return inner if inner is Dictionary else {}
