@@ -5,9 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"testing"
+	"time"
 )
 
 // controlCapBytes is the host's bound on one panel IPC message in either
@@ -15,9 +14,8 @@ import (
 // a payload_too_large error before the panel ever sees it.
 const controlCapBytes = 64 * 1024
 
-// fileHost answers host.pdf.generate with a canned PDF and services
-// host.files.read/write against the real filesystem, so a test measures bytes
-// on disk rather than trusting the reply.
+// fileHost answers host.pdf.generate with a canned PDF and host.dialogs.* with
+// a canned pick.
 type fileHost struct {
 	pdf       []byte
 	pageCount int
@@ -25,33 +23,13 @@ type fileHost struct {
 	calls     []string
 }
 
-func (h *fileHost) callCapability(capability string, args map[string]interface{}) (json.RawMessage, *rpcError) {
+func (h *fileHost) callCapability(capability string, _ map[string]interface{}) (json.RawMessage, *rpcError) {
 	h.calls = append(h.calls, capability)
 	switch capability {
 	case "host.pdf.generate":
 		return json.RawMessage(fmt.Sprintf(
 			`{"success":true,"result":{"bytes_b64":%q,"byte_size":%d,"page_count":%d,"content_type":"application/pdf"}}`,
 			base64.StdEncoding.EncodeToString(h.pdf), len(h.pdf), h.pageCount)), nil
-
-	case "host.files.write":
-		data, err := base64.StdEncoding.DecodeString(args["content"].(string))
-		if err != nil {
-			return json.RawMessage(`{"success":false,"error_code":"io_error","error_message":"bad base64"}`), nil
-		}
-		path := args["path"].(string)
-		if err := os.WriteFile(path, data, 0o644); err != nil {
-			return json.RawMessage(fmt.Sprintf(`{"success":false,"error_code":"io_error","error_message":%q}`, err.Error())), nil
-		}
-		return json.RawMessage(fmt.Sprintf(`{"success":true,"result":{"path":%q,"bytes_written":%d}}`, path, len(data))), nil
-
-	case "host.files.read":
-		data, err := os.ReadFile(args["path"].(string))
-		if err != nil {
-			return json.RawMessage(fmt.Sprintf(`{"success":false,"error_code":"io_error","error_message":%q}`, err.Error())), nil
-		}
-		return json.RawMessage(fmt.Sprintf(`{"success":true,"result":{"content":%q,"size":%d}}`,
-			base64.StdEncoding.EncodeToString(data), len(data))), nil
-
 	case "host.dialogs.file_picker":
 		return h.picker, nil
 	}
@@ -67,66 +45,40 @@ func replyBytes(t *testing.T, result map[string]interface{}) int {
 	return len(b)
 }
 
-// TestPanelPDFTransferStaysUnderTheControlCap is the panel round-trip oracle: a
-// PDF far larger than one IPC message reaches the panel intact, as a path plus
-// slices that each fit the cap, and the inline-bytes result it replaces would
-// not have fit.
-func TestPanelPDFTransferStaysUnderTheControlCap(t *testing.T) {
-	// A synthetic PDF body well over the cap, with position-dependent content so
-	// a mis-ordered or duplicated chunk cannot reassemble by luck.
+// oversizePDF is a synthetic PDF body well over the cap, with position-dependent
+// content so a mis-ordered or duplicated chunk cannot reassemble by luck.
+func oversizePDF() []byte {
 	pdf := make([]byte, 200_000)
 	copy(pdf, []byte("%PDF-1.7\n"))
-	for i := range pdf {
+	for i := 9; i < len(pdf); i++ {
 		pdf[i] = byte(i*7 + i/251)
 	}
-	host := &fileHost{pdf: pdf, pageCount: 3}
+	return pdf
+}
 
-	// nextPreviewPath writes into the system temp dir; point that at the test's.
-	t.Setenv("TMPDIR", t.TempDir())
-
-	args := mustArgs(t, map[string]interface{}{
-		"icon_png_base64": "Zm9v",
-		"deliver_to_file": true,
-		"rows":            []map[string]interface{}{{"name": "Ada"}, {"name": "Grace Hopper"}},
+// freshStore empties the transfer store and restores the real clock, so one
+// test's leftovers cannot answer another's token.
+func freshStore(t *testing.T) {
+	t.Helper()
+	transfers = map[string]*pdfTransfer{}
+	now = time.Now
+	t.Cleanup(func() {
+		transfers = map[string]*pdfTransfer{}
+		now = time.Now
 	})
+}
 
-	res := toolNametagGenerate(host, args)
-	if ok, _ := res["success"].(bool); !ok {
-		t.Fatalf("generate failed: %+v", res)
-	}
-	if _, inline := res["bytes_b64"]; inline {
-		t.Fatalf("deliver_to_file must not carry the bytes inline: %v", keys(res))
-	}
-	if size := replyBytes(t, res); size > controlCapBytes {
-		t.Fatalf("generate reply is %d bytes, over the %d-byte cap", size, controlCapBytes)
-	}
-
-	path, _ := res["path"].(string)
-	if path == "" {
-		t.Fatalf("generate returned no path: %+v", res)
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat generated pdf: %v", err)
-	}
-	if info.Size() <= controlCapBytes {
-		t.Fatalf("fixture is not over the cap: %d bytes on disk", info.Size())
-	}
-	if got := res["byte_size"]; got != int(info.Size()) {
-		t.Fatalf("byte_size %v does not match the %d bytes on disk", got, info.Size())
-	}
-	if res["page_count"] != 3 {
-		t.Fatalf("page_count: want 3, got %v", res["page_count"])
-	}
-
-	// Pull it back the way the panel does: slices from offset 0 until eof.
+// chunks pulls a whole transfer the way the panel does — slices from offset 0
+// until eof — asserting every reply fits the cap.
+func chunks(t *testing.T, host capabilityCaller, token string, total int) []byte {
+	t.Helper()
 	var got []byte
 	for round := 0; ; round++ {
 		if round > 64 {
 			t.Fatalf("chunk loop did not reach eof after %d rounds (%d bytes)", round, len(got))
 		}
 		chunk := toolNametagReadChunk(host, mustArgs(t, map[string]interface{}{
-			"path": path, "offset": len(got),
+			"token": token, "offset": len(got),
 		}))
 		if ok, _ := chunk["success"].(bool); !ok {
 			t.Fatalf("read chunk at %d failed: %+v", len(got), chunk)
@@ -134,8 +86,8 @@ func TestPanelPDFTransferStaysUnderTheControlCap(t *testing.T) {
 		if size := replyBytes(t, chunk); size > controlCapBytes {
 			t.Fatalf("chunk reply is %d bytes, over the %d-byte cap", size, controlCapBytes)
 		}
-		if chunk["total_bytes"] != int(info.Size()) {
-			t.Fatalf("total_bytes %v does not match the %d bytes on disk", chunk["total_bytes"], info.Size())
+		if chunk["total_bytes"] != total {
+			t.Fatalf("total_bytes %v does not match the %d generated bytes", chunk["total_bytes"], total)
 		}
 		data, err := base64.StdEncoding.DecodeString(chunk["bytes_b64"].(string))
 		if err != nil {
@@ -146,63 +98,66 @@ func TestPanelPDFTransferStaysUnderTheControlCap(t *testing.T) {
 		}
 		got = append(got, data...)
 		if eof, _ := chunk["eof"].(bool); eof {
-			break
+			return got
 		}
 		if len(data) == 0 {
 			t.Fatalf("chunk carried no bytes and did not report eof at offset %d", len(got))
 		}
 	}
-	if !bytes.Equal(got, pdf) {
-		t.Fatalf("reassembled %d bytes, want the %d generated bytes (equal=%v)", len(got), len(pdf), bytes.Equal(got, pdf))
+}
+
+// TestPanelPDFTransferStaysUnderTheControlCap is the panel round-trip oracle: a
+// PDF far larger than one IPC message reaches the panel intact, as a token plus
+// slices that each fit the cap; the transfer is released once the caller has
+// it; and the inline-bytes result it replaces would not have fit.
+func TestPanelPDFTransferStaysUnderTheControlCap(t *testing.T) {
+	freshStore(t)
+	pdf := oversizePDF()
+	host := &fileHost{pdf: pdf, pageCount: 3}
+
+	args := mustArgs(t, map[string]interface{}{
+		"icon_png_base64":  "Zm9v",
+		"deliver_by_token": true,
+		"rows":             []map[string]interface{}{{"name": "Ada"}, {"name": "Grace Hopper"}},
+	})
+
+	res := toolNametagGenerate(host, args)
+	if ok, _ := res["success"].(bool); !ok {
+		t.Fatalf("generate failed: %+v", res)
+	}
+	if _, inline := res["bytes_b64"]; inline {
+		t.Fatalf("deliver_by_token must not carry the bytes inline: %v", keys(res))
+	}
+	if size := replyBytes(t, res); size > controlCapBytes {
+		t.Fatalf("generate reply is %d bytes, over the %d-byte cap", size, controlCapBytes)
 	}
 
-	// A finished transfer leaves nothing behind, and the file stops being
-	// readable with it.
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("preview still on disk after the eof slice: err=%v", err)
+	token, _ := res["token"].(string)
+	if token == "" {
+		t.Fatalf("generate returned no token: %+v", res)
 	}
-	after := toolNametagReadChunk(host, mustArgs(t, map[string]interface{}{"path": path}))
-	if ok, _ := after["success"].(bool); ok {
-		t.Fatalf("a consumed preview must no longer be readable: %+v", after)
+	if res["byte_size"] != len(pdf) {
+		t.Fatalf("byte_size %v does not match the %d generated bytes", res["byte_size"], len(pdf))
 	}
-
-	// Two panels, two transfers in flight: a second delivery must not pull the
-	// first one's file out from under it, and abandoned previews are reclaimed
-	// only once the bounded ring overflows.
-	deliver := func() string {
-		res := toolNametagGenerate(host, args)
-		p, _ := res["path"].(string)
-		if p == "" {
-			t.Fatalf("generate returned no path: %+v", res)
-		}
-		return p
+	if len(pdf) <= controlCapBytes {
+		t.Fatalf("fixture is not over the cap: %d bytes", len(pdf))
 	}
-	a := deliver()
-	firstChunk := toolNametagReadChunk(host, mustArgs(t, map[string]interface{}{"path": a, "offset": 0}))
-	if ok, _ := firstChunk["success"].(bool); !ok {
-		t.Fatalf("panel A's first chunk failed: %+v", firstChunk)
-	}
-	b := deliver()
-	if a == b {
-		t.Fatalf("two deliveries reused one path: %s", a)
-	}
-	resumed := toolNametagReadChunk(host, mustArgs(t, map[string]interface{}{
-		"path": a, "offset": firstChunk["length"],
-	}))
-	if ok, _ := resumed["success"].(bool); !ok {
-		t.Fatalf("panel B's delivery broke panel A's transfer: %+v", resumed)
+	if res["page_count"] != 3 {
+		t.Fatalf("page_count: want 3, got %v", res["page_count"])
 	}
 
-	// Two are on disk; deliver until the ring holds retainedPreviews+1, which
-	// reclaims the oldest and leaves the rest — including B — alone.
-	for i := 0; i < retainedPreviews-1; i++ {
-		deliver()
+	if got := chunks(t, host, token, len(pdf)); !bytes.Equal(got, pdf) {
+		t.Fatalf("reassembled %d bytes, want the %d generated bytes", len(got), len(pdf))
 	}
-	if _, err := os.Stat(a); !os.IsNotExist(err) {
-		t.Fatalf("the oldest preview survived the ring overflowing: err=%v", err)
+
+	// A finished transfer is released: the token stops answering, and nothing
+	// holds the bytes.
+	after := toolNametagReadChunk(host, mustArgs(t, map[string]interface{}{"token": token}))
+	if after["error_code"] != "transfer_not_found" {
+		t.Fatalf("a completed transfer must be refused by name: %+v", after)
 	}
-	if _, err := os.Stat(b); err != nil {
-		t.Fatalf("a preview inside the ring was reclaimed early: %v", err)
+	if len(transfers) != 0 {
+		t.Fatalf("store still holds %d transfers after the eof slice", len(transfers))
 	}
 
 	// The falsifier: the inline-bytes result this replaces is far over the cap,
@@ -217,91 +172,120 @@ func TestPanelPDFTransferStaysUnderTheControlCap(t *testing.T) {
 	}
 }
 
-// TestReadChunkRefusesWhatItDidNotWrite — the verb hands file bytes back to its
-// caller, so it serves only this backend's own output, and a caller that walks
-// off the end or names nothing gets a structured error rather than an empty
-// slice that would read as a truncated PDF.
-func TestReadChunkRefusesWhatItDidNotWrite(t *testing.T) {
-	dir := t.TempDir()
-	host := &fileHost{}
+// TestConcurrentTransfersAllComplete — panels do not see each other, so several
+// transfers in flight at once must each deliver their own bytes whole.
+func TestConcurrentTransfersAllComplete(t *testing.T) {
+	freshStore(t)
+	const panels = 8
+	args := mustArgs(t, map[string]interface{}{
+		"icon_png_base64":  "Zm9v",
+		"deliver_by_token": true,
+		"rows":             []map[string]interface{}{{"name": "Ada"}},
+	})
 
-	// A file on disk that this backend did NOT write: readable by the host, but
-	// not reachable through read_chunk.
-	foreign := filepath.Join(dir, "secret.txt")
-	if err := os.WriteFile(foreign, []byte("not ours"), 0o644); err != nil {
-		t.Fatalf("write fixture: %v", err)
-	}
-	res := toolNametagReadChunk(host, mustArgs(t, map[string]interface{}{"path": foreign}))
-	if ok, _ := res["success"].(bool); ok {
-		t.Fatalf("a path this process never wrote must be refused: %+v", res)
-	}
-	if res["error_code"] != "target_not_allowlisted" {
-		t.Fatalf("refusal code: want target_not_allowlisted, got %+v", res)
-	}
-	for _, c := range host.calls {
-		if c == "host.files.read" {
-			t.Fatalf("a refused path must never be read: %v", host.calls)
+	tokens := make([]string, panels)
+	pdfs := make([][]byte, panels)
+	hosts := make([]*fileHost, panels)
+	for i := range tokens {
+		// Each panel's PDF differs, so a transfer serving another's bytes fails.
+		pdf := oversizePDF()
+		pdf[100] = byte(i)
+		pdfs[i] = pdf
+		hosts[i] = &fileHost{pdf: pdf, pageCount: 1}
+		res := toolNametagGenerate(hosts[i], args)
+		tokens[i], _ = res["token"].(string)
+		if tokens[i] == "" {
+			t.Fatalf("panel %d got no token: %+v", i, res)
 		}
 	}
+	// Interleave the first slice of every transfer before finishing any.
+	for i, token := range tokens {
+		first := toolNametagReadChunk(hosts[i], mustArgs(t, map[string]interface{}{"token": token, "offset": 0}))
+		if ok, _ := first["success"].(bool); !ok {
+			t.Fatalf("panel %d's first slice failed: %+v", i, first)
+		}
+	}
+	for i, token := range tokens {
+		if got := chunks(t, hosts[i], token, len(pdfs[i])); !bytes.Equal(got, pdfs[i]) {
+			t.Fatalf("panel %d reassembled the wrong bytes", i)
+		}
+	}
+}
 
-	// The same file becomes readable once the backend itself writes it.
-	path := filepath.Join(dir, "own.pdf")
-	if _, _, fault := writePDFFile(host, path, base64.StdEncoding.EncodeToString([]byte("%PDF-1.7\n"))); fault != nil {
-		t.Fatalf("write own pdf: %+v", fault)
-	}
-	if ok, _ := toolNametagReadChunk(host, mustArgs(t, map[string]interface{}{"path": path}))["success"].(bool); !ok {
-		t.Fatalf("this backend's own file must be readable")
-	}
-	// It was not a delivered preview, so reading it to eof must not delete it.
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("a saved (non-preview) PDF must survive being read: %v", err)
-	}
+// TestTransferRefusals — every way a token can fail to name live bytes is one
+// structured error the panel can act on, and an expired transfer is one of them
+// rather than a silent empty slice.
+func TestTransferRefusals(t *testing.T) {
+	freshStore(t)
+	host := &fileHost{pdf: []byte("%PDF-1.7\n"), pageCount: 1}
+	args := mustArgs(t, map[string]interface{}{
+		"icon_png_base64":  "Zm9v",
+		"deliver_by_token": true,
+		"rows":             []map[string]interface{}{{"name": "Ada"}},
+	})
 
-	// Identity, not spelling: the allowlisted pathname now holding a different
-	// file, or a symlink, is refused — the bytes served must be the ones written.
-	replaced := filepath.Join(dir, "replaced.pdf")
-	if _, _, fault := writePDFFile(host, replaced, base64.StdEncoding.EncodeToString([]byte("%PDF-1.7\nours"))); fault != nil {
-		t.Fatalf("write own pdf: %+v", fault)
-	}
-	if err := os.Remove(replaced); err != nil {
-		t.Fatalf("remove: %v", err)
-	}
-	if err := os.WriteFile(replaced, []byte("someone else's bytes"), 0o644); err != nil {
-		t.Fatalf("replace: %v", err)
-	}
-	res = toolNametagReadChunk(host, mustArgs(t, map[string]interface{}{"path": replaced}))
-	if res["error_code"] != "file_identity_changed" {
-		t.Fatalf("a replaced file must be refused as changed, got %+v", res)
-	}
-
-	linked := filepath.Join(dir, "linked.pdf")
-	if _, _, fault := writePDFFile(host, linked, base64.StdEncoding.EncodeToString([]byte("%PDF-1.7\nours"))); fault != nil {
-		t.Fatalf("write own pdf: %+v", fault)
-	}
-	if err := os.Remove(linked); err != nil {
-		t.Fatalf("remove: %v", err)
-	}
-	if err := os.Symlink(foreign, linked); err != nil {
-		t.Fatalf("symlink: %v", err)
-	}
-	res = toolNametagReadChunk(host, mustArgs(t, map[string]interface{}{"path": linked}))
-	if res["error_code"] != "file_identity_changed" {
-		t.Fatalf("a symlink standing in for our file must be refused, got %+v", res)
-	}
-
-	for name, args := range map[string]map[string]interface{}{
-		"no path":        {"offset": 0},
-		"past the end":   {"path": path, "offset": 1000},
-		"negative":       {"path": path, "offset": -1},
-		"empty path str": {"path": "   "},
+	for name, bad := range map[string]map[string]interface{}{
+		"no token":      {"offset": 0},
+		"blank token":   {"token": "   "},
+		"unknown token": {"token": "0123456789abcdef0123456789abcdef"},
 	} {
-		res := toolNametagReadChunk(host, mustArgs(t, args))
+		res := toolNametagReadChunk(host, mustArgs(t, bad))
 		if ok, _ := res["success"].(bool); ok {
 			t.Fatalf("%s: expected a failure, got %+v", name, res)
 		}
 		if code, _ := res["error_code"].(string); code == "" {
 			t.Fatalf("%s: failure carries no error_code: %+v", name, res)
 		}
+	}
+
+	live, _ := toolNametagGenerate(host, args)["token"].(string)
+	past := toolNametagReadChunk(host, mustArgs(t, map[string]interface{}{"token": live, "offset": 1000}))
+	if code, _ := past["error_code"].(string); code != "schema_validation_failed" {
+		t.Fatalf("an offset past the end must be refused: %+v", past)
+	}
+
+	// Nothing has read it for longer than staleTransfer: the token stops
+	// answering rather than serving bytes no panel is waiting for.
+	base := time.Now()
+	now = func() time.Time { return base.Add(staleTransfer + time.Second) }
+	expired := toolNametagReadChunk(host, mustArgs(t, map[string]interface{}{"token": live}))
+	if expired["error_code"] != "transfer_not_found" {
+		t.Fatalf("an expired transfer must be refused by name: %+v", expired)
+	}
+	if len(transfers) != 0 {
+		t.Fatalf("an expired transfer must be dropped, store holds %d", len(transfers))
+	}
+}
+
+// TestTransferStoreIsBounded — the store holds at most transferSlots entries;
+// delivering past the bound drops the least recently read one instead of
+// growing without limit.
+func TestTransferStoreIsBounded(t *testing.T) {
+	freshStore(t)
+	host := &fileHost{pdf: []byte("%PDF-1.7\n"), pageCount: 1}
+	args := mustArgs(t, map[string]interface{}{
+		"icon_png_base64":  "Zm9v",
+		"deliver_by_token": true,
+		"rows":             []map[string]interface{}{{"name": "Ada"}},
+	})
+
+	// A monotonic clock so "least recently read" is unambiguous.
+	base := time.Now()
+	tick := 0
+	now = func() time.Time { tick++; return base.Add(time.Duration(tick) * time.Millisecond) }
+
+	first, _ := toolNametagGenerate(host, args)["token"].(string)
+	for i := 0; i < transferSlots; i++ {
+		if token, _ := toolNametagGenerate(host, args)["token"].(string); token == "" {
+			t.Fatalf("delivery %d got no token", i)
+		}
+	}
+	if len(transfers) > transferSlots {
+		t.Fatalf("store grew to %d entries, past the %d-slot bound", len(transfers), transferSlots)
+	}
+	res := toolNametagReadChunk(host, mustArgs(t, map[string]interface{}{"token": first}))
+	if res["error_code"] != "transfer_not_found" {
+		t.Fatalf("the oldest transfer must be evicted by name: %+v", res)
 	}
 }
 

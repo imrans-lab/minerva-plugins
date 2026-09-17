@@ -4,7 +4,7 @@
 // The oracle is the host's own bound: every message on the webview bridge is
 // capped at 65,536 UTF-8 bytes in both directions, so the test fails if any
 // request or reply the page relies on crosses it, and it fails if the bytes the
-// page hands PDF.js are not byte-for-byte the PDF the backend wrote.
+// page hands PDF.js are not byte-for-byte the PDF the backend generated.
 //
 // Not covered here (no browser): PDF.js itself, canvas rasterization, the host
 // dialog, and the real IPC transport — those are stubbed.
@@ -24,14 +24,19 @@ const open = html.indexOf('<script>', marker) + '<script>'.length;
 const close = html.indexOf('</script>', open);
 const source = html.slice(open, close);
 assert.ok(source.includes('nametag_read_chunk'), 'panel script does not use the chunk route');
+assert.ok(source.includes('deliver_by_token'), 'panel script does not use the token route');
 
-// ---- a PDF the backend "wrote": bigger than one bridge message -------------
+// ---- a PDF the backend holds: bigger than one bridge message ---------------
 const pdf = Buffer.alloc(200_000);
 Buffer.from('%PDF-1.7\n').copy(pdf);
 for (let i = 9; i < pdf.length; i++) pdf[i] = (i * 7 + Math.floor(i / 251)) & 0xff;
-const PDF_PATH = '/tmp/nametag-preview-1-1.pdf';
 const ICON_PATH = '/home/me/logo.png';
 const PAGE_COUNT = 3;
+// The first transfer is dropped mid-pull, the way an expired or evicted one is:
+// the page must start over exactly once and still show the preview.
+let tokenSeq = 0;
+let liveToken = null;
+let dropNextChunk = true;
 
 // ---- DOM stub --------------------------------------------------------------
 function element(id) {
@@ -91,20 +96,35 @@ const minerva = {
       return Promise.resolve(bounded('pick_icon reply', { success: true, cancelled: false, path: ICON_PATH }));
     }
     if (tool.endsWith('nametag_generate')) {
-      assert.equal(args.deliver_to_file, true, 'generate must ask for the file route');
+      assert.equal(args.deliver_by_token, true, 'generate must ask for the token route');
       assert.equal(args.icon_path, ICON_PATH, 'generate must pass the icon by path');
       assert.ok(!('icon_png_base64' in args), 'the icon must not travel inline');
+      liveToken = 'token-' + (++tokenSeq);
       return Promise.resolve(bounded('generate reply', {
-        success: true, path: PDF_PATH, byte_size: pdf.length,
+        success: true, token: liveToken, byte_size: pdf.length,
         page_count: PAGE_COUNT, content_type: 'application/pdf',
       }));
     }
     if (tool.endsWith('nametag_read_chunk')) {
       const offset = args.offset;
       assert.equal(typeof offset, 'number', 'chunk request must carry a numeric offset');
+      assert.ok(!('path' in args), 'a chunk is fetched by token, not by path');
+      if (dropNextChunk) {
+        dropNextChunk = false;
+        return Promise.resolve(bounded('read_chunk refusal', {
+          success: false, error_code: 'transfer_not_found',
+          error_message: 'no transfer for this token',
+        }));
+      }
+      if (args.token !== liveToken) {
+        return Promise.resolve(bounded('read_chunk refusal', {
+          success: false, error_code: 'transfer_not_found',
+          error_message: 'stale token ' + args.token,
+        }));
+      }
       const end = Math.min(offset + 32 * 1024, pdf.length);
       return Promise.resolve(bounded('read_chunk reply', {
-        success: true, path: args.path, offset, length: end - offset,
+        success: true, offset, length: end - offset,
         total_bytes: pdf.length, eof: end >= pdf.length,
         bytes_b64: pdf.subarray(offset, end).toString('base64'),
       }));
@@ -183,10 +203,13 @@ vm.runInNewContext(source, context);
   assert.equal(canvases.length, PAGE_COUNT, 'every page is previewed');
   assert.match(document.getElementById('genInfo').textContent, new RegExp('^' + PAGE_COUNT + ' page'));
 
-  // The transfer really was chunked, and the last reply is the one that ended it.
+  // The transfer really was chunked, and a dropped transfer was restarted
+  // exactly once — never a retry loop.
   const chunkCalls = calls.filter((c) => c.tool.endsWith('nametag_read_chunk'));
   assert.ok(chunkCalls.length >= Math.ceil(pdf.length / (32 * 1024)),
-    'the page must walk the file in bridge-sized slices');
+    'the page must walk the transfer in bridge-sized slices');
+  const generateCalls = calls.filter((c) => c.tool.endsWith('nametag_generate'));
+  assert.equal(generateCalls.length, 2, 'a lost transfer is restarted once, and only once');
 
   // Save still works, and still carries no bytes.
   await document.getElementById('saveBtn').handlers.click();
@@ -196,5 +219,5 @@ vm.runInNewContext(source, context);
   assert.ok(save && save.args.icon_path === ICON_PATH && !('icon_png_base64' in save.args),
     'save reuses the path-based args');
 
-  console.log('PASS: panel transfers a ' + pdf.length + '-byte PDF by path + chunks, all messages under the cap');
+  console.log('PASS: panel transfers a ' + pdf.length + '-byte PDF by token + chunks, all messages under the cap');
 })().catch((error) => { console.error(error); process.exitCode = 1; });

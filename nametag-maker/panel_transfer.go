@@ -1,12 +1,13 @@
 package main
 
 import (
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
+	"time"
 )
 
 // The HTML panel talks to this backend over window.minerva.call, which is
@@ -16,106 +17,189 @@ import (
 //
 //	in  — the panel picks the icon with a host dialog (nametag_pick_icon) and
 //	      passes the resulting icon_path; only the path crosses the channel.
-//	out — nametag_generate with deliver_to_file writes the PDF to a file and
-//	      returns its path; the panel pulls the bytes back in chunks small
-//	      enough to fit the cap (nametag_read_chunk).
+//	out — nametag_generate with deliver_by_token holds the PDF in this process
+//	      under a one-time token and returns that; the panel pulls the bytes
+//	      back in slices that fit the cap (nametag_read_chunk).
+//
+// The preview never touches disk: a file would have to be named, guarded
+// against replacement between the write and each read, and reclaimed without
+// knowing which panel is still reading it. A token names bytes this process
+// already holds, so there is nothing to re-open and nothing to race.
 //
 // Tools a worker calls directly over stdio are not capped, so the default
 // inline-bytes result of nametag_generate is unchanged.
 
 // previewChunkBytes is the payload of one nametag_read_chunk reply, in bytes of
-// the file. Base64 inflates it by 4/3 (~43.7 KiB) which, with the result
+// the PDF. Base64 inflates it by 4/3 (~43.7 KiB) which, with the result
 // envelope, stays inside the 64 KiB control cap.
 const previewChunkBytes = 32 * 1024
 
-// previewSeq numbers the preview files this process writes so two renders in a
-// row never fight over one path.
-var previewSeq int
+// transferSlots bounds how many PDFs this process holds at once. Each entry is
+// a whole PDF, so memory is 32 times one PDF; a panel walks one transfer at a
+// time, so 32 covers far more panels mid-transfer than Minerva ever opens.
+// Delivering into a full store drops the entry read least recently, which is
+// always the longest-abandoned one when any exists.
+const transferSlots = 32
 
-// retainedPreviews bounds how many delivered previews stay on disk. A transfer
-// normally reclaims its own preview at the eof read; this bound reclaims the
-// ones nobody finished reading. It is a small ring rather than "the previous
-// one" because the backend cannot see panels: two panels can have transfers in
-// flight at once, and deleting the other one's file mid-transfer would break it.
-// Delivering a 5th preview removes the oldest of the 4 kept.
-const retainedPreviews = 4
+// staleTransfer is how long an unread transfer survives. A panel that closed or
+// reloaded mid-transfer never comes back for its bytes; a later read of that
+// token is refused, and eviction reaches it before any transfer still walked.
+const staleTransfer = 5 * time.Minute
 
-// deliveredPreviews are the preview paths still on disk, oldest first.
-var deliveredPreviews []string
-
-// ownedFile is the identity of a file this process wrote: the Lstat record taken
-// immediately after the write, plus its size.
-type ownedFile struct {
-	info os.FileInfo
-	size int64
+// pdfTransfer is one generated PDF waiting to be pulled across the capped
+// channel.
+type pdfTransfer struct {
+	data    []byte
+	touched time.Time
 }
 
-// ownPaths are the files this process wrote (writePDFFile), keyed by cleaned
-// path. nametag_read_chunk hands bytes back to its caller, so it serves only
-// these — it is not a general read-any-file verb. The recorded identity is what
-// makes that true: a pathname alone can be replaced with a symlink or another
-// file between the write and the read.
-var ownPaths = map[string]ownedFile{}
+// transfers are the live transfers, keyed by token.
+var transfers = map[string]*pdfTransfer{}
 
-// nextPreviewPath names the next generated preview PDF in the system temp dir.
-func nextPreviewPath() string {
-	previewSeq++
-	return filepath.Join(os.TempDir(), fmt.Sprintf("nametag-preview-%d-%d.pdf", os.Getpid(), previewSeq))
-}
+// now is the clock the store ages entries by; a test replaces it.
+var now = time.Now
 
-// forgetOwnPath deletes a file this process wrote and drops it from the
-// readable set. A remove failure is not worth failing a tool call over: the
-// path stays forgotten either way, so the bytes stop being reachable.
-func forgetOwnPath(path string) {
-	if path == "" {
-		return
+// newTransferToken mints an unguessable token: a caller cannot reach another
+// panel's bytes by guessing a name.
+func newTransferToken() (string, *toolFault) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", &toolFault{Code: "internal_error", Msg: "mint transfer token: " + err.Error()}
 	}
-	clean := filepath.Clean(path)
-	delete(ownPaths, clean)
-	for i, p := range deliveredPreviews {
-		if filepath.Clean(p) == clean {
-			deliveredPreviews = append(deliveredPreviews[:i], deliveredPreviews[i+1:]...)
-			break
+	return hex.EncodeToString(buf), nil
+}
+
+// rememberTransfer stores bytes under a fresh token, making room first.
+func rememberTransfer(t *pdfTransfer) (string, *toolFault) {
+	token, fault := newTransferToken()
+	if fault != nil {
+		return "", fault
+	}
+	for len(transfers) >= transferSlots {
+		evictTransfer()
+	}
+	t.touched = now()
+	transfers[token] = t
+	return token, nil
+}
+
+// evictTransfer drops the most expendable entry: the longest-abandoned one,
+// else the least recently read.
+func evictTransfer() {
+	oldest, at := "", time.Time{}
+	for token, t := range transfers {
+		if oldest == "" || t.touched.Before(at) {
+			oldest, at = token, t.touched
 		}
 	}
-	_ = os.Remove(path)
+	delete(transfers, oldest)
 }
 
-// recordOwnFile captures the identity of a file this process just wrote. A
-// pathname that is not a regular file (a symlink, a directory) is not recorded,
-// so nametag_read_chunk will refuse it.
-func recordOwnFile(path string) {
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() {
-		delete(ownPaths, filepath.Clean(path))
-		return
+// takeTransfer returns a live transfer, expiring it first if nothing has read
+// it for staleTransfer. A token that is unknown, expired or already completed
+// is one error the panel can act on: start the transfer over.
+func takeTransfer(token string) (*pdfTransfer, *toolFault) {
+	t, ok := transfers[token]
+	if ok && now().Sub(t.touched) > staleTransfer {
+		delete(transfers, token)
+		ok = false
 	}
-	ownPaths[filepath.Clean(path)] = ownedFile{info: info, size: info.Size()}
+	if !ok {
+		return nil, &toolFault{Code: "transfer_not_found",
+			Msg: "no transfer for this token — it finished, expired, or was evicted; generate again to start a new one"}
+	}
+	return t, nil
 }
 
-// checkOwnFile proves the file at `path` is still the one this process wrote —
-// same inode, same size, and not a symlink — rather than a replacement standing
-// at a spelling the allowlist happens to hold.
-func checkOwnFile(path string) *toolFault {
-	rec, known := ownPaths[filepath.Clean(path)]
-	if !known {
-		return &toolFault{Code: "target_not_allowlisted",
-			Msg: "nametag_read_chunk only serves PDFs this plugin wrote (nametag_generate deliver_to_file / nametag_save) in this session: " + path}
-	}
-	info, err := os.Lstat(path)
+// deliverPDFToTransfer holds a generated PDF in this process and returns the
+// nametag_generate result that names it instead of carrying its bytes.
+func deliverPDFToTransfer(pdf *pdfGenerateResult) map[string]interface{} {
+	data, err := base64.StdEncoding.DecodeString(pdf.BytesB64)
 	if err != nil {
-		return &toolFault{Code: "io_error", Msg: "stat " + path + ": " + err.Error()}
+		return failResult(&toolFault{Code: "parse_error", Msg: "host.pdf.generate returned invalid base64: " + err.Error()})
 	}
-	if !info.Mode().IsRegular() || !os.SameFile(rec.info, info) || info.Size() != rec.size {
-		return &toolFault{Code: "file_identity_changed",
-			Msg: "the file at " + path + " is no longer the one this plugin wrote"}
+	token, fault := rememberTransfer(&pdfTransfer{data: data})
+	if fault != nil {
+		return failResult(fault)
 	}
-	return nil
+	out := map[string]interface{}{
+		"success":      true,
+		"token":        token,
+		"byte_size":    len(data),
+		"page_count":   pdf.PageCount,
+		"content_type": pdf.ContentType,
+	}
+	if len(pdf.Warnings) > 0 {
+		out["warnings"] = pdf.Warnings
+	}
+	return out
+}
+
+// toolNametagReadChunk returns one slice of a transfer this process is holding,
+// so a panel that cannot receive a whole PDF in one reply can pull it across in
+// pieces. Offset and length are PDF bytes; length is clamped to
+// previewChunkBytes and the reply reports what it actually carries, so the
+// caller loops on the returned length until eof. The slice that reports eof
+// releases the transfer — the caller has everything.
+//
+// It serves only bytes this process generated and is holding under a token; it
+// reads no files.
+func toolNametagReadChunk(_ capabilityCaller, rawArgs json.RawMessage) map[string]interface{} {
+	var a struct {
+		Token  string `json:"token"`
+		Offset int    `json:"offset"`
+		Length int    `json:"length"`
+	}
+	if len(rawArgs) > 0 && string(rawArgs) != "null" {
+		if err := json.Unmarshal(rawArgs, &a); err != nil {
+			return failResult(&toolFault{Code: "schema_validation_failed", Msg: "arguments not a JSON object: " + err.Error()})
+		}
+	}
+	if strings.TrimSpace(a.Token) == "" {
+		return failResult(&toolFault{Code: "schema_validation_failed", Msg: "token is required"})
+	}
+	if a.Offset < 0 {
+		return failResult(&toolFault{Code: "schema_validation_failed", Msg: "offset must not be negative"})
+	}
+
+	t, fault := takeTransfer(a.Token)
+	if fault != nil {
+		return failResult(fault)
+	}
+	if a.Offset > len(t.data) {
+		return failResult(&toolFault{Code: "schema_validation_failed",
+			Msg: fmt.Sprintf("offset %d is past the end of the transfer (%d bytes)", a.Offset, len(t.data))})
+	}
+
+	length := a.Length
+	if length <= 0 || length > previewChunkBytes {
+		length = previewChunkBytes
+	}
+	if a.Offset+length > len(t.data) {
+		length = len(t.data) - a.Offset
+	}
+
+	eof := a.Offset+length >= len(t.data)
+	out := map[string]interface{}{
+		"success":     true,
+		"offset":      a.Offset,
+		"length":      length,
+		"total_bytes": len(t.data),
+		"eof":         eof,
+		"bytes_b64":   base64.StdEncoding.EncodeToString(t.data[a.Offset : a.Offset+length]),
+	}
+	if eof {
+		delete(transfers, a.Token)
+	} else {
+		t.touched = now()
+	}
+	return out
 }
 
 // writePDFFile writes base64 PDF bytes to a path via host.files.write and
 // returns the host's path plus the bytes actually written (the on-disk truth).
-// Shared by every route that lands a PDF on disk.
+// Shared by the routes that land a PDF on disk for the caller: nametag_save and
+// the .mtags render.
 func writePDFFile(client capabilityCaller, path, bytesB64 string) (string, int, *toolFault) {
 	raw, capErr := client.callCapability("host.files.write", map[string]interface{}{
 		"path":           path,
@@ -148,102 +232,7 @@ func writePDFFile(client capabilityCaller, path, bytesB64 string) (string, int, 
 	if written == "" {
 		written = path
 	}
-	recordOwnFile(written)
 	return written, resp.Result.BytesWritten, nil
-}
-
-// deliverPDFToFile writes a generated PDF to a fresh temp file and returns the
-// nametag_generate result that names it instead of carrying its bytes.
-func deliverPDFToFile(client capabilityCaller, pdf *pdfGenerateResult) map[string]interface{} {
-	path, written, fault := writePDFFile(client, nextPreviewPath(), pdf.BytesB64)
-	if fault != nil {
-		return failResult(fault)
-	}
-	deliveredPreviews = append(deliveredPreviews, path)
-	for len(deliveredPreviews) > retainedPreviews {
-		forgetOwnPath(deliveredPreviews[0])
-	}
-	out := map[string]interface{}{
-		"success":      true,
-		"path":         path,
-		"byte_size":    written,
-		"page_count":   pdf.PageCount,
-		"content_type": pdf.ContentType,
-	}
-	if len(pdf.Warnings) > 0 {
-		out["warnings"] = pdf.Warnings
-	}
-	return out
-}
-
-// toolNametagReadChunk returns one slice of a PDF THIS process wrote, so a panel
-// that cannot receive a whole PDF in one reply can pull it across in pieces.
-// Any other path is refused: this verb returns file bytes to its caller, so its
-// reach is the set of files the backend itself produced, not the filesystem.
-// Offset and length are file bytes; length is clamped to previewChunkBytes and
-// the reply reports what it actually carries, so the caller loops on the
-// returned length until eof. The slice that reports eof also removes a
-// delivered preview — the transfer is done with it.
-//
-// The slice is cut from a full host.files.read of the file each call: a preview
-// PDF is a few hundred KB and a re-read costs less than holding per-panel
-// buffers alive in the backend.
-func toolNametagReadChunk(client capabilityCaller, rawArgs json.RawMessage) map[string]interface{} {
-	var a struct {
-		Path   string `json:"path"`
-		Offset int    `json:"offset"`
-		Length int    `json:"length"`
-	}
-	if len(rawArgs) > 0 && string(rawArgs) != "null" {
-		if err := json.Unmarshal(rawArgs, &a); err != nil {
-			return failResult(&toolFault{Code: "schema_validation_failed", Msg: "arguments not a JSON object: " + err.Error()})
-		}
-	}
-	if strings.TrimSpace(a.Path) == "" {
-		return failResult(&toolFault{Code: "schema_validation_failed", Msg: "path is required"})
-	}
-	if a.Offset < 0 {
-		return failResult(&toolFault{Code: "schema_validation_failed", Msg: "offset must not be negative"})
-	}
-	if fault := checkOwnFile(a.Path); fault != nil {
-		return failResult(fault)
-	}
-
-	b64, fault := readFileB64(client, a.Path)
-	if fault != nil {
-		return failResult(fault)
-	}
-	data, err := base64.StdEncoding.DecodeString(b64)
-	if err != nil {
-		return failResult(&toolFault{Code: "parse_error", Msg: "host.files.read returned invalid base64: " + err.Error()})
-	}
-	if a.Offset > len(data) {
-		return failResult(&toolFault{Code: "schema_validation_failed",
-			Msg: fmt.Sprintf("offset %d is past the end of %s (%d bytes)", a.Offset, a.Path, len(data))})
-	}
-
-	length := a.Length
-	if length <= 0 || length > previewChunkBytes {
-		length = previewChunkBytes
-	}
-	if a.Offset+length > len(data) {
-		length = len(data) - a.Offset
-	}
-
-	eof := a.Offset+length >= len(data)
-	out := map[string]interface{}{
-		"success":     true,
-		"path":        a.Path,
-		"offset":      a.Offset,
-		"length":      length,
-		"total_bytes": len(data),
-		"eof":         eof,
-		"bytes_b64":   base64.StdEncoding.EncodeToString(data[a.Offset : a.Offset+length]),
-	}
-	if eof && isDeliveredPreview(a.Path) {
-		forgetOwnPath(a.Path)
-	}
-	return out
 }
 
 // toolNametagPickIcon pops a host open-dialog for a PNG and returns its path,
@@ -257,17 +246,4 @@ func toolNametagPickIcon(client capabilityCaller, _ json.RawMessage) map[string]
 		return map[string]interface{}{"success": true, "cancelled": true}
 	}
 	return map[string]interface{}{"success": true, "cancelled": false, "path": path}
-}
-
-// isDeliveredPreview reports whether a path is one of the previews still held
-// on disk — a PDF written for a caller by nametag_save is not one, and reading
-// it must never delete it.
-func isDeliveredPreview(path string) bool {
-	clean := filepath.Clean(path)
-	for _, p := range deliveredPreviews {
-		if filepath.Clean(p) == clean {
-			return true
-		}
-	}
-	return false
 }

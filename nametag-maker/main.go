@@ -303,7 +303,7 @@ func sharedProps() map[string]interface{} {
 
 func generateInputSchema() map[string]interface{} {
 	props := sharedProps()
-	props["deliver_to_file"] = map[string]interface{}{"type": "boolean", "description": "Write the PDF to a temp file and return {path, byte_size, page_count} instead of the bytes — for callers on a size-capped channel (the HTML panel), which then pull the file back with nametag_read_chunk."}
+	props["deliver_by_token"] = map[string]interface{}{"type": "boolean", "description": "Hold the PDF in the plugin and return {token, byte_size, page_count} instead of the bytes — for callers on a size-capped channel (the HTML panel), which then pull it back with nametag_read_chunk."}
 	return map[string]interface{}{"type": "object", "properties": props}
 }
 
@@ -311,7 +311,7 @@ func readChunkInputSchema() map[string]interface{} {
 	return map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
-			"path":   map[string]interface{}{"type": "string", "description": "Absolute path of a PDF this plugin wrote in this session (nametag_generate deliver_to_file / nametag_save); any other path is refused."},
+			"token":  map[string]interface{}{"type": "string", "description": "Transfer token from nametag_generate with deliver_by_token."},
 			"offset": map[string]interface{}{"type": "number", "description": "Byte offset of the slice (default 0)."},
 			"length": map[string]interface{}{"type": "number", "description": "Slice length in bytes; clamped to what fits one capped reply. The result reports the length actually returned."},
 		},
@@ -377,7 +377,7 @@ func buildFromSheetInputSchema() map[string]interface{} {
 var toolList = []map[string]interface{}{
 	{
 		"name":        "nametag_generate",
-		"description": "Generate a name-tag PDF via host.pdf.generate and return the bytes. Tags are 3-3/8 x 2-1/3 in (Avery 5395), 8 per Letter sheet, corner-cut marks. Layouts: classic (icon + name/class/room/group), detailed (image + big name + detail lines), or fully generic front/back faces. A shared `back` (or per-row back) draws a second side aligned for duplex (e.g. a schedule). Returns {bytes_b64, byte_size, page_count, content_type}, or {path, byte_size, page_count} with deliver_to_file.",
+		"description": "Generate a name-tag PDF via host.pdf.generate and return the bytes. Tags are 3-3/8 x 2-1/3 in (Avery 5395), 8 per Letter sheet, corner-cut marks. Layouts: classic (icon + name/class/room/group), detailed (image + big name + detail lines), or fully generic front/back faces. A shared `back` (or per-row back) draws a second side aligned for duplex (e.g. a schedule). Returns {bytes_b64, byte_size, page_count, content_type}, or {token, byte_size, page_count} with deliver_by_token.",
 		"inputSchema": generateInputSchema(),
 	},
 	{
@@ -387,7 +387,7 @@ var toolList = []map[string]interface{}{
 	},
 	{
 		"name":        "nametag_read_chunk",
-		"description": "Read one slice of a PDF this plugin wrote in this session (nametag_generate deliver_to_file / nametag_save) as base64 — any other path is refused. Lets a panel bounded at 64 KiB per reply pull the file back. Returns {bytes_b64, offset, length, total_bytes, eof}; loop from offset 0 until eof. The eof slice of a delivered preview also deletes it.",
+		"description": "Read one slice of a PDF the plugin is holding for a transfer token (nametag_generate with deliver_by_token) as base64. Lets a panel bounded at 64 KiB per reply pull the PDF back: loop from offset 0 until eof. Returns {bytes_b64, offset, length, total_bytes, eof}; the eof slice releases the transfer. An unknown, expired or completed token returns error_code transfer_not_found — generate again to start over.",
 		"inputSchema": readChunkInputSchema(),
 	},
 	{

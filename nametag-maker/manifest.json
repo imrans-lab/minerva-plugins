@@ -27,7 +27,7 @@
     },
     {
       "name": "minerva_nametag_maker_nametag_read_chunk",
-      "description": "Read one slice of a PDF this plugin wrote in this session, so a size-capped panel can pull back a generated PDF; any other path is refused. (Install-time metadata; backend supplies the runtime schema.)",
+      "description": "Read one slice of a PDF the plugin is holding under a transfer token, so a size-capped panel can pull back a generated PDF. (Install-time metadata; backend supplies the runtime schema.)",
       "inputSchema": { "type": "object" }
     },
     {

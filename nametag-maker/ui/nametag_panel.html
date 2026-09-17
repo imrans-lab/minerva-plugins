@@ -11,7 +11,7 @@
   webview panel has no bulk route, so neither the icon nor the PDF may travel
   inline. Paths cross instead:
   Data flow: CSV + an icon PATH (nametag_pick_icon pops a host dialog)
-             -> nametag_generate with deliver_to_file -> {path, byte_size, page_count}
+             -> nametag_generate with deliver_by_token -> {token, byte_size, page_count}
              -> nametag_read_chunk in a loop -> the PDF bytes, preview every page
                 with PDF.js
              -> Save via nametag_save (backend regenerates + picks + writes)
@@ -305,18 +305,21 @@ Grace Hopper,Compilers,2,B-205</textarea>
   }
 
   // ---- pull a generated PDF back in bridge-sized slices -----------------------
-  // Every reply is bounded at 64 KiB, so the backend writes the PDF to a file
-  // and hands back its path; this walks the file with nametag_read_chunk, which
-  // reports the length it carries and the total, until eof.
-  async function fetchPdfBytes(path, expectedTotal) {
+  // Every reply is bounded at 64 KiB, so the backend holds the PDF under a
+  // token and this walks it with nametag_read_chunk, which reports the length
+  // it carries and the total, until eof. A transfer the backend no longer holds
+  // (expired or evicted) is marked lost so the caller can start one fresh.
+  async function fetchPdfBytes(token, expectedTotal) {
     var parts = [], received = 0, total = expectedTotal || 0, guard = 0;
     while (true) {
       if (++guard > 4096) {
         throw new Error("chunk transfer did not finish (" + received + " of " + total + " bytes)");
       }
-      var res = await window.minerva.call(CHUNK_TOOL, { path: path, offset: received });
+      var res = await window.minerva.call(CHUNK_TOOL, { token: token, offset: received });
       if (!res || res.success !== true || typeof res.bytes_b64 !== "string") {
-        throw new Error("reading the generated PDF failed" + toolDetail(res));
+        var lost = new Error("reading the generated PDF failed" + toolDetail(res));
+        lost.transferLost = !!(res && res.error_code === "transfer_not_found");
+        throw lost;
       }
       var bytes = b64ToBytes(res.bytes_b64);
       if (typeof res.total_bytes === "number") { total = res.total_bytes; }
@@ -358,6 +361,21 @@ Grace Hopper,Compilers,2,B-205</textarea>
   }
 
   // ---- generate --------------------------------------------------------------
+  // One attempt: ask for a PDF and pull the whole transfer back. A failure to
+  // start is final; a transfer lost mid-pull carries transferLost so the caller
+  // can retry once.
+  async function generateAndFetch(genArgs) {
+    var res = await window.minerva.call(TOOL, genArgs);
+    // minerva.call resolves with the parsed tool result. The tool returns either
+    // {success:true, token, byte_size, page_count, content_type} or
+    // {success:false, error_code, error_message}. (isError:true would have thrown.)
+    if (!res || res.success !== true || !res.token) {
+      throw new Error("no transfer started" + toolDetail(res));
+    }
+    var bytes = await fetchPdfBytes(res.token, res.byte_size);
+    return { bytes: bytes, page_count: res.page_count, byte_size: res.byte_size };
+  }
+
   $("genBtn").addEventListener("click", async function () {
     clearMsg($("genErr"));
     $("genInfo").textContent = "";
@@ -387,24 +405,25 @@ Grace Hopper,Compilers,2,B-205</textarea>
     $("genBtn").disabled = true;
     show($("genSpinner"));
     try {
-      // deliver_to_file: the PDF lands on disk and the reply names it, because a
-      // real one is far larger than the 64 KiB this bridge carries.
+      // deliver_by_token: the backend holds the PDF and the reply names it,
+      // because a real one is far larger than the 64 KiB this bridge carries.
       var genArgs = {};
       for (var k in args) { if (Object.prototype.hasOwnProperty.call(args, k)) { genArgs[k] = args[k]; } }
-      genArgs.deliver_to_file = true;
-      var res = await window.minerva.call(TOOL, genArgs);
-      // minerva.call resolves with the parsed tool result. The tool returns either
-      // {success:true, path, byte_size, page_count, content_type} or
-      // {success:false, error_code, error_message}. (isError:true would have thrown.)
-      if (!res || res.success !== true || !res.path) {
-        setMsg($("genErr"), "Generate failed" + toolDetail(res));
-        return;
+      genArgs.deliver_by_token = true;
+
+      var out;
+      try {
+        out = await generateAndFetch(genArgs);
+      } catch (lost) {
+        // A transfer the backend dropped is worth exactly one fresh start; any
+        // second failure is the caller's to see.
+        if (!lost || !lost.transferLost) { throw lost; }
+        out = await generateAndFetch(genArgs);
       }
       lastArgs = args;   // reused verbatim by Save (backend regenerates the PDF)
-      var bytes = await fetchPdfBytes(res.path, res.byte_size);
-      $("genInfo").textContent = (res.page_count || "?") + " page(s), " +
-        Math.round((res.byte_size || bytes.length) / 1024) + " KB.";
-      await renderPreview(bytes);
+      $("genInfo").textContent = (out.page_count || "?") + " page(s), " +
+        Math.round((out.byte_size || out.bytes.length) / 1024) + " KB.";
+      await renderPreview(out.bytes);
       show($("saveCard"));
     } catch (e) {
       setMsg($("genErr"), "Generate failed: " + errText(e));

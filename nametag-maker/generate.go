@@ -530,14 +530,14 @@ func toolNametagRender(client capabilityCaller, rawArgs json.RawMessage) map[str
 // reference.
 //
 // On success returns {success, bytes_b64, byte_size, page_count, content_type}.
-// With deliver_to_file the PDF is written to a temp file instead and the result
-// carries {success, path, byte_size, page_count, content_type} with no bytes —
+// With deliver_by_token the PDF is held in this process instead and the result
+// carries {success, token, byte_size, page_count, content_type} with no bytes —
 // the route for callers on a size-capped channel (see panel_transfer.go).
 // On a host.pdf.generate failure, surfaces {success:false, error_code,
 // error_message}.
 func toolNametagGenerate(client capabilityCaller, rawArgs json.RawMessage) map[string]interface{} {
 	var deliver struct {
-		ToFile bool `json:"deliver_to_file"`
+		ByToken bool `json:"deliver_by_token"`
 	}
 	if len(rawArgs) > 0 && string(rawArgs) != "null" {
 		if err := json.Unmarshal(rawArgs, &deliver); err != nil {
@@ -549,8 +549,8 @@ func toolNametagGenerate(client capabilityCaller, rawArgs json.RawMessage) map[s
 	if fault != nil {
 		return failResult(fault)
 	}
-	if deliver.ToFile {
-		return deliverPDFToFile(client, res)
+	if deliver.ByToken {
+		return deliverPDFToTransfer(res)
 	}
 	out := map[string]interface{}{
 		"success":      true,
