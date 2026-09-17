@@ -1,0 +1,14 @@
+# Host files drive's suites cannot load without, as paths relative to the
+# Minerva checkout root, checked by scripts/run-gd-tests.sh before Godot
+# starts. src/project.godot is required for every plugin and is checked
+# unconditionally by the runner, so it is not repeated here.
+#
+# A suite that preloads a host script by path adds its line here, so a
+# Minerva SHA bump that moves or drops the script fails by name instead of
+# as a parse error inside the suite.
+#
+# test_bulk_reply_seam.gd mounts the real scene-panel broker (whose
+# MAX_PAYLOAD_BYTES is the cap it measures against) and installs and starts
+# the real drive backend through the host's own plugin manager.
+src/Scripts/Services/Plugins/PluginScenePanelBroker.gd
+src/Scripts/Services/Plugins/PluginManager.gd

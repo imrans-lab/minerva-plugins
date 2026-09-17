@@ -1,0 +1,23 @@
+# Manifest of the gd test suites scripts/run-gd-tests.sh MUST find under
+# drive/tests/gd/. Line format (v2, shared with pcb/ and cad/):
+#
+#     <filename> [assertions=N] [real-worker]
+#
+# - <filename>: exactly as it appears on disk. A suite going missing
+#   (deleted, renamed, moved off the glob) or appearing unregistered is a
+#   loud, named pre-flight failure in both directions.
+# - assertions=N: the suite must report exactly N total assertions
+#   (passed+failed), so `check(true); quit(0)` planted above the real
+#   assertions FAILS instead of passing a bare floor. Re-pin honestly when a
+#   suite legitimately grows or shrinks.
+# - real-worker: refused here — the attribute is a claim about a live worker
+#   and drive ships no scripts/probe-worker-methods.py to back it.
+
+# The real broker + real drive backend weigh a minerva_drive_list reply past
+# the host's 64 KiB control cap and assert the panel drew a row for every
+# project the worker sent. Pinned for a host where the drive plugin is
+# already installed and built: an install (or its cargo_build pipeline) adds
+# its own setup assertions, and the suite skips its live sections outright
+# when drive-plugin is not built or when DRIVE_FOLDER does not reach the
+# subprocess.
+test_bulk_reply_seam.gd assertions=13

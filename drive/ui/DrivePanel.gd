@@ -176,6 +176,35 @@ func _build_ui() -> void:
 	_main_vbox.add_child(_project_tree)
 
 
+# ── IPC send seam ────────────────────────────────────────────────────────────
+
+## The one send for every round-trip this panel makes.
+##
+## The `request` signal rides the host's control lane, which the scene-panel
+## broker bounds at PluginPayloadLimits.CONTROL_BYTES (64 KiB) in BOTH
+## directions; an over-cap reply is replaced by a payload_too_large error
+## before the caller ever sees it. The broker weighs the DECODED reply, and a
+## list row costs roughly 280 bytes of it (name, uuid, status, two versions
+## and an absolute path), so somewhere around 230 tracked projects the list
+## reply stops fitting and the panel can only report a failure. sync's name
+## lists for pushed/pulled/conflicts/errors/deferred scale the same way.
+##
+## MinervaIPC.request_bulk uses the same declared channels and the same
+## permission checks, but bounds both directions at PluginPayloadLimits
+## .BULK_BYTES (8 MiB). It mints and awaits its own reply id, so the `request`
+## signal is not emitted on that route. The broker clamps capability:, host.
+## and host_owned_save. channels back to the control cap regardless of route,
+## so the picker and os_open proxy calls are unaffected by going through here.
+##
+## Feature-detected, so a host without request_bulk keeps the signal path.
+func _send_request(ipc, channel: String, payload: Dictionary, timeout_ms: int) -> Dictionary:
+	if ipc.has_method("request_bulk"):
+		return await ipc.request_bulk(channel, payload, timeout_ms)
+	var reply_id: String = "%s:%d" % [channel, Time.get_ticks_usec()]
+	request.emit(channel, payload, reply_id)
+	return await ipc.await_reply(reply_id, timeout_ms)
+
+
 # ── Refresh (status + project list) ──────────────────────────────────────────
 
 func _refresh() -> void:
@@ -188,9 +217,7 @@ func _fetch_status() -> void:
 	if ipc == null:
 		_set_device_label("Drive: IPC unavailable.")
 		return
-	var reply_id: String = "drive:status:%d" % Time.get_ticks_usec()
-	request.emit("minerva_drive_status", {}, reply_id)
-	var reply: Dictionary = await ipc.await_reply(reply_id, 10000)
+	var reply: Dictionary = await _send_request(ipc, "minerva_drive_status", {}, 10000)
 	if not bool(reply.get("success", false)):
 		var err: String = str(reply.get("error_message", str(reply.get("error_code", "unknown"))))
 		_set_device_label("Drive: error — %s" % err)
@@ -233,9 +260,7 @@ func _fetch_list() -> void:
 	var ipc := get_node_or_null("_MinervaIPC")
 	if ipc == null:
 		return
-	var reply_id: String = "drive:list:%d" % Time.get_ticks_usec()
-	request.emit("minerva_drive_list", {}, reply_id)
-	var reply: Dictionary = await ipc.await_reply(reply_id, 15000)
+	var reply: Dictionary = await _send_request(ipc, "minerva_drive_list", {}, 15000)
 	if not bool(reply.get("success", false)):
 		var err: String = str(reply.get("error_message", str(reply.get("error_code", "unknown"))))
 		_show_status("Could not load project list: %s" % err)
@@ -290,9 +315,7 @@ func _on_sync_pressed() -> void:
 	_set_in_flight(true)
 	_show_status("Syncing…")
 
-	var reply_id: String = "drive:sync:%d" % Time.get_ticks_usec()
-	request.emit("minerva_drive_sync", {}, reply_id)
-	var reply: Dictionary = await ipc.await_reply(reply_id, 120000)
+	var reply: Dictionary = await _send_request(ipc, "minerva_drive_sync", {}, 120000)
 	_set_in_flight(false)
 
 	if not bool(reply.get("success", false)):
@@ -344,13 +367,11 @@ func _on_add_pressed() -> void:
 		_show_status("IPC unavailable — cannot add.")
 		return
 	# Pick a file to sync.
-	var pick_id: String = "drive:pick:%d" % Time.get_ticks_usec()
-	request.emit("capability:host.dialogs.file_picker", {
+	var pick: Dictionary = await _send_request(ipc, "capability:host.dialogs.file_picker", {
 		"title": "Choose a file to sync",
 		"mode": "open",
 		"filters": ["*"],
-	}, pick_id)
-	var pick: Dictionary = await ipc.await_reply(pick_id, 120000)
+	}, 120000)
 	if not bool(pick.get("success", false)):
 		_show_status("File picker failed: %s" % str(pick.get("error_message", "unknown")))
 		return
@@ -361,9 +382,7 @@ func _on_add_pressed() -> void:
 	if path.is_empty():
 		return
 	# Register it.
-	var add_id: String = "drive:add:%d" % Time.get_ticks_usec()
-	request.emit("minerva_drive_add", {"path": path}, add_id)
-	var reply: Dictionary = await ipc.await_reply(add_id, 15000)
+	var reply: Dictionary = await _send_request(ipc, "minerva_drive_add", {"path": path}, 15000)
 	if not bool(reply.get("success", false)):
 		_show_status("Add failed: %s" % str(reply.get("error_message", str(reply.get("error_code", "unknown")))))
 		return
@@ -384,9 +403,7 @@ func _on_remove_pressed() -> void:
 	if ipc == null:
 		_show_status("IPC unavailable — cannot remove.")
 		return
-	var rid: String = "drive:remove:%d" % Time.get_ticks_usec()
-	request.emit("minerva_drive_remove", {"path": path}, rid)
-	var reply: Dictionary = await ipc.await_reply(rid, 15000)
+	var reply: Dictionary = await _send_request(ipc, "minerva_drive_remove", {"path": path}, 15000)
 	if not bool(reply.get("success", false)):
 		_show_status("Remove failed: %s" % str(reply.get("error_message", str(reply.get("error_code", "unknown")))))
 		return
@@ -404,12 +421,10 @@ func _on_folder_pressed() -> void:
 		_show_status("IPC unavailable — cannot change folder.")
 		return
 	# Ask the host for a directory picker.
-	var pick_id: String = "drive:folder_pick:%d" % Time.get_ticks_usec()
-	request.emit("capability:host.dialogs.file_picker", {
+	var pick: Dictionary = await _send_request(ipc, "capability:host.dialogs.file_picker", {
 		"title": "Choose Drive folder",
 		"mode": "dir",
-	}, pick_id)
-	var pick: Dictionary = await ipc.await_reply(pick_id, 120000)
+	}, 120000)
 	if not bool(pick.get("success", false)):
 		# The host may not support "dir" mode — surface a clear message rather
 		# than silently doing nothing.
@@ -426,9 +441,7 @@ func _on_folder_pressed() -> void:
 	if chosen.is_empty():
 		return
 	# Apply the new folder.
-	var set_id: String = "drive:set_folder:%d" % Time.get_ticks_usec()
-	request.emit("minerva_drive_set_folder", {"path": chosen}, set_id)
-	var reply: Dictionary = await ipc.await_reply(set_id, 15000)
+	var reply: Dictionary = await _send_request(ipc, "minerva_drive_set_folder", {"path": chosen}, 15000)
 	if not bool(reply.get("success", false)):
 		_show_status("Set folder failed: %s" % str(reply.get("error_message", str(reply.get("error_code", "unknown")))))
 		return
@@ -461,9 +474,7 @@ func _on_reveal_pressed() -> void:
 	if ipc == null:
 		_show_status("IPC unavailable — cannot reveal.")
 		return
-	var rid: String = "drive:reveal:%d" % Time.get_ticks_usec()
-	request.emit("capability:mcp.proxy:minerva_os_open", {"path": folder}, rid)
-	var reply: Dictionary = await ipc.await_reply(rid, 15000)
+	var reply: Dictionary = await _send_request(ipc, "capability:mcp.proxy:minerva_os_open", {"path": folder}, 15000)
 	if not bool(reply.get("success", false)):
 		_show_status("Reveal failed: %s" % str(reply.get("error_message", str(reply.get("error_code", "unknown")))))
 
@@ -482,9 +493,7 @@ func _on_open_ext_pressed() -> void:
 	if ipc == null:
 		_show_status("IPC unavailable — cannot open externally.")
 		return
-	var rid: String = "drive:open_ext:%d" % Time.get_ticks_usec()
-	request.emit("capability:mcp.proxy:minerva_os_open", {"path": path}, rid)
-	var reply: Dictionary = await ipc.await_reply(rid, 15000)
+	var reply: Dictionary = await _send_request(ipc, "capability:mcp.proxy:minerva_os_open", {"path": path}, 15000)
 	if not bool(reply.get("success", false)):
 		_show_status("Open externally failed: %s" % str(reply.get("error_message", str(reply.get("error_code", "unknown")))))
 
@@ -526,14 +535,12 @@ func _on_download_pressed() -> void:
 		_show_status("IPC unavailable — cannot download.")
 		return
 	# Ask the user where to save the file.
-	var pick_id: String = "drive:download_pick:%d" % Time.get_ticks_usec()
-	request.emit("capability:host.dialogs.file_picker", {
+	var pick: Dictionary = await _send_request(ipc, "capability:host.dialogs.file_picker", {
 		"title": "Download a copy as…",
 		"mode": "save",
 		"filters": ["*"],
 		"filename": proj_name,
-	}, pick_id)
-	var pick: Dictionary = await ipc.await_reply(pick_id, 120000)
+	}, 120000)
 	if not bool(pick.get("success", false)):
 		_show_status("File picker failed: %s" % str(pick.get("error_message", "unknown")))
 		return
@@ -545,9 +552,7 @@ func _on_download_pressed() -> void:
 		return
 	# Download and write.
 	_show_status("Downloading…")
-	var exp_id: String = "drive:export:%d" % Time.get_ticks_usec()
-	request.emit("minerva_drive_export", {"proj_uuid": proj_uuid, "dest_path": dest}, exp_id)
-	var reply: Dictionary = await ipc.await_reply(exp_id, 120000)
+	var reply: Dictionary = await _send_request(ipc, "minerva_drive_export", {"proj_uuid": proj_uuid, "dest_path": dest}, 120000)
 	if not bool(reply.get("success", false)):
 		_show_status("Download failed: %s" % str(reply.get("error_message", str(reply.get("error_code", "unknown")))))
 		return
@@ -591,9 +596,7 @@ func _open_project(proj_uuid: String) -> void:
 		_show_status("IPC unavailable — cannot open project.")
 		return
 	_show_status("Opening…")
-	var rid: String = "drive:open:%d" % Time.get_ticks_usec()
-	request.emit("minerva_drive_open", {"proj_uuid": proj_uuid}, rid)
-	var reply: Dictionary = await ipc.await_reply(rid, 120000)
+	var reply: Dictionary = await _send_request(ipc, "minerva_drive_open", {"proj_uuid": proj_uuid}, 120000)
 	if not bool(reply.get("success", false)):
 		_show_status("Open failed: %s" % str(reply.get("error_message", str(reply.get("error_code", "unknown")))))
 		return
