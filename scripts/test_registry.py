@@ -21,12 +21,12 @@ class RegistryTests(unittest.TestCase):
         self.git("init", "-q")
         self.git("config", "user.email", "test@example.invalid")
         self.git("config", "user.name", "Registry test")
-        self.directory = self.root / "agent-relay"
+        self.directory = self.root / "drive"
         self.directory.mkdir()
-        self.manifest = {"id": "agent_relay", "name": "Relay", "version": "1.0.0",
+        self.manifest = {"id": "drive", "name": "Drive", "version": "1.0.0",
                          "release_targets": ["linux-x86_64"]}
         self.commit_manifest()
-        self.git("tag", "agent_relay-v1.0.0")
+        self.git("tag", "drive-v1.0.0")
         self.selected = registry.build_registry(self.root)
 
     def git(self, *args):
@@ -40,14 +40,14 @@ class RegistryTests(unittest.TestCase):
 
     def test_release_selection_survives_manifest_and_tag_changes(self):
         entry = self.selected["plugins"][0]
-        self.assertEqual(entry["id"], "agent_relay")
-        self.assertIn("/agent_relay-v1.0.0/agent-relay/manifest.json", entry["manifest_url"])
+        self.assertEqual(entry["id"], "drive")
+        self.assertIn("/drive-v1.0.0/drive/manifest.json", entry["manifest_url"])
         self.manifest.update(version="2.0.0", release_targets=["windows-x86_64"])
         self.commit_manifest()
         # A manifest bump must neither break checks nor combine old tags/new filenames.
         self.assertEqual(registry.build_registry(self.root), self.selected)
         registry.check_registry(self.root, self.selected)
-        self.git("tag", "agent_relay-v2.0.0")
+        self.git("tag", "drive-v2.0.0")
         registry.check_registry(self.root, self.selected)
         latest = registry.build_registry(self.root)["plugins"][0]
         self.assertEqual(latest["version"], "2.0.0")
@@ -55,22 +55,22 @@ class RegistryTests(unittest.TestCase):
 
     def test_rejects_broken_release_metadata(self):
         for field, value in [("manifest_version", "2.0.0"), ("downloads", {}),
-                             ("release_tag", "agent_relay-v1.0.0-branch-test")]:
+                             ("release_tag", "drive-v1.0.0-branch-test")]:
             with self.subTest(field=field):
                 bad = copy.deepcopy(self.selected)
                 bad["plugins"][0][field] = value
                 with self.assertRaises(ValueError):
                     registry.check_registry(self.root, bad)
-        self.git("tag", "agent_relay-v9.0.0")
+        self.git("tag", "drive-v9.0.0")
         with self.assertRaisesRegex(ValueError, "manifest version"):
             registry.build_registry(self.root)
 
     def test_release_guard_preserves_existing_stable_tags(self):
         script = Path(__file__).with_name("release-publish-guard.sh")
         for tag, prerelease, expected in [
-            ("agent_relay-v1.0.0", "false", "false"),
-            ("agent_relay-v2.0.0", "false", "true"),
-            ("agent_relay-v1.0.0", "true", "true"),
+            ("drive-v1.0.0", "false", "false"),
+            ("drive-v2.0.0", "false", "true"),
+            ("drive-v1.0.0", "true", "true"),
         ]:
             with self.subTest(tag=tag, prerelease=prerelease):
                 output = self.root / "output"
@@ -222,16 +222,16 @@ class CouncilReleaseTests(unittest.TestCase):
             git = init_repo(root)
             (root / "council").mkdir()
             (root / "council/manifest.json").write_text(json.dumps(self.manifest))
-            (root / "agent-relay").mkdir()
-            (root / "agent-relay/manifest.json").write_text(json.dumps(
-                {"id": "agent_relay", "name": "Relay", "version": "1.0.0",
+            (root / "drive").mkdir()
+            (root / "drive/manifest.json").write_text(json.dumps(
+                {"id": "drive", "name": "Drive", "version": "1.0.0",
                  "release_targets": ["linux-x86_64"]}))
             git("add", ".")
             git("commit", "-qm", "untagged council beside a released plugin")
-            git("tag", "agent_relay-v1.0.0")
+            git("tag", "drive-v1.0.0")
 
             selected = registry.build_registry(root)
-            self.assertEqual([p["id"] for p in selected["plugins"]], ["agent_relay"])
+            self.assertEqual([p["id"] for p in selected["plugins"]], ["drive"])
             registry.check_registry(root, selected)
 
 
