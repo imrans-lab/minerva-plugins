@@ -166,18 +166,43 @@ func TestPanelPDFTransferStaysUnderTheControlCap(t *testing.T) {
 		t.Fatalf("a consumed preview must no longer be readable: %+v", after)
 	}
 
-	// An abandoned preview (no eof read) is removed by the next delivery.
-	first := toolNametagGenerate(host, args)
-	firstPath, _ := first["path"].(string)
-	if firstPath == "" {
-		t.Fatalf("second generate returned no path: %+v", first)
+	// Two panels, two transfers in flight: a second delivery must not pull the
+	// first one's file out from under it, and abandoned previews are reclaimed
+	// only once the bounded ring overflows.
+	deliver := func() string {
+		res := toolNametagGenerate(host, args)
+		p, _ := res["path"].(string)
+		if p == "" {
+			t.Fatalf("generate returned no path: %+v", res)
+		}
+		return p
 	}
-	second := toolNametagGenerate(host, args)
-	if _, err := os.Stat(firstPath); !os.IsNotExist(err) {
-		t.Fatalf("previous preview survived the next delivery: err=%v", err)
+	a := deliver()
+	firstChunk := toolNametagReadChunk(host, mustArgs(t, map[string]interface{}{"path": a, "offset": 0}))
+	if ok, _ := firstChunk["success"].(bool); !ok {
+		t.Fatalf("panel A's first chunk failed: %+v", firstChunk)
 	}
-	if secondPath, _ := second["path"].(string); secondPath == firstPath {
-		t.Fatalf("two deliveries reused one path: %s", secondPath)
+	b := deliver()
+	if a == b {
+		t.Fatalf("two deliveries reused one path: %s", a)
+	}
+	resumed := toolNametagReadChunk(host, mustArgs(t, map[string]interface{}{
+		"path": a, "offset": firstChunk["length"],
+	}))
+	if ok, _ := resumed["success"].(bool); !ok {
+		t.Fatalf("panel B's delivery broke panel A's transfer: %+v", resumed)
+	}
+
+	// Two are on disk; deliver until the ring holds retainedPreviews+1, which
+	// reclaims the oldest and leaves the rest — including B — alone.
+	for i := 0; i < retainedPreviews-1; i++ {
+		deliver()
+	}
+	if _, err := os.Stat(a); !os.IsNotExist(err) {
+		t.Fatalf("the oldest preview survived the ring overflowing: err=%v", err)
+	}
+	if _, err := os.Stat(b); err != nil {
+		t.Fatalf("a preview inside the ring was reclaimed early: %v", err)
 	}
 
 	// The falsifier: the inline-bytes result this replaces is far over the cap,
@@ -230,6 +255,38 @@ func TestReadChunkRefusesWhatItDidNotWrite(t *testing.T) {
 	// It was not a delivered preview, so reading it to eof must not delete it.
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("a saved (non-preview) PDF must survive being read: %v", err)
+	}
+
+	// Identity, not spelling: the allowlisted pathname now holding a different
+	// file, or a symlink, is refused — the bytes served must be the ones written.
+	replaced := filepath.Join(dir, "replaced.pdf")
+	if _, _, fault := writePDFFile(host, replaced, base64.StdEncoding.EncodeToString([]byte("%PDF-1.7\nours"))); fault != nil {
+		t.Fatalf("write own pdf: %+v", fault)
+	}
+	if err := os.Remove(replaced); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if err := os.WriteFile(replaced, []byte("someone else's bytes"), 0o644); err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	res = toolNametagReadChunk(host, mustArgs(t, map[string]interface{}{"path": replaced}))
+	if res["error_code"] != "file_identity_changed" {
+		t.Fatalf("a replaced file must be refused as changed, got %+v", res)
+	}
+
+	linked := filepath.Join(dir, "linked.pdf")
+	if _, _, fault := writePDFFile(host, linked, base64.StdEncoding.EncodeToString([]byte("%PDF-1.7\nours"))); fault != nil {
+		t.Fatalf("write own pdf: %+v", fault)
+	}
+	if err := os.Remove(linked); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if err := os.Symlink(foreign, linked); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	res = toolNametagReadChunk(host, mustArgs(t, map[string]interface{}{"path": linked}))
+	if res["error_code"] != "file_identity_changed" {
+		t.Fatalf("a symlink standing in for our file must be refused, got %+v", res)
 	}
 
 	for name, args := range map[string]map[string]interface{}{

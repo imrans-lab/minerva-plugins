@@ -32,15 +32,30 @@ const previewChunkBytes = 32 * 1024
 // row never fight over one path.
 var previewSeq int
 
-// lastPreviewPath is the preview this process delivered most recently. The next
-// delivery removes it, so a panel that renders all day leaves one file behind
-// at most, and a completed transfer leaves none.
-var lastPreviewPath string
+// retainedPreviews bounds how many delivered previews stay on disk. A transfer
+// normally reclaims its own preview at the eof read; this bound reclaims the
+// ones nobody finished reading. It is a small ring rather than "the previous
+// one" because the backend cannot see panels: two panels can have transfers in
+// flight at once, and deleting the other one's file mid-transfer would break it.
+// Delivering a 5th preview removes the oldest of the 4 kept.
+const retainedPreviews = 4
 
-// ownPaths are the files this process wrote (writePDFFile). nametag_read_chunk
-// hands bytes back to its caller, so it serves only these — it is not a
-// general read-any-file verb.
-var ownPaths = map[string]bool{}
+// deliveredPreviews are the preview paths still on disk, oldest first.
+var deliveredPreviews []string
+
+// ownedFile is the identity of a file this process wrote: the Lstat record taken
+// immediately after the write, plus its size.
+type ownedFile struct {
+	info os.FileInfo
+	size int64
+}
+
+// ownPaths are the files this process wrote (writePDFFile), keyed by cleaned
+// path. nametag_read_chunk hands bytes back to its caller, so it serves only
+// these — it is not a general read-any-file verb. The recorded identity is what
+// makes that true: a pathname alone can be replaced with a symlink or another
+// file between the write and the read.
+var ownPaths = map[string]ownedFile{}
 
 // nextPreviewPath names the next generated preview PDF in the system temp dir.
 func nextPreviewPath() string {
@@ -55,11 +70,47 @@ func forgetOwnPath(path string) {
 	if path == "" {
 		return
 	}
-	delete(ownPaths, filepath.Clean(path))
-	if path == lastPreviewPath {
-		lastPreviewPath = ""
+	clean := filepath.Clean(path)
+	delete(ownPaths, clean)
+	for i, p := range deliveredPreviews {
+		if filepath.Clean(p) == clean {
+			deliveredPreviews = append(deliveredPreviews[:i], deliveredPreviews[i+1:]...)
+			break
+		}
 	}
 	_ = os.Remove(path)
+}
+
+// recordOwnFile captures the identity of a file this process just wrote. A
+// pathname that is not a regular file (a symlink, a directory) is not recorded,
+// so nametag_read_chunk will refuse it.
+func recordOwnFile(path string) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		delete(ownPaths, filepath.Clean(path))
+		return
+	}
+	ownPaths[filepath.Clean(path)] = ownedFile{info: info, size: info.Size()}
+}
+
+// checkOwnFile proves the file at `path` is still the one this process wrote —
+// same inode, same size, and not a symlink — rather than a replacement standing
+// at a spelling the allowlist happens to hold.
+func checkOwnFile(path string) *toolFault {
+	rec, known := ownPaths[filepath.Clean(path)]
+	if !known {
+		return &toolFault{Code: "target_not_allowlisted",
+			Msg: "nametag_read_chunk only serves PDFs this plugin wrote (nametag_generate deliver_to_file / nametag_save) in this session: " + path}
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return &toolFault{Code: "io_error", Msg: "stat " + path + ": " + err.Error()}
+	}
+	if !info.Mode().IsRegular() || !os.SameFile(rec.info, info) || info.Size() != rec.size {
+		return &toolFault{Code: "file_identity_changed",
+			Msg: "the file at " + path + " is no longer the one this plugin wrote"}
+	}
+	return nil
 }
 
 // writePDFFile writes base64 PDF bytes to a path via host.files.write and
@@ -97,7 +148,7 @@ func writePDFFile(client capabilityCaller, path, bytesB64 string) (string, int, 
 	if written == "" {
 		written = path
 	}
-	ownPaths[filepath.Clean(written)] = true
+	recordOwnFile(written)
 	return written, resp.Result.BytesWritten, nil
 }
 
@@ -108,8 +159,10 @@ func deliverPDFToFile(client capabilityCaller, pdf *pdfGenerateResult) map[strin
 	if fault != nil {
 		return failResult(fault)
 	}
-	forgetOwnPath(lastPreviewPath)
-	lastPreviewPath = path
+	deliveredPreviews = append(deliveredPreviews, path)
+	for len(deliveredPreviews) > retainedPreviews {
+		forgetOwnPath(deliveredPreviews[0])
+	}
 	out := map[string]interface{}{
 		"success":      true,
 		"path":         path,
@@ -152,9 +205,8 @@ func toolNametagReadChunk(client capabilityCaller, rawArgs json.RawMessage) map[
 	if a.Offset < 0 {
 		return failResult(&toolFault{Code: "schema_validation_failed", Msg: "offset must not be negative"})
 	}
-	if !ownPaths[filepath.Clean(a.Path)] {
-		return failResult(&toolFault{Code: "target_not_allowlisted",
-			Msg: "nametag_read_chunk only serves PDFs this plugin wrote (nametag_generate deliver_to_file / nametag_save) in this session: " + a.Path})
+	if fault := checkOwnFile(a.Path); fault != nil {
+		return failResult(fault)
 	}
 
 	b64, fault := readFileB64(client, a.Path)
@@ -188,7 +240,7 @@ func toolNametagReadChunk(client capabilityCaller, rawArgs json.RawMessage) map[
 		"eof":         eof,
 		"bytes_b64":   base64.StdEncoding.EncodeToString(data[a.Offset : a.Offset+length]),
 	}
-	if eof && filepath.Clean(a.Path) == filepath.Clean(lastPreviewPath) {
+	if eof && isDeliveredPreview(a.Path) {
 		forgetOwnPath(a.Path)
 	}
 	return out
@@ -205,4 +257,17 @@ func toolNametagPickIcon(client capabilityCaller, _ json.RawMessage) map[string]
 		return map[string]interface{}{"success": true, "cancelled": true}
 	}
 	return map[string]interface{}{"success": true, "cancelled": false, "path": path}
+}
+
+// isDeliveredPreview reports whether a path is one of the previews still held
+// on disk — a PDF written for a caller by nametag_save is not one, and reading
+// it must never delete it.
+func isDeliveredPreview(path string) bool {
+	clean := filepath.Clean(path)
+	for _, p := range deliveredPreviews {
+		if filepath.Clean(p) == clean {
+			return true
+		}
+	}
+	return false
 }
