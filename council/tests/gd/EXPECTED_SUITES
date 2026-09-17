@@ -40,3 +40,35 @@
 # delayed convergence after another panel becomes the holder, and empty-panel
 # project-scoped adoption after its prior owner closes.
 test_council_panel.gd assertions=125
+
+# The per-plugin CONTRACT GUARD: six domain-defined cases (null/empty, small
+# and large x happy/unhappy, and the large-with-errors complaint reply) driven
+# through the real broker and the real council-plugin subprocess, with the wire
+# bytes of every large case printed on the Results line. Shares only its
+# assertion discipline with the other plugins' guards
+# (scripts/contract_guard.gd); the six cases, and council's definition of
+# "large" (transcript length), are its own. Same rig and the same setup needs
+# as the suite above: the binary must be built, and the plugin REGISTRY is
+# stubbed so a second runtime is never started for the same plugin id.
+#
+# council is the plugin whose LARGE side is the REQUEST — the whole document
+# travels out on every seed — so case 4 measures the request against the
+# control cap and case 5 measures it against council's OWN document budget
+# (internal/session/envelope.go MaxEnvelopeBytes, 1 MiB), which the suite
+# mirrors as a constant so a drift shows up as a case that no longer proves
+# what it says.
+#
+# 30 assertions = 4 setup (host scripts, the manifest, the binary speaking, the
+# panel and its bulk route) + 3 small-happy + 3 null/empty (refusal + code, the
+# held document survives) + 4 small-unhappy (refusal + code, the code IS
+# stale_revision, nothing moved) + 5 large-happy (the request is over the cap,
+# not an oversize refusal, success, the engine accepted it, it is holding it) +
+# 5 large-unhappy (the fixture is past the budget, not an oversize refusal,
+# refused, the held document survives) + 5 large-with-errors (not oversize,
+# refused, the complaint reply outweighs the clean one, the held document
+# survives) + 1 teardown.
+#
+# `real-worker` is not claimed: council ships no scripts/probe-worker-methods.py
+# and this suite prints no such field. Its pin describes a host with the binary
+# built; without it the setup fails by name rather than skipping.
+test_contract_guard.gd assertions=30
