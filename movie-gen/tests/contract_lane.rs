@@ -139,7 +139,7 @@ fn nothing_that_grows_with_the_work_crosses_the_wire() {
                 assert!(
                     !property.to_ascii_lowercase().contains(fragment),
                     "{name} now takes `{property}`, which carries bytes across the \
-                     wire — 3d-gen's declared lane is paths in and paths out, and \
+                     wire — movie-gen's declared lane is paths in and paths out, and \
                      this file's header is the contract that has to change first"
                 );
             }

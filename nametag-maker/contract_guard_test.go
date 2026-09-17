@@ -59,6 +59,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -323,7 +324,7 @@ func TestContractGuardLargeErrorReply(t *testing.T) {
 			"declared lane in this file's header is out of date and the case must "+
 			"be rewritten to weigh them", faulty["warnings"])
 	}
-	if len(faulty) != len(clean) {
+	if strings.Join(keysOf(faulty), ",") != strings.Join(keysOf(clean), ",") {
 		t.Fatalf("large-errors: the two moods answer in different shapes: %v vs %v",
 			keysOf(faulty), keysOf(clean))
 	}
@@ -340,10 +341,13 @@ func TestContractGuardLargeErrorReply(t *testing.T) {
 }
 
 // keysOf is the reply's key set, for the shape comparison above.
+// keysOf returns the map's keys in sorted order so two replies can be
+// compared as shapes regardless of Go's randomized map iteration.
 func keysOf(m map[string]interface{}) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)
 	}
+	sort.Strings(out)
 	return out
 }

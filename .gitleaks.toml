@@ -9,15 +9,16 @@ title = "minerva-plugins secret history policy"
 useDefault = true
 
 [[allowlists]]
-description = "Local build output that can never reach a commit"
-paths = [
-  # Every Rust plugin's target/ is gitignored. The compiled rmeta of rsa,
-  # pkcs1, pkcs8, pem-rfc7468 and openssl embeds those crates' own PEM
-  # documentation and test vectors, which read as private keys. A directory
-  # scan walks them anyway, and 55 unfixable findings train everyone to
-  # ignore the check.
-  '''(^|/)target/''',
-]
+description = "Compiled Rust metadata in local build output"
+# Every Rust plugin's target/ is gitignored. The compiled rmeta of rsa,
+# pkcs1, pkcs8, pem-rfc7468 and openssl embeds those crates' own PEM
+# documentation and test vectors, which read as private keys. A directory
+# scan walks them anyway, and 55 unfixable findings train everyone to
+# ignore the check. Scoped to the one rule those artifacts trip, so a real
+# credential force-added under a target/ path is still caught by every
+# other rule.
+targetRules = ["private-key"]
+paths = ['''(^|/)target/''']
 
 [[allowlists]]
 description = "Docket trackers carry record keys and prose, not credentials"
@@ -28,13 +29,3 @@ description = "Docket trackers carry record keys and prose, not credentials"
 # files because they are tool-owned and cannot be edited to appease a scanner.
 targetRules = ["generic-api-key"]
 paths = ['''\.dct(\.cache(-shm|-wal)?)?$''']
-
-[[allowlists]]
-description = "Historical 32-hex placeholder token in the nametag transfer test"
-# The test now builds its unminted token at runtime, so no token-shaped literal
-# remains in source and no future commit can reproduce this. History still
-# carries the commit that introduced it, which only --all-history revisits.
-# Pinned to that one commit AND to the heuristic rule, so a real credential in
-# the same commit — or the same shape in any other commit — still fails.
-targetRules = ["generic-api-key"]
-commits = ["7625e1db1535c17c256d1a1bc20cec38551643d6"]

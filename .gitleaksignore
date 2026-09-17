@@ -1,0 +1,4 @@
+# One fingerprint per line: commit:path:rule:line. Pins the exact historical
+# finding, not the rule or the commit. The test now builds its unminted token
+# at runtime, so no later commit can reproduce this shape.
+7625e1db1535c17c256d1a1bc20cec38551643d6:nametag-maker/panel_transfer_test.go:generic-api-key:230
