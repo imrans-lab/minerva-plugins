@@ -20,4 +20,7 @@
 # its own setup assertions, and the suite skips its live sections outright
 # when drive-plugin is not built or when DRIVE_FOLDER does not reach the
 # subprocess.
-test_bulk_reply_seam.gd assertions=13
+# 14 assertions = 4 setup (channel declared, start, panel, bulk route) + 2
+# the backend answered at all and is working in the scratch folder + 4 the
+# weighed reply + 3 the drawn rows + 1 teardown.
+test_bulk_reply_seam.gd assertions=14

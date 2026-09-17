@@ -41,6 +41,11 @@ extends SceneTree
 ## not reach the subprocess the live steps do not run: this suite will not
 ## write a fixture into a real user's Drive.
 ##
+## READINESS CONTRACT: start_plugin returning ok means the subprocess
+## launched, not that it is answering — the host's own tool discovery is still
+## round-tripping on the same stdio pipe. The suite therefore waits on a real
+## status round trip, retried on a short budget, and never on a sleep.
+##
 ## SKIP CONTRACT: when the Rust binary is not built on this host the live
 ## sections do not run and the suite says so loudly. Its assertion pin
 ## therefore describes a host that has built the plugin.
@@ -79,9 +84,17 @@ const FIXTURE_NAME_PREFIX := "bulk-lane-fixture-project-"
 ## Generous: a cold backend may attempt (and fail) a cloud round trip first.
 const LIST_TIMEOUT_MS := 60000
 
+## Readiness probing: a short per-probe budget so an unanswered request costs
+## one retry, and a long overall one so a genuinely dead backend is still
+## reported as dead rather than as a slow one.
+const READY_PROBE_MS := 15000
+const READY_DEADLINE_MS := 120000
+
 var _pass: int = 0
 var _fail: int = 0
 var _pm: Node = null
+## True only when this suite built the manager and must therefore free it.
+var _owns_pm: bool = false
 var _broker: Object = null
 var _panel: Node = null
 var _panel_key: String = ""
@@ -170,12 +183,30 @@ func _write_fixture_state() -> void:
 # ---------------------------------------------------------------------------
 
 func _mount(manifest_path: String) -> bool:
-	var pm_script: Script = load(PLUGIN_MANAGER_PATH)
-	if pm_script == null:
-		printerr("  PluginManager.gd did not load")
-		return false
-	_pm = pm_script.new()
-	root.add_child(_pm)
+	# ONE manager per plugin id, or none of this is a fair test. The headless
+	# host boots its own plugin system, and a second PluginManager over the
+	# same plugin database gives the id two runtimes: each starts its own
+	# subprocess and runs its own tool discovery, the loser is named in the log
+	# as "Plugin connection changed during tool discovery", and a request sent
+	# on one runtime's connection is answered into the other's reader — the
+	# awaiting panel is never told anything at all. So reuse the host's
+	# manager whenever the autoload has one, and build a private one only on a
+	# host that has no plugin system.
+	_owns_pm = false
+	# Reached through the tree rather than the autoload identifier so a host
+	# without the singleton is a fallback, not a parse-time dependency.
+	var singleton: Node = root.get_node_or_null("SingletonObject")
+	if singleton != null and singleton.get("plugin_manager") != null:
+		_pm = singleton.get("plugin_manager")
+		print("  reusing the host's PluginManager (one runtime per plugin id)")
+	else:
+		var pm_script: Script = load(PLUGIN_MANAGER_PATH)
+		if pm_script == null:
+			printerr("  PluginManager.gd did not load")
+			return false
+		_pm = pm_script.new()
+		_owns_pm = true
+		root.add_child(_pm)
 	await process_frame
 	if _pm._db == null:
 		printerr("  PluginManager did not initialise its database")
@@ -275,8 +306,29 @@ func _mount(manifest_path: String) -> bool:
 ## describes and a real user's Drive might be. Refuse to go further.
 func _step_the_backend_uses_the_scratch_folder() -> bool:
 	print("-- the backend is working in this suite's scratch folder --")
-	var envelope: Dictionary = await _panel._send_request(
-			_panel.get_node_or_null("_MinervaIPC"), STATUS_CHANNEL, {}, LIST_TIMEOUT_MS)
+	# start_plugin returning ok means the subprocess launched, not that it is
+	# answering: the host's own tool discovery is still round-tripping on the
+	# same stdio pipe. Readiness is therefore a real round trip and nothing
+	# else — status is the cheapest one drive has and is documented never to
+	# fail — retried on a short budget so a request issued into an unsettled
+	# connection costs one retry instead of the whole suite.
+	var envelope: Dictionary = {}
+	var answered: bool = false
+	var deadline_ms: int = Time.get_ticks_msec() + READY_DEADLINE_MS
+	while Time.get_ticks_msec() < deadline_ms:
+		envelope = await _panel._send_request(
+				_panel.get_node_or_null("_MinervaIPC"), STATUS_CHANNEL, {}, READY_PROBE_MS)
+		if bool(envelope.get("success", false)):
+			answered = true
+			break
+		print("  backend not answering yet (%s) — retrying"
+				% str(envelope.get("error_code", "?")))
+		# A refusal comes back immediately, so back off rather than spin.
+		await create_timer(0.5).timeout
+	check("the backend answered a status round trip before the measurements begin",
+			answered, "last envelope=%s" % str(envelope).left(400))
+	if not answered:
+		return false
 	var folder: String = str(_worker_result(envelope).get("folder", ""))
 	var ok: bool = folder == _scratch_folder
 	check("the backend's effective Drive folder is the scratch folder",
@@ -383,18 +435,45 @@ func _teardown() -> void:
 			and (_broker as Node).get_parent() == null:
 		(_broker as Node).free()
 	if _pm != null:
+		# Stopped either way — this suite started it. The manager itself is
+		# left alone unless it is this suite's own.
 		var stop_result: Dictionary = await _pm.stop_plugin("drive")
 		check("teardown: stop_plugin returns ok",
 				bool(stop_result.get("ok", false)), str(stop_result))
+		if _owns_pm and is_instance_valid(_pm):
+			if _pm.get_parent() != null:
+				_pm.get_parent().remove_child(_pm)
+			_pm.free()
+		_pm = null
 
 
+## The whole scratch tree, not just the fixture: the backend creates the
+## effective Drive folder on every call and may materialise files under it, and
+## anything left behind would seed the NEXT run's state with rows this suite
+## did not write.
 func _cleanup() -> void:
 	if _scratch_folder == "":
 		return
-	var state_path: String = _scratch_folder.path_join(".drive-state.json")
-	if FileAccess.file_exists(state_path):
-		DirAccess.remove_absolute(state_path)
-	DirAccess.remove_absolute(_scratch_folder)
+	_remove_tree(_scratch_folder)
+
+
+func _remove_tree(path: String) -> void:
+	var dir := DirAccess.open(path)
+	if dir == null:
+		return
+	dir.include_hidden = true
+	dir.list_dir_begin()
+	var entry: String = dir.get_next()
+	while entry != "":
+		if entry != "." and entry != "..":
+			var child: String = path.path_join(entry)
+			if dir.current_is_dir():
+				_remove_tree(child)
+			else:
+				DirAccess.remove_absolute(child)
+		entry = dir.get_next()
+	dir.list_dir_end()
+	DirAccess.remove_absolute(path)
 
 
 func check(desc: String, ok: bool, detail: String = "") -> void:

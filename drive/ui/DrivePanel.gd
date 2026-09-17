@@ -183,11 +183,10 @@ func _build_ui() -> void:
 ## The `request` signal rides the host's control lane, which the scene-panel
 ## broker bounds at PluginPayloadLimits.CONTROL_BYTES (64 KiB) in BOTH
 ## directions; an over-cap reply is replaced by a payload_too_large error
-## before the caller ever sees it. The broker weighs the DECODED reply, and a
-## list row costs roughly 280 bytes of it (name, uuid, status, two versions
-## and an absolute path), so somewhere around 230 tracked projects the list
-## reply stops fitting and the panel can only report a failure. sync's name
-## lists for pushed/pulled/conflicts/errors/deferred scale the same way.
+## before the caller ever sees it. A list reply grows with the tracked set,
+## and sync's pushed/pulled/conflicts/errors/deferred name lists with it, so
+## both outgrow that lane on an ordinary user's Drive. The size arithmetic is
+## in tests/gd/test_bulk_reply_seam.gd, which measures it.
 ##
 ## MinervaIPC.request_bulk uses the same declared channels and the same
 ## permission checks, but bounds both directions at PluginPayloadLimits
