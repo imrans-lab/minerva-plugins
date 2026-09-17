@@ -229,6 +229,15 @@ func _send_request(ipc: Node, channel: String, payload: Dictionary,
 ## cannot be re-armed from here, so the whole budget is spent in one await —
 ## the same end for the caller, without the intermediate expiries. Either way
 ## the envelope carries `elapsed_ms`, and a give-up says how long it waited.
+##
+## A give-up reports the budget the panel asked the host to wait, never less.
+## The helper counts its own expiry on a SceneTree timer, which advances on
+## process delta rather than wall clock, so the wall time around that await
+## can be shorter than the wait that was asked for; the wait the worker was
+## given is the budget, and the helper's sentinel names it too. Only that
+## sentinel is treated this way: it is the one timeout that names the reply id
+## back, where a timeout reported by the broker or the worker is a real answer
+## about a shorter wait.
 func _send_request_until(ipc: Node, channel: String, payload: Dictionary,
 		chunk_ms: int, give_up_ms: int, request_id: String) -> Dictionary:
 	if not ipc.has_method("request_bulk"):
@@ -238,11 +247,16 @@ func _send_request_until(ipc: Node, channel: String, payload: Dictionary,
 	var started_ms: int = Time.get_ticks_msec()
 	var envelope: Dictionary = await ipc.request_bulk(channel, payload, give_up_ms)
 	var elapsed_ms: int = Time.get_ticks_msec() - started_ms
-	envelope["elapsed_ms"] = elapsed_ms
-	if (not bool(envelope.get("success", false))
-			and str(envelope.get("error_code", "")) == "timeout"):
+	var gave_up: bool = (
+		not bool(envelope.get("success", false))
+		and str(envelope.get("error_code", "")) == "timeout"
+		and not str(envelope.get("reply_id", "")).is_empty()
+	)
+	if gave_up:
+		elapsed_ms = maxi(elapsed_ms, give_up_ms)
 		envelope["error_message"] = (
 			"the worker did not answer in %.1f s" % (elapsed_ms / 1000.0))
+	envelope["elapsed_ms"] = elapsed_ms
 	return envelope
 
 # ── Plugin platform lifecycle hooks (override MinervaPluginPanel virtuals) ──

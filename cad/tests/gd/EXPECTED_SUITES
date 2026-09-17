@@ -912,7 +912,8 @@ test_package_export.gd assertions=16
 
 # The real broker + real backend weigh a cad.evaluate reply past the host's
 # 64 KiB control cap and assert the panel painted the worker's own
-# tessellation. Pinned for a host where the cad plugin is already installed:
-# an install (or its setup pipeline) adds its own setup assertions, and the
-# suite skips its live sections outright when cad-plugin is not built.
+# tessellation. REQUIRES the built cad-plugin binary and an already-installed
+# cad plugin: without the binary the suite reports no assertions at all, which
+# the runner fails (there is no clean skip), and a first install adds its own
+# setup assertions on top of the count pinned here.
 test_bulk_reply_seam.gd assertions=12
