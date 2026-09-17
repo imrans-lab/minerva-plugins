@@ -311,7 +311,7 @@ func readChunkInputSchema() map[string]interface{} {
 	return map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
-			"path":   map[string]interface{}{"type": "string", "description": "Absolute path of the file to read."},
+			"path":   map[string]interface{}{"type": "string", "description": "Absolute path of a PDF this plugin wrote in this session (nametag_generate deliver_to_file / nametag_save); any other path is refused."},
 			"offset": map[string]interface{}{"type": "number", "description": "Byte offset of the slice (default 0)."},
 			"length": map[string]interface{}{"type": "number", "description": "Slice length in bytes; clamped to what fits one capped reply. The result reports the length actually returned."},
 		},
@@ -387,7 +387,7 @@ var toolList = []map[string]interface{}{
 	},
 	{
 		"name":        "nametag_read_chunk",
-		"description": "Read one slice of a file as base64. Lets a panel bounded at 64 KiB per reply pull back a PDF written by nametag_generate (deliver_to_file) or nametag_save. Returns {bytes_b64, offset, length, total_bytes, eof}; loop from offset 0 until eof.",
+		"description": "Read one slice of a PDF this plugin wrote in this session (nametag_generate deliver_to_file / nametag_save) as base64 — any other path is refused. Lets a panel bounded at 64 KiB per reply pull the file back. Returns {bytes_b64, offset, length, total_bytes, eof}; loop from offset 0 until eof. The eof slice of a delivered preview also deletes it.",
 		"inputSchema": readChunkInputSchema(),
 	},
 	{
