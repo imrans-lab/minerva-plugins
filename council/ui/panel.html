@@ -3728,7 +3728,11 @@ window.CouncilPresets = [
       contribution_ids: ids
     }).then(function (reply) {
       if (!reply || !reply.ok) { return; }
-      say('Sent ' + reply.payload.characters + ' characters to chat ' + reply.payload.chat_id + '.');
+      // A transcript longer than the host's message cap travels as consecutive
+      // messages, so the count is said rather than left for the chat to explain.
+      var parts = reply.payload.parts || 1;
+      say('Sent ' + reply.payload.characters + ' characters to chat ' + reply.payload.chat_id
+        + (parts > 1 ? ', in ' + parts + ' messages.' : '.'));
     });
   }
 

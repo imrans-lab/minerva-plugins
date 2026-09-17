@@ -633,6 +633,19 @@ it is always a user action. The text is built by the same derivation
 `_on_panel_render_for_llm` uses, so what the user sends and what a provider reads
 can never be two different summaries.
 
+A `capability:` channel is held at the host's **control** cap in both directions
+whatever the host's bulk limit is, and a worked session's derivation is routinely
+several times that. So `CouncilBackend.send_to_chat` cuts the text into
+consecutive messages that each measure inside the cap — the budget is measured in
+the encoded form the broker counts, because JSON escaping makes a message cost
+more bytes than it holds — and sends them one at a time, in order. Cuts land on
+whole characters and prefer the end of a line, and nothing is inserted, so the
+messages concatenate back to the derivation byte for byte: the transcript is read
+by reading them in the order they arrived. A part that fails stops the send and
+reports how much of the text reached the chat; a destination that leaves no room
+for any character at all is refused as `payload_too_large` rather than split
+forever.
+
 The other direction — bringing a question and selected context *to* Council from
 elsewhere — is an MCP tool on Council's backend taking an explicit `session_id`
 (or creating one and returning it). Never an implicit destination.

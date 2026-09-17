@@ -184,6 +184,31 @@ class Exchange extends RefCounted:
 			await finished
 
 
+## The host's reply for a message a chat accepted. It is a coroutine because the
+## real MinervaIPC.await_reply is one: a stand-in that returned straight away
+## would let the send loop run to completion inside a single emit, which is not
+## the interleaving the shipped code runs in.
+class SinkIPC extends Node:
+	func await_reply(_reply_id: String, _timeout_ms: int = 0) -> Dictionary:
+		await Engine.get_main_loop().process_frame
+		return {"success": true, "result": {}}
+
+
+## The far end of the send capability, which this suite cannot have for real:
+## there is no capability broker here and no chat behind it. It is the panel
+## SHAPE the backend speaks to — the `request` signal and the host's
+## `_MinervaIPC` child — and what each hop carried is read off that signal,
+## exactly as the section reads it off the real panel's. Everything under test
+## (the split, the measured budget, the send loop) is the shipped code.
+class ChatSink extends Node:
+	signal request(channel: String, payload: Dictionary, reply_id: String)
+
+	func _init() -> void:
+		var helper := SinkIPC.new()
+		helper.name = "_MinervaIPC"
+		add_child(helper)
+
+
 ## Enough of an Editor for PluginScenePanelHost._build_ctx, which reads
 ## `associated_object` and puts the editor itself in ctx.
 class FakeEditor extends RefCounted:
@@ -1392,6 +1417,77 @@ func _section_11_the_text_a_session_hands_over() -> void:
 	check("addressed to the chat the session itself is bound to",
 			handed.size() == 1 and str(handed[0].get("chat_id", "")) == bound_chat,
 			str(handed).left(160))
+
+	# A SESSION LONGER THAN THE LANE CARRIES. The send is a `capability:` channel,
+	# which the host holds at the CONTROL cap in both directions however new it
+	# is, and a real council's transcript runs to several times that. The oracle
+	# is the derivation itself: whatever reaches the chat, read in the order it
+	# arrives, has to BE it — so the messages are concatenated and compared to the
+	# record's own text, byte for byte.
+	#
+	# The chat is the one thing this suite cannot have (no capability broker, see
+	# the section header), so the send runs against a sink in the panel's shape.
+	# The split, the budget and the send loop are the shipped ones.
+	var cap: int = CouncilBackend.HOST_IPC_PAYLOAD_LIMIT
+	var long_fixture: Dictionary = _parse(FileAccess.get_file_as_string(POPULATED_FIXTURE_PATH))
+	var long_session: Dictionary = _session_of(long_fixture, CONTEXT_SESSION)
+	# Characters JSON pays extra for — quotes, backslashes, newlines — and
+	# characters that cost more bytes than they are characters. A budget counted
+	# in characters instead of measured in the encoded form shows up here as a
+	# message the host would refuse.
+	var paragraph := "A \"quoted\" clause, a backslash \\, 界 and 🙂 in one line.\n"
+	for cid in COMPLETE_IDS:
+		_part_of(long_session, cid)["text"] = paragraph.repeat(500)
+	var long_record = record_script.new()
+	long_record.adopt(long_fixture)
+	var long_text: String = long_record.context_text(CONTEXT_SESSION, PackedStringArray())
+	var long_measured: int = CouncilBackend.measure({"chat_id": bound_chat, "message": long_text})
+	check("setup: this session's derivation is past the cap the send lane is held to",
+			long_measured > cap and _context_blocks(long_text).size() == COMPLETE_IDS.size(),
+			"%d bytes vs %d, blocks %s" % [long_measured, cap, str(_context_blocks(long_text))])
+
+	var sink := ChatSink.new()
+	var sent_messages: Array[Dictionary] = []
+	var watch_sink := func(channel: String, payload: Dictionary, _reply_id: String) -> void:
+		if channel == CouncilBackend.SEND_MESSAGE_CHANNEL:
+			sent_messages.append(payload)
+	sink.request.connect(watch_sink)
+	var chunked = CouncilBackend.new(sink, "council_panel#chunked")
+	var long_sent: Dictionary = await chunked.send_to_chat(bound_chat, long_text)
+	var carried := PackedStringArray()
+	var widest := 0
+	var wrong_chat := 0
+	for message_v in sent_messages:
+		var message: Dictionary = message_v
+		carried.append(str(message.get("message", "")))
+		widest = maxi(widest, CouncilBackend.measure(message))
+		if str(message.get("chat_id", "")) != bound_chat:
+			wrong_chat += 1
+	check("a session past the cap is sent rather than refused, in more than one message",
+			bool(long_sent.get("ok", false)) and int(long_sent.get("parts", 0)) == carried.size()
+			and carried.size() > 1,
+			"%s / %d delivered" % [str(long_sent).left(160), carried.size()])
+	check("and every message it was cut into fits the lane the host holds it to",
+			not carried.is_empty() and widest <= cap, "widest %d vs %d" % [widest, cap])
+	var reassembled := "".join(carried)
+	check("the messages the chat receives concatenate back to the derivation, byte for byte",
+			reassembled.to_utf8_buffer() == long_text.to_utf8_buffer(),
+			"%d vs %d bytes, differ at %d" % [reassembled.to_utf8_buffer().size(),
+				long_text.to_utf8_buffer().size(), _first_difference(reassembled, long_text)])
+	check("each of them addressed to the chat the session is bound to",
+			wrong_chat == 0, "%d of %d went elsewhere" % [wrong_chat, carried.size()])
+
+	# WHAT STILL CANNOT FIT. A destination that fills the lane on its own leaves
+	# no room for any character of the text, and the refusal is the answer —
+	# cutting it smaller would never terminate.
+	sent_messages.clear()
+	var impossible: Dictionary = await chunked.send_to_chat("c".repeat(cap), long_text)
+	check("a text with no room left for it is refused by name, and nothing is sent",
+			not bool(impossible.get("ok", true))
+			and str(impossible.get("code", "")) == "payload_too_large"
+			and sent_messages.is_empty(),
+			"%s / %d sent" % [str(impossible).left(160), sent_messages.size()])
+	sink.free()
 
 	# THE UNBOUND SESSION. The binding is the only thing that changes; the text
 	# would be the same one that was just sent, so a send here would be a send to

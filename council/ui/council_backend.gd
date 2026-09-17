@@ -226,11 +226,86 @@ func models() -> Dictionary:
 ## Hand `text` to the chat `chat_id` names. The caller resolves the id from the
 ## session's recorded `chat_binding`; this class refuses an empty one rather
 ## than falling back to anything.
+##
+## A capability channel is always at the host's CONTROL cap, bulk route or not,
+## and a session's transcript is routinely several times that. So the text is
+## cut into consecutive messages that each fit and sent one at a time, in order.
+## Nothing is inserted and every cut lands on a whole character, so the messages
+## the chat receives concatenate back to exactly this text — the transcript is
+## read by reading them in the order they arrived.
+##
+## Returns {ok:true, parts: <how many messages carried it>} on success. A part
+## that fails stops the send and says how much of the text reached the chat,
+## because "sent" for a transcript the chat only has the beginning of is the one
+## answer a user cannot act on.
 func send_to_chat(chat_id: String, text: String) -> Dictionary:
 	if chat_id.strip_edges().is_empty():
 		return {"ok": false, "code": "missing_chat",
 			"message": "This session is not bound to a chat, so there is nowhere to send it."}
-	return await _send(SEND_MESSAGE_CHANNEL, {"chat_id": chat_id, "message": text})
+	var limit := _payload_limit(_ipc_helper(), SEND_MESSAGE_CHANNEL)
+	var parts := split_for_send(chat_id, text, limit)
+	if parts.is_empty():
+		return {"ok": false, "code": "payload_too_large", "retryable": false,
+			"message": "This chat's address alone fills the %d UTF-8 bytes the host carries, so there is no room for any of the text." % limit}
+	var delivered := 0
+	var last: Dictionary = {}
+	for part in parts:
+		last = await _send(SEND_MESSAGE_CHANNEL, {"chat_id": chat_id, "message": str(part)})
+		if not bool(last.get("ok", false)):
+			if delivered == 0:
+				return last
+			var partial := last.duplicate()
+			partial["message"] = ("Only the first %d of %d messages reached the chat, so it holds the "
+				+ "beginning of this session and not the rest. (%s)") % [
+					delivered, parts.size(), str(last.get("message", ""))]
+			partial["parts"] = delivered
+			return partial
+		delivered += 1
+	last = last.duplicate()
+	last["parts"] = delivered
+	return last
+
+
+## The consecutive messages `text` has to be cut into to reach `chat_id` over a
+## lane bounded at `limit`, in order. Empty when not even one character fits,
+## which is the caller's cue to refuse rather than loop.
+##
+## The budget is MEASURED rather than computed: JSON escaping makes a message
+## cost more bytes than it holds, by an amount only the encoder knows, so each
+## candidate is weighed as the host will weigh it. A cut prefers the end of a
+## line so a block is not split mid-sentence when it need not be, but it is the
+## measurement that decides where it may fall at all.
+static func split_for_send(chat_id: String, text: String, limit: int) -> Array:
+	var parts: Array = []
+	var rest := text
+	while not rest.is_empty():
+		var take := _longest_fitting_prefix(chat_id, rest, limit)
+		if take <= 0:
+			return []
+		if take < rest.length():
+			var line_end := rest.rfind("\n", take - 1)
+			if line_end >= 0:
+				take = line_end + 1
+		parts.append(rest.substr(0, take))
+		rest = rest.substr(take)
+	return parts
+
+
+## How many characters of `rest` fit in one message, by bisection over the
+## measured size. A character costs at least one byte, so a prefix longer than
+## the whole limit cannot fit and the search never has to look past it.
+static func _longest_fitting_prefix(chat_id: String, rest: String, limit: int) -> int:
+	if measure({"chat_id": chat_id, "message": rest}) <= limit:
+		return rest.length()
+	var low := 0
+	var high: int = mini(rest.length(), limit)
+	while low + 1 < high:
+		var mid: int = low + (high - low) / 2
+		if measure({"chat_id": chat_id, "message": rest.substr(0, mid)}) <= limit:
+			low = mid
+		else:
+			high = mid
+	return low
 
 
 # ---------------------------------------------------------------------------
@@ -359,12 +434,12 @@ func _send(channel: String, payload: Dictionary) -> Dictionary:
 	if _panel == null or not is_instance_valid(_panel):
 		return {"ok": false, "code": "internal", "message": "The panel is gone.", "retryable": false}
 
-	var helper: Node = _panel.get_node_or_null("_MinervaIPC")
+	var helper := _ipc_helper()
 	if helper == null:
 		return {"ok": false, "code": "internal", "retryable": false,
 			"message": "This panel is not registered with the host."}
-	var bulk := not channel.begins_with("capability:") and helper.has_method("request_bulk") and helper.has_method("get_bulk_payload_limit")
-	var limit: int = helper.get_bulk_payload_limit() if bulk else HOST_IPC_PAYLOAD_LIMIT
+	var bulk := _takes_bulk_route(helper, channel)
+	var limit := _payload_limit(helper, channel)
 	var measured := measure(payload)
 	if measured > limit:
 		return {"ok": false, "code": "payload_too_large", "retryable": false,
@@ -401,6 +476,28 @@ func _refusal(body: Dictionary) -> Dictionary:
 		return {}
 	return {"ok": false, "code": "internal", "retryable": false,
 		"message": str(body.get("error", "The Council backend refused the record."))}
+
+
+## The host's IPC helper on this panel, or null when the panel is gone or was
+## never registered.
+func _ipc_helper() -> Node:
+	if _panel == null or not is_instance_valid(_panel):
+		return null
+	return _panel.get_node_or_null("_MinervaIPC")
+
+
+## Whether `channel` travels the host's bulk route. Capability channels never
+## do — the host holds them at the control cap — and an older host has no bulk
+## route at all, which is what the method probe answers.
+static func _takes_bulk_route(helper: Node, channel: String) -> bool:
+	return helper != null and not channel.begins_with("capability:") \
+		and helper.has_method("request_bulk") and helper.has_method("get_bulk_payload_limit")
+
+
+## How many UTF-8 bytes one message on `channel` may measure.
+static func _payload_limit(helper: Node, channel: String) -> int:
+	return helper.get_bulk_payload_limit() if _takes_bulk_route(helper, channel) \
+		else HOST_IPC_PAYLOAD_LIMIT
 
 
 ## What the host will measure this payload as: the serialised argument

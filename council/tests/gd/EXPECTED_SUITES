@@ -32,8 +32,10 @@
 # and a round driven straight down the MCP tool door, with no panel in the
 # exchange, reaching the panel that owns that document before it saves; and the
 # one text derivation a session hands over, held to the fixture that is its
-# oracle and proved to be the same text through both of its callers.
+# oracle and proved to be the same text through both of its callers, including a
+# session past the send lane's cap, whose messages have to concatenate back to
+# that derivation byte for byte.
 # Includes four landing regressions: foreign write, pending save warning,
 # delayed convergence after another panel becomes the holder, and empty-panel
 # project-scoped adoption after its prior owner closes.
-test_council_panel.gd assertions=117
+test_council_panel.gd assertions=123

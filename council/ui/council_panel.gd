@@ -844,7 +844,10 @@ func _chat_handoff(payload: Dictionary, request_id: String, revision: int) -> Di
 	if not bool(sent.get("ok", false)):
 		return _err(request_id, revision, str(sent.get("code", "internal")),
 			str(sent.get("message", "")), bool(sent.get("retryable", false)))
-	return _ok(request_id, revision, {"chat_id": chat_id, "characters": text.length()})
+	# `parts` is how many messages carried the text: the capability lane is at the
+	# host's control cap, so a long session arrives as consecutive messages.
+	return _ok(request_id, revision, {"chat_id": chat_id, "characters": text.length(),
+		"parts": int(sent.get("parts", 1))})
 
 
 ## Council's view preferences, as the page reads them.
