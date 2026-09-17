@@ -501,7 +501,7 @@ func _plate_source() -> String:
 		PLATE_SPAN_MM, PLATE_SPAN_MM, PLATE_THICKNESS_MM]
 	for i in range(HOLE_COUNT):
 		var x := 20.0 + float(i % HOLE_COLUMNS) * HOLE_PITCH_MM
-		var y := 20.0 + floor(float(i) / float(HOLE_COLUMNS)) * HOLE_PITCH_MM
+		var y: float = 20.0 + floor(float(i) / float(HOLE_COLUMNS)) * HOLE_PITCH_MM
 		out += "part = part - translate([%.1f, %.1f, -1], cylinder(h=%.1f, r=%.2f))\n" % [
 			x, y, PLATE_THICKNESS_MM + 2.0, HOLE_RADIUS_MM]
 	return out
