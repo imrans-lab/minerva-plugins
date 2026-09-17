@@ -24,3 +24,34 @@
 # the backend answered at all and is working in the scratch folder + 4 the
 # weighed reply + 3 the drawn rows + 1 teardown.
 test_bulk_reply_seam.gd assertions=14
+
+# The per-plugin CONTRACT GUARD: six domain-defined cases (null/empty, small
+# and large x happy/unhappy, and the large-with-errors reply) driven through
+# the real broker and the real drive-plugin subprocess, with the wire bytes of
+# every large case printed on the Results line. Shares only its assertion
+# discipline with the other plugins' guards (scripts/contract_guard.gd); the
+# six cases, and drive's definition of "large" (tracked-file count), are its
+# own. Same scratch-folder contract as the suite above: no case runs unless
+# the backend confirms it is working in this suite's own folder.
+#
+# CASE 5 IS EXPECTED TO FAIL against drive as it stands, and its two
+# assertions are the report: a state file that is not valid JSON is read as an
+# EMPTY state (src/main.rs load_state ends in `unwrap_or_default()`), answered
+# as a Drive with no projects, and then OVERWRITTEN with that empty state —
+# the tracked set is destroyed and the reply says all is well. The assertions
+# state the contract, not the behaviour. Do not weaken them to make the suite
+# green; fix load_state.
+#
+# 28 assertions = 6 mount (db, the installed definition's channels, backend
+# start, the bulk route, a status round trip, the scratch-folder gate) + 2
+# null/empty + 3 small-happy + 3 small-unhappy (refusal + code, the tracked
+# count is untouched) + 6 large-happy (request under the cap, reply over it,
+# not an oversize refusal, success, the row count, the drawn rows) + 2
+# large-unhappy + 5 large-with-errors (not oversize, success, every row
+# unhappy, the row shape is the happy one's, still over the cap) + 1 teardown.
+#
+# `real-worker` is refused for drive (no scripts/probe-worker-methods.py), and
+# this suite prints no such field. Without the built binary it SKIPS and
+# reports no assertions, which the runner fails; the pin describes a host that
+# has built and installed the plugin.
+test_contract_guard.gd assertions=28
