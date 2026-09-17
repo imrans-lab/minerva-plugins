@@ -34,8 +34,9 @@
 # one text derivation a session hands over, held to the fixture that is its
 # oracle and proved to be the same text through both of its callers, including a
 # session past the send lane's cap, whose messages have to concatenate back to
-# that derivation byte for byte.
+# that derivation byte for byte, and a block whose single line straddles the
+# boundary, where a line-end cut would halve what each message carries.
 # Includes four landing regressions: foreign write, pending save warning,
 # delayed convergence after another panel becomes the holder, and empty-panel
 # project-scoped adoption after its prior owner closes.
-test_council_panel.gd assertions=123
+test_council_panel.gd assertions=125

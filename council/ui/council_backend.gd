@@ -283,8 +283,12 @@ static func split_for_send(chat_id: String, text: String, limit: int) -> Array:
 		if take <= 0:
 			return []
 		if take < rest.length():
+			# Back the cut up to the end of a line, but only while that keeps at
+			# least HALF of what fit: a block opens with a blank line, so a long
+			# line that straddles the boundary would otherwise be preceded by a
+			# part carrying almost nothing and the message count would double.
 			var line_end := rest.rfind("\n", take - 1)
-			if line_end >= 0:
+			if line_end >= 0 and line_end + 1 >= take / 2:
 				take = line_end + 1
 		parts.append(rest.substr(0, take))
 		rest = rest.substr(take)

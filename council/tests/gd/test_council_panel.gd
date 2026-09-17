@@ -1477,6 +1477,43 @@ func _section_11_the_text_a_session_hands_over() -> void:
 	check("each of them addressed to the chat the session is bound to",
 			wrong_chat == 0, "%d of %d went elsewhere" % [wrong_chat, carried.size()])
 
+	# A BLOCK WHOSE LINE STRADDLES THE BOUNDARY. The derivation opens every block
+	# with a blank line, so when one contribution is a SINGLE line longer than
+	# the lane, the only line end inside a fitting prefix is the block's own head.
+	# Backing the cut up to it unconditionally would send a message carrying a
+	# heading and nothing else and then bisect the same line again, roughly
+	# doubling the message count. The claim is that the cut falls where the
+	# measurement put it instead: every message but the last carries at least
+	# half the lane. The characters here are worth more bytes than they are
+	# characters, which is how one line passes the lane while staying inside the
+	# schema's own 32768-character ceiling for a contribution.
+	var straddle: Dictionary = _parse(FileAccess.get_file_as_string(POPULATED_FIXTURE_PATH))
+	var straddle_session: Dictionary = _session_of(straddle, CONTEXT_SESSION)
+	var one_line := "🙂界 ".repeat(9000)
+	for cid in COMPLETE_IDS:
+		_part_of(straddle_session, cid)["text"] = one_line
+	var straddle_record = record_script.new()
+	straddle_record.adopt(straddle)
+	var straddle_text: String = straddle_record.context_text(CONTEXT_SESSION, PackedStringArray())
+	check("setup: one contribution is a single line that does not fit the lane on its own",
+			not one_line.contains("\n") and one_line.length() <= 32768
+			and CouncilBackend.measure({"chat_id": bound_chat, "message": one_line}) > cap,
+			"%d characters, %d bytes in the message" % [one_line.length(),
+				CouncilBackend.measure({"chat_id": bound_chat, "message": one_line})])
+	var straddle_parts: Array = CouncilBackend.split_for_send(bound_chat, straddle_text, cap)
+	var narrowest := cap
+	var joined := ""
+	for i in straddle_parts.size():
+		joined += str(straddle_parts[i])
+		if i < straddle_parts.size() - 1:
+			narrowest = mini(narrowest,
+				CouncilBackend.measure({"chat_id": bound_chat, "message": straddle_parts[i]}))
+	check("the cut follows the measurement when a line end would cost most of the message",
+			straddle_parts.size() > 1 and narrowest * 2 >= cap
+			and joined.to_utf8_buffer() == straddle_text.to_utf8_buffer(),
+			"%d parts, narrowest %d of %d, %d vs %d bytes" % [straddle_parts.size(), narrowest,
+				cap, joined.to_utf8_buffer().size(), straddle_text.to_utf8_buffer().size()])
+
 	# WHAT STILL CANNOT FIT. A destination that fills the lane on its own leaves
 	# no room for any character of the text, and the refusal is the answer —
 	# cutting it smaller would never terminate.

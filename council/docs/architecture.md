@@ -639,9 +639,11 @@ several times that. So `CouncilBackend.send_to_chat` cuts the text into
 consecutive messages that each measure inside the cap — the budget is measured in
 the encoded form the broker counts, because JSON escaping makes a message cost
 more bytes than it holds — and sends them one at a time, in order. Cuts land on
-whole characters and prefer the end of a line, and nothing is inserted, so the
-messages concatenate back to the derivation byte for byte: the transcript is read
-by reading them in the order they arrived. A part that fails stops the send and
+whole characters and prefer the end of a line while that still keeps at least
+half of what fit — a block opens with a blank line, so a long line straddling
+the boundary would otherwise be preceded by a message carrying almost nothing —
+and nothing is inserted, so the messages concatenate back to the derivation byte
+for byte: the transcript is read by reading them in the order they arrived. A part that fails stops the send and
 reports how much of the text reached the chat; a destination that leaves no room
 for any character at all is refused as `payload_too_large` rather than split
 forever.
