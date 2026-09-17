@@ -31,9 +31,12 @@ extends RefCounted
 ##   var guard := ContractGuard.new()
 
 ## Codes a refusal may carry, in the order they are consulted. `error_code` is
-## the host's scene-reply contract (PluginScenePanelBroker); `code` and
-## `error_kind` are the shapes plugin surfaces of their own use.
-const DEFAULT_CODE_KEYS: Array[String] = ["error_code", "code", "error_kind"]
+## the host's scene-reply contract (PluginScenePanelBroker); `code`,
+## `error_kind` and the nested `error.kind` are the shapes plugin surfaces use
+## of their own. A key may name a path through nested dictionaries with dots,
+## because where a plugin keeps its code is the plugin's business — that it HAS
+## one is not.
+const DEFAULT_CODE_KEYS: Array[String] = ["error_code", "code", "error_kind", "error.kind"]
 
 ## Codes that mean "the host refused to carry this", which is never a valid
 ## answer to a case the plugin declares it supports at that size.
@@ -104,7 +107,7 @@ func expect_refusal(case_name: String, reply: Dictionary,
 		return ""
 	var code := ""
 	for key in code_keys:
-		var value: Variant = reply.get(key, null)
+		var value: Variant = _at_path(reply, key)
 		if value is String and not (value as String).is_empty():
 			code = value
 			break
@@ -193,6 +196,16 @@ func results() -> int:
 	if failed > 0:
 		printerr("FAILURES: %d" % failed)
 	return 1 if failed > 0 else 0
+
+
+## The value at a dotted path through nested dictionaries, or null.
+static func _at_path(reply: Dictionary, key: String) -> Variant:
+	var value: Variant = reply
+	for step in key.split("."):
+		if not (value is Dictionary):
+			return null
+		value = (value as Dictionary).get(step, null)
+	return value
 
 
 static func brief(value: Variant, limit: int = 300) -> String:
