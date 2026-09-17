@@ -14,3 +14,10 @@
 # depends on them.
 src/test/helpers/plugin_panel_driver.gd
 src/test/helpers/panel_tool_registry_driver.gd
+
+# test_contract_guard.gd and test_production_seam.gd mount the real chain by
+# path: the host's own plugin manager installs and starts the backend, and the
+# scene-panel broker carries every case (its MAX_PAYLOAD_BYTES is the cap the
+# large cases are weighed against).
+src/Scripts/Services/Plugins/PluginManager.gd
+src/Scripts/Services/Plugins/PluginScenePanelBroker.gd
