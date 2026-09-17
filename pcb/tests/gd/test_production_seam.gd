@@ -208,6 +208,7 @@ func _init() -> void:
 			await _step_2_span_propose_full_contract()
 			await _step_3_commit_refused_unacknowledged()
 			await _step_4_commit_acknowledged_lays_copper()
+			await _step_5_over_cap_reply_lands_whole_board()
 		else:
 			printerr("SETUP FAILED — production chain did not mount; live steps not run")
 		await _teardown()
@@ -686,6 +687,98 @@ func _step_4_commit_acknowledged_lays_copper() -> void:
 	check("4: the source hint was consumed",
 			(reply.get("consumed_hint_ids", []) as Array) == [_hint_id],
 			"got %s" % str(reply.get("consumed_hint_ids", [])))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 5 — a board-sized reply survives the round trip.
+#
+# The broker replaces an over-cap reply on the ordinary control channel with
+# payload_too_large; the panel's send seam rides the bulk route, which bounds
+# both directions at BULK_BYTES. The reply is measured against the control cap
+# here so a small board cannot pass this step, and the landed component count
+# is compared to refs parsed from the fixture text rather than to the
+# generator's own input.
+# ──────────────────────────────────────────────────────────────────────────────
+
+## Enough D_SMA instances for the deserialize reply ({board, resolved,
+## warnings}, ~1.4 KB per resolved component) to clear the 64 KiB control cap
+## with room to spare, while the REQUEST stays well under it — so a failure
+## here can only be the reply direction.
+const OVER_CAP_COMPONENTS := 64
+
+
+## Board big enough to hold OVER_CAP_COMPONENTS D_SMA parts without overlap,
+## so the reply is large for one reason only: there are many components.
+const OVER_CAP_HEADER := """version: 1
+name: over-cap-probe
+width_mm: 400
+height_mm: 400
+layers: [top, bottom]
+design_rules:
+  clearance_mm: 0.2
+  trace_width_mm: 0.25
+  via_diameter_mm: 0.8
+  via_drill_mm: 0.4
+components:
+"""
+
+
+## The fixture, built rather than pasted: copies of the seed library's D_SMA
+## laid out on a 20-wide grid.
+func _over_cap_board_yaml() -> String:
+	var out := OVER_CAP_HEADER
+	for i in range(1, OVER_CAP_COMPONENTS + 1):
+		out += ("  - ref: D%d\n" % i) \
+			+ "    footprint: Diode_SMD:D_SMA\n" \
+			+ ("    x_mm: %.1f\n" % (10.0 + float(i % 20) * 18.0)) \
+			+ ("    y_mm: %.1f\n" % (10.0 + floor(float(i) / 20.0) * 18.0)) \
+			+ "    rotation_deg: 0\n" \
+			+ "    layer: top\n" \
+			+ "    pins:\n" \
+			+ '      - {number: "1", x_mm: -2.05, y_mm: 0.0, pad_width_mm: 2.2, pad_height_mm: 1.7}\n' \
+			+ '      - {number: "2", x_mm: 2.05, y_mm: 0.0, pad_width_mm: 2.2, pad_height_mm: 1.7}\n'
+	return out + "nets:\n  - name: N_CHAIN\n    pins: [D1.2, D2.1]\n"
+
+
+## Count components by reading the fixture text, independently of the loop that
+## wrote it — the number the load must agree with.
+func _count_component_refs(yaml_text: String) -> int:
+	var n := 0
+	for line in yaml_text.split("\n"):
+		if line.begins_with("  - ref: "):
+			n += 1
+	return n
+
+
+func _step_5_over_cap_reply_lands_whole_board() -> void:
+	print("-- 5: a deserialize reply past the control cap still lands the whole board --")
+	var yaml_text := _over_cap_board_yaml()
+	var expected := _count_component_refs(yaml_text)
+	var cap: int = load(SCENE_PANEL_BROKER_SCRIPT_PATH).MAX_PAYLOAD_BYTES
+	var request_bytes := JSON.stringify({"yaml": yaml_text}).to_utf8_buffer().size()
+	check("5: the REQUEST is under the control cap (the reply is what is on trial)",
+			request_bytes < cap, "request=%d cap=%d" % [request_bytes, cap])
+
+	# The raw round trip through the panel's own send seam, so the reply can be
+	# weighed before anything unwraps it. Same broker, same backend, same
+	# channel the public verb below rides.
+	var raw: Dictionary = await panel._request_with_backend_ensure(
+		"pcb.deserialize", {"yaml": yaml_text}, 30000)
+	var reply_bytes := JSON.stringify(raw).to_utf8_buffer().size()
+	check("5: the reply really is over the control cap", reply_bytes > cap,
+			"reply=%d cap=%d" % [reply_bytes, cap])
+	check("5: the reply is not a payload_too_large refusal",
+			str(raw.get("error_code", "")).findn("too_large") == -1
+				and str(raw.get("error_message", "")).findn("too large") == -1,
+			str(raw.get("error_message", "")))
+
+	# The public verb — the exact dict an MCP caller sees.
+	var reply: Dictionary = await panel.handle_tool("minerva_pcb_load_board", {"yaml": yaml_text})
+	check("5: load reply is success", bool(reply.get("success", false)),
+			str(reply).left(400))
+	check_eq("5: component_count equals the fixture's own ref count",
+			int(reply.get("component_count", -1)), expected)
+	check_eq("5: the live board holds every component", data.get_component_count(), expected)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

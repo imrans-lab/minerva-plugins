@@ -4276,9 +4276,8 @@ func _verify_backend_identity(ipc, timeout_ms: int = 10000) -> bool:
 	if ipc == null:
 		return false
 	var nonce := "pcb-identity-%d-%d" % [Time.get_ticks_usec(), randi()]
-	var reply_id := "ping:%d" % Time.get_ticks_usec()
-	request.emit(_PING_CHANNEL, {"echo": nonce}, reply_id)
-	var reply: Dictionary = await ipc.await_reply(reply_id, timeout_ms)
+	var reply: Dictionary = await _send_request(
+		ipc, _PING_CHANNEL, {"echo": nonce}, timeout_ms)
 	if typeof(reply) != TYPE_DICTIONARY or not bool(reply.get("success", false)):
 		return false
 	# Two levels of unwrap between here and HandlePing's raw {ok,plugin,
@@ -4315,12 +4314,32 @@ func _verify_backend_identity(ipc, timeout_ms: int = 10000) -> bool:
 func _start_and_verify_backend(ipc, timeout_ms: int = 30000) -> bool:
 	if ipc == null:
 		return false
-	var reply_id := "%s:%d" % [_START_BACKEND_CHANNEL, Time.get_ticks_usec()]
-	request.emit(_START_BACKEND_CHANNEL, {"id": _BACKEND_PLUGIN_ID}, reply_id)
-	var start_reply: Dictionary = await ipc.await_reply(reply_id, timeout_ms)
+	var start_reply: Dictionary = await _send_request(
+		ipc, _START_BACKEND_CHANNEL, {"id": _BACKEND_PLUGIN_ID}, timeout_ms)
 	if typeof(start_reply) != TYPE_DICTIONARY or not bool(start_reply.get("success", false)):
 		return false
 	return await _verify_backend_identity(ipc)
+
+
+## The one send for every backend round-trip this panel makes.
+##
+## The ordinary `request` signal rides the host's control channel, which the
+## broker bounds at PluginPayloadLimits.CONTROL_BYTES in both directions: an
+## over-cap reply is replaced by a payload_too_large error before the caller
+## sees it, and request-side snapshotting cannot reach a reply. Board-scaled
+## replies (deserialize, health, placements, draft findings) routinely exceed
+## that cap.
+##
+## MinervaIPC.request_bulk uses the same declared channels and permission
+## checks but bounds request and reply at PluginPayloadLimits.BULK_BYTES. It
+## mints and awaits its own reply id, so the `request` signal is not emitted
+## on that route. Feature-detected so a host without it keeps the signal path.
+func _send_request(ipc, channel: String, payload: Dictionary, timeout_ms: int) -> Dictionary:
+	if ipc.has_method("request_bulk"):
+		return await ipc.request_bulk(channel, payload, timeout_ms)
+	var reply_id := "%s:%d" % [channel, Time.get_ticks_usec()]
+	request.emit(channel, payload, reply_id)
+	return await ipc.await_reply(reply_id, timeout_ms)
 
 
 ## Wraps a single backend IPC round-trip with on-demand lazy start: send the
@@ -4337,16 +4356,12 @@ func _request_with_backend_ensure(channel: String, payload: Dictionary, timeout_
 	if ipc == null:
 		return {"success": false, "error_code": "worker_unavailable",
 			"error_message": "plugin IPC channel not ready"}
-	var reply_id := "%s:%d" % [channel, Time.get_ticks_usec()]
-	request.emit(channel, payload, reply_id)
-	var result: Dictionary = await ipc.await_reply(reply_id, timeout_ms)
+	var result: Dictionary = await _send_request(ipc, channel, payload, timeout_ms)
 	if not _reply_says_plugin_not_running(result):
 		return result
 	if not await _start_and_verify_backend(ipc):
 		return result
-	var retry_id := "%s:%d" % [channel, Time.get_ticks_usec()]
-	request.emit(channel, payload, retry_id)
-	return await ipc.await_reply(retry_id, timeout_ms)
+	return await _send_request(ipc, channel, payload, timeout_ms)
 
 
 ## Board-by-reference sender seam (work item 01a0223ec9e271269fd664fcf90dd20b):
@@ -5482,15 +5497,17 @@ func check_draft(candidate_ids: Array = []) -> Dictionary:
 	# sidecar's own fingerprint and is therefore v2 for that reason instead.
 	var draft_token: String = _PcbRoutingSidecarScript.compute_board_fingerprint_v2(composed)
 
-	var reply_id := "pcb.draft_check:%d" % Time.get_ticks_usec()
 	# By-ref like every other board-carrying sender (work item
 	# 01a0223ec9e271269fd664fcf90dd20b). This channel was left inline, so on a
 	# board past the broker's 64KiB cap the request died before the worker saw
 	# it — and the refusal arrived as an empty reply, indistinguishable from a
 	# worker that simply had nothing to say. The composed DRAFT board is what
 	# travels, so it is bigger than the canonical one, not smaller.
-	request.emit("pcb.draft_check", _payload_by_ref(payload, "board"), reply_id)
-	var result: Dictionary = await ipc.await_reply(reply_id, 30000)
+	#
+	# Through the one send seam, so the findings coming back are bounded by the
+	# bulk limit rather than the control cap, like every other board reply.
+	var result: Dictionary = await _send_request(
+		ipc, "pcb.draft_check", _payload_by_ref(payload, "board"), 30000)
 	# The broker's own failures are success:false with no result at all. They
 	# used to fall through the unwrap and return {} — the same value an overlay
 	# drift and an unmounted panel returned, so three different faults with

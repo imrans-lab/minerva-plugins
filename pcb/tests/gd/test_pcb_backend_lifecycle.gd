@@ -116,6 +116,13 @@ class FakeBroker:
 			}
 		ipc.call_deferred("_reply", reply_id, reply)
 
+	## The bulk route MinervaIPC.request_bulk calls directly (the panel sends
+	## every backend request that way when the host offers it). Same scripted
+	## handlers as the signal route — only the entry point differs.
+	func handle_scene_request(_panel_key: String, channel: String, payload: Dictionary,
+			reply_id: String, _generation: int = 0, _bulk: bool = false) -> void:
+		on_request(channel, payload, reply_id)
+
 	func call_count(channel: String) -> int:
 		var n := 0
 		for c in calls:
@@ -192,6 +199,10 @@ func _panel_with_broker() -> Array:
 	panel.add_child(ipc)
 	var broker := FakeBroker.new(ipc)
 	panel.request.connect(broker.on_request)
+	# Production parity: the real broker binds the bulk route at register_panel
+	# time, and the panel prefers it. Without this the panel's sends would
+	# resolve to "panel is no longer registered" and never reach the fake.
+	ipc.configure_bulk(broker, "pcb_panel")
 	return [panel, ipc, broker]
 
 
