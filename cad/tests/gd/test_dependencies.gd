@@ -11,16 +11,18 @@ func _run() -> void:
 		return
 	var panel: Node = rig.panel
 	# The worker is controlled by this test; reserved host requests still go
-	# through the real broker and FileWatcherService.
-	panel.request.connect(func(channel: String, payload: Dictionary, reply_id: String):
+	# through the real broker and FileWatcherService. They ride the bulk route
+	# with everything else the panel sends, so the forwarding listens there.
+	rig.bulk.add_sink(func(channel: String, payload: Dictionary, reply_id: String):
 		if channel.begins_with("host.fs."):
 			rig.broker.handle_scene_request(rig.panel_name, channel, payload, reply_id))
 	await PanelTools.handle(panel, "minerva_cad_build", {"action": "set_mode", "mode": "manual"})
-	_attach_document(rig, SOURCE)
+	await _attach_document(rig, SOURCE)
 	var answer := _worker_answer()
 	answer.result["references"] = [{"name": "module", "path": _reference_path, "units": "mm", "up": "z",
 		"matrix": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]}]
 	panel.build_latest()
+	await process_frame
 	_reply(rig, str(_evaluations(rig.dispatched)[-1].reply_id), answer)
 	await process_frame
 	check("painted dependencies subscribe through the host watcher", Watcher.get_instance().is_watched(_reference_path),
@@ -35,6 +37,7 @@ func _run() -> void:
 	await create_timer(0.35).timeout
 	check("Save As preserves Manual mode and does not compile", _evaluations(rig.dispatched).size() == 1)
 	panel.build_latest()
+	await process_frame
 	_reply(rig, str(_evaluations(rig.dispatched)[-1].reply_id), answer)
 	await process_frame
 	check("explicit rebuild adopts the saved base without a source edit",
@@ -60,6 +63,7 @@ func _run() -> void:
 	check("manual dependency changes retain geometry and do not compile", _evaluations(rig.dispatched).size() == before
 		and panel._reference_library.get_load_count() == loads, str(panel.build_status()))
 	panel.build_latest()
+	await process_frame
 	_reply(rig, str(_evaluations(rig.dispatched)[-1].reply_id), answer)
 	await process_frame
 	check("explicit rebuild replaces dependency snapshot and loads once for all panes", not panel.evaluation_freshness().stale

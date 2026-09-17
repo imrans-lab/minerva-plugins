@@ -7,7 +7,7 @@ func _run() -> void:
 	if rig.is_empty():
 		return
 	var panel: Node = rig.panel
-	_attach_document(rig, SOURCE)
+	await _attach_document(rig, SOURCE)
 	var answer := _worker_answer()
 	answer.result["model"] = {"configuration": "assembled", "selection": "", "physical": true,
 		"configurations": [{"name": "assembled", "physical": true}, {"name": "exploded", "physical": false}]}
@@ -18,6 +18,7 @@ func _run() -> void:
 	var menu: OptionButton = panel.get_node("ResponsiveContainer/WideLayout/WideSidebar/BuildControls/Configuration")
 	check("human menu shares the completed configuration list", menu.item_count == 3, str(menu.item_count))
 	menu.item_selected.emit(2)
+	await process_frame
 	var dispatch: Dictionary = _evaluations(rig.dispatched)[-1].payload
 	check("human configuration switch selects cached source without rewriting", dispatch.source == SOURCE
 		and dispatch.configuration == "exploded" and rig.buffer.text == SOURCE, str(dispatch))
@@ -44,6 +45,7 @@ func _run() -> void:
 	check("choosing a configuration preserves the manual build boundary", chosen.build_required
 		and _evaluations(rig.dispatched).size() == before and rig.buffer.text == EDITED_SOURCE, str(chosen))
 	panel.build_latest()
+	await process_frame
 	dispatch = _evaluations(rig.dispatched)[-1].payload
 	check("next explicit build uses the selected configuration", dispatch.source == EDITED_SOURCE
 		and dispatch.configuration == "assembled", str(dispatch))

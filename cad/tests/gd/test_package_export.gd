@@ -52,7 +52,7 @@ func _run() -> void:
 	var source := 'solid=cube(2)\nref=mesh(%s,units="mm",up="z")\nsub=assembly([instance(solid,id="pin"),translate([5,0,0],instance(ref,id="board"))])\nscene=assembly([translate([20,0,0],instance(sub,id="module")),translate([0,10,0],instance(solid,id="spare"))])\nscene\n' % JSON.stringify(input)
 	var requirements := JSON.stringify({"schema": "minerva.cad.validation/v1", "checks": []})
 	Files.write_bytes(_document_path + ".checks.json", requirements.to_utf8_buffer())
-	_attach_document(rig, source)
+	await _attach_document(rig, source)
 	var ready: Dictionary = await panel.await_evaluation(30000)
 	check("source assembled by actual geometry worker", not ready.get("timed_out", false) and _status(panel) == "ok", str(ready).left(600))
 	if _status(panel) != "ok":
@@ -91,7 +91,7 @@ func _run() -> void:
 		check("stale preflight refuses before publishing and never claims a document", not stale.get("success", true)
 			and not DirAccess.dir_exists_absolute(directory.path_join("stale")), str(stale))
 		_document_path = moved.path_join("model.mcad")
-		_attach_document(rig, FileAccess.get_file_as_string(_document_path))
+		await _attach_document(rig, FileAccess.get_file_as_string(_document_path))
 		await panel.await_evaluation(30000)
 		var regenerated: Dictionary = await PanelTools.handle(panel, "minerva_cad_package", {"path": directory.path_join("regenerated"), "wait_ms": 0})
 		while regenerated.get("status") == "running" and Time.get_ticks_msec() < deadline:

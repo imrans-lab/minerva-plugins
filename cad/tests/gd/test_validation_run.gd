@@ -8,13 +8,14 @@ func _run() -> void:
 	if rig.is_empty():
 		return
 	var panel: Node = rig.panel
-	_attach_document(rig, SOURCE)
+	await _attach_document(rig, SOURCE)
 	var answer := _worker_answer()
 	answer.result["model"] = {"configuration": "assembled", "selection": "", "physical": true}
 	_reply(rig, str(_evaluations(rig.dispatched)[-1].reply_id), answer)
 	await process_frame
-	panel.request.connect(_answer_query.bind(rig))
-	panel.request.connect(_answer_motion.bind(rig))
+	# This suite is the backend, and the panel asks on the bulk route.
+	rig.bulk.add_sink(_answer_query.bind(rig))
+	rig.bulk.add_sink(_answer_motion.bind(rig))
 	var specification := {"schema": ValidationSpec.SCHEMA, "checks": [
 		{"id": "missing", "kind": "interference", "selection": "missing", "configuration": "assembled", "args": {}},
 		{"id": "unmeasured", "kind": "design", "selection": "instance:post", "configuration": "assembled", "args": {"required_mm": 1}},

@@ -31,6 +31,8 @@ const DocumentBufferScript := preload("res://Scripts/Services/Documents/Document
 const PANEL_BROKER_PATH := "res://Scripts/Services/Plugins/PluginScenePanelBroker.gd"
 ## The panel's MCP verb surface, which is where the staleness guard sits.
 const PanelTools := preload("res://../../minerva-plugins/cad/ui/panel_tools.gd")
+## Stands in for the broker on the panel's bulk route (see the script's doc).
+const BulkRouteRecorder := preload("res://../../minerva-plugins/cad/tests/gd/bulk_route_recorder.gd")
 
 const SOURCE := "part = cube(10, 10, 10)\n"
 const EDITED_SOURCE := "part = cube(20, 10, 10)\n"
@@ -112,7 +114,7 @@ func _test_a_slow_answer_is_still_painted() -> void:
 	panel._eval_await_chunk_ms = CHUNK_MS
 	panel._eval_give_up_ms = PATIENT_GIVE_UP_MS
 
-	_attach_document(rig, SOURCE)
+	await _attach_document(rig, SOURCE)
 	var dispatched: Array = rig["dispatched"]
 	var evaluations: Array = _evaluations(dispatched)
 	check("open: attaching the document dispatched one evaluation",
@@ -165,9 +167,9 @@ func _test_one_open_is_one_evaluation() -> void:
 		# same source; only one of them is worth a worker's time.
 		if load_first:
 			panel._on_panel_load_request({"file_path": _document_path})
-			_attach_document(rig, SOURCE)
+			await _attach_document(rig, SOURCE)
 		else:
-			_attach_document(rig, SOURCE)
+			await _attach_document(rig, SOURCE)
 			panel._on_panel_load_request({"file_path": _document_path})
 
 		# Long enough for the typing debounce to have fired had one been armed.
@@ -200,7 +202,7 @@ func _test_giving_up_is_said_out_loud() -> void:
 	panel._eval_await_chunk_ms = 30
 	panel._eval_give_up_ms = 120
 
-	_attach_document(rig, SOURCE)
+	await _attach_document(rig, SOURCE)
 	# The worker never answers. Well past the give-up budget.
 	await create_timer(0.6).timeout
 
@@ -231,7 +233,7 @@ func _test_a_newer_evaluation_still_preempts_an_older_one() -> void:
 	panel._eval_await_chunk_ms = CHUNK_MS
 	panel._eval_give_up_ms = PATIENT_GIVE_UP_MS
 
-	_attach_document(rig, SOURCE)
+	await _attach_document(rig, SOURCE)
 	var first: Array = _evaluations(rig["dispatched"])
 	if first.is_empty():
 		_teardown(rig)
@@ -286,7 +288,7 @@ func _test_awaiting_covers_the_debounce_as_well_as_the_worker() -> void:
 	panel._eval_await_chunk_ms = CHUNK_MS
 	panel._eval_give_up_ms = PATIENT_GIVE_UP_MS
 
-	_attach_document(rig, SOURCE)
+	await _attach_document(rig, SOURCE)
 	var opened: Array = _evaluations(rig["dispatched"])
 	if opened.is_empty():
 		_teardown(rig)
@@ -350,7 +352,7 @@ func _test_a_check_refuses_geometry_the_document_moved_past() -> void:
 	panel._eval_await_chunk_ms = CHUNK_MS
 	panel._eval_give_up_ms = PATIENT_GIVE_UP_MS
 
-	_attach_document(rig, SOURCE)
+	await _attach_document(rig, SOURCE)
 	var opened: Array = _evaluations(rig["dispatched"])
 	if opened.is_empty():
 		_teardown(rig)
@@ -515,7 +517,7 @@ func _test_a_measurement_outrun_by_an_evaluation_is_stamped_stale() -> void:
 	panel._eval_await_chunk_ms = CHUNK_MS
 	panel._eval_give_up_ms = PATIENT_GIVE_UP_MS
 
-	_attach_document(rig, SOURCE)
+	await _attach_document(rig, SOURCE)
 	var opened: Array = _evaluations(rig["dispatched"])
 	if opened.is_empty():
 		_teardown(rig)
@@ -595,7 +597,7 @@ func _test_manual_builds() -> void:
 	var panel: Node = rig.panel
 	var automatic: Button = panel.get_node("ResponsiveContainer/WideLayout/WideSidebar/BuildControls/Mode")
 	automatic.button_pressed = false
-	_attach_document(rig, SOURCE)
+	await _attach_document(rig, SOURCE)
 	check("manual open synchronizes without compiling", _evaluations(rig.dispatched).is_empty()
 		and panel.get_document_state().source == SOURCE, str(panel.build_status()))
 	rig.buffer.apply_edit(EDITED_SOURCE)
@@ -607,6 +609,7 @@ func _test_manual_builds() -> void:
 	var button: Button = panel.get_node("ResponsiveContainer/WideLayout/WideSidebar/BuildControls/Build")
 	button.pressed.emit()
 	await PanelTools.handle(panel, "minerva_cad_build", {"action": "build_latest"})
+	await process_frame
 	var evals := _evaluations(rig.dispatched)
 	check("GUI build and repeated MCP build join one latest snapshot", evals.size() == 1
 		and evals[0].payload.source == EDITED_SOURCE, str(evals))
@@ -617,6 +620,7 @@ func _test_manual_builds() -> void:
 		panel.build_status().build_required and panel.evaluation_freshness().stale
 		and _status(panel) == "ok", str(panel.build_status()))
 	panel.build_latest()
+	await process_frame
 	evals = _evaluations(rig.dispatched)
 	_reply(rig, str(evals[-1].reply_id), _worker_answer())
 	await process_frame
@@ -682,6 +686,7 @@ func _test_manual_builds() -> void:
 		and outcome.reply.get("provenance", {}).get("source_digest", "") == EDITED_SOURCE.sha256_text()
 		and outcome.reply.get("document_id", "") == rig.buffer.document_id, str(outcome.reply))
 	panel.build_latest()
+	await process_frame
 	evals = _evaluations(rig.dispatched)
 	_reply(rig, str(evals[-1].reply_id), _worker_error())
 	await process_frame
@@ -731,22 +736,34 @@ func _make_rig(panel_name: String) -> Dictionary:
 	})
 
 	var dispatched: Array = []
-	panel.request.connect(func(channel: String, payload: Dictionary, reply_id: String) -> void:
-		dispatched.append({"channel": channel, "payload": payload, "reply_id": reply_id}))
+	var record := func(channel: String, payload: Dictionary, reply_id: String) -> void:
+		dispatched.append({"channel": channel, "payload": payload, "reply_id": reply_id})
+	# cad.cancel_eval is the one send still on the `request` signal; every
+	# other one rides the bulk route, which calls the broker directly. Both
+	# land in the one list, so what a test reads is "what the panel asked the
+	# backend for", whichever lane carried it.
+	panel.request.connect(record)
+	var bulk: RefCounted = BulkRouteRecorder.install(panel, panel_name, record)
 
 	return {
 		"panel": panel,
 		"broker": broker,
 		"panel_name": panel_name,
 		"dispatched": dispatched,
+		# Held: MinervaIPC keeps only a weak reference to its bulk broker.
+		"bulk": bulk,
 	}
 
 
 ## Attach a DocumentBuffer holding `text` — the substrate's own open path.
+##
+## Awaited: the evaluation the attach triggers goes out on the bulk route,
+## which dispatches deferred, so it is recorded at the end of this frame.
 func _attach_document(rig: Dictionary, text: String) -> void:
 	var buffer = DocumentBufferScript.new(_document_path, text)
 	rig["buffer"] = buffer
 	(rig["broker"] as Object).attach_buffer_to_panel("cad", str(rig["panel_name"]), buffer)
+	await process_frame
 
 
 ## Hand a worker reply back the way the host does.

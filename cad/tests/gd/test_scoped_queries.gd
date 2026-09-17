@@ -6,12 +6,13 @@ func _run() -> void:
 	if rig.is_empty():
 		return
 	var panel: Node = rig.panel
-	_attach_document(rig, SOURCE)
+	await _attach_document(rig, SOURCE)
 	var answer := _worker_answer()
 	answer.result["model"] = {"configuration": "exploded", "selection": "", "physical": false}
 	_reply(rig, str(_evaluations(rig.dispatched)[-1].reply_id), answer)
 	await process_frame
-	panel.request.connect(_answer_query.bind(rig))
+	# This suite is the backend, and the panel asks on the bulk route.
+	rig.bulk.add_sink(_answer_query.bind(rig))
 	var before: Dictionary = panel.get_evaluation_state().duplicate(true)
 	var reply: Dictionary = await PanelTools.handle(panel, "minerva_cad_material", {
 		"configuration": "assembled", "selection": "instance:post", "at_mm": [0,0,0]})

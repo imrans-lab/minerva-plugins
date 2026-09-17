@@ -37,6 +37,8 @@ const PANEL_SCENE_PATH := "res://../../minerva-plugins/cad/ui/CADPanel.tscn"
 
 const DocumentBufferScript := preload("res://Scripts/Services/Documents/DocumentBuffer.gd")
 const PanelBrokerScript := preload("res://Scripts/Services/Plugins/PluginScenePanelBroker.gd")
+## Stands in for the broker on the panel's bulk route (see the script's doc).
+const BulkRouteRecorder := preload("res://../../minerva-plugins/cad/tests/gd/bulk_route_recorder.gd")
 
 ## The board the solid runs into: 40 x 30 in x and y, 2 mm thick, sitting on
 ## the world origin. Written as an ASCII STL whose solid name becomes the
@@ -311,14 +313,20 @@ func _make_rig(panel_name: String) -> Dictionary:
 	})
 
 	var dispatched: Array = []
-	panel.request.connect(func(channel: String, payload: Dictionary, reply_id: String) -> void:
-		dispatched.append({"channel": channel, "payload": payload, "reply_id": reply_id}))
+	var record := func(channel: String, payload: Dictionary, reply_id: String) -> void:
+		dispatched.append({"channel": channel, "payload": payload, "reply_id": reply_id})
+	# cad.cancel_eval is the one send still on the `request` signal; every
+	# other one rides the bulk route, which calls the broker directly.
+	panel.request.connect(record)
+	var bulk: RefCounted = BulkRouteRecorder.install(panel, panel_name, record)
 
 	return {
 		"panel": panel,
 		"broker": broker,
 		"panel_name": panel_name,
 		"dispatched": dispatched,
+		# Held: MinervaIPC keeps only a weak reference to its bulk broker.
+		"bulk": bulk,
 	}
 
 

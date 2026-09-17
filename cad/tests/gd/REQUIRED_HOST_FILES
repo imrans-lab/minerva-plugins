@@ -35,3 +35,7 @@ src/Scripts/Services/Watcher/FileWatcherService.gd
 src/Scripts/Services/MCP/MCPServerConnection.gd
 
 src/Scripts/Services/Plugins/PluginDefinition.gd
+
+# test_bulk_reply_seam.gd installs and starts the real cad backend through the
+# host's own plugin manager.
+src/Scripts/Services/Plugins/PluginManager.gd

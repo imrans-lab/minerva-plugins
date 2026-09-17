@@ -46,13 +46,15 @@ var _inflight_request_id: String = ""
 var _open_eval_text: String = ""
 var _open_eval_path: String = ""
 
-## How long one await of a cad.evaluate reply lasts before the panel re-arms it.
-## MinervaIPC.await_reply is shared substrate: when its limit passes the await
-## ends for good and the worker's later reply is dropped as stale, so a limit
-## wide enough for the heaviest document would have to be raised for every
-## channel. Instead the panel re-awaits the SAME reply_id in chunks. The re-arm
-## runs in the same call stack as the expiry (await_reply resumes its caller
-## synchronously), so no reply can land in the gap.
+## How long one await of a cad.evaluate reply lasts before the panel re-arms it
+## on the `request`-signal route. MinervaIPC.await_reply is shared substrate:
+## when its limit passes the await ends for good and the worker's later reply
+## is dropped as stale, so a limit wide enough for the heaviest document would
+## have to be raised for every channel. Instead the panel re-awaits the SAME
+## reply_id in chunks. The re-arm runs in the same call stack as the expiry
+## (await_reply resumes its caller synchronously), so no reply can land in the
+## gap. The bulk route owns its reply id, so there it waits _eval_give_up_ms in
+## one go instead (see _send_request_until).
 var _eval_await_chunk_ms: int = 300000
 
 ## Total time the panel waits before it abandons an evaluation, reports status
@@ -160,8 +162,9 @@ func adopt_restored_document(document_path: String, source: String, references: 
 
 ## Send one request to the plugin backend over a declared IPC channel and
 ## return the host's reply envelope {success, result|error_code/error_message}.
-## The evaluation path predates this and keeps its own copy, because it also
-## owns cancellation and supersession; everything else asks through here.
+## Every channel but the evaluation's own goes through here; the evaluation
+## path owns cancellation and supersession, so it calls the send seam below
+## directly with its own wait budget.
 func call_backend(channel: String, args: Dictionary,
 		timeout_ms: int = 30000) -> Dictionary:
 	var ipc := get_node_or_null("_MinervaIPC")
@@ -172,9 +175,7 @@ func call_backend(channel: String, args: Dictionary,
 			"error_message": "MinervaIPC helper not attached; cannot reach "
 				+ "the CAD plugin backend",
 		}
-	var reply_id := "%s:%d" % [channel, Time.get_ticks_usec()]
-	request.emit(channel, args, reply_id)
-	return await ipc.await_reply(reply_id, timeout_ms)
+	return await _send_request(ipc, channel, args, timeout_ms)
 
 
 ## The same round trip, kept alive until the backend actually answers.
@@ -195,9 +196,54 @@ func call_backend_until(channel: String, args: Dictionary,
 			"error_message": "MinervaIPC helper not attached; cannot reach "
 				+ "the CAD plugin backend",
 		}
+	return await _send_request_until(ipc, channel, args, chunk_ms, give_up_ms, "")
+
+
+## The one send every backend round trip this panel makes goes through.
+##
+## The `request` signal rides the host's control lane, which the broker bounds
+## at PluginScenePanelBroker.MAX_PAYLOAD_BYTES (64 KiB) in BOTH directions: an
+## over-cap reply never reaches the caller, it is replaced by a
+## payload_too_large error. A cad.evaluate reply carries a whole tessellation
+## — hundreds of KB for a sphere, megabytes for a real enclosure — so on that
+## lane only toy models can render.
+##
+## MinervaIPC.request_bulk uses the same declared channels and the same
+## permission checks with both directions bounded at 8 MiB. It mints and
+## awaits its own reply id, so the `request` signal is NOT emitted on that
+## route. Feature-detected: a host without it keeps the signal path.
+func _send_request(ipc: Node, channel: String, payload: Dictionary,
+		timeout_ms: int) -> Dictionary:
+	if ipc.has_method("request_bulk"):
+		return await ipc.request_bulk(channel, payload, timeout_ms)
 	var reply_id := "%s:%d" % [channel, Time.get_ticks_usec()]
-	request.emit(channel, args, reply_id)
-	return await _renew_await(ipc, reply_id, chunk_ms, give_up_ms, "")
+	request.emit(channel, payload, reply_id)
+	return await ipc.await_reply(reply_id, timeout_ms)
+
+
+## The same send, waited on for as long as `give_up_ms` allows.
+##
+## On the signal route the helper's await ends at its own limit and a later
+## reply is dropped as stale, so the wait is re-armed on the same reply id in
+## `chunk_ms` slices (see _renew_await). The bulk route owns its reply id and
+## cannot be re-armed from here, so the whole budget is spent in one await —
+## the same end for the caller, without the intermediate expiries. Either way
+## the envelope carries `elapsed_ms`, and a give-up says how long it waited.
+func _send_request_until(ipc: Node, channel: String, payload: Dictionary,
+		chunk_ms: int, give_up_ms: int, request_id: String) -> Dictionary:
+	if not ipc.has_method("request_bulk"):
+		var reply_id := "%s:%d" % [channel, Time.get_ticks_usec()]
+		request.emit(channel, payload, reply_id)
+		return await _renew_await(ipc, reply_id, chunk_ms, give_up_ms, request_id)
+	var started_ms: int = Time.get_ticks_msec()
+	var envelope: Dictionary = await ipc.request_bulk(channel, payload, give_up_ms)
+	var elapsed_ms: int = Time.get_ticks_msec() - started_ms
+	envelope["elapsed_ms"] = elapsed_ms
+	if (not bool(envelope.get("success", false))
+			and str(envelope.get("error_code", "")) == "timeout"):
+		envelope["error_message"] = (
+			"the worker did not answer in %.1f s" % (elapsed_ms / 1000.0))
+	return envelope
 
 # ── Plugin platform lifecycle hooks (override MinervaPluginPanel virtuals) ──
 
@@ -317,7 +363,9 @@ func _cancel_inflight_eval_if_any() -> void:
 	if _inflight_request_id == "":
 		return
 	# Emit fire-and-forget — we don't need a reply correlation for the ack.
-	# Empty reply_id signals the IPC helper to drop the response.
+	# Empty reply_id signals the IPC helper to drop the response. This is the
+	# one send that stays on the control lane: the bulk route exists to await
+	# a reply it minted, and a request id is bytes either way.
 	request.emit("cad.cancel_eval", {"request_id": _inflight_request_id}, "")
 	_inflight_request_id = ""
 
@@ -645,18 +693,6 @@ func _on_panel_load_request(document: Dictionary) -> void:
 	_evaluate_document_open(dsl_text)
 
 
-## Await one cad.evaluate reply for as long as the worker needs it.
-##
-## The shared IPC await ends at its own limit; this re-arms it on the same
-## reply_id until the worker answers, a newer evaluation takes the in-flight
-## slot, or _eval_give_up_ms is spent. Returns the IPC envelope with
-## `elapsed_ms` added — on a give-up that envelope is the helper's own timeout
-## error, which the caller turns into last_eval.status "timeout".
-func _await_eval_reply(ipc: Node, reply_id: String, request_id: String) -> Dictionary:
-	return await _renew_await(ipc, reply_id, _eval_await_chunk_ms,
-		_eval_give_up_ms, request_id)
-
-
 ## Re-arm one IPC await on the same reply_id until the backend answers.
 ##
 ## The re-arm runs in the same call stack as the expiry (await_reply resumes
@@ -714,7 +750,6 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 		_show_eval_error("CAD evaluation unavailable — the panel's IPC helper is not attached.")
 		return
 
-	var reply_id := "cad.evaluate:" + str(Time.get_ticks_usec())
 	var args: Dictionary = {"source": dsl_text}
 	args.merge(_model_views.arguments())
 	if request_id != "":
@@ -738,12 +773,12 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 	}
 	# A fresh evaluate supersedes any prior failure — clear a stale banner.
 	_hide_eval_error()
-	request.emit("cad.evaluate", args, reply_id)
 
 	# No fixed limit: a heavy document (many booleans, a cold build123d start)
 	# can take minutes, and an answer the worker computed must be painted
 	# whenever it is still the newest one.
-	var result: Dictionary = await _await_eval_reply(ipc, reply_id, request_id)
+	var result: Dictionary = await _send_request_until(ipc, "cad.evaluate", args,
+		_eval_await_chunk_ms, _eval_give_up_ms, request_id)
 	var elapsed_ms: int = int(result.get("elapsed_ms", 0))
 
 	# Supersession: if a newer evaluate started while we were awaiting, drop

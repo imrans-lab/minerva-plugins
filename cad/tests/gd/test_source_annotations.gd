@@ -23,11 +23,12 @@ func _run() -> void:
 	var panel: Node = rig.panel
 	panel._apply_width_class(&"lg")
 	await PanelTools.handle(panel, "minerva_cad_build", {"action": "set_mode", "mode": "manual"})
-	_attach_document(rig, SOURCE)
+	await _attach_document(rig, SOURCE)
 	var answer := _worker_answer()
 	answer.result["annotations"] = [{"id": "hole", "at_mm": [5,5,5], "text": "Fit requirement",
 		"dimension": "diameter", "nominal_mm": 4, "deviations_mm": [0,0.2]}]
 	panel.build_latest()
+	await process_frame
 	_reply(rig, str(_evaluations(rig.dispatched)[-1].reply_id), answer)
 	await process_frame
 	var host: Object = panel._annotation_host
@@ -59,12 +60,14 @@ func _run() -> void:
 	discussion.kind = "2d_text"
 	host.set_annotations([discussion, overlay])
 	panel.build_latest()
+	await process_frame
 	_reply(rig, str(_evaluations(rig.dispatched)[-1].reply_id), answer)
 	await process_frame
 	check("rebuild and restore replace overlays without duplicating discussion", host.get_annotations().size() == 2,
 		str(host.get_annotations()))
 	rig.buffer.apply_edit(BROKEN_SOURCE)
 	panel.build_latest()
+	await process_frame
 	_reply(rig, str(_evaluations(rig.dispatched)[-1].reply_id), _worker_error())
 	await process_frame
 	check("failed build preserves the completed source overlay", host.get_annotations().size() == 2
@@ -72,12 +75,14 @@ func _run() -> void:
 	var malformed := answer.duplicate(true)
 	malformed.result.annotations[0].at_mm = []
 	panel.build_latest()
+	await process_frame
 	_reply(rig, str(_evaluations(rig.dispatched)[-1].reply_id), malformed)
 	await process_frame
 	check("malformed annotation reply rejects build and retains overlays", host.get_annotations().size() == 2
 		and _status(panel) == "error", str(panel._last_eval_result))
 	rig.buffer.apply_edit(EDITED_SOURCE)
 	panel.build_latest()
+	await process_frame
 	_reply(rig, str(_evaluations(rig.dispatched)[-1].reply_id), _worker_answer())
 	await process_frame
 	check("successful removal clears only source overlays", host.get_annotations().size() == 1

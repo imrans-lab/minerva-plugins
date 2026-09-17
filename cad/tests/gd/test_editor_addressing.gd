@@ -37,6 +37,8 @@ const PANEL_SCENE_PATH := "res://../../minerva-plugins/cad/ui/CADPanel.tscn"
 ## tests/gd/REQUIRED_HOST_FILES so a host refactor fails by name.
 const DocumentBufferScript := preload("res://Scripts/Services/Documents/DocumentBuffer.gd")
 const PanelBrokerScript := preload("res://Scripts/Services/Plugins/PluginScenePanelBroker.gd")
+## Stands in for the broker on the panel's bulk route (see the script's doc).
+const BulkRouteRecorder := preload("res://../../minerva-plugins/cad/tests/gd/bulk_route_recorder.gd")
 ## The host's own editor_not_found builder — the reply a caller who mistyped a
 ## name actually reads.
 const PluginErrorsScript := preload("res://Scripts/Services/Plugins/PluginErrors.gd")
@@ -137,7 +139,9 @@ func _test_two_open_documents_evaluate_independently() -> void:
 				str(broker.get_panel_for_editor(str(b["title"])))])
 
 	# An edit to A, and only A: the count on B is the control that shows the
-	# two documents are not sharing one evaluation.
+	# two documents are not sharing one evaluation. The frame lets each open's
+	# own evaluation reach the recorder before the baseline is taken.
+	await process_frame
 	var b_before: int = _evaluations(b).size()
 	_edit(a, EDITED_SOURCE)
 	await create_timer(0.5).timeout
@@ -400,8 +404,14 @@ func _open(broker: Object, file_name: String, path: String, text: String,
 	})
 
 	var dispatched: Array = []
-	panel.request.connect(func(channel: String, payload: Dictionary, reply_id: String) -> void:
-		dispatched.append({"channel": channel, "payload": payload, "reply_id": reply_id}))
+	var record := func(channel: String, payload: Dictionary, reply_id: String) -> void:
+		dispatched.append({"channel": channel, "payload": payload, "reply_id": reply_id})
+	# cad.cancel_eval is the one send still on the `request` signal; every
+	# other one rides the bulk route, which calls the broker directly and
+	# deferred — a count taken in the frame of the open has not seen the
+	# evaluation the attach below triggers.
+	panel.request.connect(record)
+	var bulk: RefCounted = BulkRouteRecorder.install(panel, key, record)
 
 	var buffer = DocumentBufferScript.new(path, text)
 	broker.attach_buffer_to_panel("cad", key, buffer)
@@ -414,6 +424,8 @@ func _open(broker: Object, file_name: String, path: String, text: String,
 		"editor": editor,
 		"buffer": buffer,
 		"dispatched": dispatched,
+		# Held: MinervaIPC keeps only a weak reference to its bulk broker.
+		"bulk": bulk,
 	}
 
 

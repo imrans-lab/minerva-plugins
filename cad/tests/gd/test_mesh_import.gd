@@ -27,6 +27,8 @@ const PANEL_SCENE_PATH := "res://../../minerva-plugins/cad/ui/CADPanel.tscn"
 const DocumentBufferScript := preload("res://Scripts/Services/Documents/DocumentBuffer.gd")
 const PanelBrokerScript := preload("res://Scripts/Services/Plugins/PluginScenePanelBroker.gd")
 const MeshImport := preload("res://../../minerva-plugins/cad/ui/scripts/mesh_import.gd")
+## Stands in for the broker on the panel's bulk route (see the script's doc).
+const BulkRouteRecorder := preload("res://../../minerva-plugins/cad/tests/gd/bulk_route_recorder.gd")
 const ReferenceMeshes := preload("res://../../minerva-plugins/cad/ui/scripts/reference_meshes.gd")
 
 ## The document the panel starts from. One binding, so the first generated name
@@ -182,8 +184,13 @@ func _test_import_writes_one_relative_line_to_the_shared_buffer() -> void:
 	# Everything the panel dispatches, so the evaluation can be observed
 	# without a worker.
 	var dispatched: Array = []
-	panel.request.connect(func(channel: String, payload: Dictionary, _reply_id: String) -> void:
-		dispatched.append({"channel": channel, "payload": payload}))
+	var record := func(channel: String, payload: Dictionary, _reply_id: String) -> void:
+		dispatched.append({"channel": channel, "payload": payload})
+	panel.request.connect(record)
+	# The evaluation rides the bulk route, which calls the broker directly
+	# rather than emitting `request`. Held in a local: MinervaIPC keeps only a
+	# weak reference to its bulk broker.
+	var _bulk: RefCounted = BulkRouteRecorder.install(panel, "cad_panel", record)
 
 	broker.attach_buffer_to_panel("cad", "cad_panel", buffer)
 	check("setup: the panel is attached to the document's buffer",
