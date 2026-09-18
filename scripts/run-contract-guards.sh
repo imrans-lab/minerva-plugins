@@ -142,7 +142,9 @@ done
 HEAD_REV="$(git -C "${PLUGINS_ROOT}" rev-parse HEAD 2>/dev/null)" \
   || die "${PLUGINS_ROOT} is not a git checkout — cannot prove which revision is under test"
 if [ "${HEAD_REV}" != "${PLUGIN_REV}" ]; then
-  # Accept an unambiguous short sha, refuse anything else.
+  # Accept an unambiguous short sha of at least seven characters (git's own
+  # abbreviation floor); a shorter prefix would match almost any HEAD.
+  [ "${#PLUGIN_REV}" -ge 7 ] || die "--plugin-rev ${PLUGIN_REV} is too short to identify a revision (7+ characters)"
   case "${HEAD_REV}" in
     "${PLUGIN_REV}"*) : ;;
     *) die "--plugin-rev ${PLUGIN_REV} is not the checkout under test (${PLUGINS_ROOT} HEAD is ${HEAD_REV})" ;;
@@ -460,6 +462,9 @@ if ! diff -q "${PROFILE_BEFORE}" "${PROFILE_AFTER}" >/dev/null; then
   echo "error: this run modified the real user-data directory ${REAL_USER_DATA}:" >&2
   diff "${PROFILE_BEFORE}" "${PROFILE_AFTER}" | head -n 20 >&2
   echo "  user:// isolation did not hold (or a Minerva instance was running alongside this run)." >&2
+  # A harness fault outranks a guard verdict in the exit code: 2 means the
+  # run itself cannot be trusted, even if a guard had already reported 1;
+  # summary.json keeps both facts.
   overall_rc=2
 fi
 

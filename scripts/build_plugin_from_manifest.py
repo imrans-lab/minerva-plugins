@@ -158,7 +158,9 @@ def phases_for(step: dict, plugin_dir: str, tools: dict) -> list[dict]:
                 dir_abs, str(step.get("requirements_file", "requirements.txt")))]
         return [
             {"label": "venv create",
-             "argv": [tools.get("python", sys.executable), "-m", "venv", venv_abs],
+             # --clear: a venv that already exists keeps its old interpreter
+             # otherwise, so the chosen python would never actually be used.
+             "argv": [tools.get("python", sys.executable), "-m", "venv", "--clear", venv_abs],
              "artifact": marker},
             {"label": "pip install", "argv": install, "artifact": marker},
         ]
