@@ -183,6 +183,8 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 
 static func _dispatch(panel, tool_name: String, args: Dictionary) -> Dictionary:
 	match tool_name:
+		"minerva_cad_object":
+			return preload("scripts/object_tools.gd").handle(panel, args)
 		"minerva_cad_package":
 			return await preload("scripts/package_export.gd").handle(panel, args)
 		"minerva_cad_validation":
@@ -907,6 +909,8 @@ static func _selection_payload(panel, selection: Dictionary, args: Dictionary) -
 ## is the cheap answer to "what did I click in", and it says so. The measured
 ## answer is minerva_cad_find_holes, which gauges the same candidate.
 static func _nearest_hole(panel, selection: Dictionary, args: Dictionary) -> Variant:
+	if str(selection.get("kind", "reference")) == "solid":
+		return null
 	if not bool(args.get("include_hole", true)):
 		return null
 	var node_name := str(selection.get("node", ""))

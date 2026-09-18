@@ -22,6 +22,9 @@ func wire() -> void:
 		var row := panel.get_node_or_null(path)
 		if row == null:
 			continue
+		var import_button := row.get_node_or_null("ImportMeshButton") as Button
+		if import_button != null:
+			_set_icon(import_button, "import_mesh.svg", "Import")
 		var choice: Button = row.get_node("Mode")
 		_set_icon(choice, "automatic_build.svg", "Auto")
 		if not choice.toggled.is_connected(_on_mode):

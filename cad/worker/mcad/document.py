@@ -148,6 +148,14 @@ class EvaluatedDocument:
             references=references, annotations=self.annotations, shape=shape,
             bindings={n:v for n,v in self.bindings.items() if Translator.is_part(v)},
             document=self, model=model)
+        # Definition meshes are shared by every placement and cached across
+        # configurations. Keep picking data out of compact model summaries.
+        if not selection and assembly:
+            result.picking = {d["id"]: self.render("definition:" + d["id"], configuration,
+                tolerance=tolerance, angular_tolerance=angular_tolerance).mesh
+                for d in assembly.get("definitions", []) if d["kind"] == "solid"}
+        elif not selection and shape is not None:
+            result.picking = {name: mesh}
         self._renders[cache_key] = result
         while len(self._renders) > 32:
             self._renders.popitem(last=False)

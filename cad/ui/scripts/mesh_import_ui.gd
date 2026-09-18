@@ -49,8 +49,8 @@ func attach(panel: Object) -> void:
 
 	_import_buttons.clear()
 	for button_path in [
-		"ResponsiveContainer/WideLayout/WideSidebar/ImportMeshButton",
-		"ResponsiveContainer/NarrowLayout/ProjectionRow/ImportMeshButton",
+		"ResponsiveContainer/WideLayout/WideSidebar/BuildControls/ImportMeshButton",
+		"ResponsiveContainer/NarrowLayout/BuildControls/ImportMeshButton",
 	]:
 		var button := panel.get_node_or_null(button_path) as Button
 		if button == null:

@@ -53,6 +53,28 @@ func _run() -> void:
 		check("leader projects inside pane " + str(i), rect.has_point(drawing.leaders[i]), str(rect))
 	check("dimensional callouts display nominal and signed limits", drawing.labels.has("Diameter 4 mm")
 		and " ".join(drawing.labels).contains("+0.0 / +0.2 mm"), str(drawing.labels))
+	# Exercise the camera-to-overlay invalidation boundary, not a manual redraw call.
+	var view_updates := [0]
+	host.view_changed.connect(func(): view_updates[0] += 1)
+	var camera = panes[0].camera
+	var original_target: Vector3 = camera.get_target()
+	var original_distance: float = camera.get_distance()
+	camera.set_target(original_target + Vector3(2, 0, 0))
+	var moved := Drawing.new()
+	moved.host = host
+	SourceKind.new().render(moved, overlay)
+	check("camera pan requests redraw and moves the source leader", view_updates[0] == 1
+		and moved.leaders != drawing.leaders, str(moved.leaders))
+	camera.set_distance(original_distance * 1.2)
+	check("orthographic zoom also requests redraw", view_updates[0] == 2, str(view_updates))
+	camera.set_target(original_target + Vector3(10000, 0, 0))
+	var outside := Drawing.new()
+	outside.host = host
+	SourceKind.new().render(outside, overlay)
+	check("offscreen anchor hides its callout in that pane only", outside.leaders.size() == 3,
+		str(outside.leaders))
+	camera.set_target(original_target)
+	camera.set_distance(original_distance)
 	# A saved host list can include derived records; loading it must never make
 	# those records editable copies. Separately authored discussion stays intact.
 	var discussion := overlay.duplicate(true)

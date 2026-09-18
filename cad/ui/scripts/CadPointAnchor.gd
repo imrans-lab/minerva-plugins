@@ -98,7 +98,11 @@ static func resolve(anchor: Variant, records: Array) -> Variant:
 	var remembered := vec3_from(d.get("world", null))
 
 	var record := record_named(records, reference_name)
-	if record.is_empty():
+	var node_exists := false
+	for node: Dictionary in record.get("node_bounds", []):
+		node_exists = node_exists or str(node.get("path", node.get("name", ""))) == node_name
+	var stamp_changed := d.has("geometry_stamp") and str(d.geometry_stamp) != str(record.get("stamp", ""))
+	if record.is_empty() or not node_exists or stamp_changed:
 		return {
 			"position": remembered,
 			"local": local,

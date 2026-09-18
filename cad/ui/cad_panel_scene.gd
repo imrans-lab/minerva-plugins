@@ -125,7 +125,7 @@ var _wide_sidebar: VBoxContainer = null
 var _active_viewport_id: String = "iso"
 
 ## Full-rect overlay Control that spans all 4 SubViewportContainers.
-## mouse_filter=IGNORE so all clicks pass through to SubViewports.
+## Object modes intercept viewport clicks; toolbar clicks pass through.
 ## Used as panel_root reference so host.get_panes() can compute panel-relative rects.
 var _canvas_overlay: Control = null
 
@@ -221,7 +221,7 @@ func _ready() -> void:
 
 	# ── Projection dropdown ────────────────────────────────────────────────
 	_pane_projection = _PaneProjectionScript.new(self)
-	_projection_dropdown = $ResponsiveContainer/NarrowLayout/ProjectionRow/ProjectionDropdown as OptionButton
+	_projection_dropdown = $ResponsiveContainer/NarrowLayout/BuildControls/ProjectionDropdown as OptionButton
 	_PaneProjectionScript.fill(_projection_dropdown)
 	_projection_dropdown.select(0)  # Perspective by default
 	_projection_dropdown.item_selected.connect(_on_projection_selected)
@@ -276,11 +276,13 @@ func _ready() -> void:
 	# Used as the panel_root reference so host.get_panes() can compute
 	# panel-relative rects for multi-pane annotation projection. The platform's
 	# PlatformAnnotationOverlay (auto-mounted via get_annotation_host()) handles
-	# all annotation drawing; this Control is purely a coordinate anchor.
-	_canvas_overlay = Control.new()
+	# all annotation drawing; this Control also handles object interaction
+	# within viewport rectangles, leaving toolbar controls outside its hit area.
+	_canvas_overlay = preload("scripts/object_interaction.gd").new()
 	_canvas_overlay.name = "AnnotationCanvasOverlay"
 	_canvas_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_canvas_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_canvas_overlay.offset_right = -184.0
 	_canvas_overlay.z_index = 1
 	add_child(_canvas_overlay)
 
@@ -306,6 +308,7 @@ func _ready() -> void:
 	# ── Reference-node selection: click picking + sidebar + point anchors ──
 	_reference_selection = _ReferenceSelectionScript.new()
 	_reference_selection.attach(self)
+	_canvas_overlay.setup(self)
 
 	# ── Wide-mode sidebar: edge Tree + Prev/Next/Clear buttons ─────────────
 	_edge_sidebar = _EdgeSidebarScript.new()
@@ -314,6 +317,13 @@ func _ready() -> void:
 
 	# ── Connect ResponsiveContainer width-class signal & apply initial mode
 	_responsive.width_class_changed.connect(_on_width_class_changed)
+	for slot: Control in [get_node("ObjectDock/Annotations"), get_node("BottomDockSlot")]:
+		# The host sets RIGHT after mounting. As in PCB, correct the mode after
+		# that mount completes, not from inside child_entered_tree.
+		slot.child_entered_tree.connect(func(_child: Node): call_deferred("_sync_annotation_dock"))
+	get_node("BottomDockSlot").minimum_size_changed.connect(func(): call_deferred("_update_dock_extent"))
+	get_node("ObjectDock").minimum_size_changed.connect(func(): call_deferred("_update_dock_extent"))
+	resized.connect(func(): call_deferred("_sync_annotation_dock"))
 	# Apply the initial layout state so the canvas is correctly placed
 	# even before the first resize transition fires.
 	_apply_width_class(_responsive.width_class)
@@ -321,6 +331,50 @@ func _ready() -> void:
 
 func get_annotation_host() -> RefCounted:
 	return _annotation_host
+
+
+var _annotation_dock_wide := false
+
+func get_annotation_dock_parent() -> Control:
+	return get_node("ObjectDock/Annotations") if _annotation_dock_wide else get_node("BottomDockSlot")
+
+
+func _sync_annotation_dock() -> void:
+	# Match PCB's 900px panel boundary and 20px hysteresis. Use the whole
+	# panel width: expanding the dock must not switch its own layout mode.
+	_annotation_dock_wide = size.x >= (880.0 if _annotation_dock_wide else 900.0)
+	var destination := get_annotation_dock_parent()
+	var narrow := not _annotation_dock_wide
+	for slot: Control in [get_node("ObjectDock/Annotations"), get_node("BottomDockSlot")]:
+		for child: Node in slot.get_children():
+			if not child.has_method("set_dock_mode"):
+				continue
+			if child.get_parent() != destination:
+				child.reparent(destination)
+			if child is Control:
+				child.size_flags_vertical = Control.SIZE_SHRINK_END if narrow else Control.SIZE_EXPAND_FILL
+			# AnnotationDockPane.DockMode: RIGHT=0, BOTTOM=1, same as PCB.
+			child.set_dock_mode(1 if narrow else 0)
+	get_node("BottomDockSlot").visible = narrow
+	get_node("ObjectDock/Annotations").visible = not narrow
+	_update_dock_extent()
+
+
+func _update_dock_extent() -> void:
+	var bottom: Control = get_node("BottomDockSlot")
+	var height := bottom.get_combined_minimum_size().y if not _annotation_dock_wide else 0.0
+	var sidebar: Control = get_node("ObjectDock")
+	var sidebar_width := maxf(88.0, sidebar.get_combined_minimum_size().x)
+	sidebar.offset_left = -sidebar_width
+	bottom.offset_top = -height
+	for control: Control in [_responsive, _canvas_overlay, get_node("EvalBannerLayer"), get_node("ObjectDock")]:
+		control.offset_bottom = -height
+	for control: Control in [_responsive, _canvas_overlay, get_node("EvalBannerLayer")]:
+		control.offset_right = -sidebar_width - 8.0
+
+
+func get_annotation_overlay_parent() -> Control:
+	return _canvas_overlay
 
 
 ## Panel-executed MCP tool entry point (executor: "panel",
@@ -533,18 +587,18 @@ signal annotation_tool_status_changed
 func notify_annotation_tool_status_changed() -> void:
 	annotation_tool_status_changed.emit()
 
-## Duck-typed hook used by Minerva's annotation-tool bridge. An armed overlay
-## owns pointer input, so a user who has not selected the foreign surface yet
-## needs an actionable warning in the annotation dock (visible in every CAD
-## layout), not only instructions in the wide reference sidebar.
+## Duck-typed hook used by Minerva's annotation-tool bridge, read whenever the
+## armed tool changes. An armed annotation overlay owns pointer input, so the
+## object tool cannot stay armed beside it: arming an annotation tool drops the
+## object mode (the reverse hand-off lives in the object overlay's set_mode).
+## The text is the guidance the annotation dock shows while a tool is armed;
+## no tool, no guidance.
 func get_annotation_tool_status(tool: Object) -> String:
-	if tool == null or get_reference_state().is_empty():
+	if tool == null:
 		return ""
-	var selection := get_reference_selection()
-	if not selection.is_empty() and not bool(selection.get("stale", false)):
-		return ""
-	return "Reference clicks are unavailable while an annotation tool is armed. " \
-		+ "Turn the tool off, click the reference point, then arm it again."
+	if _canvas_overlay != null:
+		_canvas_overlay.set_mode("")
+	return "Arrow tips placed on geometry attach to that object. Middle-drag and wheel navigate."
 
 
 ## Select a reference node by name (and optionally a point in its own frame),
@@ -616,6 +670,7 @@ func _apply_width_class(cls: StringName) -> void:
 
 	# Ortho x-ray for the narrow single view depends on the current dropdown selection.
 	_apply_mesh_visibility()
+	_sync_annotation_dock()
 
 
 ## Populate Cad_AnnotationHost's viewport map for the active layout. Called

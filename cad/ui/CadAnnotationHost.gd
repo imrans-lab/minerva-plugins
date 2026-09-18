@@ -128,6 +128,9 @@ func add_annotation(annotation: Dictionary) -> String:
 	if str(annotation.get("kind", "")) == "cad_source_annotation":
 		return ""
 	var stored: Dictionary = _normalize_envelope(annotation)
+	# Restoring an existing envelope must not reinterpret its screen coordinates.
+	if str(stored.get("id", "")).is_empty():
+		stored = attach_surface_arrow(stored)
 	var id: String = str(stored.get("id", ""))
 	if id.is_empty():
 		id = "ann_%x" % randi()
@@ -586,10 +589,23 @@ func set_viewport_for(view_id: String, vp: Node) -> void:
 ## for off-tree duck-typing symmetry; Camera3D.unproject_position() is accessed
 ## via duck typing in cad_edge_number_kind.
 func set_camera_for(view_id: String, cam: Object) -> void:
+	var previous: Object = _camera_for.get(view_id)
 	if cam == null:
 		_camera_for.erase(view_id)
-		return
-	_camera_for[view_id] = cam
+	else:
+		_camera_for[view_id] = cam
+	# A narrow-layout camera is registered under several view IDs. Connect once,
+	# and disconnect an outgoing camera only after its last mapping is removed.
+	if is_instance_valid(previous) and not _camera_for.values().has(previous):
+		if previous.has_signal("view_changed") and previous.is_connected("view_changed", _on_camera_view_changed):
+			previous.disconnect("view_changed", _on_camera_view_changed)
+	if cam != null and cam.has_signal("view_changed") and not cam.is_connected("view_changed", _on_camera_view_changed):
+		cam.connect("view_changed", _on_camera_view_changed)
+	view_changed.emit()
+
+
+func _on_camera_view_changed() -> void:
+	view_changed.emit()
 
 
 ## Map of view_id -> SubViewportContainer node, populated by CADPanel._ready() via
@@ -620,10 +636,92 @@ func set_panel_root(root: Control) -> void:
 ## The CADPanel this host belongs to. Set by the panel itself on _ready.
 var _panel: Node = null
 
+## Keep a middle-button drag on its originating pane across pane boundaries.
+var _navigation_camera: Camera3D = null
+
+
+func forward_navigation_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_MIDDLE and event.pressed:
+		_navigation_camera = null
+	var position: Vector2
+	if event is InputEventMouse:
+		position = event.position
+	elif event is InputEventGesture:
+		position = event.position
+	else:
+		return
+	var camera: Camera3D = _navigation_camera if is_instance_valid(_navigation_camera) else null
+	if camera == null:
+		for pane: Dictionary in get_panes():
+			if (pane.viewport_rect as Rect2).has_point(position):
+				camera = pane.camera as Camera3D
+				break
+	if camera == null or not camera.has_method("handle_pointer_input"):
+		return
+	# OrbitCamera consumes motion deltas; it does not need pane-local positions.
+	camera.call("handle_pointer_input", event)
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_MIDDLE:
+		_navigation_camera = camera if event.pressed else null
+	elif event is InputEventMouseMotion and not (event.button_mask & MOUSE_BUTTON_MASK_MIDDLE):
+		_navigation_camera = null
+
 
 ## Adopt the panel this host was built for.
 func set_panel(panel: Node) -> void:
 	_panel = panel
+	var source_kind: Object = _registry.get_annotation_kind(&"cad_source_annotation")
+	if source_kind != null:
+		source_kind.host_ref = weakref(self)
+	var kind := preload("kinds/cad_surface_arrow.gd").new()
+	kind.host_ref = weakref(self)
+	_registry.register_annotation_kind(kind)
+
+
+## Pixel is relative to the annotation canvas, not a SubViewport.
+func pick_surface(pixel: Vector2) -> Dictionary:
+	if not is_instance_valid(_panel) or _panel._reference_selection == null:
+		return {}
+	for pane: Dictionary in get_panes():
+		var rect: Rect2 = pane.viewport_rect
+		if not rect.has_point(pixel):
+			continue
+		var camera: Camera3D = pane.camera
+		var local_pixel := (pixel - rect.position) * Vector2(camera.get_viewport().size) / rect.size
+		var origin := camera.project_ray_origin(local_pixel)
+		return _panel._reference_selection.pick(_reference_records, origin,
+			origin + camera.project_ray_normal(local_pixel) * camera.far)
+	return {}
+
+
+func anchor_from_hit(hit: Dictionary) -> Dictionary:
+	if hit.is_empty():
+		return {}
+	var record: Dictionary = hit.record
+	var pose: Transform3D = record.pose
+	var anchor := _CadPointAnchorScript.build(str(record.name), str(hit.node), hit.local,
+		preload("scripts/reference_selection.gd").to_local_normal(pose, hit.normal), hit.world)
+	anchor["geometry_stamp"] = str(record.get("stamp", ""))
+	return anchor
+
+
+func attach_surface_arrow(annotation: Dictionary) -> Dictionary:
+	if str(annotation.get("kind", "")) != "2d_arrow":
+		return annotation
+	for primitive: Dictionary in annotation.get("primitives", []):
+		if primitive.get("kind", "") != "arrow":
+			continue
+		var tip: Array = primitive.get("to", [])
+		var tail: Array = primitive.get("from", [])
+		if tip.size() != 2 or tail.size() != 2:
+			return annotation
+		var anchor := anchor_from_hit(pick_surface(Vector2(tip[0], tip[1])))
+		if anchor.is_empty():
+			return annotation
+		annotation["kind"] = "cad_surface_arrow"
+		annotation["anchor"] = _normalize_anchor(anchor)
+		annotation.kind_payload["tail_offset"] = [tail[0] - tip[0], tail[1] - tip[1]]
+		return annotation
+	return annotation
 
 
 ## The live panel behind this host, for the panel-executed tool dispatcher.
@@ -753,6 +851,8 @@ var _last_selection_kind: String = ""
 
 func set_reference_records(records: Array) -> void:
 	_reference_records = records
+	AnnotationHost.refresh_all_anchors(_annotations, self)
+	view_changed.emit()
 
 
 func get_reference_records() -> Array:
@@ -905,31 +1005,6 @@ func get_current_selection_anchor(kind: String = "") -> Dictionary:
 		_selected_reference.get("normal", Vector3.ZERO),
 		_selected_reference.get("world", Vector3.ZERO)
 	)
-
-
-# ── Phase B2 follow-up: camera-tracking → AnnotationOverlay redraw ────────────
-
-## Cache of last-known per-pane camera global_transform. _process compares the
-## live transform against this cache and emits annotations_changed when any
-## differs, so substrate AnnotationOverlay re-projects camera-dependent kinds
-## (the Phase B2 leader+box callout). Without this, kinds that call
-## camera.unproject_position only re-run on annotations_changed (data change),
-## leaving the callout frozen at the projection state of the last data event.
-var _camera_xform_cache: Dictionary = {}
-
-func _process(_delta: float) -> void:
-	var any_moved := false
-	for vid in _camera_for:
-		var cam: Variant = _camera_for[vid]
-		if cam == null or not (cam is Camera3D):
-			continue
-		var current: Transform3D = (cam as Camera3D).global_transform
-		var cached: Variant = _camera_xform_cache.get(vid, null)
-		if cached == null or not (cached is Transform3D) or (cached as Transform3D) != current:
-			_camera_xform_cache[vid] = current
-			any_moved = true
-	if any_moved:
-		annotations_changed.emit()
 
 
 ## Resolve a CAD edge anchor to its current world-space midpoint.

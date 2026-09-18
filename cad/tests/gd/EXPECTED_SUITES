@@ -893,7 +893,7 @@ test_snapshot_posed.gd assertions=22
 test_fastener_mounting.gd assertions=12
 
 # Source-owned overlays: all panes, replacement, read-only ownership and failed builds.
-test_source_annotations.gd assertions=14
+test_source_annotations.gd assertions=17
 
 # Configuration switching, manual build boundary, physical eligibility and host export context.
 test_model_views.gd assertions=9
@@ -953,3 +953,5 @@ test_bulk_reply_seam.gd assertions=12
 # binary it SKIPS and reports no assertions, which the runner fails. The pin
 # describes a host that has built and installed the plugin.
 test_contract_guard.gd assertions=39
+
+test_object_annotations.gd assertions=10

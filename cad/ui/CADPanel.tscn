@@ -41,7 +41,7 @@ ambient_light_source = 2
 ambient_light_color = Color(0.9, 0.92, 0.96, 1)
 ambient_light_energy = 1.2
 
-[node name="CADPanel" type="PanelContainer"]
+[node name="CADPanel" type="Control"]
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
@@ -52,7 +52,11 @@ size_flags_vertical = 3
 script = ExtResource("1_cadpanel")
 
 [node name="ResponsiveContainer" type="Container" parent="."]
-layout_mode = 2
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_right = -184.0
 size_flags_horizontal = 3
 size_flags_vertical = 3
 script = ExtResource("5_responsive")
@@ -290,9 +294,9 @@ size_flags_horizontal = 3
 fit_to_longest_item = false
 clip_text = true
 
-[node name="ImportMeshButton" type="Button" parent="ResponsiveContainer/WideLayout/WideSidebar"]
+[node name="ImportMeshButton" type="Button" parent="ResponsiveContainer/WideLayout/WideSidebar/BuildControls"]
 layout_mode = 2
-text = "Import mesh…"
+custom_minimum_size = Vector2(32, 32)
 tooltip_text = "Pick a mesh file and add a mesh() reference line to the document."
 
 [node name="ReferencePanel" type="VBoxContainer" parent="ResponsiveContainer/WideLayout/WideSidebar"]
@@ -329,6 +333,21 @@ size_flags_vertical = 3
 [node name="BuildControls" type="HBoxContainer" parent="ResponsiveContainer/NarrowLayout"]
 layout_mode = 2
 
+[node name="ProjectionDropdown" type="OptionButton" parent="ResponsiveContainer/NarrowLayout/BuildControls"]
+layout_mode = 2
+size_flags_horizontal = 3
+fit_to_longest_item = false
+clip_text = true
+tooltip_text = "View direction"
+
+[node name="Configuration" type="OptionButton" parent="ResponsiveContainer/NarrowLayout/BuildControls"]
+layout_mode = 2
+visible = false
+tooltip_text = "Show source or an assembly configuration from the completed source."
+size_flags_horizontal = 3
+fit_to_longest_item = false
+clip_text = true
+
 [node name="Mode" type="Button" parent="ResponsiveContainer/NarrowLayout/BuildControls"]
 layout_mode = 2
 custom_minimum_size = Vector2(32, 32)
@@ -341,30 +360,10 @@ layout_mode = 2
 custom_minimum_size = Vector2(32, 32)
 tooltip_text = "Build latest"
 
-[node name="Configuration" type="OptionButton" parent="ResponsiveContainer/NarrowLayout/BuildControls"]
+[node name="ImportMeshButton" type="Button" parent="ResponsiveContainer/NarrowLayout/BuildControls"]
 layout_mode = 2
-visible = false
-tooltip_text = "Show an assembly configuration from the completed source."
-size_flags_horizontal = 3
-fit_to_longest_item = false
-clip_text = true
-
-[node name="ProjectionRow" type="HBoxContainer" parent="ResponsiveContainer/NarrowLayout"]
-layout_mode = 2
-size_flags_horizontal = 3
-
-[node name="ProjectionLabel" type="Label" parent="ResponsiveContainer/NarrowLayout/ProjectionRow"]
-layout_mode = 2
-text = "View:"
-
-[node name="ProjectionDropdown" type="OptionButton" parent="ResponsiveContainer/NarrowLayout/ProjectionRow"]
-layout_mode = 2
-size_flags_horizontal = 3
-
-[node name="ImportMeshButton" type="Button" parent="ResponsiveContainer/NarrowLayout/ProjectionRow"]
-layout_mode = 2
-text = "Import mesh…"
-tooltip_text = "Pick a mesh file and add a mesh() reference line to the document."
+custom_minimum_size = Vector2(32, 32)
+tooltip_text = "Import mesh — pick a mesh file and add a mesh() reference line to the document."
 
 [node name="SingleView" type="SubViewportContainer" parent="ResponsiveContainer/NarrowLayout"]
 layout_mode = 2
@@ -401,7 +400,11 @@ view_id = "single"
 environment = SubResource("Environment_cad")
 
 [node name="EvalBannerLayer" type="Control" parent="."]
-layout_mode = 2
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_right = -184.0
 mouse_filter = 2
 z_index = 2
 
@@ -449,3 +452,72 @@ ok_button_text = "Import"
 file_mode = 0
 access = 2
 size = Vector2i(760, 520)
+
+[node name="ObjectDock" type="VBoxContainer" parent="."]
+layout_mode = 1
+anchor_left = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = -88.0
+
+[node name="Title" type="Label" parent="ObjectDock"]
+layout_mode = 2
+text = "Objects"
+
+[node name="Tools" type="HFlowContainer" parent="ObjectDock"]
+layout_mode = 2
+
+[node name="Select" type="Button" parent="ObjectDock/Tools"]
+layout_mode = 2
+custom_minimum_size = Vector2(32, 32)
+toggle_mode = true
+tooltip_text = "Select object"
+
+[node name="Translate" type="Button" parent="ObjectDock/Tools"]
+layout_mode = 2
+custom_minimum_size = Vector2(32, 32)
+toggle_mode = true
+tooltip_text = "Translate object"
+
+[node name="Rotate" type="Button" parent="ObjectDock/Tools"]
+layout_mode = 2
+custom_minimum_size = Vector2(32, 32)
+toggle_mode = true
+tooltip_text = "Rotate object"
+
+[node name="Axis" type="OptionButton" parent="ObjectDock"]
+layout_mode = 2
+size_flags_horizontal = 0
+custom_minimum_size = Vector2(64, 32)
+fit_to_longest_item = false
+clip_text = true
+tooltip_text = "World axis for translation or rotation; rotate about the object's origin"
+item_count = 3
+selected = 0
+popup/item_0/text = "X"
+popup/item_0/id = 0
+popup/item_1/text = "Y"
+popup/item_1/id = 1
+popup/item_2/text = "Z"
+popup/item_2/id = 2
+
+[node name="Selection" type="Label" parent="ObjectDock"]
+layout_mode = 2
+text = "No object selected"
+autowrap_mode = 3
+
+[node name="Status" type="Label" parent="ObjectDock"]
+layout_mode = 2
+autowrap_mode = 3
+
+[node name="Annotations" type="VBoxContainer" parent="ObjectDock"]
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="BottomDockSlot" type="VBoxContainer" parent="."]
+layout_mode = 1
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_right = -8.0
+grow_vertical = 0

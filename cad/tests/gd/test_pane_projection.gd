@@ -106,20 +106,19 @@ func _run() -> void:
 				str(pane.size), str(row.size), str(row.position), str(pane_viewport.size)])
 
 	var narrow_dropdown: OptionButton = panel.get_node(
-		"ResponsiveContainer/NarrowLayout/ProjectionRow/ProjectionDropdown")
+		"ResponsiveContainer/NarrowLayout/BuildControls/ProjectionDropdown")
 
 	# The pane IS the label: a word saying "View" over a picture of the part
-	# only eats the corner it sits in. The one-pane layout, where the dropdown
-	# stands in a toolbar rather than on a picture, keeps its own.
+	# only eats the corner it sits in. The compact one-pane toolbar also omits it.
 	var wide_labels: Array = []
 	for slot in PANE_NODES.keys():
 		if panel.get_node_or_null("%s/%s/ProjectionRow/ProjectionLabel" % [GRID, PANE_NODES[slot]]) != null:
 			wide_labels.append(slot)
-	check("no wide pane prefixes its dropdown with a label, while the one-pane "
-			+ "layout keeps its own",
+	check("no pane prefixes its dropdown with a label, including the one-pane "
+			+ "toolbar",
 			wide_labels.is_empty()
 				and panel.get_node_or_null(
-					"ResponsiveContainer/NarrowLayout/ProjectionRow/ProjectionLabel") != null,
+					"ResponsiveContainer/NarrowLayout/BuildControls/ProjectionLabel") == null,
 			"labels still in %s" % str(wide_labels))
 
 	# Sized to its content: an OptionButton that fits its longest item asks for

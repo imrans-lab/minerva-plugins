@@ -144,16 +144,21 @@ func _run() -> void:
 
 func _test_annotation_tool_explains_reference_click_constraint() -> void:
 	var armed_tool := RefCounted.new()
-	check("an armed annotation tool explains why reference clicks are unavailable",
-			not _panel.get_annotation_tool_status(armed_tool).is_empty())
+	check("an armed annotation tool shows guidance in the dock; no tool, no guidance",
+			not _panel.get_annotation_tool_status(armed_tool).is_empty()
+			and _panel.get_annotation_tool_status(null).is_empty())
+	# The two pointer-owning tools are exclusive: reading the status for an
+	# armed annotation tool drops an active object mode.
+	_panel._canvas_overlay.set_mode("select")
+	_panel.get_annotation_tool_status(armed_tool)
+	check("arming an annotation tool disarms the object tool",
+			_panel._canvas_overlay.mode.is_empty())
 	# The host re-reads the status only when told to; the MCP selection must
-	# tell it, or the warning outlives the reason for it.
+	# tell it, or the dock shows a status the selection has outdated.
 	var pings: Array = []
 	var listener := func() -> void: pings.append(true)
 	_panel.annotation_tool_status_changed.connect(listener)
 	_panel.select_reference_node("ref1", "Plate")
-	check("the annotation warning disappears once a reference point is selected",
-			_panel.get_annotation_tool_status(armed_tool).is_empty())
 	check("an MCP selection asks the host to re-read the annotation-tool status",
 			pings.size() == 1, "signal fired %d times" % pings.size())
 	_panel.annotation_tool_status_changed.disconnect(listener)

@@ -2,6 +2,25 @@ extends AnnotationKind
 ## Read-only callout derived from source on the completed model.
 const _Callout := preload("cad_callout.gd")
 const _Layout := preload("cad_edge_label_layout.gd")
+var host_ref: WeakRef
+
+func bounds(annotation: Dictionary) -> Rect2:
+	var host: Object = host_ref.get_ref() if host_ref != null else null
+	if host == null:
+		return Rect2()
+	var world := preload("../scripts/CadPointAnchor.gd").vec3_from(annotation.get("anchor", {}).get("point", []))
+	for pane: Dictionary in host.get_panes():
+		var camera: Camera3D = pane.camera
+		if camera.is_position_behind(world):
+			continue
+		var point := camera.unproject_position(world) + (pane.viewport_rect as Rect2).position
+		if (pane.viewport_rect as Rect2).has_point(point):
+			return Rect2(point - Vector2(4, 4), Vector2(8, 8))
+	return Rect2()
+
+func hit_test(annotation: Dictionary, point: Vector2, threshold: float) -> bool:
+	var rect := bounds(annotation)
+	return rect.has_area() and rect.grow(threshold).has_point(point)
 
 func _init() -> void:
 	name = &"cad_source_annotation"
@@ -55,6 +74,8 @@ func render(ctx: AnnotationRenderContext, annotation: Dictionary) -> void:
 			continue
 		var rect: Rect2 = pane.get("viewport_rect", Rect2())
 		var start := camera.unproject_position(world) + rect.position
+		if not rect.has_point(start):
+			continue
 		var layout: Dictionary = _Layout.get_layout(host, camera, rect, host.get_annotations())
 		_Callout.draw(ctx, start, layout.get(str(annotation.id), start + Vector2(80,-40)), title, body, false)
 

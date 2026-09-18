@@ -29,6 +29,7 @@ class EvaluationResult:
     shape: Any = None
     document: Any = None
     model: dict = field(default_factory=dict)
+    picking: dict = field(default_factory=dict)
     # Final solid bindings share the already-built geometry; never serialized.
     bindings: dict[str, Any] = field(default_factory=dict)
 
@@ -65,8 +66,12 @@ def evaluate_source(
             translator = Translator()
             translate_program(translator, parse(source))
             document = EvaluatedDocument.from_translator(translator)
-        return document.render(selection, configuration, tolerance=tolerance,
-                               angular_tolerance=angular_tolerance)
+        result = document.render(selection, configuration, tolerance=tolerance,
+                                 angular_tolerance=angular_tolerance)
+        if not selection and "placements" not in result.model:
+            from .authoring import placements
+            result.model["placements"] = placements(source, document, result.model)
+        return result
     except (ParseError, TranslatorError, ValueError) as exc:
         cause = exc if isinstance(exc, (ParseError, TranslatorError)) else TranslatorError(str(exc))
         raise EvaluationError(str(exc)) from cause
