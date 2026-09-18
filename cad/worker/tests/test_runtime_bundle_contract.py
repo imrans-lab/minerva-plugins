@@ -107,6 +107,44 @@ def test_python_fcl_is_installed_without_its_declared_dependencies():
     assert "python-fcl" not in LOCK.get("PIP_PKGS", "")
 
 
+def test_dev_lane_venv_declares_every_geometry_backend_at_the_bundle_pin():
+    """A venv built from pyproject alone must reach what the bundle reaches.
+
+    The manifest lane installs the worker editable from pyproject.toml and
+    never sees the lock, so a backend pinned only in the lock is absent from
+    every dev-lane install: the cold-start probe toasts at the first evaluate
+    and the clearance family withholds pass. The pin has to match the bundle's
+    or the two lanes measure with different FCL builds.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "cad_dispatcher_backends", CAD / "worker" / "mcad_worker" / "dispatcher.py")
+    dispatcher = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(dispatcher)
+
+    pyproject = (CAD / "worker" / "pyproject.toml").read_text(encoding="utf-8")
+    block = re.search(r"^dependencies\s*=\s*\[(.*?)^\]", pyproject,
+                      re.S | re.M)
+    assert block, "pyproject.toml has no [project] dependencies list"
+    declared = dict(
+        (re.split(r"[<>=!~\[]", d, 1)[0], d)
+        for d in re.findall(r'"([^"]+)"', block.group(1)))
+    lock_pins = dict(
+        (re.split(r"[<>=!~\[]", s, 1)[0], s)
+        for s in (LOCK.get("PIP_PKGS", "") + " "
+                  + LOCK.get("PIP_NO_DEPS_PKGS", "")).split())
+    module_dist = {m: d for d, m in DIST_IMPORT_NAME.items()}
+
+    for module in dispatcher.GEOMETRY_BACKENDS:
+        dist = module_dist.get(module, module)
+        assert dist in declared, (
+            f"geometry backend {module} ({dist}) is probed at worker start "
+            f"but not declared in worker/pyproject.toml dependencies")
+        assert declared[dist] == lock_pins.get(dist), (
+            f"{dist} is {declared[dist]} in pyproject.toml but "
+            f"{lock_pins.get(dist)} in runtime-bundle.lock")
+
+
 # ---------------------------------------------------------------------------
 # The wheels
 # ---------------------------------------------------------------------------

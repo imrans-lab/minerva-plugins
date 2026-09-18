@@ -4,6 +4,11 @@ version = "0.1.0"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "build123d>=0.7.0",
+    # The clearance backend. The release bundle installs the same wheel
+    # (scripts/runtime-bundle.lock PIP_NO_DEPS_PKGS); a venv built from this
+    # file alone must reach the same geometry backends, or every clearance,
+    # interference and fastener check withholds pass on a dev-lane install.
+    "python-fcl==0.7.0.11",
 ]
 
 [project.optional-dependencies]
