@@ -135,6 +135,12 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGINS_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# The pass/fail contract this runner and scripts/run-contract-guards.sh must
+# agree on exactly: EXPECTED_SUITES parsing, the allowlist cleaner, the fatal-
+# diagnostic extractor and the Results-line parser.
+# shellcheck source=lib/gd_test_contract.sh
+. "${SCRIPT_DIR}/lib/gd_test_contract.sh"
+
 USAGE="usage: $0 --plugin <id> [--preflight-only] <path-to-minerva-checkout>"
 
 PREFLIGHT_ONLY=0
@@ -287,74 +293,7 @@ shopt -u nullglob
 # names. This is what makes deleting/renaming a suite a loud, named failure
 # instead of a smaller-but-still-green run — see the header comment.
 MANIFEST="${GD_TEST_DIR}/EXPECTED_SUITES"
-if [ ! -f "${MANIFEST}" ]; then
-  echo "error: suite manifest not found: ${MANIFEST}" >&2
-  exit 2
-fi
-
-# Manifest v2 line format:  <filename> [assertions=N] [real-worker]
-# The first whitespace-separated token is the suite filename (what preflight
-# and the both-direction set check match on); the rest are per-suite
-# enforcement attributes. Unknown attributes are a hard error — a typo'd
-# `real-workr` that silently parsed as nothing would un-enforce the very
-# thing the entry was written to enforce.
-declare -a manifest_names=()
-declare -A manifest_assertions=()
-declare -A manifest_real_worker=()
-# A DUPLICATE row inflates EXPECTED_SUITE_COUNT while the suite runs once:
-# every suite can pass, the summary prints 50/51, and the runner still exits
-# 0. Duplicate attributes would make conflicting pins "last one wins". Both
-# are manifest corruption: refuse by name, exit 2.
-declare -A manifest_seen=()
-while IFS= read -r line; do
-  case "${line}" in
-    ""|"#"*) continue ;;
-  esac
-  read -r -a fields <<< "${line}"
-  if [ "${#fields[@]}" -eq 0 ]; then
-    continue  # whitespace-only line
-  fi
-  name="${fields[0]}"
-  if [ -n "${manifest_seen[${name}]:-}" ]; then
-    echo "error: ${MANIFEST}: duplicate suite entry '${name}' (a duplicate inflates the suite count while the suite runs once)" >&2
-    exit 2
-  fi
-  manifest_seen["${name}"]=1
-  manifest_names+=("${name}")
-  for attr in "${fields[@]:1}"; do
-    case "${attr}" in
-      assertions=*)
-        if [ -n "${manifest_assertions[${name}]:-}" ]; then
-          echo "error: ${MANIFEST}: suite '${name}' repeats the assertions= attribute (conflicting pins must not be last-one-wins)" >&2
-          exit 2
-        fi
-        val="${attr#assertions=}"
-        if ! [[ "${val}" =~ ^[0-9]+$ ]] || [ "${val}" -eq 0 ]; then
-          echo "error: ${MANIFEST}: suite '${name}' has non-positive-integer assertions pin '${attr}'" >&2
-          exit 2
-        fi
-        manifest_assertions["${name}"]="${val}"
-        ;;
-      real-worker)
-        if [ -n "${manifest_real_worker[${name}]:-}" ]; then
-          echo "error: ${MANIFEST}: suite '${name}' repeats the real-worker attribute" >&2
-          exit 2
-        fi
-        manifest_real_worker["${name}"]=1
-        ;;
-      *)
-        echo "error: ${MANIFEST}: suite '${name}' has unknown attribute '${attr}'" >&2
-        echo "  (known: assertions=N, real-worker)" >&2
-        exit 2
-        ;;
-    esac
-  done
-done < "${MANIFEST}"
-
-if [ "${#manifest_names[@]}" -eq 0 ]; then
-  echo "error: suite manifest ${MANIFEST} has no entries" >&2
-  exit 2
-fi
+gd_manifest_parse "${MANIFEST}"
 
 declare -a disk_names=()
 for test_path in "${tests[@]}"; do
@@ -487,72 +426,12 @@ if [ "${#manifest_real_worker[@]}" -gt 0 ] && [ -z "${RUN_GD_TESTS_SUITE_DIR:-}"
 fi
 
 # Known-harness-diagnostics allowlist (execution only — preflight executes
-# nothing, so it has nothing to scan). Comments/blanks are stripped into a
-# scratch copy before use: grep -v -f treats a blank line as a
-# match-everything pattern, which would filter EVERY diagnostic and silently
-# disarm the whole check — the exact failure mode this runner exists to
-# prevent, so it is treated as a harness-config error instead.
+# nothing, so it has nothing to scan). gd_allowlist_clean strips comments and
+# blanks into the scratch copy and compile-checks the patterns; see the lib
+# for why both are refusals rather than best-effort.
 ALLOWLIST="${GD_TEST_DIR}/KNOWN_HARNESS_DIAGNOSTICS"
-if [ ! -f "${ALLOWLIST}" ]; then
-  echo "error: known-harness-diagnostics allowlist not found: ${ALLOWLIST}" >&2
-  echo "  (required for execution runs — every SCRIPT ERROR/failed-script-load" >&2
-  echo "   diagnostic not matching it fails the suite that printed it)" >&2
-  exit 2
-fi
 ALLOWLIST_CLEAN="$(mktemp)"
-grep -Ev '^[[:space:]]*(#|$)' "${ALLOWLIST}" > "${ALLOWLIST_CLEAN}" || true
-if [ ! -s "${ALLOWLIST_CLEAN}" ]; then
-  echo "error: allowlist ${ALLOWLIST} has no patterns (only comments/blanks)" >&2
-  rm -f "${ALLOWLIST_CLEAN}"
-  exit 2
-fi
-# COMPILE-CHECK the patterns before anything runs.
-# An invalid ERE makes the residue grep exit 2, and an unguarded scan would
-# read that as "no residue" — the gate silently disarming itself on a typo is
-# the exact fail-open this runner exists to prevent. grep against /dev/null:
-# rc 1 = patterns valid (nothing to match), rc 2 = at least one is malformed.
-grep -E -f "${ALLOWLIST_CLEAN}" /dev/null >/dev/null 2>&1
-_allowlist_rc=$?
-if [ "${_allowlist_rc}" -ge 2 ]; then
-  echo "error: allowlist ${ALLOWLIST} contains an invalid extended regex (grep rc ${_allowlist_rc})" >&2
-  echo "  (the diagnostics gate cannot run against a pattern set that does not compile)" >&2
-  rm -f "${ALLOWLIST_CLEAN}"
-  exit 2
-fi
-
-# Emit one "MESSAGE @@ at: LOCATION" record per fatal diagnostic in a
-# captured suite log. Scope is deliberately the two fatal families the
-# acceptance names — `SCRIPT ERROR:` (compile/parse/runtime script errors)
-# and `ERROR: Failed to load script` — NOT every `ERROR:` engine line
-# (headless runs legitimately print Node-not-found/socket noise that is not
-# a script-layer verdict). The `at:` line that follows a diagnostic is glued
-# onto the record so the allowlist can pin a message to a location instead
-# of blessing it everywhere.
-_fatal_diagnostics() {
-  awk '
-    /^SCRIPT ERROR: / || /^ERROR: Failed to load script / {
-      if (pending != "") print pending " @@ "
-      pending = $0
-      next
-    }
-    /^[ \t]+at: / {
-      if (pending != "") {
-        loc = $0
-        sub(/^[ \t]+/, "", loc)
-        print pending " @@ " loc
-        pending = ""
-      }
-      next
-    }
-    {
-      if (pending != "") {
-        print pending " @@ "
-        pending = ""
-      }
-    }
-    END { if (pending != "") print pending " @@ " }
-  ' "$1"
-}
+gd_allowlist_clean "${ALLOWLIST}" "${ALLOWLIST_CLEAN}"
 
 overall_rc=0
 declare -a results=()
@@ -606,13 +485,10 @@ for test_path in "${tests[@]}"; do
   # Parse "=== Results: N passed, M failed ===" (every suite in the manifest
   # prints this exact prefix; a few append "(real_worker_used=%s)" inside the
   # parens, which the pattern below does not need to match).
-  results_line="$(grep -m1 -E '=== Results: [0-9]+ passed, [0-9]+ failed' "${RESULTS_TMP}" || true)"
-  n_pass=""
-  n_fail=""
-  if [[ "${results_line}" =~ Results:\ ([0-9]+)\ passed,\ ([0-9]+)\ failed ]]; then
-    n_pass="${BASH_REMATCH[1]}"
-    n_fail="${BASH_REMATCH[2]}"
-  fi
+  gd_results_parse "${RESULTS_TMP}"
+  results_line="${GD_RESULTS_LINE}"
+  n_pass="${GD_N_PASS}"
+  n_fail="${GD_N_FAIL}"
 
   # FAIL CLOSED: an absent or unparseable Results line is a FAIL, never a
   # PASS — that is the exact case a `quit(0)` planted before the first
@@ -677,7 +553,7 @@ for test_path in "${tests[@]}"; do
     # filter, 1 = every diagnostic matched the allowlist, >=2 = the scan
     # itself failed, which is a harness error and FAILS the suite (fail
     # closed) rather than reading as an empty residue.
-    diag_residue="$(_fatal_diagnostics "${RESULTS_TMP}" | grep -Ev -f "${ALLOWLIST_CLEAN}")"
+    diag_residue="$(gd_fatal_diagnostics "${RESULTS_TMP}" | grep -Ev -f "${ALLOWLIST_CLEAN}")"
     diag_rc=$?
     if [ "${diag_rc}" -ge 2 ]; then
       suite_ok=0
