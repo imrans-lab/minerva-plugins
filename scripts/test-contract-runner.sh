@@ -14,6 +14,13 @@
 
 set -u
 
+# The runner is Linux-only (its user:// isolation is XDG-based), so its
+# self-test is too: elsewhere every case would fail at the platform gate.
+if [ "$(uname -s)" != "Linux" ]; then
+  echo "skip: run-contract-guards.sh and this self-test support Linux only"
+  exit 0
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNER="${SCRIPT_DIR}/run-contract-guards.sh"
 SANDBOX="$(mktemp -d)"
@@ -33,15 +40,9 @@ echo 'config/name="Minerva"' > "${HOST}/src/project.godot"
 cat > "${HOST}/src/gdextension/terminal/terminal.gdextension" <<'GDEXT'
 [libraries]
 linux.editor.x86_64 = "res://bin/libfake.linux.so"
-macos.editor = "res://bin/libfake.macos.framework"
-windows.editor.x86_64 = "res://bin/libfake.windows.dll"
 GDEXT
-case "$(uname -s)" in
-  Linux) touch "${HOST}/src/bin/libfake.linux.so" ;;
-  Darwin) mkdir -p "${HOST}/src/bin/libfake.macos.framework" ;;
-  *) touch "${HOST}/src/bin/libfake.windows.dll" ;;
-esac
-EXT_LIB="$(find "${HOST}/src/bin" -maxdepth 1 -mindepth 1 | head -n1)"
+EXT_LIB="${HOST}/src/bin/libfake.linux.so"
+touch "${EXT_LIB}"
 
 # The fake plugin. Its manifest's setup stanza is an `exec` step, so the
 # runner's manifest-driven builder is exercised for real without a toolchain.
@@ -90,6 +91,14 @@ esac
 for arg in "$@"; do
   if [ "${arg}" = "--import" ]; then
     [ "${FAKE_IMPORT_FAILS:-0}" = "1" ] && { echo "Parse Error: broken"; exit 1; }
+    [ "${FAKE_IMPORT_HANGS:-0}" = "1" ] && { sleep 120; exit 0; }
+    if [ "${FAKE_IMPORT_DIAG:-0}" = "1" ]; then
+      # What Godot actually does with an unparseable class_name script on
+      # import: reports it and still exits 0.
+      echo "SCRIPT ERROR: Parse Error: Unexpected token in class body."
+      echo "   at: GDScript::reload (res://Scripts/Services/Plugins/InternalPlugins.gd:7)"
+      exit 0
+    fi
     exit 0
   fi
 done
@@ -112,6 +121,14 @@ case "${FAKE_MODE:-healthy}" in
            echo "   at: _case_small_happy (res://../../minerva-plugins/demo/tests/gd/test_contract_guard.gd:99)"
            echo "=== Results: 3 passed, 0 failed ==="; exit 0 ;;
   hang)    sleep 120; exit 0 ;;
+  overflow) # green verdict first, then a runaway stream, then the fatal line
+           # the gate would miss if it only read a truncated prefix
+           echo "=== Results: 3 passed, 0 failed ==="
+           head -c 6000000 /dev/zero | tr '\0' x
+           echo
+           echo "SCRIPT ERROR: Invalid call. Nonexistent function 'late' in base 'Node'."
+           echo "   at: _exit_tree (res://../../minerva-plugins/demo/tests/gd/test_contract_guard.gd:200)"
+           exit 0 ;;
 esac
 FG
 chmod +x "${FAKE_GODOT}"
@@ -124,6 +141,8 @@ run_case() {
   local out_dir="${SANDBOX}/out-${name}"
   local log="${SANDBOX}/${name}.out"
   rm -rf "${out_dir}"
+  # PREP plants a defect in the fresh --out dir before the runner sees it.
+  [ -z "${PREP:-}" ] || eval "${PREP}"
   CONTRACT_GUARDS_PLUGINS_ROOT="${PLUGINS}" XDG_DATA_HOME="${DEV_PROFILE}" \
     "${RUNNER}" --minerva "${HOST}" --godot "${FAKE_GODOT}" --plugin-rev "${REV}" \
     --out "${out_dir}" "$@" > "${log}" 2>&1
@@ -213,7 +232,23 @@ mf["setup"].pop("requires")
 json.dump(mf, open(path, "w"))
 PYMF
 # a failed --import is fatal (the permissive runner swallows it with || true)
-FAKE_IMPORT_FAILS=1 FAKE_MODE=healthy run_case import_failure 2 "godot --import exited nonzero"
+FAKE_IMPORT_FAILS=1 FAKE_MODE=healthy run_case import_failure 2 "godot --import exited 1"
+# ...and so is an import that exits 0 while reporting a script it could not parse
+FAKE_IMPORT_DIAG=1 FAKE_MODE=healthy run_case import_exit0_diagnostic 2 "exited 0 but printed fatal script diagnostics"
+# ...and one that never finishes
+FAKE_IMPORT_HANGS=1 FAKE_MODE=healthy run_case import_hang 2 "godot --import timed out after 2s" --timeout 2
+
+echo
+echo "=== evidence integrity ==="
+# a green Results line followed by a runaway stream and a late fatal: the gate
+# must refuse to score what it could not read, not pass on the prefix
+FAKE_MODE=overflow run_case output_overflow 1 "output exceeded the"
+# the log cannot be opened for writing: a harness fault, never a verdict
+PREP='mkdir -p "${out_dir}/logs/demo-contract-guard.log"' FAKE_MODE=healthy \
+  run_case capture_failure 2 "output capture failed"
+# summary.json cannot be written: no evidence means no green exit
+PREP='mkdir -p "${out_dir}/summary.json"' FAKE_MODE=healthy \
+  run_case evidence_writer_failure 2 "could not write"
 
 echo
 echo "=== preconditions ==="

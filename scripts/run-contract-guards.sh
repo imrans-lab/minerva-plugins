@@ -36,20 +36,19 @@
 # Nothing is downloaded and Minerva is never built: an incomplete --minerva
 # fails closed instead.
 #
-# ISOLATED USER DATA. Every run points Godot's user:// at a fresh scratch dir
-# under --out (`<out>/userdata`) by exporting XDG_DATA_HOME, XDG_CONFIG_HOME
-# and XDG_CACHE_HOME, so the plugin DB, policy.json, drive state and anything
-# else written to user:// never touch the developer's profile.
-#   * Linux (the target platform, verified here): Godot's data/config/cache
-#     paths honour those three XDG variables, so user:// resolves to
-#     <out>/userdata/godot/app_userdata/Minerva.
-#   * macOS and Windows are UNVERIFIED and almost certainly NOT isolated by
-#     this mechanism: Godot resolves user:// through ~/Library/Application
-#     Support and %APPDATA% respectively, neither of which reads XDG_*. This
-#     runner therefore ALSO fingerprints the developer's real user-data
-#     directory before and after the run and fails if a single byte-size,
-#     mtime or path changed — that check is platform-independent and is what
-#     actually enforces the isolation claim.
+# LINUX ONLY. This runner refuses to start anywhere else, because its user://
+# isolation is a Linux mechanism: every run exports XDG_DATA_HOME,
+# XDG_CONFIG_HOME and XDG_CACHE_HOME at a fresh scratch dir under --out
+# (`<out>/userdata`), and on Linux Godot resolves user:// through those three
+# variables, so the plugin DB, policy.json, drive state and anything else the
+# guards write lands at <out>/userdata/data/godot/app_userdata/Minerva. macOS
+# and Windows resolve user:// through ~/Library/Application Support and
+# %APPDATA%, which ignore XDG_*; running there would write into the
+# developer's real profile, so it is not allowed rather than half-checked.
+# As a second line of defence the developer's real user-data directory is
+# fingerprinted by METADATA (path, size, mtime) before and after the run and
+# any change fails the run with exit 2. That is a stat walk, not byte
+# identity: a same-size in-place rewrite within one mtime tick would pass it.
 #
 # EXACT INVOCATION for a consuming host's functional CI job, from a workspace
 # that already holds the two checkouts SIDE BY SIDE and has built Minerva's
@@ -69,10 +68,13 @@
 # summary.json is the machine-readable verdict and logs/ holds each guard's
 # full output.
 #
-# EXIT CODES: 0 = every selected guard passed. 1 = a guard failed. 2 = a
-# harness/environment problem (bad arguments, missing extensions, layout
-# mismatch, failed build, corrupt manifest) — a gate that could not run is
-# never reported as a gate that passed.
+# EXIT CODES: 0 = every selected guard passed. 1 = a guard failed (including
+# a guard whose output overran the log cap, since nothing past the cap was
+# inspected). 2 = a harness/environment problem (bad arguments, non-Linux
+# host, missing extensions, layout mismatch, failed build, corrupt manifest,
+# import failure, output-capture fault, developer profile touched, summary
+# not writable) — a gate that could not run is never reported as a gate that
+# passed, and 2 outranks 1 when both apply.
 
 set -u
 
@@ -169,12 +171,14 @@ MINERVA_DIR="$(cd "${MINERVA_ARG}" 2>/dev/null && pwd)" \
 # and the guard degrades to a skip. The library list is read from the
 # .gdextension files themselves rather than hardcoded, so a new extension is
 # covered the day it is added. Platform tag: Godot's headless EDITOR binary
-# (what --script runs under) loads the `<os>.editor.<arch>` entries.
-case "$(uname -s)" in
-  Linux) EXT_OS="linux" ;;
-  Darwin) EXT_OS="macos" ;;
-  *) EXT_OS="windows" ;;
-esac
+# (what --script runs under) loads the `linux.editor.<arch>` entries — Linux
+# only, see the header: the XDG isolation this runner relies on holds nowhere
+# else.
+if [ "$(uname -s)" != "Linux" ]; then
+  echo "error: run-contract-guards.sh supports Linux only (user:// isolation is XDG-based; $(uname -s) would write into the developer's real profile)" >&2
+  exit 2
+fi
+EXT_OS="linux"
 EXT_ARCH="$(uname -m)"
 missing_libs=()
 checked_libs=0
@@ -244,7 +248,10 @@ rm -rf "${USER_DATA}"
 mkdir -p "${LOG_DIR}" "${USER_DATA}/data" "${USER_DATA}/config" "${USER_DATA}/cache"
 
 # The developer profile this run must NOT touch, fingerprinted by metadata
-# only (path, size, mtime) so the check costs a stat walk rather than a read.
+# only (path, size, mtime): a stat walk, not a byte comparison, so it catches
+# any file created, removed or grown, but not a same-size rewrite inside one
+# mtime tick. The XDG redirection above is the primary isolation; this is
+# the tripwire behind it.
 REAL_DATA_HOME="${XDG_DATA_HOME:-${HOME:-/nonexistent}/.local/share}"
 REAL_USER_DATA="${REAL_DATA_HOME}/godot/app_userdata/Minerva"
 PROFILE_BEFORE="${OUT_DIR}/profile-before.txt"
@@ -331,11 +338,30 @@ export XDG_CACHE_HOME="${USER_DATA}/cache"
 # Godot resolves class_name globals through .godot/global_script_class_cache.cfg,
 # which is generated on import and not tracked in git. run-gd-tests.sh swallows
 # this step's exit code; here a failed import means every suite afterwards is
-# testing a half-loaded project, so it is fatal.
-echo "=== importing host project (${MINERVA_DIR}/src) ==="
-if ! "${GODOT_BIN}" --headless --path "${MINERVA_DIR}/src" --import > "${LOG_DIR}/import.log" 2>&1; then
-  echo "error: godot --import exited nonzero (see ${LOG_DIR}/import.log)" >&2
+# testing a half-loaded project, so it is fatal. Three ways it can fail:
+# nonzero exit, exceeding the same deadline a suite gets (an import that hangs
+# on a broken importer would otherwise hold the job until the CI-level
+# timeout, with no verdict written), and a script parse/compile diagnostic
+# printed on an exit-0 import — Godot reports a class_name script it could
+# not parse as a SCRIPT ERROR and still exits 0, leaving a class cache that
+# lacks that class. A healthy import prints no SCRIPT ERROR at all, so there
+# is no allowlist here: any fatal diagnostic is a broken host checkout.
+echo "=== importing host project (${MINERVA_DIR}/src, deadline ${SUITE_TIMEOUT}s) ==="
+timeout --kill-after=15 "${SUITE_TIMEOUT}" \
+  "${GODOT_BIN}" --headless --path "${MINERVA_DIR}/src" --import > "${LOG_DIR}/import.log" 2>&1
+import_rc=$?
+if [ "${import_rc}" -eq 124 ] || [ "${import_rc}" -eq 137 ]; then
+  echo "error: godot --import timed out after ${SUITE_TIMEOUT}s (exit ${import_rc}; see ${LOG_DIR}/import.log)" >&2
+  exit 2
+elif [ "${import_rc}" -ne 0 ]; then
+  echo "error: godot --import exited ${import_rc} (see ${LOG_DIR}/import.log)" >&2
   tail -n 40 "${LOG_DIR}/import.log" >&2
+  exit 2
+fi
+import_diags="$(gd_fatal_diagnostics "${LOG_DIR}/import.log")"
+if [ -n "${import_diags}" ]; then
+  echo "error: godot --import exited 0 but printed fatal script diagnostics (see ${LOG_DIR}/import.log):" >&2
+  while IFS= read -r diag_line; do echo "      ${diag_line}" >&2; done <<< "${import_diags}"
   exit 2
 fi
 echo
@@ -365,20 +391,33 @@ for plugin in "${PLUGINS[@]}"; do
 
   echo "=== ${plugin} contract guard (pin ${PINNED[${plugin}]} assertions, timeout ${SUITE_TIMEOUT}s) ==="
   started="$(date +%s)"
+  # Output is bounded WHILE it is captured: `head` stops the pipe one byte
+  # past the cap, so the kept log is never a silently truncated prefix of a
+  # longer stream. Everything the gate inspects below (Results line, SKIP,
+  # fatal diagnostics) is inspected on exactly the bytes kept, and a stream
+  # that overran the cap fails the guard outright — a fatal diagnostic printed
+  # after byte 5 MiB is one the gate could not have seen, so it must not be
+  # scored as absent. Once head closes, godot either stops on SIGPIPE at its
+  # next write or runs on to the deadline `timeout` enforces; the verdict is
+  # the same either way.
   env "${plugin_env_var}=${plugin_dir}" \
     timeout --kill-after=15 "${SUITE_TIMEOUT}" \
     "${GODOT_BIN}" --headless --path "${MINERVA_DIR}/src" --script "${res_script}" 2>&1 \
+    | head -c "$((LOG_CAP_BYTES + 1))" \
     | tee "${log}"
-  rc="${PIPESTATUS[0]}"
+  pipe_rcs=("${PIPESTATUS[@]}")
+  rc="${pipe_rcs[0]}"
   duration=$(( $(date +%s) - started ))
 
-  # Bound the kept log; a runaway suite must not fill the artifact store.
-  log_bytes="$(wc -c < "${log}")"
-  if [ "${log_bytes}" -gt "${LOG_CAP_BYTES}" ]; then
-    head -c "${LOG_CAP_BYTES}" "${log}" > "${log}.trunc"
-    printf '\n*** TRUNCATED: %s bytes of output, capped at %s ***\n' "${log_bytes}" "${LOG_CAP_BYTES}" >> "${log}.trunc"
-    mv "${log}.trunc" "${log}"
+  # The capture stages themselves must have succeeded. A tee that could not
+  # open the log, or a head that died, means the bytes scored below are not
+  # the bytes godot wrote, and that is a harness fault, not a guard verdict.
+  capture_fault=""
+  if [ "${pipe_rcs[1]}" -ne 0 ] || [ "${pipe_rcs[2]}" -ne 0 ] || [ ! -f "${log}" ]; then
+    capture_fault="output capture failed (head rc ${pipe_rcs[1]}, tee rc ${pipe_rcs[2]})"
   fi
+  log_bytes=0
+  [ -f "${log}" ] && log_bytes="$(wc -c < "${log}")"
 
   gd_results_parse "${log}"
   results_line="${GD_RESULTS_LINE}"
@@ -389,7 +428,14 @@ for plugin in "${PLUGINS[@]}"; do
 
   ok=1
   reason=""
-  if [ "${rc}" -eq 124 ] || [ "${rc}" -eq 137 ]; then
+  if [ -n "${capture_fault}" ]; then
+    ok=0
+    reason="${capture_fault}"
+    overall_rc=2
+  elif [ "${log_bytes}" -gt "${LOG_CAP_BYTES}" ]; then
+    ok=0
+    reason="output exceeded the ${LOG_CAP_BYTES}-byte cap; anything past it was not inspected, so no verdict can be read from this log"
+  elif [ "${rc}" -eq 124 ] || [ "${rc}" -eq 137 ]; then
     ok=0
     reason="timed out after ${SUITE_TIMEOUT}s (exit ${rc})"
   elif [ "${rc}" -ne 0 ]; then
@@ -442,10 +488,13 @@ for plugin in "${PLUGINS[@]}"; do
     fi
   fi
 
-  [ "${ok}" -eq 1 ] || overall_rc=1
+  # A capture fault already raised overall_rc to 2 (harness outranks verdict).
+  if [ "${ok}" -ne 1 ] && [ "${overall_rc}" -eq 0 ]; then overall_rc=1; fi
   # A tab is IFS whitespace, so `read` COLLAPSES an empty field: the reader
   # below would silently shift every column left on a passing row. "-" stands
-  # in for the empty reason for exactly that reason.
+  # in for the empty reason for exactly that reason, and a tab INSIDE the
+  # reason (a SKIP line quoting one) would add a column, so it is flattened.
+  reason="${reason//$'\t'/ }"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "${plugin}" "$([ "${ok}" -eq 1 ] && echo PASS || echo FAIL)" "${reason:--}" \
     "${BINARY_SHA[${plugin}]}" "${rc}" "${n_pass:--}" "${n_fail:--}" \
@@ -502,6 +551,14 @@ json.dump({
     "guards": rows,
 }, open(sys.argv[2], "w"), indent=2)
 ' "${RECORDS}" "${SUMMARY}"
+summary_rc=$?
+# The verdict IS the artifact. If it could not be written, or does not read
+# back as JSON, the job has no evidence to archive and must not exit on the
+# guards' code alone — a downstream consumer would see "exit 0, no summary".
+if [ "${summary_rc}" -ne 0 ] || ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "${SUMMARY}" 2>/dev/null; then
+  echo "error: could not write ${SUMMARY} (writer rc ${summary_rc}); no evidence was produced for this run" >&2
+  overall_rc=2
+fi
 
 echo "================ contract guards ================"
 while IFS=$'\t' read -r plugin verdict reason sha rc npass nfail pin secs _results; do
