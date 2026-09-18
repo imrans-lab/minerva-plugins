@@ -108,18 +108,22 @@ func _test_the_panel_offers_the_action() -> void:
 	var panel := _make_panel()
 	if panel == null:
 		return
+	# The host loads toolbar assets through this lifecycle hook.
+	panel._on_panel_loaded({})
 
 	var wide_button := panel.get_node_or_null(
-		"ResponsiveContainer/WideLayout/WideSidebar/ImportMeshButton") as Button
+		"ResponsiveContainer/WideLayout/WideSidebar/BuildControls/ImportMeshButton") as Button
 	check("gui: the wide layout carries an Import mesh button declared in the scene",
-			wide_button != null and not wide_button.text.strip_edges().is_empty(),
+			wide_button != null and wide_button.icon != null
+			and wide_button.text.is_empty() and not wide_button.tooltip_text.is_empty(),
 			"button=%s" % str(wide_button))
 
 	var narrow_button := panel.get_node_or_null(
-		"ResponsiveContainer/NarrowLayout/ProjectionRow/ImportMeshButton") as Button
+		"ResponsiveContainer/NarrowLayout/BuildControls/ImportMeshButton") as Button
 	check("gui: the narrow layout carries one too — the action is not lost on a small pane",
-			narrow_button != null,
-			"no ImportMeshButton in NarrowLayout/ProjectionRow")
+			narrow_button != null and narrow_button.icon != null
+			and narrow_button.text.is_empty() and not narrow_button.tooltip_text.is_empty(),
+			"no ImportMeshButton in NarrowLayout/BuildControls")
 
 	var dialog := panel.get_node_or_null("MeshImportDialog") as FileDialog
 	var filters := dialog.filters if dialog != null else PackedStringArray()

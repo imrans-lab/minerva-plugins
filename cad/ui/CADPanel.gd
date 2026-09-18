@@ -130,6 +130,21 @@ func build_status() -> Dictionary:
 func set_build_mode(mode: String) -> Dictionary:
 	return _build.set_mode(mode)
 
+
+## The same guarded history serves the host ribbon and the CAD MCP tool.
+func _on_panel_undo_request() -> bool:
+	return _step_edit_history(false)
+
+
+func _on_panel_redo_request() -> bool:
+	return _step_edit_history(true)
+
+
+func _step_edit_history(redo: bool) -> bool:
+	var result: Dictionary = _canvas_overlay.undo(redo)
+	_canvas_overlay.message(str(result.get("error", "Redone" if redo else "Undone")))
+	return bool(result.get("success", false))
+
 func verify_dependencies() -> void:
 	_dependencies.verify()
 
@@ -941,6 +956,7 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 	# freshness stamp moves here and nowhere else.
 	_painted_buffer_version = int(snapshot.source_version)
 	_evaluation_state.painted(self, snapshot, eval_result)
+	_reference_selection.set_records(preload("scripts/object_records.gd").build(eval_result, get_reference_state()))
 	_model_views.refresh()
 	_annotation_host.set_source_annotations(prepared_annotations.annotations,
 		_evaluation_state.completed.get("provenance", {}))

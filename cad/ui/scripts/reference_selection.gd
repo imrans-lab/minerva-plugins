@@ -113,6 +113,11 @@ func handle_click(view_id: String, pixel: Vector2) -> bool:
 	if hit.is_empty():
 		clear_selection()
 		return false
+	select_hit(hit, view_id, pixel)
+	return true
+
+
+func select_hit(hit: Dictionary, view_id: String = "", pixel: Vector2 = Vector2.ZERO) -> void:
 	var pose: Transform3D = (hit["record"] as Dictionary).get("pose", Transform3D.IDENTITY)
 	_selection = _make_selection(
 		hit["record"],
@@ -125,7 +130,6 @@ func handle_click(view_id: String, pixel: Vector2) -> bool:
 		pixel
 	)
 	_publish()
-	return true
 
 
 ## Select a node by name, optionally at a named point in the reference's own
@@ -367,6 +371,11 @@ func _make_selection(
 	var local_box: AABB = row.get("aabb", AABB())
 	return {
 		"reference": str(record.get("name", "")),
+		"object_id": str(record.get("name", "")),
+		"kind": str(record.get("kind", "reference")),
+		"metadata": record.get("metadata", {}),
+		"geometry_stamp": str(record.get("stamp", "")),
+		"file_path": str(record.get("resolved_path", "")),
 		"node": str(row.get("path", node_name)) if not row.is_empty() else node_name,
 		"node_name": str(row.get("name", node_name)) if not row.is_empty() else node_name,
 		"local": local,

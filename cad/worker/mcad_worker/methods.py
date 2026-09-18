@@ -458,6 +458,7 @@ def _evaluate(params: dict) -> dict:
         "references": result.references,
         "annotations": result.annotations,
         "model": result.model,
+        "picking": result.picking,
         "provenance": {
             "source_digest": h[0],
             "selection": selection, "configuration": configuration,

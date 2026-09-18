@@ -8,6 +8,9 @@
 extends Camera3D
 class_name OrbitCamera
 
+## Emitted after camera pose or projection changes, including pan and zoom.
+signal view_changed
+
 @export var orthographic_environment: Environment
 
 # -------------------------------------------------------------------------
@@ -63,6 +66,15 @@ func handle_pointer_input(event: InputEvent) -> bool:
 		return false
 
 	var handled := false
+	if event is InputEventMagnifyGesture:
+		_distance = clamp(_distance / maxf(event.factor, 0.01), MIN_DISTANCE, MAX_DISTANCE)
+		_apply_transform()
+		return true
+	if event is InputEventPanGesture:
+		_target -= transform.basis.x * event.delta.x * PAN_SENSITIVITY * (_distance / DEFAULT_DISTANCE)
+		_target += transform.basis.y * event.delta.y * PAN_SENSITIVITY * (_distance / DEFAULT_DISTANCE)
+		_apply_transform()
+		return true
 
 	# Middle mouse button: start/stop drag
 	if event is InputEventMouseButton:
@@ -134,6 +146,7 @@ func _apply_transform() -> void:
 	environment = orthographic_environment if _view_preset != "Perspective" else null
 	if _view_preset != "Perspective":
 		_apply_orthographic_transform()
+		view_changed.emit()
 		return
 
 	projection = Camera3D.PROJECTION_PERSPECTIVE
@@ -151,6 +164,7 @@ func _apply_transform() -> void:
 
 	position = _target + offset
 	look_at(_target, _Z_UP)
+	view_changed.emit()
 
 
 func _apply_orthographic_transform() -> void:

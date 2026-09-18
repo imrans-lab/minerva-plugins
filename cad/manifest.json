@@ -21,6 +21,82 @@
   },
   "tools": [
     {
+      "name": "minerva_cad_object",
+      "description": "Inspect or select a native instance/imported object; report identity, provenance and local/world surface point. Transform the selected explicit placement along world axis 0=X,1=Y,2=Z by amount in mm or degrees; rotation pivots about its origin. Source edits are guarded and undoable. Read an annotation attachment, attach a legacy arrow using its current screen tip, or refine a surface arrow using object-local point_mm and optional normal. Refinement verifies a surface hit within 0.01 mm and is undoable. This never cuts geometry. Unsupported/generated placements remain read-only.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "inspect",
+              "select",
+              "set_mode",
+              "transform",
+              "attachment",
+              "attach_arrow",
+              "refine_attachment",
+              "undo",
+              "redo"
+            ]
+          },
+          "object_id": {
+            "type": "string"
+          },
+          "node": {
+            "type": "string"
+          },
+          "annotation_id": {
+            "type": "string"
+          },
+          "point_mm": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "minItems": 3,
+            "maxItems": 3
+          },
+          "normal": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "minItems": 3,
+            "maxItems": 3
+          },
+          "mode": {
+            "type": "string"
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "translate",
+              "rotate"
+            ]
+          },
+          "axis": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2
+          },
+          "amount": {
+            "type": "number"
+          },
+          "require_source_version": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "editor_name"
+        ]
+      }
+    },
+    {
       "name": "minerva_cad_package",
       "executor": "panel",
       "description": "Freeze the completed DSL and all evaluated mesh dependencies into a new portable directory, then export the selected assembly configuration to glTF with instance identities and poses. Uses existing explicit export jobs; start returns a ticket, collect repeats without rebuilding. Reopen model.mcad with its .package.json sidecar; no placement script required. Source/visible model stay unchanged. Failed jobs retain their staging path.",
@@ -1070,7 +1146,11 @@
           "ui/scripts/assembly_export.gd",
           "ui/scripts/package_export.gd",
         "ui/scripts/dependencies.gd",
-        "ui/scripts/evaluation_state.gd"
+        "ui/scripts/evaluation_state.gd",
+        "ui/scripts/object_records.gd",
+        "ui/scripts/object_interaction.gd",
+        "ui/scripts/object_tools.gd",
+        "ui/kinds/cad_surface_arrow.gd"
         ],
         "file_extensions": [
           ".mcad"

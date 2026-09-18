@@ -74,6 +74,7 @@ static func get_layout(
 	var key: Array = [
 		camera.global_transform.basis,
 		camera.global_transform.origin,
+		camera.get_camera_projection(),
 		viewport_rect,
 		ann_count,
 		Engine.get_frames_drawn(),
