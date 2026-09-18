@@ -144,6 +144,10 @@ on:
       - ".github/workflows/pcb.yml"
       - ".github/actions/pcb-setup/**"
   workflow_dispatch:
+  schedule:
+    # Nightly compatibility check against Minerva development HEAD (see the
+    # panel job): resolves the branch once to a full SHA and records it.
+    - cron: "17 9 * * *"
 
 permissions:
   contents: read
@@ -504,7 +508,7 @@ jobs:
       # both if you bump it.
       #
       # Head of turnrocklabs/Minerva `development` on 2026-07-25.
-      MINERVA_SHA: "8cc7ace5d916f79ebfe987b22cfd36a69979572d"
+      MINERVA_SHA: "2289b80d0885692b9ffbe4ab538a9dca0618681c"
     steps:
       - name: Checkout minerva-plugins
         uses: actions/checkout@v4
@@ -522,11 +526,29 @@ jobs:
       # inside the workspace and relocate.
       #
       # Minerva is public, so no credentials are needed to fetch it.
+      # PR and push runs use the pinned SHA above. The nightly resolves
+      # `development` ONCE to a full SHA, records it in the job summary, and
+      # checks out exactly that revision, so a red nightly names the host
+      # commit it saw and a green one is reproducible from the summary.
+      - name: Resolve the Minerva host revision
+        id: host
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            sha=$(git ls-remote https://github.com/turnrocklabs/Minerva refs/heads/development | cut -f1)
+            src="development (nightly)"
+          else
+            sha="$MINERVA_SHA"
+            src="pinned"
+          fi
+          test -n "$sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Minerva host: $sha ($src)" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Checkout Minerva (pinned)
         uses: actions/checkout@v4
         with:
           repository: turnrocklabs/Minerva
-          ref: ${{ env.MINERVA_SHA }}
+          ref: ${{ steps.host.outputs.sha }}
           path: _minerva_host
 
       - name: Place Minerva beside minerva-plugins

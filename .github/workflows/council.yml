@@ -23,6 +23,10 @@ on:
       # edit to the others untested here.
       - "scripts/**"
   workflow_dispatch:
+  schedule:
+    # Nightly compatibility check against Minerva development HEAD (see the
+    # panel job): resolves the branch once to a full SHA and records it.
+    - cron: "17 9 * * *"
 
 # Enable only after T13 and real-model/desktop acceptance are recorded.
 # Until then main still produces installable artifacts and staging prereleases.
@@ -206,7 +210,7 @@ jobs:
       # stale and the plugin system does not exist there. Same SHA cad.yml
       # pins. If you bump it, re-check that every path in
       # council/tests/gd/REQUIRED_HOST_FILES still exists at the new SHA.
-      MINERVA_SHA: "839516e4d5289a7473bbb66ea4d18cfb33647be2"
+      MINERVA_SHA: "2289b80d0885692b9ffbe4ab538a9dca0618681c"
     steps:
       - name: Checkout minerva-plugins
         uses: actions/checkout@v4
@@ -218,11 +222,29 @@ jobs:
       # the sibling slot is $GITHUB_WORKSPACE/../Minerva. It CANNOT be checked
       # out there directly — actions/checkout rejects any `path` outside
       # $GITHUB_WORKSPACE — so clone inside and relocate.
+      # PR and push runs use the pinned SHA above. The nightly resolves
+      # `development` ONCE to a full SHA, records it in the job summary, and
+      # checks out exactly that revision, so a red nightly names the host
+      # commit it saw and a green one is reproducible from the summary.
+      - name: Resolve the Minerva host revision
+        id: host
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            sha=$(git ls-remote https://github.com/turnrocklabs/Minerva refs/heads/development | cut -f1)
+            src="development (nightly)"
+          else
+            sha="$MINERVA_SHA"
+            src="pinned"
+          fi
+          test -n "$sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Minerva host: $sha ($src)" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Checkout Minerva (pinned)
         uses: actions/checkout@v4
         with:
           repository: turnrocklabs/Minerva
-          ref: ${{ env.MINERVA_SHA }}
+          ref: ${{ steps.host.outputs.sha }}
           path: _minerva_host
 
       - name: Place Minerva beside minerva-plugins
