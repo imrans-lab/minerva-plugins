@@ -5,6 +5,9 @@
 # docs/plugins.dct is the Docket tracker: these are a work item's record key
 # ("pcb.bus.followups.dcr_...") across the three commits that rewrote its line,
 # and one comment body's prose; each pinned exactly, never the file or the rule.
+# Docket rewrites a record's line on every change, so the same key can surface
+# again under a new commit; when the scan names a .dct line, read it, and if it
+# is a record key or prose, add its exact fingerprint here rather than a waiver.
 7f5446315dee72fe00f76f55b2c40ed01449e08b:docs/plugins.dct:generic-api-key:166
 05e7f06bbe798c051f60c6a08543490d8182b0b9:docs/plugins.dct:generic-api-key:166
 858b79eb47667afd8246d160b73197f10217b67e:docs/plugins.dct:generic-api-key:166

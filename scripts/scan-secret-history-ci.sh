@@ -17,7 +17,8 @@ require_commit() {
 }
 
 case "${GITHUB_EVENT_NAME:-}" in
-  workflow_dispatch)
+  workflow_dispatch|schedule)
+    # Manual runs and the nightly have no incoming range: audit everything.
     exec "$scanner" --all-history
     ;;
   pull_request)
@@ -27,8 +28,8 @@ case "${GITHUB_EVENT_NAME:-}" in
     ;;
   push)
     require_commit "${SECRET_SCAN_HEAD:-}"
-    # A new branch reports an all-zero "before"; scan everything the branch
-    # carries that no other ref already has.
+    # A new branch reports an all-zero "before"; with no base to diff against,
+    # scan the branch tip's full ancestry (a superset of what is new).
     if [[ "${SECRET_SCAN_BASE:-}" == "0000000000000000000000000000000000000000" ]]; then
       exec "$scanner" --range "$SECRET_SCAN_HEAD"
     fi

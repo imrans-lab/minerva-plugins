@@ -1218,7 +1218,10 @@ mod tests {
             good.tracked.push(p);
         }
         save_state(&base, &good);
-        assert_eq!(load_state(&base).expect("valid state loads").tracked.len(), 400);
+        assert_eq!(
+            load_state(&base).expect("valid state loads").tracked.len(),
+            400
+        );
 
         // Corrupt it: valid state text with the tail lopped off.
         let corrupt = {
@@ -1243,15 +1246,40 @@ mod tests {
         );
         assert_state_unreadable(
             "add",
-            &handle_add(&json!({"arguments": {"path": format!("{base}/new.minproj")}}), json!(3)),
+            &handle_add(
+                &json!({"arguments": {"path": format!("{base}/new.minproj")}}),
+                json!(3),
+            ),
         );
         assert_state_unreadable(
             "remove",
-            &handle_remove(&json!({"arguments": {"path": format!("{base}/p0.minproj")}}), json!(4)),
+            &handle_remove(
+                &json!({"arguments": {"path": format!("{base}/p0.minproj")}}),
+                json!(4),
+            ),
         );
         assert_state_unreadable(
             "set_folder",
             &handle_set_folder(&json!({"arguments": {"path": ""}}), json!(5)),
+        );
+        // sync and open are the two handlers that used to reach the host (a
+        // connect, and host.project.current) before the state was loaded. They
+        // must refuse first, which the out.is_empty() assertion below pins.
+        let mut lines = std::iter::empty::<Result<String, io::Error>>();
+        assert_state_unreadable(
+            "sync",
+            &handle_sync(&json!({}), json!(6), &mut out, &mut lines, &mut next_id),
+        );
+        let mut lines = std::iter::empty::<Result<String, io::Error>>();
+        assert_state_unreadable(
+            "open",
+            &handle_open(
+                &json!({"arguments": {"proj_uuid": "uuid-0"}}),
+                json!(7),
+                &mut out,
+                &mut lines,
+                &mut next_id,
+            ),
         );
 
         assert!(out.is_empty(), "a refused read must not talk to the host");
@@ -1270,5 +1298,4 @@ mod tests {
         std::env::remove_var("DRIVE_FOLDER");
         let _ = std::fs::remove_dir_all(&dir);
     }
-
 }
