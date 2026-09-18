@@ -95,7 +95,18 @@ fn tool_ok(payload: Value) -> Value {
 
 /// Return an MCP isError tool result with a message string.
 fn tool_err(message: &str) -> Value {
-    let text = serde_json::to_string(&json!({"error": message}))
+    tool_err_coded("", message)
+}
+
+/// Return an MCP isError tool result carrying a machine-readable `code` beside
+/// the human `error` text. An empty code emits the plain refusal shape, so the
+/// coded and uncoded refusals stay one shape for readers.
+fn tool_err_coded(code: &str, message: &str) -> Value {
+    let mut body = json!({ "error": message });
+    if !code.is_empty() {
+        body["code"] = json!(code);
+    }
+    let text = serde_json::to_string(&body)
         .unwrap_or_else(|_| r#"{"error":"serialisation failed"}"#.into());
     json!({ "isError": true, "content": [{"type": "text", "text": text}] })
 }
@@ -197,6 +208,9 @@ fn effective_folder(state: &sync::SyncState) -> String {
     base_drive_folder()
 }
 
+/// Refusal code for a state file that exists but cannot be read back.
+const STATE_UNREADABLE_CODE: &str = "state_unreadable";
+
 /// Path to the persisted state file inside the drive folder.
 fn state_file_path(folder: &str) -> String {
     format!("{folder}/.drive-state.json")
@@ -209,17 +223,46 @@ fn state_file_path(folder: &str) -> String {
 /// at the base folder so the plugin can always find it. The effective working
 /// folder (which may be overridden inside the state) is determined by calling
 /// `effective_folder(state)` after loading.
-fn load_state(folder: &str) -> SyncState {
+fn load_state(folder: &str) -> Result<SyncState, String> {
     let path = state_file_path(folder);
     let mut state = match std::fs::read_to_string(&path) {
-        Ok(s) => serde_json::from_str::<SyncState>(&s).unwrap_or_default(),
-        Err(_) => SyncState::default(),
+        Ok(s) => serde_json::from_str::<SyncState>(&s).map_err(|e| {
+            // The reason is built from the parser's classification and position
+            // only: a malformed state file may hold private paths, and the
+            // refusal text reaches the panel and the logs.
+            format!(
+                "{STATE_UNREADABLE_CODE}: {path} is not readable Drive state \
+                 ({:?} at line {}, column {})",
+                e.classify(),
+                e.line(),
+                e.column()
+            )
+        })?,
+        // A file that is simply absent is the first run: the empty default is
+        // the right answer. Any other read failure is an existing file we could
+        // not read, which must never be replaced by a default.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => SyncState::default(),
+        Err(e) => {
+            return Err(format!("{STATE_UNREADABLE_CODE}: cannot read {path} ({})", e.kind()));
+        }
     };
     if state.device_id.is_empty() {
         state.device_id = uuid::Uuid::new_v4().to_string();
         save_state(folder, &state);
     }
-    state
+    Ok(state)
+}
+
+/// Load state, or return the refusal from the calling handler. A state file that
+/// exists but cannot be read is never reported as an empty Drive and is never
+/// written over, so the tracked set survives a bad read.
+macro_rules! state_or_refuse {
+    ($folder:expr, $id:expr) => {
+        match load_state($folder) {
+            Ok(s) => s,
+            Err(e) => return ok_response($id, tool_err_coded(STATE_UNREADABLE_CODE, &e)),
+        }
+    };
 }
 
 /// Serialize state to the state file (pretty JSON).
@@ -302,7 +345,7 @@ fn handle_status(
     if let Err(e) = std::fs::create_dir_all(&base) {
         log::warn!("create drive base folder {base}: {e}");
     }
-    let state = load_state(&base);
+    let state = state_or_refuse!(&base, id);
     let folder = effective_folder(&state);
     if folder != base {
         if let Err(e) = std::fs::create_dir_all(&folder) {
@@ -339,7 +382,7 @@ fn handle_list(
     if let Err(e) = std::fs::create_dir_all(&base) {
         log::warn!("create drive base folder {base}: {e}");
     }
-    let state = load_state(&base);
+    let state = state_or_refuse!(&base, id);
     let folder = effective_folder(&state);
     if folder != base {
         if let Err(e) = std::fs::create_dir_all(&folder) {
@@ -392,12 +435,15 @@ fn handle_sync(
         log::warn!("create drive base folder {base}: {e}");
     }
 
+    // Load state before connecting: an unreadable state is refused without a
+    // network round trip, so the refusal does not depend on connectivity.
+    let mut state = state_or_refuse!(&base, id);
+
     let mut client = match connect_client(out, lines, next_id) {
         Ok(c) => c,
         Err(e) => return ok_response(id, tool_err(&e)),
     };
 
-    let mut state = load_state(&base);
     // Use the effective folder for cloud-only file materialization.
     let folder = effective_folder(&state);
     if folder != base {
@@ -444,7 +490,7 @@ fn handle_add(params: &Value, id: Value) -> RpcResponse {
     }
     let base = base_drive_folder();
     let _ = std::fs::create_dir_all(&base);
-    let mut state = load_state(&base);
+    let mut state = state_or_refuse!(&base, id);
     let already = state.tracked.iter().any(|p| p == &path);
     if !already {
         state.tracked.push(path.clone());
@@ -465,7 +511,7 @@ fn handle_remove(params: &Value, id: Value) -> RpcResponse {
         return ok_response(id, tool_err("remove requires a non-empty 'path'"));
     }
     let base = base_drive_folder();
-    let mut state = load_state(&base);
+    let mut state = state_or_refuse!(&base, id);
     let before = state.tracked.len();
     state.tracked.retain(|p| p != &path);
     state.entries.remove(&path);
@@ -499,7 +545,7 @@ fn handle_set_folder(params: &Value, id: Value) -> RpcResponse {
     }
     let base = base_drive_folder();
     let _ = std::fs::create_dir_all(&base);
-    let mut state = load_state(&base);
+    let mut state = state_or_refuse!(&base, id);
     state.drive_folder_override = raw.clone();
     save_state(&base, &state);
     let folder = effective_folder(&state);
@@ -523,6 +569,11 @@ fn handle_open(
     if proj_uuid.is_empty() {
         return ok_response(id, tool_err("open requires a non-empty 'proj_uuid'"));
     }
+    // Load state here rather than at step 5: an unreadable state is refused
+    // before any host or cloud round trip, so the refusal is deterministic.
+    let base = base_drive_folder();
+    let _ = std::fs::create_dir_all(&base);
+    let mut state = state_or_refuse!(&base, id);
 
     // Step 2: Check whether the current project has unsaved changes.
     let current_result = match request_capability(out, lines, next_id, "host.project.current", json!({})) {
@@ -555,9 +606,6 @@ fn handle_open(
     };
 
     // Step 5: Resolve the local path.
-    let base = base_drive_folder();
-    let _ = std::fs::create_dir_all(&base);
-    let mut state = load_state(&base);
     let folder = effective_folder(&state);
     let local_path = state
         .entries
@@ -919,6 +967,14 @@ fn main() {
 mod tests {
     use super::*;
 
+    /// `base_drive_folder()` reads the process-wide DRIVE_FOLDER, so every test
+    /// that reads or sets it runs under this lock.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     // ── effective_folder precedence ───────────────────────────────────────────
 
     #[test]
@@ -931,6 +987,7 @@ mod tests {
 
     #[test]
     fn effective_folder_falls_back_to_base_when_override_empty() {
+        let _env = env_guard();
         let state = sync::SyncState::default(); // drive_folder_override is ""
         let result = effective_folder(&state);
         let base = base_drive_folder();
@@ -940,6 +997,7 @@ mod tests {
 
     #[test]
     fn effective_folder_clears_override_on_empty_string() {
+        let _env = env_guard();
         // Setting override to "" and then calling effective_folder must return
         // the base folder (i.e. clearing the override works).
         let mut state = sync::SyncState::default();
@@ -1107,4 +1165,110 @@ mod tests {
         assert_eq!(v["conflicts"][0]["conflict_copy"], json!("/p/b.txt.conflict-dev-0"));
         assert_eq!(v["deferred"][0], json!("open.minproj"));
     }
+
+    // ── unreadable state file ────────────────────────────────────────────────
+
+    /// Parse the tool payload out of a handler response.
+    fn payload_of(resp: &RpcResponse) -> Value {
+        let v = serde_json::to_value(resp).expect("serializable response");
+        let text = v["result"]["content"][0]["text"].as_str().expect("text content").to_owned();
+        let mut body: Value = serde_json::from_str(&text).expect("valid json payload");
+        body["__isError"] = v["result"]["isError"].clone();
+        body
+    }
+
+    fn assert_state_unreadable(what: &str, resp: &RpcResponse) {
+        let body = payload_of(resp);
+        assert_eq!(body["__isError"], json!(true), "{what} must be an isError refusal");
+        assert_eq!(body["code"], json!(STATE_UNREADABLE_CODE), "{what} must carry the code");
+        let msg = body["error"].as_str().unwrap_or_default();
+        assert!(msg.starts_with(STATE_UNREADABLE_CODE), "{what} error text: {msg}");
+        assert!(
+            body.get("projects").is_none() && body.get("project_count").is_none(),
+            "{what} must not answer with a project view: {body}"
+        );
+    }
+
+    /// A state file that exists but cannot be parsed is refused by every tool
+    /// that loads state, is left byte-identical on disk, and does not change
+    /// what a MISSING state file means (the first-run empty default).
+    #[test]
+    fn unreadable_state_is_refused_and_never_rewritten() {
+        let _env = env_guard();
+        let dir = std::env::temp_dir().join(format!("drive-state-guard-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp drive folder");
+        let base = dir.to_string_lossy().to_string();
+        std::env::set_var("DRIVE_FOLDER", &base);
+        let path = state_file_path(&base);
+
+        // A populated, valid state loads as itself.
+        let mut good = sync::SyncState::default();
+        good.device_id = "device-under-test".to_owned();
+        for i in 0..400 {
+            let p = format!("{base}/p{i}.minproj");
+            good.entries.insert(
+                p.clone(),
+                sync::TrackedEntry {
+                    proj_uuid: format!("uuid-{i}"),
+                    name: format!("p{i}.minproj"),
+                    base_version: 1,
+                    base_hash: "h".to_owned(),
+                },
+            );
+            good.tracked.push(p);
+        }
+        save_state(&base, &good);
+        assert_eq!(load_state(&base).expect("valid state loads").tracked.len(), 400);
+
+        // Corrupt it: valid state text with the tail lopped off.
+        let corrupt = {
+            let full = std::fs::read_to_string(&path).expect("state written");
+            full[..full.len() / 2].to_owned()
+        };
+        std::fs::write(&path, &corrupt).expect("corrupt the state");
+        let before = std::fs::read(&path).expect("corrupt bytes");
+
+        let mut out: Vec<u8> = Vec::new();
+        let mut next_id: u64 = 0;
+
+        let mut lines = std::iter::empty::<Result<String, io::Error>>();
+        assert_state_unreadable(
+            "list",
+            &handle_list(&json!({}), json!(1), &mut out, &mut lines, &mut next_id),
+        );
+        let mut lines = std::iter::empty::<Result<String, io::Error>>();
+        assert_state_unreadable(
+            "status",
+            &handle_status(&json!({}), json!(2), &mut out, &mut lines, &mut next_id),
+        );
+        assert_state_unreadable(
+            "add",
+            &handle_add(&json!({"arguments": {"path": format!("{base}/new.minproj")}}), json!(3)),
+        );
+        assert_state_unreadable(
+            "remove",
+            &handle_remove(&json!({"arguments": {"path": format!("{base}/p0.minproj")}}), json!(4)),
+        );
+        assert_state_unreadable(
+            "set_folder",
+            &handle_set_folder(&json!({"arguments": {"path": ""}}), json!(5)),
+        );
+
+        assert!(out.is_empty(), "a refused read must not talk to the host");
+        assert_eq!(
+            std::fs::read(&path).expect("state still there"),
+            before,
+            "the unreadable state file must be byte-identical after the refusals"
+        );
+
+        // A MISSING state file is still the first run: the empty default.
+        std::fs::remove_file(&path).expect("remove state");
+        let fresh = load_state(&base).expect("missing state is the empty default");
+        assert!(fresh.entries.is_empty() && fresh.tracked.is_empty());
+        assert!(!fresh.device_id.is_empty(), "first run mints a device id");
+
+        std::env::remove_var("DRIVE_FOLDER");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 }
