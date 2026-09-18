@@ -161,6 +161,8 @@ func emitHostNotify(level, message string, details interface{}) {
 var (
 	worker   *bridge.Worker
 	registry *tools.Registry
+	// Set only for local source development via go build -ldflags -X.
+	devPython string
 )
 
 // initWorker resolves the Python interpreter path and constructs the Worker.
@@ -174,7 +176,7 @@ func initWorker() {
 	}
 	workerDir := sharedruntime.WorkerScriptDir(pluginRoot)
 
-	pythonPath, err := sharedruntime.PythonPath(sharedruntime.PythonPathRequest{
+	pythonPath, err := resolveWorkerPython(sharedruntime.PythonPathRequest{
 		EmbeddedBundle: cadruntime.EmbeddedBundle,
 		EmbeddedSHA256: cadruntime.EmbeddedSHA256,
 		WorkerDir:      workerDir,
