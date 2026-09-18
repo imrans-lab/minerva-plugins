@@ -526,8 +526,8 @@ static func _is_one_colour(image: Image) -> bool:
 	if width <= 0 or height <= 0:
 		return true
 	var first := image.get_pixel(0, 0)
-	var step_x := maxi(width / BLANK_PROBE_STEPS, 1)
-	var step_y := maxi(height / BLANK_PROBE_STEPS, 1)
+	var step_x := maxi(int(width / float(BLANK_PROBE_STEPS)), 1)
+	var step_y := maxi(int(height / float(BLANK_PROBE_STEPS)), 1)
 	var y := 0
 	while y < height:
 		var x := 0

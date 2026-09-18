@@ -131,8 +131,8 @@ func handle_click(view_id: String, pixel: Vector2) -> bool:
 ## Select a node by name, optionally at a named point in the reference's own
 ## frame. This is the MCP and sidebar route into the same state a click sets.
 ## Returns the selection, or {} when the reference or node is not mounted.
-func select(reference: String, node_name: String, local_point: Variant = null, source: String = "mcp") -> Dictionary:
-	var record := _CadPointAnchor.record_named(_records, reference)
+func select(reference_name: String, node_name: String, local_point: Variant = null, source: String = "mcp") -> Dictionary:
+	var record := _CadPointAnchor.record_named(_records, reference_name)
 	if record.is_empty():
 		return {}
 	var chosen := node_name
@@ -327,12 +327,12 @@ static func node_entries(records: Array) -> Array:
 			continue
 		var record: Dictionary = entry
 		var pose: Transform3D = record.get("pose", Transform3D.IDENTITY)
-		var reference := str(record.get("name", ""))
+		var reference_name := str(record.get("name", ""))
 		for node_entry in record.get("node_bounds", []):
 			var node: Dictionary = node_entry
 			var local_box: AABB = node.get("aabb", AABB())
 			out.append({
-				"reference": reference,
+				"reference": reference_name,
 				"node": str(node.get("name", "")),
 				"node_path": str(node.get("path", node.get("name", ""))),
 				"local_aabb": local_box,
@@ -432,12 +432,12 @@ func _publish() -> void:
 	if _sidebar != null and _sidebar.has_method("set_selection"):
 		_sidebar.call("set_selection", _selection)
 	if _panel != null and is_instance_valid(_panel) \
-			and _panel.has_signal("annotation_tool_status_changed"):
-		_panel.emit_signal("annotation_tool_status_changed")
+			and _panel.has_method("notify_annotation_tool_status_changed"):
+		_panel.call("notify_annotation_tool_status_changed")
 
 
-func _on_sidebar_activated(reference: String, node_name: String) -> void:
-	select(reference, node_name, null, "sidebar")
+func _on_sidebar_activated(reference_name: String, node_name: String) -> void:
+	select(reference_name, node_name, null, "sidebar")
 
 
 func _host() -> Object:

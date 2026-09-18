@@ -382,7 +382,7 @@ func _collect(handle: String, wait_ms: int, panel: Object) -> Dictionary:
 		return _no_clearance(("no clearance measurement is filed under ticket "
 			+ "'%s' — its report was collected already, or nobody collected it "
 			+ "for %d s and it was dropped; ask again without a ticket to "
-			+ "start a new measurement") % [handle, TICKET_KEEP_MS / 1000])
+			+ "start a new measurement") % [handle, int(TICKET_KEEP_MS / 1000.0)])
 	var job: Dictionary = _jobs[handle]
 	if str(job["status"]) == "running" and wait_ms > 0:
 		await _wait_for(job, wait_ms)

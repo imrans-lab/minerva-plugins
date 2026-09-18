@@ -390,8 +390,8 @@ func run_check(gauge: Object, state: PhysicsDirectSpaceState3D, args: Dictionary
 	_declared = {}
 	_declared_matched = {}
 	_contacts = {}
-	_rim_tests = 0
-	_rim_crossing = {}
+	rim_test_count = 0
+	rim_crossing_pairs = {}
 	var mask := int(args.get("mask", ALL_LAYERS))
 	var reference_scope := str(args.get("reference", ""))
 	var node_scope := str(args.get("node", ""))
@@ -700,7 +700,7 @@ func _cross_into_references(
 		# a face resting on a face meets exactly there. Neither is a hit the
 		# edge does not straddle — it lies in that surface, or climbs off it,
 		# rather than passing through.
-		var penetrating := travelled > TOUCH_EPSILON_MM \
+		var crossing_penetrates := travelled > TOUCH_EPSILON_MM \
 			and (length - travelled) > TOUCH_EPSILON_MM \
 			and _straddles(a, b, point, hit) \
 			and _penetrates_reference(gauge, state, point, direction, mask,
@@ -718,7 +718,7 @@ func _cross_into_references(
 			"node": str(hit.get("node", "")),
 			"reference": str(hit.get("reference", "")),
 			"distance": travelled,
-			"bound_only": not penetrating,
+			"bound_only": not crossing_penetrates,
 		})
 		var next := point + direction * CROSSING_ADVANCE_MM
 		if a.distance_to(next) >= length:

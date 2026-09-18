@@ -76,13 +76,13 @@ static func parse(args: Dictionary) -> Dictionary:
 				+ "{reference, node?, region_mm?, required_mm?, why?}")
 			continue
 		var one: Dictionary = item
-		var reference := str(one.get("reference", "")).strip_edges()
-		if reference.is_empty():
+		var reference_name := str(one.get("reference", "")).strip_edges()
+		if reference_name.is_empty():
 			errors.append("an expected contact must name the `reference` it "
 				+ "is about; `node` and `region_mm` narrow it from there")
 			continue
 		var entry := {
-			"reference": reference,
+			"reference": reference_name,
 			"node": str(one.get("node", "")).strip_edges(),
 			"required_mm": float(one.get("required_mm", 0.0)),
 			"why": str(one.get("why", "")).strip_edges(),
@@ -115,12 +115,12 @@ static func parse(args: Dictionary) -> Dictionary:
 ## gone stale about, which is what `unmatched` reports on; the caller grades
 ## the pair against the STRICTEST of them (see `strictest`), because one pair
 ## carries one gap and every declaration on it has to hold.
-static func indices_for(entries: Array, reference: String, node: String,
+static func indices_for(entries: Array, reference_name: String, node: String,
 		points: Array) -> Array:
 	var out: Array = []
 	for index in range(entries.size()):
 		var entry: Dictionary = entries[index]
-		if str(entry["reference"]) != reference:
+		if str(entry["reference"]) != reference_name:
 			continue
 		if not _node_matches(node, str(entry["node"])):
 			continue
@@ -137,9 +137,9 @@ static func indices_for(entries: Array, reference: String, node: String,
 
 ## The declaration a measurement is GRADED against, or -1: the strictest of
 ## the ones it answers to.
-static func index_for(entries: Array, reference: String, node: String,
+static func index_for(entries: Array, reference_name: String, node: String,
 		points: Array) -> int:
-	return strictest(entries, indices_for(entries, reference, node, points))
+	return strictest(entries, indices_for(entries, reference_name, node, points))
 
 
 ## Of several declarations one pair answers to, the one it is graded against:
@@ -189,10 +189,10 @@ static func describe(entry: Dictionary) -> String:
 
 ## The reply row for a declaration that matched something: what was declared,
 ## what was measured, and whether the declaration held.
-static func row(entry: Dictionary, reference: String, node: String,
+static func row(entry: Dictionary, reference_name: String, node: String,
 		measured: String, measured_mm: float, excluded: bool) -> Dictionary:
 	var out := {
-		"reference": reference,
+		"reference": reference_name,
 		"node": node,
 		"declared_required_mm": float(entry["required_mm"]),
 		"measured": measured,
@@ -229,8 +229,8 @@ static func ungrade_regions(pairs: Array, declared_rows: Array) -> int:
 			+ "witness point inside it, and clearance outside the region was " \
 			+ "not measured separately, so this pair is ungraded there"
 		ungraded += 1
-		for row in declared_rows:
-			var declared_row: Dictionary = row
+		for row_entry in declared_rows:
+			var declared_row: Dictionary = row_entry
 			if declared_row.has("region_mm") \
 					and bool(declared_row.get("excluded", false)) \
 					and str(declared_row.get("node", "")) == str(pair.get("node", "")) \

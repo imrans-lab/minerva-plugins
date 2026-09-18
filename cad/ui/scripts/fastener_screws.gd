@@ -157,9 +157,9 @@ static func merge(runs: Array) -> Dictionary:
 	var failed := 0
 	var envelope: Dictionary = {}
 	for entry in runs:
-		var run: Dictionary = entry
-		var spec: Dictionary = run["spec"]
-		var report: Dictionary = run["report"]
+		var run_entry: Dictionary = entry
+		var spec: Dictionary = run_entry["spec"]
+		var report: Dictionary = run_entry["report"]
 		var named := {
 			"index": int(spec["index"]),
 			"dia_mm": float(spec["dia_mm"]),

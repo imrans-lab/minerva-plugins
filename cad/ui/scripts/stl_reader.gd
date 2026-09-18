@@ -128,7 +128,7 @@ static func _read_ascii(text: String) -> PackedVector3Array:
 		))
 	# A trailing partial triangle is a truncated file; drop it rather than
 	# emitting a degenerate face.
-	var whole := (out.size() / 3) * 3
+	var whole := int(out.size() / 3.0) * 3
 	if whole < out.size():
 		out.resize(whole)
 	return out

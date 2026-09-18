@@ -299,7 +299,7 @@ func _extract_blob(mesh: Mesh, xform: Transform3D) -> Dictionary:
 			# corners, in order.
 			for i in range(vertices.size()):
 				indices.append(base + i)
-	var triangles := int(indices.size() / 3)
+	var triangles := int(indices.size() / 3.0)
 	if triangles <= 0 or vertex_count <= 0:
 		return {}
 	indices.resize(triangles * 3)

@@ -294,9 +294,12 @@ func view_state() -> Dictionary:
 	var cam: Camera3D = camera_for_active_viewport()
 	var camera_state: Variant = null
 	if cam != null:
+		var camera_target: Variant = null
+		if cam.has_method("get_target"):
+			camera_target = _vec3(cam.get_target())
 		camera_state = {
 			"view_preset": String(cam.get_debug_state().get("view_preset", "")) if cam.has_method("get_debug_state") else "",
-			"target": _vec3(cam.get_target()) if cam.has_method("get_target") else null,
+			"target": camera_target,
 			"distance": cam.get_distance() if cam.has_method("get_distance") else null,
 			"yaw": cam.get_yaw() if cam.has_method("get_yaw") else null,
 			"pitch": cam.get_pitch() if cam.has_method("get_pitch") else null,

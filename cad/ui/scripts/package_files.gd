@@ -46,8 +46,8 @@ static func freeze(library: RefCounted, dependencies: Array, document_path: Stri
 	var files: Dictionary = {}
 	var originals: Dictionary = {}
 	var total := 0
-	for reference: Dictionary in dependencies:
-		var raw := str(reference.get("path", "")).strip_edges()
+	for reference_entry: Dictionary in dependencies:
+		var raw := str(reference_entry.get("path", "")).strip_edges()
 		if paths.has(raw):
 			continue
 		var resolved: Dictionary = library.resolve(raw, document_path)

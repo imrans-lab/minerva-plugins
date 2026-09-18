@@ -142,13 +142,13 @@ static func reference_specs(panel: Node) -> Array:
 	for entry in raw as Array:
 		if not (entry is Dictionary):
 			continue
-		var reference: Dictionary = entry
+		var reference_entry: Dictionary = entry
 		var spec: Dictionary = {
-			"name": str(reference.get("name", "")),
-			"path": str(reference.get("path", "")),
-			"units": str(reference.get("units", "")),
-			"up": str(reference.get("up", "")),
-			"matrix": _matrix_rows(reference.get("matrix", [])),
+			"name": str(reference_entry.get("name", "")),
+			"path": str(reference_entry.get("path", "")),
+			"units": str(reference_entry.get("units", "")),
+			"up": str(reference_entry.get("up", "")),
+			"matrix": _matrix_rows(reference_entry.get("matrix", [])),
 		}
 		out.append(spec)
 	return out
@@ -377,7 +377,7 @@ static func vertex_count(panel: Node) -> int:
 	var verts: Array = vertices as Array
 	if verts.is_empty():
 		return 0
-	return verts.size() if verts[0] is Array else int(verts.size() / 3)
+	return verts.size() if verts[0] is Array else int(verts.size() / 3.0)
 
 
 # ---------------------------------------------------------------------------

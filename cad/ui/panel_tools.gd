@@ -645,11 +645,11 @@ static func _check_interference(panel, args: Dictionary) -> Dictionary:
 static func _check_clearance(panel, args: Dictionary) -> Dictionary:
 	if panel == null or not panel.has_method("check_clearance"):
 		return _err("clearance checking is not available on this panel")
-	var handle := str(args.get("ticket", ""))
-	if not handle.is_empty():
+	var ticket_handle := str(args.get("ticket", ""))
+	if not ticket_handle.is_empty():
 		# A ticket names a measurement that was started with its own scope and
 		# tolerance; nothing else in the call is read but the wait budget.
-		var collected: Dictionary = await panel.check_clearance({"ticket": handle,
+		var collected: Dictionary = await panel.check_clearance({"ticket": ticket_handle,
 			"wait_ms": int(args.get("wait_ms", 0))})
 		if collected.has("error"):
 			return _err(str(collected["error"]))
@@ -850,16 +850,16 @@ static func _selected_reference(panel, args: Dictionary) -> Dictionary:
 static func _select_reference(panel, args: Dictionary) -> Dictionary:
 	if panel == null or not panel.has_method("select_reference_node"):
 		return _err("reference selection is not available on this panel")
-	var reference := str(args.get("reference", ""))
-	if reference.is_empty():
+	var reference_name := str(args.get("reference", ""))
+	if reference_name.is_empty():
 		return _err("select_reference needs a reference name; "
 			+ "minerva_cad_references lists them")
 	var point: Variant = args.get("point_mm", null)
 	var selection: Dictionary = panel.select_reference_node(
-		reference, str(args.get("node", "")), point)
+		reference_name, str(args.get("node", "")), point)
 	if selection.is_empty():
 		return _err("no mounted reference named '%s' has a node '%s'"
-			% [reference, str(args.get("node", ""))])
+			% [reference_name, str(args.get("node", ""))])
 	return _ok(await _selection_payload(panel, selection, args))
 
 

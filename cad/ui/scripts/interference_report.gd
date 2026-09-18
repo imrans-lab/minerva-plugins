@@ -73,8 +73,8 @@ var _contacts: Dictionary = {}
 ## Crossings the rim rule was asked about in the running check, against
 ## MAX_RIM_TESTS, and the pairs it has already proved really do overlap — the
 ## pairs it is no longer worth asking about.
-var _rim_tests: int = 0
-var _rim_crossing: Dictionary = {}
+var rim_test_count: int = 0
+var rim_crossing_pairs: Dictionary = {}
 ## Wall clock of the running check, microseconds.
 var _started_us: int = 0
 

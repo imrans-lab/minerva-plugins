@@ -224,7 +224,7 @@ static func _analyze_soups(soups: Array, angle_deg: float) -> Dictionary:
 		var soup: Dictionary = soup_entry
 		var positions: PackedVector3Array = soup["positions"]
 		var indices: PackedInt32Array = soup["indices"]
-		triangles += int(indices.size() / 3)
+		triangles += int(indices.size() / 3.0)
 		# Candidates are labelled by the node's PATH from the file root: the
 		# leaf name is not unique in a foreign assembly.
 		var found := analyze_soup(
@@ -301,7 +301,7 @@ static func analyze_soup(
 	var welded := _weld(positions, indices)
 	var points: PackedVector3Array = welded["points"]
 	var corners: PackedInt32Array = welded["corners"]
-	var face_count := int(corners.size() / 3)
+	var face_count := int(corners.size() / 3.0)
 	if face_count == 0:
 		return empty
 
@@ -440,7 +440,7 @@ static func _weld(positions: PackedVector3Array, indices: PackedInt32Array) -> D
 	var ids := {}
 	var points := PackedVector3Array()
 	var corners := PackedInt32Array()
-	var triangle_count := int(indices.size() / 3)
+	var triangle_count := int(indices.size() / 3.0)
 	for t in range(triangle_count):
 		var i0 := indices[t * 3]
 		var i1 := indices[t * 3 + 1]

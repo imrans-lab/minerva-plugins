@@ -52,16 +52,16 @@ static func run(panel: Node, tool: String, args: Dictionary, dispatch: Callable)
 		contexts[context_id] = context
 		panel.add_child(context)
 		var requested := {"source": str(document.get("source", "")), "selection": selection, "configuration": configuration}
-		var result := Reply.unwrap(await panel.call_backend("cad.evaluate", requested, 600000), "scoped model")
-		if result.has("error"):
+		var scoped_evaluation := Reply.unwrap(await panel.call_backend("cad.evaluate", requested, 600000), "scoped model")
+		if scoped_evaluation.has("error"):
 			contexts.erase(context_id)
 			context.queue_free()
-			return _error(str(result.error), "selection_failed")
-		if tool.begins_with("minerva_cad_check_") and not bool(result.get("model", {}).get("physical", true)):
+			return _error(str(scoped_evaluation.error), "selection_failed")
+		if tool.begins_with("minerva_cad_check_") and not bool(scoped_evaluation.get("model", {}).get("physical", true)):
 			contexts.erase(context_id)
 			context.queue_free()
 			return _error("Presentation-only configuration cannot pass physical validation", "configuration_context")
-		var references: Array = result.get("references", [])
+		var references: Array = scoped_evaluation.get("references", [])
 		# A selected solid is checked against the configuration's references;
 		# a capture/inspection shows only its explicitly selected geometry.
 		if (tool in Freshness.MEASURING_VERBS or args.get("include_context", false)) and not selection.is_empty():
@@ -72,7 +72,7 @@ static func run(panel: Node, tool: String, args: Dictionary, dispatch: Callable)
 				context.queue_free()
 				return _error(str(whole.error), "selection_failed")
 			references = whole.get("references", [])
-		context.setup(panel, document, result, references)
+		context.setup(panel, document, scoped_evaluation, references)
 		scoped["selection"] = selection
 		scoped["configuration"] = configuration
 	var freshness: Dictionary = context.evaluation_freshness()

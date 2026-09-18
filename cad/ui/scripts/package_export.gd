@@ -5,7 +5,7 @@ const Assembly := preload("assembly_export.gd")
 const Evaluation := preload("evaluation_state.gd")
 const Reply := preload("worker_reply.gd")
 const META := "cad_package_export"
-const Note := preload("cad_note.gd")
+const CadNote := preload("cad_note.gd")
 
 static func handle(panel: Node, args: Dictionary) -> Dictionary:
 	var action := str(args.get("action", "start"))
@@ -24,8 +24,8 @@ static func handle(panel: Node, args: Dictionary) -> Dictionary:
 			return {"success": false, "error": "Invalid package camera or configuration data"}
 		var shown: Dictionary = panel._model_views.handle({"action": "show", "configuration": recipe.get("configuration", ""), "selection": ""})
 		if shown.get("success", false):
-			panel.set_meta(Note.PENDING_CAMERA_META, cameras)
-			Note.apply_cameras(panel, cameras)
+			panel.set_meta(CadNote.PENDING_CAMERA_META, cameras)
+			CadNote.apply_cameras(panel, cameras)
 		return shown
 	var job: Dictionary = panel.get_meta(META, {})
 	if action in ["collect", "cancel"]:
@@ -47,7 +47,7 @@ static func handle(panel: Node, args: Dictionary) -> Dictionary:
 	var configuration := str(args.get("configuration", before.document.get("model", {}).get("configuration", "")))
 	var key := JSON.stringify([path, before.document.get("source", ""), configuration]).sha256_text()
 	job = {"ticket": "package-" + key.left(24), "reply": {}, "cancelled": false,
-		"path": path, "configuration": configuration, "deadline": Time.get_ticks_msec() + 900000, "phase": "freezing", "document": before.document.duplicate(true), "cameras": Note.cameras_of(panel)}
+		"path": path, "configuration": configuration, "deadline": Time.get_ticks_msec() + 900000, "phase": "freezing", "document": before.document.duplicate(true), "cameras": CadNote.cameras_of(panel)}
 	panel.set_meta(META, job)
 	_execute(panel, job)
 	return await _wait(panel, job, args)

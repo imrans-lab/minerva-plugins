@@ -84,13 +84,13 @@ func verify() -> void:
 	# Strong verification belongs at a measurement/export boundary, not every
 	# frame or evaluation poll. It catches same-size/same-mtime replacements.
 	panel._reference_library.refresh_stamps()
-	var changed: Array[String] = []
+	var detected_paths: Array[String] = []
 	for path: String in _snapshot:
 		if panel._reference_library.file_stamp(path) != str(_snapshot[path]):
-			changed.append(path)
-	changed.sort()
-	var newly_changed := changed != changed_paths
-	changed_paths = changed
+			detected_paths.append(path)
+	detected_paths.sort()
+	var newly_changed := detected_paths != changed_paths
+	changed_paths = detected_paths
 	if newly_changed:
 		panel._build.refresh()
 		if not changed_paths.is_empty():

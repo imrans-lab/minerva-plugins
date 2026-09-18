@@ -380,13 +380,13 @@ static func _seed_candidates(gauge: Node, record: Dictionary, args: Dictionary) 
 	var out: Array = []
 	var half_extent := _extent_along(bounds, axis) * 0.5
 	for entry in seeded.get("seeds", []):
-		var seed: Dictionary = entry
-		var hint := float(seed.get("radius_hint_mm", 0.5))
+		var seed_entry: Dictionary = entry
+		var hint := float(seed_entry.get("radius_hint_mm", 0.5))
 		out.append({
 			"kind": "cylinder",
 			"form": "concave",
 			"node": "",
-			"center": seed.get("center", Vector3.ZERO),
+			"center": seed_entry.get("center", Vector3.ZERO),
 			"axis": axis,
 			"radius_mm": hint,
 			"dia_mm": hint * 2.0,

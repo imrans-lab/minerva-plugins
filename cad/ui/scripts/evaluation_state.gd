@@ -114,17 +114,17 @@ static func document(panel: Object, args: Dictionary = {}) -> Dictionary:
 static func preflight(panel: Node, args: Dictionary, require_current: bool) -> Dictionary:
 	if require_current and panel.has_method("verify_dependencies"):
 		panel.verify_dependencies()
-	var freshness: Dictionary = panel.evaluation_freshness()
+	var freshness_state: Dictionary = panel.evaluation_freshness()
 	var gate = preload("eval_freshness.gd")
-	var error: String = gate.requirement_error(args, freshness)
+	var error: String = gate.requirement_error(args, freshness_state)
 	if not error.is_empty():
 		return gate.stamp({"success": false, "checked": false,
-			"error": error, "error_code": "evaluation_requirement"}, freshness)
-	if require_current and freshness.get("stale", false) and not gate.accepts_stale(args):
-		var refused: Dictionary = gate.refusal(freshness)
+			"error": error, "error_code": "evaluation_requirement"}, freshness_state)
+	if require_current and freshness_state.get("stale", false) and not gate.accepts_stale(args):
+		var refused: Dictionary = gate.refusal(freshness_state)
 		refused["success"] = false
 		return refused
-	return {"success": true, "freshness": freshness, "document": document(panel)}
+	return {"success": true, "freshness": freshness_state, "document": document(panel)}
 
 static func finish(panel: Node, reply: Dictionary, before: Dictionary) -> Dictionary:
 	var gate = preload("eval_freshness.gd")

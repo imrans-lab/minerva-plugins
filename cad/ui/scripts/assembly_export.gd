@@ -9,8 +9,8 @@ static func write(library: RefCounted, evaluated: Dictionary, definitions: Dicti
 	root.transform = Transform3D(Basis(Vector3(.001, 0, 0), Vector3(0, 0, -.001), Vector3(0, .001, 0)), Vector3.ZERO)
 	var nodes: Array = []
 	var references: Dictionary = {}
-	for reference: Dictionary in evaluated.get("references", []):
-		references[str(reference.get("name", ""))] = reference
+	for reference_entry: Dictionary in evaluated.get("references", []):
+		references[str(reference_entry.get("name", ""))] = reference_entry
 	var instances: Array = evaluated.get("model", {}).get("instances", []).duplicate(true)
 	if instances.is_empty():
 		if evaluated.get("body_count", 0) > 0:
@@ -26,15 +26,15 @@ static func write(library: RefCounted, evaluated: Dictionary, definitions: Dicti
 		var units := ""
 		var up := ""
 		if references.has(id):
-			var reference: Dictionary = references[id]
-			var resolved: Dictionary = library.resolve(str(reference.path), directory.path_join("model.mcad"))
+			var reference_entry: Dictionary = references[id]
+			var resolved: Dictionary = library.resolve(str(reference_entry.path), directory.path_join("model.mcad"))
 			if not str(resolved.get("error", "")).is_empty():
 				error = str(resolved.error)
 				break
 			path = str(resolved.path)
-			units = str(reference.get("units", ""))
-			up = str(reference.get("up", ""))
-			placement = reference.get("matrix", [])
+			units = str(reference_entry.get("units", ""))
+			up = str(reference_entry.get("up", ""))
+			placement = reference_entry.get("matrix", [])
 		var loaded = library.load_file(path, units, up)
 		if not loaded.is_ok():
 			error = "Cannot export instance %s: %s" % [id, loaded.error]

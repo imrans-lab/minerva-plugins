@@ -356,13 +356,13 @@ static func holes_as_dsl(holes: Array, kind: String, clearance_mm: float,
 		var axis := Vector3.ZERO
 		if axis_world.size() == 3:
 			axis = Vector3(float(axis_world[0]), float(axis_world[1]), float(axis_world[2]))
-		var wrap := ""
+		var wrapper := ""
 		var square := false
 		for candidate in _DSL_AXES:
 			var spec: Dictionary = candidate
 			var spec_axis: Vector3 = spec["axis"]
 			if absf(axis.normalized().dot(spec_axis)) >= _DSL_AXIS_DOT:
-				wrap = str(spec["rotate"])
+				wrapper = str(spec["rotate"])
 				square = true
 				break
 		if not square:
@@ -375,9 +375,9 @@ static func holes_as_dsl(holes: Array, kind: String, clearance_mm: float,
 			# A slug that only just spans the hole leaves a coplanar face on
 			# each end, which is the one thing a boolean cut is fragile about.
 			length = maxf(float(hole.get("extent_mm", 0.0)) * 3.0, 1.0)
-		var key := "%.4f|%.4f|%s" % [radius, length, wrap]
+		var key := "%.4f|%.4f|%s" % [radius, length, wrapper]
 		if not groups.has(key):
-			groups[key] = {"radius": radius, "length": length, "wrap": wrap,
+			groups[key] = {"radius": radius, "length": length, "wrap": wrapper,
 				"centres": []}
 			order.append(key)
 		(groups[key]["centres"] as Array).append(
@@ -398,8 +398,8 @@ static func holes_as_dsl(holes: Array, kind: String, clearance_mm: float,
 		var slug := "slug_%d" % slug_index
 		var body := "cylinder(h = %s, r = %s, center = true)" \
 			% [dsl_number(float(group["length"])), dsl_number(float(group["radius"]))]
-		var wrap: String = str(group["wrap"])
-		lines.append("%s = %s" % [slug, body if wrap.is_empty() else wrap % body])
+		var wrapper: String = str(group["wrap"])
+		lines.append("%s = %s" % [slug, body if wrapper.is_empty() else wrapper % body])
 		for centre in group["centres"]:
 			var at: Array = centre as Array
 			if at.size() != 3:

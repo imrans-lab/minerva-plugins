@@ -10,14 +10,14 @@ const MAX_MS := 900000
 static func handle(panel: Node, args: Dictionary, dispatch: Callable) -> Dictionary:
 	var action := str(args.get("action", "run"))
 	if action == "report":
-		var loaded := Report.read(str(args.get("report_path", "")), str(args.get("sha256", "")))
-		if loaded.has("error"):
-			return {"success": false, "error": loaded.error}
+		var loaded_report := Report.read(str(args.get("report_path", "")), str(args.get("sha256", "")))
+		if loaded_report.has("error"):
+			return {"success": false, "error": loaded_report.error}
 		if str(args.get("detail", "")) == "full":
-			return {"success": true, "report": loaded.report, "evidence": loaded.artifact, "historical": true,
-				"source_version": loaded.report.get("document", {}).get("source_version", -1),
-				"provenance": loaded.report.get("document", {}).get("provenance", {})}
-		var summary := Report.summarize(loaded.report, loaded.artifact)
+			return {"success": true, "report": loaded_report.report, "evidence": loaded_report.artifact, "historical": true,
+				"source_version": loaded_report.report.get("document", {}).get("source_version", -1),
+				"provenance": loaded_report.report.get("document", {}).get("provenance", {})}
+		var summary := Report.summarize(loaded_report.report, loaded_report.artifact)
 		summary["historical"] = true
 		return summary
 	var job: Dictionary = panel.get_meta(META, {})

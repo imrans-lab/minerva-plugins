@@ -39,7 +39,7 @@ const ID_PRECISION: int = 3
 ## reference's own frame; `world` is where that point sits under the pose in
 ## force when the anchor was made.
 static func build(
-	reference: String,
+	reference_name: String,
 	node_name: String,
 	local: Vector3,
 	normal: Vector3 = Vector3.ZERO,
@@ -48,8 +48,8 @@ static func build(
 	return {
 		"plugin": _CadAnchorTypesScript.PLUGIN,
 		"type": _CadAnchorTypesScript.POINT_TYPE,
-		"id": point_id(reference, node_name, local),
-		"reference": reference,
+		"id": point_id(reference_name, node_name, local),
+		"reference": reference_name,
 		"node": node_name,
 		"local": [local.x, local.y, local.z],
 		"normal": [normal.x, normal.y, normal.z],
@@ -58,10 +58,10 @@ static func build(
 
 
 ## Stable identity for a point: which node of which reference, and where on it.
-static func point_id(reference: String, node_name: String, local: Vector3) -> String:
+static func point_id(reference_name: String, node_name: String, local: Vector3) -> String:
 	var fmt := "%." + str(ID_PRECISION) + "f"
 	return "%s/%s@%s,%s,%s" % [
-		reference,
+		reference_name,
 		node_name,
 		fmt % local.x,
 		fmt % local.y,
@@ -91,19 +91,19 @@ static func resolve(anchor: Variant, records: Array) -> Variant:
 	if not is_point_anchor(anchor):
 		return null
 	var d: Dictionary = anchor
-	var reference := str(d.get("reference", ""))
+	var reference_name := str(d.get("reference", ""))
 	var node_name := str(d.get("node", ""))
 	var local := vec3_from(d.get("local", null))
 	var normal := vec3_from(d.get("normal", null))
 	var remembered := vec3_from(d.get("world", null))
 
-	var record := record_named(records, reference)
+	var record := record_named(records, reference_name)
 	if record.is_empty():
 		return {
 			"position": remembered,
 			"local": local,
 			"normal": normal,
-			"reference": reference,
+			"reference": reference_name,
 			"node": node_name,
 			"stale": true,
 		}
@@ -116,7 +116,7 @@ static func resolve(anchor: Variant, records: Array) -> Variant:
 		"position": pose * local,
 		"local": local,
 		"normal": world_normal.normalized() if world_normal.length_squared() > 0.0 else Vector3.ZERO,
-		"reference": reference,
+		"reference": reference_name,
 		"node": node_name,
 		"stale": false,
 	}
@@ -125,13 +125,13 @@ static func resolve(anchor: Variant, records: Array) -> Variant:
 ## The mounted record with this name, or {} when the document no longer names
 ## it. There is deliberately no "first record" fallback: a point resolved
 ## against another reference's pose is a wrong answer with no error in it.
-static func record_named(records: Array, reference: String) -> Dictionary:
-	if reference.is_empty():
+static func record_named(records: Array, reference_name: String) -> Dictionary:
+	if reference_name.is_empty():
 		return {}
 	for entry in records:
 		if not (entry is Dictionary):
 			continue
-		if str((entry as Dictionary).get("name", "")) == reference:
+		if str((entry as Dictionary).get("name", "")) == reference_name:
 			return entry
 	return {}
 

@@ -357,7 +357,7 @@ func _build_outline_mesh(raw_verts: Array, raw_faces: Array,
 		_outlined_edge_count = int(outline["edges"])
 		_outline_source = "brep"
 
-	_feature_edge_count = int(segments.size() / 2)
+	_feature_edge_count = int(segments.size() / 2.0)
 	return _ReferenceMeshes.line_mesh_from_segments(
 		segments,
 		ORTHO_EDGE_COLOR if _wireframe_only else DEFAULT_EDGE_COLOR

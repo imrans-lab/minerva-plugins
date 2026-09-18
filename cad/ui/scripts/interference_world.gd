@@ -452,7 +452,7 @@ func get_solid_bounds() -> AABB:
 
 
 func get_solid_edge_count() -> int:
-	return int(_solid_edges.size() / 2)
+	return int(_solid_edges.size() / 2.0)
 
 
 # ---------------------------------------------------------------------------

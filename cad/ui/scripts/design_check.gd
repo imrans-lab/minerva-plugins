@@ -174,7 +174,7 @@ static func _collect_run(panel, handle: String, wait_ms: int) -> Dictionary:
 		return {"success": false, "error": ("no design check named %s is "
 			+ "running on this panel: a run is forgotten once its reply was "
 			+ "collected, or after %d minutes uncollected — start a new one")
-			% [handle, RUN_STALE_MS / 60000]}
+			% [handle, int(RUN_STALE_MS / 60000.0)]}
 	return await _await_run(key, entry, wait_ms)
 
 

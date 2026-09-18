@@ -91,10 +91,10 @@ static func emit(rows: Array, node_filters: Array, clearance_mm: float) -> Dicti
 		+ "to be generous.")
 	var bindings: Array = []
 	for entry in selected:
-		var reference: Dictionary = entry
-		var binding := "keepout_%s" % _identifier(str(reference["name"]))
+		var reference_entry: Dictionary = entry
+		var binding := "keepout_%s" % _identifier(str(reference_entry["name"]))
 		var written := _write_reference(lines, binding,
-			reference["nodes"] as Array, clearance_mm, omitted)
+			reference_entry["nodes"] as Array, clearance_mm, omitted)
 		if written > 0:
 			bindings.append(binding)
 	for note in omitted:

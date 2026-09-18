@@ -107,7 +107,19 @@ var _eval_buffer_version: int = -1
 ## colliders. -1 for a panel that has painted nothing.
 var _painted_buffer_version: int = -1
 
-var _evaluation_state := preload("scripts/evaluation_state.gd").new()
+## Last-known mesh data, passed to EdgeOverlay so it can rebuild silhouettes
+## on camera moves. Measurement helpers read it through the panel object.
+var _last_mesh_data: Dictionary = {}
+## Outcome of the last reference mount: {world_aabb, warnings, errors, mounted}.
+var _reference_report: Dictionary = {}
+## The last mesh() specs verbatim ({name, path, matrix, units, up}); notes use
+## these to restore references before the worker answers.
+var _last_references: Array = []
+## The bottom report banner for evaluation, import and interference results.
+@onready var _eval_banner: PanelContainer = $EvalBannerLayer/EvalBanner
+
+const _EvaluationState := preload("scripts/evaluation_state.gd")
+var _evaluation_state := _EvaluationState.new()
 var _dependencies := preload("scripts/dependencies.gd").new(self)
 var _model_views := preload("scripts/model_views.gd").new(self)
 var _build := preload("scripts/build_controls.gd").new(self)
@@ -638,10 +650,10 @@ func get_evaluation_state() -> Dictionary:
 	return _evaluation_state.completed.duplicate()
 
 func begin_evaluation_read(args: Dictionary, require_current: bool = false) -> Dictionary:
-	return _evaluation_state.preflight(self, args, require_current)
+	return _EvaluationState.preflight(self, args, require_current)
 
 func finish_evaluation_read(reply: Dictionary, before: Dictionary) -> Dictionary:
-	return _evaluation_state.finish(self, reply, before)
+	return _EvaluationState.finish(self, reply, before)
 
 
 

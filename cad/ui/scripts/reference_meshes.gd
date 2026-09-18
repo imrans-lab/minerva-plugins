@@ -167,7 +167,7 @@ func refresh_stamps() -> void:
 func dependency_paths(path: String) -> Array:
 	var paths: Array = [path]
 	if path.get_extension().to_lower() == "gltf" and FileAccess.file_exists(path):
-		paths.append_array(_reader._external_file_paths(path))
+		paths.append_array(_Reader._external_file_paths(path))
 	return paths
 
 
@@ -320,11 +320,11 @@ static func triangle_count_of(mesh: Mesh) -> int:
 			continue
 		var indices: Variant = arrays[Mesh.ARRAY_INDEX]
 		if indices is PackedInt32Array:
-			total += (indices as PackedInt32Array).size() / 3
+			total += int((indices as PackedInt32Array).size() / 3.0)
 			continue
 		var verts: Variant = arrays[Mesh.ARRAY_VERTEX]
 		if verts is PackedVector3Array:
-			total += (verts as PackedVector3Array).size() / 3
+			total += int((verts as PackedVector3Array).size() / 3.0)
 	return total
 
 
@@ -472,7 +472,7 @@ static func feature_edge_segments(
 	var face_uses := {}          # Vector3i(sorted welded corners) -> int
 	var degenerate := 0
 
-	var triangle_count := indices.size() / 3
+	var triangle_count := int(indices.size() / 3.0)
 	for t in range(triangle_count):
 		var i0 := indices[t * 3]
 		var i1 := indices[t * 3 + 1]

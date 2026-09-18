@@ -144,19 +144,9 @@ var _geometry_overlays: Dictionary = {}
 ## mcad_list_edges reply or synthesised from the stub cube in _ready().
 var _edge_registry: Array = []
 
-## Last-known mesh data (passed to EdgeOverlay so it can rebuild silhouettes
-## on camera moves).
-var _last_mesh_data: Dictionary = {}
-
 ## Loads, converts and caches the mesh files the source references. One library
 ## per panel: the cache is keyed by path, so all five panes share every read.
 var _reference_library: RefCounted = null
-## Outcome of the last mount: {world_aabb, warnings, errors, mounted}.
-var _reference_report: Dictionary = {}
-## The mesh() specs the last mount was given ({name, path, matrix, units, up}),
-## verbatim. A note carries these so a reopened tab shows its references before
-## the worker has answered.
-var _last_references: Array = []
 ## Segmentation and primitive fitting over the loaded references (RefCounted),
 ## and the physics gauge that verifies what it proposes (a child Node).
 var _mesh_features: RefCounted = null
@@ -180,13 +170,6 @@ var _reference_selection: RefCounted = null
 ## appends to the document (scripts/mesh_import_ui.gd).
 var _mesh_import_ui: RefCounted = null
 
-
-## The report banner along the BOTTOM of the panel (scripts/eval_banner.gd on
-## the EvalBanner node of the scene): a failed evaluation, a reference that
-## would not load, the interference the check found. It owns the stamp that
-## says which evaluation a report belongs to and the per-report dismissal;
-## _evaluate_and_render only tells it what to say.
-@onready var _eval_banner: PanelContainer = $EvalBannerLayer/EvalBanner
 
 ## The wide sidebar's edge inspector and the edge selection it drives
 ## (scripts/edge_sidebar.gd).
@@ -545,6 +528,10 @@ func get_reference_selection() -> Dictionary:
 ## the armed tool changes; this is the panel's side of asking it to read
 ## again, so a selection made while a tool stays armed clears the warning.
 signal annotation_tool_status_changed
+
+
+func notify_annotation_tool_status_changed() -> void:
+	annotation_tool_status_changed.emit()
 
 ## Duck-typed hook used by Minerva's annotation-tool bridge. An armed overlay
 ## owns pointer input, so a user who has not selected the foreign surface yet

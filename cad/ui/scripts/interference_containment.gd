@@ -380,7 +380,7 @@ func _probe_points(points: PackedVector3Array, box: AABB) -> PackedVector3Array:
 	var out := PackedVector3Array()
 	if points.is_empty():
 		return out
-	var step: int = maxi(1, points.size() / MAX_PROBE_POINTS)
+	var step: int = maxi(1, int(points.size() / float(MAX_PROBE_POINTS)))
 	var index := 0
 	while index < points.size() and out.size() < MAX_PROBE_POINTS:
 		out.append(_inset(points[index], box))
@@ -478,11 +478,11 @@ func _rim_touching_solid(
 ## the rule says — and not past the budget, which is announced as a limit so
 ## the report reads TRUNCATED rather than clean.
 func _rim_gate_open(reference_name: String, node_path: String) -> bool:
-	if _rim_crossing.has(_pair_key(reference_name, node_path)):
+	if rim_crossing_pairs.has(_pair_key(reference_name, node_path)):
 		return false
-	_rim_tests += 1
-	if _rim_tests > max_rim_tests:
-		if _rim_tests == max_rim_tests + 1:
+	rim_test_count += 1
+	if rim_test_count > max_rim_tests:
+		if rim_test_count == max_rim_tests + 1:
 			_limit(("the rim rule was asked about the first %d "
 				+ "crossings; past that every crossing is reported without "
 				+ "being asked whether the bodies merely meet there")
@@ -499,7 +499,7 @@ func _rim_gate_open(reference_name: String, node_path: String) -> bool:
 func _rim_verdict(verdict: int, point: Vector3, reference_name: String,
 		node_path: String, node_scope: String) -> bool:
 	if verdict == _RimContact.Verdict.CROSSING:
-		_rim_crossing[_pair_key(reference_name, node_path)] = true
+		rim_crossing_pairs[_pair_key(reference_name, node_path)] = true
 		return false
 	if verdict != _RimContact.Verdict.TOUCHING:
 		return false

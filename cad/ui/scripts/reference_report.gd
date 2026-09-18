@@ -109,19 +109,19 @@ func mount_under(
 		for entry in references:
 			if not (entry is Dictionary):
 				continue
-			var reference: Dictionary = entry
-			var reference_name := str(reference.get("name", ""))
-			var pose: Transform3D = _library.transform_from_matrix(reference.get("matrix", []))
+			var reference_entry: Dictionary = entry
+			var reference_name := str(reference_entry.get("name", ""))
+			var pose: Transform3D = _library.transform_from_matrix(reference_entry.get("matrix", []))
 			var state := {
 				"name": reference_name,
-				"definition": reference.get("definition", ""),
-				"source": reference.get("source", ""), "accuracy": reference.get("accuracy", "unspecified"),
-				"path": str(reference.get("path", "")),
+				"definition": reference_entry.get("definition", ""),
+				"source": reference_entry.get("source", ""), "accuracy": reference_entry.get("accuracy", "unspecified"),
+				"path": str(reference_entry.get("path", "")),
 				"resolved_path": "",
 				# units and up are baked into parts[].transform, so anything
 				# keyed on the geometry has to key on them as well.
-				"units": str(reference.get("units", "")).to_lower(),
-				"up": str(reference.get("up", "")).to_lower(),
+				"units": str(reference_entry.get("units", "")).to_lower(),
+				"up": str(reference_entry.get("up", "")).to_lower(),
 				"status": STATUS_OK,
 				"reason": "",
 				"warning": "",
@@ -137,7 +137,7 @@ func mount_under(
 				"node_bounds": [],
 			}
 
-			var resolved: Dictionary = _library.resolve(str(reference.get("path", "")), document_path)
+			var resolved: Dictionary = _library.resolve(str(reference_entry.get("path", "")), document_path)
 			if not str(resolved["warning"]).is_empty():
 				warnings.append(str(resolved["warning"]))
 				state["warning"] = str(resolved["warning"])
@@ -153,12 +153,12 @@ func mount_under(
 				# library apply — and, for a format that carries no units,
 				# report — its own default.
 				var declared_units := ""
-				if bool(reference.get("units_declared", true)):
-					declared_units = str(reference.get("units", ""))
+				if bool(reference_entry.get("units_declared", true)):
+					declared_units = str(reference_entry.get("units", ""))
 				loaded = _library.load_file(
 					str(resolved["path"]),
 					declared_units,
-					str(reference.get("up", ""))
+					str(reference_entry.get("up", ""))
 				)
 				state["stamp"] = loaded.stamp
 				state["triangle_count"] = loaded.triangle_count
