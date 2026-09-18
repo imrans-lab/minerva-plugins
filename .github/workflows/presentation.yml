@@ -157,9 +157,16 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  secret-scan:
+    # The shared scan over the exact commit range; a release cannot publish
+    # without it passing for this SHA.
+    uses: ./.github/workflows/secret-scan.yml
+    permissions:
+      contents: read
+
   release:
     name: Publish release
-    needs: build
+    needs: [build, secret-scan]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:

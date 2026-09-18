@@ -149,9 +149,16 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  secret-scan:
+    # The shared scan over the exact commit range; a release cannot publish
+    # without it passing for this SHA.
+    uses: ./.github/workflows/secret-scan.yml
+    permissions:
+      contents: read
+
   release:
     name: Publish release
-    needs: build
+    needs: [build, secret-scan]
     # Auto-tag releases on every push (branch or explicit tag). Skip
     # PRs — fork tokens are read-only and cannot publish releases.
     if: github.event_name == 'push'

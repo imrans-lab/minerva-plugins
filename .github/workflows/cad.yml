@@ -480,12 +480,19 @@ jobs:
       - name: Runtime dependency + NOTICE suites
         run: python3 -m pytest cad/worker/tests/test_notice.py cad/worker/tests/test_runtime_bundle_contract.py cad/worker/tests/test_clearance.py cad/worker/tests/test_features.py -q
 
+  secret-scan:
+    # The shared scan over the exact commit range; a release cannot publish
+    # without it passing for this SHA.
+    uses: ./.github/workflows/secret-scan.yml
+    permissions:
+      contents: read
+
   release:
     name: Publish release
     concurrency: cad-release
     # The licence inventory is a release gate: a tarball never ships while
     # NOTICE.md and the shipped licence texts disagree.
-    needs: [build, notice, panel, worker-lifetime]
+    needs: [build, notice, panel, worker-lifetime, secret-scan]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:

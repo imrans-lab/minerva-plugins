@@ -807,6 +807,13 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  secret-scan:
+    # The shared scan over the exact commit range; a release cannot publish
+    # without it passing for this SHA.
+    uses: ./.github/workflows/secret-scan.yml
+    permissions:
+      contents: read
+
   release:
     concurrency: pcb-release
     # A SKIPPED JOB IS NOT A PASSED JOB. Listing these in `needs` alone would
@@ -819,7 +826,7 @@ jobs:
     # Before this, `release` waited on `package` alone and `package` waited on
     # nothing, so no test result could stop a publish: run 33571607977 shipped
     # artifacts with a red windows-latest job in the same run.
-    needs: [test, fab-gate, panel, test-crossplatform, package]
+    needs: [test, fab-gate, panel, test-crossplatform, package, secret-scan]
     # Push only — PRs build but never release. Same tag scheme as cad.yml:
     # a version tag releases as-is; main releases pcb-v<manifest version>;
     # a dcr/** branch releases a -branch- prerelease that regen_registry.py

@@ -239,10 +239,17 @@ jobs:
       - name: Pre-flight the GD suite registry and host wiring
         run: bash council/scripts/run-gd-tests.sh --preflight-only ../Minerva
 
+  secret-scan:
+    # The shared scan over the exact commit range; a release cannot publish
+    # without it passing for this SHA.
+    uses: ./.github/workflows/secret-scan.yml
+    permissions:
+      contents: read
+
   release:
     name: Publish release
     concurrency: council-release
-    needs: [test, package, panel]
+    needs: [test, package, panel, secret-scan]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
