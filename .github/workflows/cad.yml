@@ -160,9 +160,10 @@ jobs:
       # entry this platform lacks is a warning, since pexpect and ptyprocess
       # are POSIX-only and one census covers all three platforms.
       #
-      # Only build123d and python-fcl are pinned, so an upstream release of
-      # anything transitive turns this red. That is the intent: a new version
-      # is a licence text to re-check.
+      # Most transitives remain unpinned, so an upstream release turns this
+      # red. The few audited transitive pins in runtime-bundle.lock prevent
+      # known patch drift from changing identical source builds; any deliberate
+      # bump still requires the census and licence texts to move together.
       - name: Verify the licence census still describes the built bundle
         # Both counters are load-bearing. A layout glob that matches nothing
         # expands to its own literal, so the candidate loop tests each path

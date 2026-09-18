@@ -16,10 +16,11 @@
 #
 #     python3 cad/scripts/gen_notice.py --census <stage>/lib/python3.12/site-packages
 #
-# Only build123d and python-fcl are pinned in runtime-bundle.lock; everything
-# else here is transitive and unconstrained, so an upstream release changes
-# these versions. That is the point — a version change here is a licence text
-# that has to be re-checked, and --verify-bundle is what makes someone look.
+# Most entries are transitive and unconstrained, so an upstream release changes
+# these versions. A small set of audited transitive distributions is pinned in
+# runtime-bundle.lock because patch drift was making identical source builds
+# disagree with their committed licence texts. --verify-bundle still requires
+# every built distribution and version to match this census.
 #
 # The census is the UNION over the three build platforms, so some entries are
 # absent from any one bundle: pexpect and ptyprocess are POSIX-only, colorama

@@ -26,7 +26,12 @@ CPYTHON="3.12.13"
 # pinned too: build123d 0.10.0 pulls it unconstrained, and its 0.3.0 requires
 # cadquery-ocp 8.x (it imports OCP.collections, which 7.8.x has no package
 # for), so the unpinned resolve broke the Layer 1 import on every platform.
-PIP_PKGS="build123d==0.10.0 ocp-gordon==0.2.2"
+# The remaining explicit pins are audited transitive distributions whose
+# patch releases otherwise make the committed licence census drift between
+# identical source builds. Their versions stay aligned with the reviewed
+# licence texts and runtime-bundle.manifest; the census gate remains strict
+# for every other resolved distribution.
+PIP_PKGS="build123d==0.10.0 ocp-gordon==0.2.2 contourpy==1.3.3 fonttools==4.64.0 matplotlib==3.11.1 pure-eval==0.2.3 wcwidth==0.8.3"
 
 # Wheels installed WITHOUT their declared dependencies. python-fcl's
 # Requires-Dist names Cython, which only its BUILD needs — `import fcl` works

@@ -15,9 +15,9 @@ two disagree is `cad/scripts/gen_notice.py`; the rendered result is
 `cad/NOTICE.md`.
 
 What the inventory is checked against is `cad/scripts/runtime-bundle.manifest`
-— a census of every distribution in the BUILT bundle's site-packages, not the
-two pins in `runtime-bundle.lock`. pip resolves the transitive tree, so the
-lock names two distributions and the bundle contains forty-seven.
+— a census of every distribution in the BUILT bundle's site-packages, not only
+the direct pins in `runtime-bundle.lock`. pip still resolves a larger transitive
+tree, and every resolved distribution must remain represented in the census.
 
 ## Adding or bumping a runtime dependency
 

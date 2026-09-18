@@ -515,8 +515,8 @@ def render_notice(lock_vars: dict,
         "distribution, so naming the licence here is not on its own enough.",
         "",
         "The inventory is checked against a census of the built bundle's "
-        "site-packages (`cad/scripts/runtime-bundle.manifest`), not against "
-        "the two pins in `cad/scripts/runtime-bundle.lock`: pip resolves the "
+        "site-packages (`cad/scripts/runtime-bundle.manifest`), not only against "
+        "the direct pins in `cad/scripts/runtime-bundle.lock`: pip resolves the "
         f"transitive tree, so the lock names {len(pins)} distributions and "
         f"the bundle contains {len(census)}. Wheel metadata cannot see what a "
         "wheel vendors either — python-fcl's contains compiled FCL, libccd, "
