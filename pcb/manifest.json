@@ -2306,11 +2306,21 @@
   "setup": {
     "requires": [
       {
+        "tool": "python",
+        "min": "3.12"
+      },
+      {
         "tool": "go",
         "min": "1.22"
       }
     ],
     "steps": [
+      {
+        "type": "python_venv",
+        "dir": "worker",
+        "install": "editable",
+        "timeout_s": 600
+      },
       {
         "type": "go_build",
         "package": "./",

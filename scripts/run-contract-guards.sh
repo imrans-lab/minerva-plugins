@@ -28,7 +28,8 @@
 # DEPENDENCIES, as the selected guards actually require them:
 #   cad      Go >=1.22 and Python >=3.12 (manifest builds cad-plugin and an
 #            editable venv under cad/worker/.venv for the OCCT worker)
-#   pcb      Go >=1.22 (pcb-plugin; its Python worker ships in-tree)
+#   pcb      Go >=1.22 and Python >=3.12,<3.13 (manifest builds pcb-plugin and
+#            an editable venv under pcb/worker/.venv for the board worker)
 #   council  Go >=1.22 (council-plugin)
 #   drive    Rust/cargo >=1.70 (drive-plugin, built --release --locked)
 #   always   git, python3 (arg-free helper scripts), coreutils `timeout`,
@@ -312,6 +313,26 @@ echo
 declare -A BINARY_SHA=()
 for plugin in "${PLUGINS[@]}"; do
   plugin_dir="${PLUGINS_ROOT}/${plugin}"
+
+  # Every Python worker in the plugin must be PROVISIONED by the manifest. A
+  # pyproject.toml with no python_venv step for its directory is a worker
+  # whose interpreter comes from whatever the developer's machine happens to
+  # hold — a stale untracked .venv or a bare PATH python3 — so the build
+  # passes here and the worker dies importing its dependencies on a clean
+  # host. The check is on the declaration, not on the .venv: the builder
+  # recreates a declared venv from scratch, and an undeclared one is exactly
+  # the masking this refuses.
+  while IFS= read -r pyproject; do
+    worker_rel="$(dirname "${pyproject#"${plugin_dir}"/}")"
+    if ! python3 -c '
+import json, sys
+steps = json.load(open(sys.argv[1])).get("setup", {}).get("steps", [])
+sys.exit(0 if any(s.get("type") == "python_venv" and s.get("dir") == sys.argv[2] for s in steps) else 1)
+' "${plugin_dir}/manifest.json" "${worker_rel}"; then
+      die "${plugin}: ${worker_rel}/pyproject.toml is a Python worker but ${plugin}/manifest.json declares no python_venv step whose dir is exactly '${worker_rel}' — its interpreter would come from the developer's environment, which a clean host does not have"
+    fi
+  done < <(find "${plugin_dir}" -mindepth 2 -maxdepth 2 -name pyproject.toml -not -path '*/.venv/*' | LC_ALL=C sort)
+
   echo "=== building ${plugin} from its manifest's setup steps ==="
   python3 "${SCRIPT_DIR}/build_plugin_from_manifest.py" "${plugin_dir}" \
     > "${LOG_DIR}/${plugin}-build.json" 2> >(tee "${LOG_DIR}/${plugin}-build.log" >&2) \

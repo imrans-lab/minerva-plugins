@@ -231,6 +231,12 @@ mf = json.load(open(path))
 mf["setup"].pop("requires")
 json.dump(mf, open(path, "w"))
 PYMF
+# a Python worker the manifest does not provision: the developer's own venv or
+# PATH python3 would mask it here and a clean host would crash the worker
+mkdir -p "${PLUGINS}/demo/worker"
+echo '[project]' > "${PLUGINS}/demo/worker/pyproject.toml"
+FAKE_MODE=healthy run_case undeclared_python_worker 2 "declares no python_venv step whose dir is exactly 'worker'"
+rm -rf "${PLUGINS}/demo/worker"
 # a failed --import is fatal (the permissive runner swallows it with || true)
 FAKE_IMPORT_FAILS=1 FAKE_MODE=healthy run_case import_failure 2 "godot --import exited 1"
 # ...and so is an import that exits 0 while reporting a script it could not parse
