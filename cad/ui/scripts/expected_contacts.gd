@@ -93,7 +93,7 @@ static func parse(args: Dictionary) -> Dictionary:
 			if box == null:
 				errors.append(("region_mm for '%s' must be "
 					+ "{min_mm: [x, y, z], max_mm: [x, y, z]} in world "
-					+ "millimetres") % reference)
+					+ "millimetres") % reference_name)
 				continue
 			entry["region"] = box
 		entries.append(entry)
