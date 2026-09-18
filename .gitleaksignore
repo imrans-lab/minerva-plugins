@@ -2,3 +2,10 @@
 # finding, not the rule or the commit. The test now builds its unminted token
 # at runtime, so no later commit can reproduce this shape.
 7625e1db1535c17c256d1a1bc20cec38551643d6:nametag-maker/panel_transfer_test.go:generic-api-key:230
+# docs/plugins.dct is the Docket tracker: these are a work item's record key
+# ("pcb.bus.followups.dcr_...") across the three commits that rewrote its line,
+# and one comment body's prose; each pinned exactly, never the file or the rule.
+7f5446315dee72fe00f76f55b2c40ed01449e08b:docs/plugins.dct:generic-api-key:166
+05e7f06bbe798c051f60c6a08543490d8182b0b9:docs/plugins.dct:generic-api-key:166
+858b79eb47667afd8246d160b73197f10217b67e:docs/plugins.dct:generic-api-key:166
+cfb1ece2883d9bf8e1b2079b68a17827c5fd65d3:docs/plugins.dct:generic-api-key:3436
