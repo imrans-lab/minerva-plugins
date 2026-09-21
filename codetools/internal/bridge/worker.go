@@ -590,6 +590,13 @@ func buildEnv(pythonPath string) []string {
 	if t := os.Getenv("TMP"); t != "" {
 		env = append(env, "TMP="+t)
 	}
+	// Desktop capture needs the caller's display socket and X11 authority. Keep
+	// this allowlist narrow so the Python isolation above remains unchanged.
+	for _, key := range []string{"DISPLAY", "XAUTHORITY", "WAYLAND_DISPLAY"} {
+		if value := os.Getenv(key); value != "" {
+			env = append(env, key+"="+value)
+		}
+	}
 
 	// Intentionally NOT forwarded (would contaminate the worker's interpreter):
 	//   PYTHONHOME / PYTHONPATH / PYTHONSTARTUP / PYTHONUSERBASE

@@ -125,7 +125,7 @@ def parse_godot_output(text: str) -> list[dict[str, Any]]:
 
 
 # Location embedded in a probe-scraped debugger row, e.g. "res://main.gd:42".
-_LOC_RE = re.compile(r"(res://[^\s:()]+):(\d+)")
+_LOC_RE = re.compile(r"((?:res|user)://[^\s:()]+):(\d+)")
 # Leading severity prefix on a scraped debugger label, stripped for the message.
 _PREFIX_RE = re.compile(
     r"^(SCRIPT ERROR|USER ERROR|USER WARNING|ERROR|WARNING)\s*:\s*", re.IGNORECASE
@@ -225,7 +225,7 @@ def _debugger_rows_to_diagnostics(state: dict[str, Any] | None) -> list[dict[str
             "file": file_,
             "line": line_,
             "function": None,
-            "user_fixable": bool(file_ and str(file_).startswith("res://")),
+            "user_fixable": bool(file_ and str(file_).startswith(("res://", "user://"))),
         }
         if details:
             diag["details"] = [str(d) for d in details]

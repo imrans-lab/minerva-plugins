@@ -245,7 +245,10 @@ def explore(params: dict) -> dict:
 # 2. inspect — artifact capture / list / status
 # ---------------------------------------------------------------------------
 
-_INSPECT_OPS = frozenset(["attach", "list", "status", "prepare", "remove-probe", "run", "stop"])
+_INSPECT_OPS = frozenset([
+    "attach", "capture-debugger", "list", "status", "prepare",
+    "remove-probe", "run", "stop",
+])
 
 # X11/visual capture ops — feature-gated to Linux + a live DISPLAY (P3.3). The
 # cross-platform debugger/output JSON capture (the GDScript probe) is NOT gated.
@@ -298,6 +301,32 @@ def inspect(params: dict) -> dict:
         raise ToolError(
             "op must be one of: %s" % ", ".join(sorted(_INSPECT_OPS)),
             kind="invalid_args",
+        )
+
+    # ---- capture-debugger ----
+    if op == "capture-debugger":
+        from . import godot_debugger_capture
+        root = _resolve_root(params)
+        project_path = _resolve_project_path_param(params)
+        state = _read_probe_state(project_path)
+        try:
+            capture_params = dict(params)
+            capture_params["project_path"] = str(project_path)
+            record = godot_debugger_capture.capture(capture_params, root, state)
+        except RuntimeError as exc:
+            return envelope.error(str(exc), kind="capability_unavailable")
+        # Full raw rows, stacks, screenshots, and normalized diagnostics remain
+        # in durable artifacts; keep the MCP reply bounded for large editors.
+        compact = godot_debugger_capture.compact_record(record)
+        outcome = "interrupted Godot debugger capture" if record.get("capture_error") \
+            else "captured Godot debugger"
+        return envelope.ok(
+            "%s: %d raw, %d unique, complete=%s (%s)" % (
+                outcome,
+                record["raw_count"], record["unique_count"], record["complete"],
+                record["method"],
+            ),
+            artifacts=[compact],
         )
 
     # ---- attach ----

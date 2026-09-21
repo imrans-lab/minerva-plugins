@@ -137,3 +137,53 @@ If `codetools_probe.gd` bumps the top-level schema (e.g.,
 - The fixture `project_path` field should be `/project` (the normalized
   placeholder). The `provenance.output_path` should match:
   `/project/.codetools/godot_probe/debugger_state.json`.
+
+# Retained debugger capture
+
+Use `minerva_codetools_inspect` with `op: "capture-debugger"` to preserve the
+editor's current Debugger entries without rerunning the application or clearing
+the panel. The portable path reads an installed editor probe. Full raw rows,
+details, stack text, normalized diagnostics, and screenshots are written below
+`<root>/.codetools/inspect/debugger-captures/`. `root` defaults to the worker's
+current directory; `project_path` identifies the Godot project and its probe.
+The tool reply contains bounded counts, completeness limits, a five-entry
+preview, and artifact paths.
+
+For an already-running X11 editor without the probe, set `capture_method: "x11"`.
+This fallback requires `xdotool`, `xprop`, `xwininfo`, and `xclip` on `PATH`,
+with `DISPLAY` and (when required by the X server) `XAUTHORITY` available to the
+worker. Pillow with XCB support is optional; without it, Copy Error text is
+still retained but scoped screenshots report an error.
+The tool discovers the largest visible matching Godot window and requires
+`window_title_contains` to prove it is the intended project. Supply these
+window-relative calibration values:
+
+- `x11_region`: normalized `[x, y, width, height]` enclosing only Debugger rows.
+- `x11_row_height`: row height in pixels.
+- `x11_copy_menu_offset`: `[dx, dy]` from a selected row to **Copy Error**.
+
+For example:
+
+```json
+{
+  "op": "capture-debugger",
+  "capture_method": "x11",
+  "project_path": "/absolute/path/to/project",
+  "root": "/absolute/path/to/capture-output",
+  "window_title_contains": "ProjectName",
+  "x11_region": [0.167, 0.571, 0.714, 0.386],
+  "x11_row_height": 22,
+  "x11_copy_menu_offset": [24, 18],
+  "expected_count": 0
+}
+```
+
+Traversal is bounded by `max_rows` and `max_pages`. It preserves duplicate Copy
+Error text, snapshots and restores clipboard bytes, restores the previously
+active window, and reports why it stopped. `expected_count: 0` takes a scoped
+region screenshot without clicking. This caller observation is recorded but
+does not prove completeness. The fallback never captures the whole desktop.
+
+Code Tools 0.3.3 includes this operation. Existing installations must update to
+that release after Minerva is stopped; source-worker validation does not add
+`capture-debugger` to an already installed plugin.

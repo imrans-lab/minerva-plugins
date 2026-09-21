@@ -1,7 +1,7 @@
 {
   "id": "codetools",
   "name": "Code Tools",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "host_api_version": "1",
   "release_targets": [
     "linux-x86_64",
@@ -507,7 +507,7 @@
     },
     {
       "name": "minerva_codetools_inspect",
-      "description": "Evidence artifact capture, probe management, and Godot run/diagnostics for the sightline inspect subsystem. Dispatches by op: 'run' (drive a Godot project and capture normalized runtime diagnostics — mode=headless is autonomous, mode=editor-assist is human-driven), 'stop' (terminate a running Godot editor/game for a project), 'attach' (create an attachment session with artifact paths), 'list' (list sessions, or artifacts for a session), 'status' (read Godot probe status, read-only), 'prepare' (install the GDScript editor probe into a Godot project — cross-platform, reversible), 'remove-probe' (uninstall the probe; editor-aware — pass stop_editor=true to stop a live editor first). 'capture-visual' is feature-gated to Linux + DISPLAY (returns capability_unavailable otherwise).",
+      "description": "Evidence artifact capture, probe management, and Godot run/diagnostics. 'capture-debugger' durably captures existing editor debugger entries through the cross-platform probe or a calibrated X11 Copy Error fallback while preserving raw duplicates.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -515,6 +515,7 @@
             "type": "string",
             "enum": [
               "run",
+              "capture-debugger",
               "stop",
               "attach",
               "list",
@@ -523,7 +524,7 @@
               "remove-probe",
               "capture-visual"
             ],
-            "description": "Operation. run drives Godot + captures diagnostics; stop terminates a running Godot for the project; attach/list manage evidence artifacts; status reads probe state; prepare/remove-probe install/uninstall the editor probe (cross-platform); capture-visual is Linux+DISPLAY-only."
+            "description": "Operation. capture-debugger captures existing editor entries without clearing or rerunning the app; other operations manage probes, runs, and evidence artifacts."
           },
           "mode": {
             "type": "string",
@@ -595,6 +596,62 @@
           "project_path": {
             "type": "string",
             "description": "status/prepare/remove-probe: path to the Godot project (defaults to root/cwd)."
+          },
+          "capture_method": {
+            "type": "string",
+            "enum": ["auto", "probe", "x11"],
+            "description": "capture-debugger: prefer probe automatically, require probe, or use calibrated X11 Copy Error capture."
+          },
+          "window_id": {
+            "type": "string",
+            "description": "capture-debugger X11: optional editor window id; otherwise discovers the largest visible matching window."
+          },
+          "window_name": {
+            "type": "string",
+            "description": "capture-debugger X11: window-title regex used for discovery (default Godot)."
+          },
+          "window_title_contains": {
+            "type": "string",
+            "description": "capture-debugger X11: required project/editor title fragment used to reject unrelated Godot windows."
+          },
+          "x11_region": {
+            "type": "array",
+            "description": "capture-debugger X11: debugger rows [x,y,width,height], normalized to the discovered Godot client window.",
+            "items": {"type": "number"},
+            "minItems": 4,
+            "maxItems": 4
+          },
+          "x11_row_height": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "capture-debugger X11: debugger row height in pixels."
+          },
+          "x11_copy_menu_offset": {
+            "type": "array",
+            "description": "capture-debugger X11: [dx,dy] from selected row to Copy Error menu item.",
+            "items": {"type": "integer"},
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "max_rows": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "capture-debugger: hard traversal row cap (default 250, maximum 2000)."
+          },
+          "max_pages": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "capture-debugger X11: hard page cap (default 20, maximum 100)."
+          },
+          "settle_seconds": {
+            "type": "number",
+            "minimum": 0.02,
+            "description": "capture-debugger X11: delay after selection/menu actions."
+          },
+          "expected_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "capture-debugger X11: optional visible debugger count observed by the caller. Zero captures the calibrated region without clicking rows; nonzero is advisory and never used to claim completeness."
           }
         },
         "required": [

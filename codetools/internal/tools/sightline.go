@@ -76,13 +76,13 @@ func HandleExplore(ctx context.Context, w *bridge.Worker, params json.RawMessage
 // Inspect is the MCP spec for minerva_codetools_inspect.
 var Inspect = ToolSpec{
 	Name:        "minerva_codetools_inspect",
-	Description: "Evidence artifact capture, probe management, and Godot run/diagnostics for the sightline inspect subsystem. Dispatches by op: 'run' (drive a Godot project and capture normalized runtime diagnostics — mode=headless is autonomous, mode=editor-assist is human-driven), 'stop' (terminate a running Godot editor/game for a project), 'attach' (create an attachment session with artifact paths), 'list' (list sessions, or artifacts for a session), 'status' (read Godot probe status, read-only), 'prepare' (install the GDScript editor probe into a Godot project — cross-platform, reversible), 'remove-probe' (uninstall the probe; editor-aware — pass stop_editor=true to stop a live editor first). 'capture-visual' is feature-gated to Linux + DISPLAY (returns capability_unavailable otherwise).",
+	Description: "Evidence artifact capture, probe management, and Godot diagnostics. capture-debugger durably captures existing editor debugger entries through the probe or a calibrated X11 Copy Error fallback.",
 	InputSchema: json.RawMessage(`{
 		"type": "object",
 		"properties": {
 			"op": {
 				"type": "string",
-				"enum": ["run", "stop", "attach", "list", "status", "prepare", "remove-probe", "capture-visual"],
+				"enum": ["run", "capture-debugger", "stop", "attach", "list", "status", "prepare", "remove-probe", "capture-visual"],
 				"description": "Operation. run drives Godot + captures diagnostics; stop terminates a running Godot for the project; attach/list manage evidence artifacts; status reads probe state; prepare/remove-probe install/uninstall the editor probe (cross-platform); capture-visual is Linux+DISPLAY-only."
 			},
 			"mode": {
@@ -151,8 +151,23 @@ var Inspect = ToolSpec{
 			},
 			"project_path": {
 				"type": "string",
-				"description": "status/prepare/remove-probe: path to the Godot project (defaults to root/cwd)."
-			}
+				"description": "status/prepare/remove-probe/capture-debugger: Godot project path."
+			},
+			"capture_method": {"type": "string", "enum": ["auto", "probe", "x11"]},
+			"window_id": {"type": "string"},
+			"window_name": {"type": "string"},
+			"window_title_contains": {"type": "string"},
+			"x11_region": {
+				"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4
+			},
+			"x11_row_height": {"type": "integer", "minimum": 1},
+			"x11_copy_menu_offset": {
+				"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2
+			},
+			"max_rows": {"type": "integer", "minimum": 1},
+			"max_pages": {"type": "integer", "minimum": 1},
+			"settle_seconds": {"type": "number", "minimum": 0.02},
+			"expected_count": {"type": "integer", "minimum": 0}
 		},
 		"required": ["op"],
 		"additionalProperties": false
