@@ -107,6 +107,48 @@ def test_python_fcl_is_installed_without_its_declared_dependencies():
     assert "python-fcl" not in LOCK.get("PIP_PKGS", "")
 
 
+def _pyproject_dependencies() -> dict:
+    """Distribution name -> requirement string, from worker/pyproject.toml."""
+    pyproject = (CAD / "worker" / "pyproject.toml").read_text(encoding="utf-8")
+    block = re.search(r"^dependencies\s*=\s*\[(.*?)^\]", pyproject,
+                      re.S | re.M)
+    assert block, "pyproject.toml has no [project] dependencies list"
+    return dict(
+        (re.split(r"[<>=!~\[]", d, 1)[0], d)
+        for d in re.findall(r'"([^"]+)"', block.group(1)))
+
+
+def _lock_pins() -> dict:
+    """Distribution name -> pin, from runtime-bundle.lock's pip package lists."""
+    return dict(
+        (re.split(r"[<>=!~\[]", s, 1)[0], s)
+        for s in (LOCK.get("PIP_PKGS", "") + " "
+                  + LOCK.get("PIP_NO_DEPS_PKGS", "")).split())
+
+
+#: The geometry stack the worker imports on every evaluate. Pinned in the lock,
+#: and in pyproject at the same version, so dev-lane and contract-guard installs
+#: cannot resolve a different OCCT binding than the release (PLG 01a0c856803a).
+GEOMETRY_STACK = ("build123d", "ocp-gordon")
+
+
+def test_dev_lane_pins_the_geometry_stack_at_the_bundle_pin():
+    """pyproject must not float the geometry stack the bundle pins.
+
+    An open build123d range let a fresh dev-lane venv resolve build123d 0.13
+    with cadquery-ocp 8.0, where the worker's TopoDS.Face_s calls raise, while
+    the bundle kept working: the two lanes measured different kernels and only
+    the Minerva contract guard noticed.
+    """
+    declared, lock_pins = _pyproject_dependencies(), _lock_pins()
+    for dist in GEOMETRY_STACK:
+        assert lock_pins.get(dist, "").startswith(f"{dist}=="), (
+            f"{dist} is not pinned exactly in runtime-bundle.lock PIP_PKGS")
+        assert declared.get(dist) == lock_pins[dist], (
+            f"{dist} is {declared.get(dist)} in pyproject.toml but "
+            f"{lock_pins[dist]} in runtime-bundle.lock")
+
+
 def test_dev_lane_venv_declares_every_geometry_backend_at_the_bundle_pin():
     """A venv built from pyproject alone must reach what the bundle reaches.
 
@@ -122,17 +164,7 @@ def test_dev_lane_venv_declares_every_geometry_backend_at_the_bundle_pin():
     assert spec.loader is not None
     spec.loader.exec_module(dispatcher)
 
-    pyproject = (CAD / "worker" / "pyproject.toml").read_text(encoding="utf-8")
-    block = re.search(r"^dependencies\s*=\s*\[(.*?)^\]", pyproject,
-                      re.S | re.M)
-    assert block, "pyproject.toml has no [project] dependencies list"
-    declared = dict(
-        (re.split(r"[<>=!~\[]", d, 1)[0], d)
-        for d in re.findall(r'"([^"]+)"', block.group(1)))
-    lock_pins = dict(
-        (re.split(r"[<>=!~\[]", s, 1)[0], s)
-        for s in (LOCK.get("PIP_PKGS", "") + " "
-                  + LOCK.get("PIP_NO_DEPS_PKGS", "")).split())
+    declared, lock_pins = _pyproject_dependencies(), _lock_pins()
     module_dist = {m: d for d, m in DIST_IMPORT_NAME.items()}
 
     for module in dispatcher.GEOMETRY_BACKENDS:

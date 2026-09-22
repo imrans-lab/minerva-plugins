@@ -3,7 +3,13 @@ name = "cad-plugin-worker"
 version = "0.1.0"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "build123d>=0.7.0",
+    # The geometry stack, at the release bundle's pins (scripts/runtime-bundle.lock
+    # PIP_PKGS). An open range let PyPI hand dev-lane and contract-guard
+    # installs build123d 0.13 / cadquery-ocp 8.0, where TopoDS.Face_s no longer
+    # exists and every feature read raises (PLG 01a0c856803a). build123d 0.10.0
+    # holds cadquery-ocp on the 7.8 line.
+    "build123d==0.10.0",
+    "ocp-gordon==0.2.2",
     # The clearance backend. The release bundle installs the same wheel
     # (scripts/runtime-bundle.lock PIP_NO_DEPS_PKGS); a venv built from this
     # file alone must reach the same geometry backends, or every clearance,
