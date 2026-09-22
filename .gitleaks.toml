@@ -7,3 +7,13 @@ title = "minerva-plugins secret history policy"
 # Start from the maintained upstream ruleset; only carve out what is provably
 # not ours. Never disable rules wholesale.
 useDefault = true
+
+# Docket comment 579 lists two CI run IDs, not an API credential (01a0ca29befd).
+[[rules]]
+id = "generic-api-key"
+[[rules.allowlists]]
+description = "Exact CI run references in the Docket checkpoint"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^docs/plugins\.dct$''']
+regexes = ['''secret-scan35708739383, corpus-policy35708739337''']
