@@ -1,0 +1,84 @@
+[01] W 0:00:01:593   GDScript::reload: The variable "argv" is declared below in the parent block.
+  <GDScript Error>CONFUSABLE_LOCAL_DECLARATION
+  <GDScript Source>AgentContainerForeground.gd:137 @ GDScript::reload()
+
+[02] W 0:00:02:674   GDScript::reload: The local variable "harness" is shadowing an already-declared variable at line 36 in the current class.
+  <GDScript Error>SHADOWED_VARIABLE
+  <GDScript Source>TriggerDestination.gd:140 @ GDScript::reload()
+
+[03] W 0:00:02:674   GDScript::reload: The local variable "chat_id" is shadowing an already-declared variable at line 31 in the current class.
+  <GDScript Error>SHADOWED_VARIABLE
+  <GDScript Source>TriggerDestination.gd:146 @ GDScript::reload()
+
+[04] W 0:00:02:771   GDScript::reload: The local variable "receipt" is shadowing an already-declared function at line 88 in the current class.
+  <GDScript Error>SHADOWED_VARIABLE
+  <GDScript Source>TriggerHarnessDelivery.gd:75 @ GDScript::reload()
+
+[05] W 0:00:02:771   GDScript::reload: The local variable "receipt" is shadowing an already-declared function at line 88 in the current class.
+  <GDScript Error>SHADOWED_VARIABLE
+  <GDScript Source>TriggerHarnessDelivery.gd:196 @ GDScript::reload()
+
+[06] W 0:00:03:366   GDScript::reload: Integer used when an enum value is expected. If this is intended, cast the integer to the enum type using the "as" keyword.
+  <GDScript Error>INT_AS_ENUM_WITHOUT_CAST
+  <GDScript Source>AgentManagerWindow.gd:1439 @ GDScript::reload()
+
+[07] W 0:00:03:366   GDScript::reload: Integer used when an enum value is expected. If this is intended, cast the integer to the enum type using the "as" keyword.
+  <GDScript Error>INT_AS_ENUM_WITHOUT_CAST
+  <GDScript Source>AgentManagerWindow.gd:1450 @ GDScript::reload()
+
+[08] W 0:00:03:366   GDScript::reload: Integer used when an enum value is expected. If this is intended, cast the integer to the enum type using the "as" keyword.
+  <GDScript Error>INT_AS_ENUM_WITHOUT_CAST
+  <GDScript Source>AgentManagerWindow.gd:1451 @ GDScript::reload()
+
+[09] W 0:00:04:117   GDScript::reload: Values of the ternary operator are not mutually compatible.
+  <GDScript Error>INCOMPATIBLE_TERNARY
+  <GDScript Source>PluginArchiveScan.gd:262 @ GDScript::reload()
+
+[10] W 0:00:04:117   GDScript::reload: Integer division. Decimal part will be discarded.
+  <GDScript Error>INTEGER_DIVISION
+  <GDScript Source>PluginArchiveScan.gd:383 @ GDScript::reload()
+
+[11] W 0:00:04:126   GDScript::reload: The local variable "spawn" is shadowing an already-declared function at line 171 in the current class.
+  <GDScript Error>SHADOWED_VARIABLE
+  <GDScript Source>SetupExecutors.gd:179 @ GDScript::reload()
+
+[12] W 0:00:04:135   GDScript::reload: Values of the ternary operator are not mutually compatible.
+  <GDScript Error>INCOMPATIBLE_TERNARY
+  <GDScript Source>PluginInstallTransaction.gd:191 @ GDScript::reload()
+
+[13] W 0:00:04:135   GDScript::reload: The local function parameter "plugin_id" is shadowing an already-declared variable at line 48 in the current class.
+  <GDScript Error>SHADOWED_VARIABLE
+  <GDScript Source>PluginInstallTransaction.gd:214 @ GDScript::reload()
+
+[14] W 0:00:04:135   GDScript::reload: The local function parameter "plugin_id" is shadowing an already-declared variable at line 48 in the current class.
+  <GDScript Error>SHADOWED_VARIABLE
+  <GDScript Source>PluginInstallTransaction.gd:250 @ GDScript::reload()
+
+[15] W 0:00:04:135   GDScript::reload: The local function parameter "plugin_id" is shadowing an already-declared variable at line 48 in the current class.
+  <GDScript Error>SHADOWED_VARIABLE
+  <GDScript Source>PluginInstallTransaction.gd:265 @ GDScript::reload()
+
+[16] W 0:00:04:135   GDScript::reload: Values of the ternary operator are not mutually compatible.
+  <GDScript Error>INCOMPATIBLE_TERNARY
+  <GDScript Source>PluginInstallTransaction.gd:268 @ GDScript::reload()
+
+[17] W 0:00:04:135   GDScript::reload: The local function parameter "had_previous" is shadowing an already-declared variable at line 49 in the current class.
+  <GDScript Error>SHADOWED_VARIABLE
+  <GDScript Source>PluginInstallTransaction.gd:336 @ GDScript::reload()
+
+[18] W 0:00:04:244   GDScript::reload: The signal "changed" is declared but never explicitly used in the class.
+  <GDScript Error>UNUSED_SIGNAL
+  <GDScript Source>PluginInstallJob.gd:14 @ GDScript::reload()
+
+[19] W 0:00:04:244   GDScript::reload: The signal "finished" is declared but never explicitly used in the class.
+  <GDScript Error>UNUSED_SIGNAL
+  <GDScript Source>PluginInstallJob.gd:15 @ GDScript::reload()
+
+[20] W 0:00:58:099   PluginDefinition.gd:653 @ warn_if_binary_has_no_producer(): [PluginDefinition] Plugin 'codetools' declares entrypoint './codetools-plugin' but no 'setup' stanza — no declared producer for its binary.
+  <C++ Source>  core/variant/variant_utility.cpp:1034 @ push_warning()
+  <Stack Trace> PluginDefinition.gd:653 @ warn_if_binary_has_no_producer()
+                PluginDefinition.gd:349 @ from_manifest()
+                PluginSkillConsent.gd:23 @ collect()
+                PluginManager.gd:546 @ collect_skill_consent()
+                MarketplaceClient.gd:267 @ _install()
+                PluginArchive.gd:49 @ unpack()
