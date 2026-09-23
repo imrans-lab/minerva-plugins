@@ -32,7 +32,7 @@ const (
 	serverName      = "council"
 
 	// serverVersion must equal the version in manifest.json; a test pins it.
-	serverVersion = "0.1.0"
+	serverVersion = "0.1.1"
 
 	// maxLine bounds one protocol line. It is generous next to the engine's own
 	// transport budget so an oversized request is refused by the protocol with

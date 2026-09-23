@@ -1,7 +1,7 @@
 {
   "id": "drive",
   "name": "Drive",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Keep a folder of files in sync across all your computers (Windows, macOS, and Linux). Every save uploads a new version to the cloud, so older versions stay recoverable, and when two machines edit the same file, the other edit is kept beside it as a conflict copy instead of being lost. You can also download a cloud-only project to any machine. You need to be signed in to a Minerva account.",
   "price": {"amount_minor": 0, "currency": "USD"},
   "host_api_version": "1",

@@ -59,7 +59,7 @@ use serde_json::{json, Value};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "scansort";
-const SERVER_VERSION: &str = "0.0.1";
+const SERVER_VERSION: &str = "0.0.2";
 
 #[derive(Deserialize, Debug)]
 struct RpcRequest {

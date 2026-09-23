@@ -1,7 +1,7 @@
 {
   "id": "codetools",
   "name": "Code Tools",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Code-understanding tools for your AI agent and a code-graph panel for you. It indexes a repository's files and symbols, then lets you search them, see what calls what, spot dead code and duplication, and review git diffs side by side. It also gives the agent file read, write, edit, search, and shell tools. It brings its own Python runtime, so there is nothing else to install.",
   "price": {"amount_minor": 0, "currency": "USD"},
   "host_api_version": "1",

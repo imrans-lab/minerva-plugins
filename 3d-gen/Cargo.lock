@@ -322,7 +322,7 @@ dependencies = [
 
 [[package]]
 name = "gen3d-plugin"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "base64",
  "env_logger",

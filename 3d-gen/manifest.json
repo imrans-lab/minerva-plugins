@@ -1,7 +1,7 @@
 {
   "id": "gen3d",
   "name": "3D Generator",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Turn a text prompt or a reference image into a 3D model. Results are saved as GLB files you can reopen from a .m3d document, and your AI agent can generate models with the same tools. Generation runs on Minerva's media service, so you need to be signed in to a Minerva account; nothing else to install.",
   "price": {"amount_minor": 0, "currency": "USD"},
   "host_api_version": "1",

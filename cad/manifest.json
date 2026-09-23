@@ -1,7 +1,7 @@
 {
   "id": "cad",
   "name": "CAD",
-  "version": "0.3.16",
+  "version": "0.3.17",
   "description": "Design 3D parts and assemblies by writing short scripts, and see them drawn as solid models you can orbit in a four-view editor. Your AI agent can build and edit designs with you and check them: measure holes and clearances, find collisions and fastener problems, and test that a part can slide in or out. Import STL or glTF meshes as references, and export your design as STEP, STL, 3MF, or glTF files. Models are saved in .mcad files. The plugin brings its own Python geometry engine, so there is nothing else to install.",
   "price": {"amount_minor": 0, "currency": "USD"},
   "host_api_version": "1",
