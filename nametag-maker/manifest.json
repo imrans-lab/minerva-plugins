@@ -2,6 +2,8 @@
   "id": "nametag_maker",
   "name": "Name Tags",
   "version": "0.0.1",
+  "description": "Design printable name tags and turn a spreadsheet of names into a ready-to-print PDF sheet. Map your spreadsheet's columns to tag fields, add an icon, preview the result, and save the PDF; your AI agent can build tag sheets with the same tools. Nothing else to install.",
+  "price": {"amount_minor": 0, "currency": "USD"},
   "host_api_version": "1",
   "release_targets": [
     "linux-x86_64",

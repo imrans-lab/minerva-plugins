@@ -2,6 +2,8 @@
   "id": "movie_gen",
   "name": "Movie Generator",
   "version": "0.0.1",
+  "description": "Generate short videos (MP4) from a text prompt, from a single starting image, or by filling in the motion between a first and a last frame. Your AI agent can generate clips with the same tools, and projects are saved in .mmovie documents. Generation runs on Minerva's media service, so you need to be signed in to a Minerva account; nothing else to install.",
+  "price": {"amount_minor": 0, "currency": "USD"},
   "host_api_version": "1",
   "release_targets": ["linux-x86_64", "macos-universal", "windows-x86_64"],
   "backend": {

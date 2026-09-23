@@ -65,6 +65,56 @@ class RegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "manifest version"):
             registry.build_registry(self.root)
 
+    def test_listing_is_carried_from_the_tag_and_validated(self):
+        self.assertNotIn("description", self.selected["plugins"][0],
+                         "a release tagged before listings existed advertises none")
+        listing = {"description": "Keeps files in step across machines. " * 4,
+                   "price": {"amount_minor": 0, "currency": "USD"}}
+        self.manifest.update(version="2.0.0", **listing)
+        self.commit_manifest()
+        self.git("tag", "drive-v2.0.0")
+        selected = registry.build_registry(self.root)
+        entry = selected["plugins"][0]
+        self.assertEqual({k: entry[k] for k in listing}, listing)
+        registry.check_registry(self.root, selected)
+        stale = copy.deepcopy(selected)
+        stale["plugins"][0]["description"] = "Old words."
+        with self.assertRaises(ValueError):
+            registry.check_registry(self.root, stale)
+        self.manifest.update(version="3.0.0", price={"amount_minor": 0.0, "currency": "USD"})
+        self.commit_manifest()
+        self.git("tag", "drive-v3.0.0")
+        with self.assertRaisesRegex(ValueError, "drive-v3.0.0: price"):
+            registry.build_registry(self.root)
+
+    def test_listing_validator_accepts_only_a_long_description_and_free_integer_price(self):
+        good = {"description": "x" * registry.MIN_DESCRIPTION_CHARS,
+                "price": {"amount_minor": 0, "currency": "USD"}}
+        self.assertEqual(registry.listing_errors(good), [])
+        for label, change in [
+            ("no description", {"description": None}),
+            ("short description", {"description": "A CAD tool."}),
+            ("no price", {"price": None}),
+            ("float price", {"price": {"amount_minor": 0.0, "currency": "USD"}}),
+            ("bool price", {"price": {"amount_minor": False, "currency": "USD"}}),
+            ("string price", {"price": {"amount_minor": "0", "currency": "USD"}}),
+            ("paid", {"price": {"amount_minor": 100, "currency": "USD"}}),
+            ("other currency", {"price": {"amount_minor": 0, "currency": "EUR"}}),
+            ("extra key", {"price": {"amount_minor": 0, "currency": "USD", "tax": 0}}),
+        ]:
+            with self.subTest(label):
+                bad = {k: v for k, v in {**good, **change}.items() if v is not None}
+                self.assertEqual(len(registry.listing_errors(bad)), 1)
+
+    def test_every_manifest_directory_is_held_to_the_listing(self):
+        (self.root / "unlisted").mkdir()
+        (self.root / "unlisted/manifest.json").write_text(json.dumps({"id": "unlisted"}))
+        (self.directory / "manifest.json").write_text(json.dumps(
+            {**self.manifest, "description": "d" * 200, "price": {"amount_minor": 0, "currency": "USD"}}))
+        with self.assertRaisesRegex(ValueError, "unlisted: description") as caught:
+            registry.check_manifests(self.root)
+        self.assertNotIn("drive:", str(caught.exception))
+
     def test_release_guard_preserves_existing_stable_tags(self):
         script = Path(__file__).with_name("release-publish-guard.sh")
         for tag, prerelease, expected in [

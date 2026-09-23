@@ -2,6 +2,8 @@
   "id": "scansort",
   "name": "Scansort",
   "version": "0.0.1",
+  "description": "Sort scanned documents into encrypted, password-protected vaults. Scansort extracts each document's text, uses an AI model and rules you write to decide where it belongs, and files it, so you can search and pull documents back out later. You need at least one AI model provider set up in Minerva for classification.",
+  "price": {"amount_minor": 0, "currency": "USD"},
   "host_api_version": "1",
   "release_targets": ["linux-x86_64", "linux-arm64", "macos-universal", "windows-x86_64"],
   "backend": {

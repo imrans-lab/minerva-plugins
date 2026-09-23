@@ -2,6 +2,8 @@
   "id": "pcb",
   "name": "PCB Editor",
   "version": "0.8.2",
+  "description": "Design printed circuit boards in Minerva. Place and route components, manage nets and copper layers, and check your design. When the board is ready, export a manufacturing order package in JLCPCB's format or a 3D model of the assembled board. Your AI agent can read and edit the board with you. Adding official KiCad parts and fetching vendor 3D models needs an internet connection; nothing else to install.",
+  "price": {"amount_minor": 0, "currency": "USD"},
   "host_api_version": "1",
   "release_targets": [
     "linux-x86_64",

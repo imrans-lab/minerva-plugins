@@ -2,7 +2,8 @@
 """Generate the marketplace registry from tagged release manifests.
 
 Run after a successful release: git fetch --tags && python3 scripts/regen_registry.py
-Use --check to validate the committed release selections without advancing them.
+Use --check to validate the committed release selections without advancing them,
+and every plugin manifest's store listing (description and price).
 Use --published with --check to verify GitHub has every advertised asset (gh required).
 """
 
@@ -30,6 +31,39 @@ RELEASES_BASE = f"https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/download"
 # source of truth, kept in sync with that plugin's matrix workflow). A plugin
 # that omits `release_targets` defaults to the full set.
 TARGETS = ["linux-x86_64", "linux-arm64", "macos-universal", "windows-x86_64"]
+
+# Store-listing fields every manifest declares and the registry carries. The
+# description is what a first-time user reads before installing, so it must say
+# more than the name. Prices are integer minor units (cents) so no float ever
+# rounds; the marketplace takes no payments, so the only valid price is free.
+LISTING_FIELDS = ("description", "price")
+MIN_DESCRIPTION_CHARS = 120
+FREE = {"amount_minor": 0, "currency": "USD"}
+
+
+def listing_errors(manifest: dict) -> list[str]:
+    """What is wrong with a manifest's description and price; empty when valid."""
+    errors = []
+    description = manifest.get("description")
+    if not isinstance(description, str) or len(description.strip()) < MIN_DESCRIPTION_CHARS:
+        errors.append(f"description must be a string of at least {MIN_DESCRIPTION_CHARS} characters "
+                      "saying what the plugin does, what it can do, and what it needs")
+    price = manifest.get("price")
+    # type() rather than isinstance: bool is an int, and 0.0 == 0.
+    if not isinstance(price, dict) or price != FREE or type(price["amount_minor"]) is not int:
+        errors.append(f"price must be exactly {json.dumps(FREE)} (integer minor units)")
+    return errors
+
+
+def check_manifests(repo_root: Path):
+    """Every plugin directory's working manifest carries a valid listing,
+    including directories not yet in PLUGIN_DIRS: their next tag is what
+    the registry will advertise."""
+    problems = [f"{path.parent.name}: {error}"
+                for path in sorted(repo_root.glob("*/manifest.json"))
+                for error in listing_errors(json.loads(path.read_text()))]
+    if problems:
+        raise ValueError("invalid manifest listing:\n  " + "\n  ".join(problems))
 
 
 def get_repo_root() -> Path:
@@ -125,7 +159,7 @@ def build_plugin_entry(plugin_dir: Path, repo_root: Path, tag: str | None = None
         for target in targets
     }
 
-    return {
+    entry = {
         "id": plugin_id,
         "name": manifest.get("name", plugin_id),
         "version": tag_version,
@@ -134,6 +168,14 @@ def build_plugin_entry(plugin_dir: Path, repo_root: Path, tag: str | None = None
         "manifest_url": f"{RAW_BASE}/{tag}/{rel_manifest}",
         "downloads": downloads,
     }
+    # Releases tagged before the listing fields existed carry neither; any
+    # later tag must carry both, valid.
+    if any(field in manifest for field in LISTING_FIELDS):
+        errors = listing_errors(manifest)
+        if errors:
+            raise ValueError(f"{tag}: " + "; ".join(errors))
+        entry.update({field: manifest[field] for field in LISTING_FIELDS})
+    return entry
 
 
 def build_registry(repo_root: Path):
@@ -190,6 +232,7 @@ def main(argv) -> int:
     repo_root = get_repo_root()
     out_path = repo_root / "registry.json"
     if args.check:
+        check_manifests(repo_root)
         check_registry(repo_root, json.loads(out_path.read_text()), args.published)
         print("registry release selections verified")
     else:

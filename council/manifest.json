@@ -2,6 +2,8 @@
   "id": "council",
   "name": "Council",
   "version": "0.1.0",
+  "description": "Ask a question from an ordinary Minerva chat and get an answer from a small council: a chair plus a few advisors, some of them grounded in your own notes. The chat shows the chair's summary, and the Council editor shows each member's full argument with its sources. You need at least one AI model provider set up in Minerva. This version runs on Linux x86_64 only.",
+  "price": {"amount_minor": 0, "currency": "USD"},
   "host_api_version": "1",
   "release_targets": [
     "linux-x86_64"

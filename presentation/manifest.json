@@ -2,6 +2,8 @@
   "id": "presentation",
   "name": "Presentation",
   "version": "0.0.3",
+  "description": "Build slide decks in Minerva. Each slide holds text, image, and spreadsheet tiles that you can arrange and annotate, and decks are saved as .mdeck documents inside your project. Your AI agent can read and edit open decks with you. Nothing else to install.",
+  "price": {"amount_minor": 0, "currency": "USD"},
   "host_api_version": "1",
   "release_targets": ["linux-x86_64", "linux-arm64", "macos-universal", "windows-x86_64"],
   "backend": {

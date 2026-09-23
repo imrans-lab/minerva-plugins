@@ -268,6 +268,8 @@ Legend: **R** = required, **O** = optional. "Strict→null" means a violation ma
 | `id` | R | string | `""` | Must match `^[a-z][a-z0-9_]*$`. Drives tool prefix `minerva_<id>_` and class-name prefix. |
 | `name` | R | string | `""` | Human-readable display name. |
 | `version` | R | string | `""` | Semver by convention; only non-empty is checked. The marketplace tarball filename uses this version. |
+| `description` | R (marketplace) | string | — | Store listing a first-time user reads before installing: what the plugin does, what it can do, and what it needs (sign-in, providers, network, platforms). At least 120 characters. Not read by the host; `scripts/regen_registry.py --check` enforces it and copies it into `registry.json`. |
+| `price` | R (marketplace) | object | — | `{"amount_minor": 0, "currency": "USD"}`: integer minor units, never a float. Free is the only accepted value; the marketplace takes no payments. Enforced and carried like `description`. |
 | `host_api_version` | O | string | `"1"` | Coerced via `str()` (int `1` → `"1"`). **Unenforced** today — advisory metadata. |
 | `backend` | O* | object | `{}` | Launch config. Its children make it effectively required. |
 | `backend.transport` | O | string | `"stdio"` | **Must equal `"stdio"`** or validation fails. Only stdio MCP is supported. |
