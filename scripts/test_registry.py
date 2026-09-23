@@ -18,9 +18,7 @@ class RegistryTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.git("init", "-q")
-        self.git("config", "user.email", "test@example.invalid")
-        self.git("config", "user.name", "Registry test")
+        init_repo(self.root)
         self.directory = self.root / "drive"
         self.directory.mkdir()
         self.manifest = {"id": "drive", "name": "Drive", "version": "1.0.0",
@@ -158,6 +156,11 @@ def init_repo(root):
         subprocess.run(["git", "-C", str(root), *args], check=True,
                        capture_output=True, text=True)
     git("init", "-q")
+    # No automatic maintenance: a commit can leave it running in the
+    # background, still writing .git/objects while the temporary directory is
+    # removed.
+    git("config", "maintenance.auto", "false")
+    git("config", "gc.auto", "0")
     git("config", "user.email", "test@example.invalid")
     git("config", "user.name", "Registry test")
     return git
