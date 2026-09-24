@@ -11,6 +11,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -51,6 +52,8 @@ type outResponse struct {
 type server struct {
 	out      sync.Mutex
 	enc      *json.Encoder
+	in       *bufio.Scanner
+	capSeq   int
 	meter    *Meter
 	recorder *Recorder
 	dataDir  string
@@ -140,6 +143,16 @@ var toolList = []map[string]interface{}{
 		},
 	},
 	{
+		"name":        "record_export",
+		"description": "Copy the most recent recording (running or finished) to a path of the user's choosing. Pass path to write there directly; omit it to pop the host's save dialog. Returns {path, rows} or {cancelled: true}.",
+		"inputSchema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path": map[string]interface{}{"type": "string", "description": "Absolute destination path for the CSV copy."},
+			},
+		},
+	},
+	{
 		"name":        "record_stop",
 		"description": "Stop the running recording and return {path, rows, seconds}. Open the CSV with minerva_create_spreadsheet_editor to chart it.",
 		"inputSchema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
@@ -203,6 +216,12 @@ func (s *server) callTool(id json.RawMessage, params json.RawMessage) {
 		}
 		s.pushState()
 		s.respondTool(id, map[string]interface{}{"success": true, "path": a.Path})
+	case "record_export":
+		var a struct {
+			Path string `json:"path"`
+		}
+		json.Unmarshal(p.Args, &a)
+		s.respondTool(id, s.exportRecording(a.Path))
 	case "record_stop":
 		out, err := s.recorder.Stop()
 		if err != nil {
@@ -215,6 +234,66 @@ func (s *server) callTool(id json.RawMessage, params json.RawMessage) {
 	default:
 		s.fail(id, -32601, "tools/call: unknown tool: "+p.Name)
 	}
+}
+
+// exportRecording copies the latest CSV to dest, asking the host for a
+// destination when none is given.
+func (s *server) exportRecording(dest string) map[string]interface{} {
+	src := s.recorder.LastPath()
+	if src == "" {
+		return toolErr("no_recording", "nothing has been recorded yet")
+	}
+	if dest == "" {
+		picked, err := s.pickSavePath("Save multimeter recording", filepath.Base(src))
+		if err != nil {
+			return toolErr("picker_failed", err.Error())
+		}
+		if picked == "" {
+			return map[string]interface{}{"success": true, "cancelled": true}
+		}
+		dest = picked
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return toolErr("export_failed", err.Error())
+	}
+	defer in.Close()
+	out, err := os.Create(dest)
+	if err != nil {
+		return toolErr("export_failed", err.Error())
+	}
+	defer out.Close()
+	rows, err := copyCountingRows(out, in)
+	if err != nil {
+		return toolErr("export_failed", err.Error())
+	}
+	return map[string]interface{}{"success": true, "path": dest, "rows": rows}
+}
+
+// copyCountingRows copies a CSV and returns its data-row count (lines minus
+// the header).
+func copyCountingRows(dst io.Writer, src io.Reader) (int, error) {
+	lines := 0
+	r := bufio.NewReader(src)
+	for {
+		line, err := r.ReadBytes('\n')
+		if len(line) > 0 {
+			if _, werr := dst.Write(line); werr != nil {
+				return 0, werr
+			}
+			lines++
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return 0, err
+		}
+	}
+	if lines > 0 {
+		lines--
+	}
+	return lines, nil
 }
 
 // pushState publishes the connection + recording snapshot for panels and
@@ -282,6 +361,7 @@ func main() {
 
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 1<<20), 4<<20)
+	s.in = scanner
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {

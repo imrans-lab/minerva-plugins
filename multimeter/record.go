@@ -76,6 +76,16 @@ func (r *Recorder) Stop() (map[string]interface{}, error) {
 	return out, err
 }
 
+// LastPath is the most recent recording, running or finished.
+func (r *Recorder) LastPath() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.w != nil {
+		r.w.Flush()
+	}
+	return r.path
+}
+
 func (r *Recorder) Status() map[string]interface{} {
 	r.mu.Lock()
 	defer r.mu.Unlock()

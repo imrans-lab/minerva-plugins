@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MultiMeter</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  /* Single self-contained panel: inline CSS + JS, no siblings (guide §2.5).
+     Renders under godot-cef and godot_wry: no ESM, no top-level await. */
+  :root {
+    --bg: #14161a; --panel: #1d2026; --line: #2c3038; --text: #e6e8eb; --muted: #8a919c;
+    --accent: #4fc3f7; --warn: #ffb74d; --ok: #66bb6a; --bad: #ef5350; --graph: #4fc3f7;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.4 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  body { display: flex; flex-direction: column; gap: 10px; padding: 12px; min-height: 100%; }
+  .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  #conn { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+  #dot { width: 10px; height: 10px; border-radius: 50%; background: var(--bad); flex: none; }
+  #dot.on { background: var(--ok); }
+  #err { color: var(--warn); }
+  #display { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+  #value { font: 700 56px/1 "SF Mono", Menlo, Consolas, monospace; letter-spacing: 1px; white-space: nowrap; }
+  #unit { font-size: 22px; color: var(--accent); margin-left: 8px; }
+  #func { color: var(--muted); font-size: 15px; }
+  .badges { display: flex; gap: 6px; flex-wrap: wrap; min-height: 22px; }
+  .badge { font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 4px;
+    background: #3a3a1e; color: #ffe082; letter-spacing: .5px; }
+  .badge.bat { background: #4a2e14; color: var(--warn); }
+  .badge.ol { background: #4a1e1e; color: var(--bad); }
+  button { background: #2a2e36; color: var(--text); border: 1px solid var(--line); border-radius: 6px;
+    padding: 7px 12px; font-size: 13px; cursor: pointer; }
+  button:hover { background: #343945; }
+  button:active { background: var(--accent); color: #000; }
+  button:disabled { opacity: .45; cursor: default; }
+  button.rec { border-color: var(--bad); }
+  button.rec.on { background: var(--bad); color: #fff; }
+  select { background: #2a2e36; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+  #graph { width: 100%; height: 220px; display: block; border-radius: 6px; background: #121418; }
+  .stats { display: flex; gap: 16px; color: var(--muted); font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }
+  .stats b { color: var(--text); font-weight: 600; }
+  .hint { color: var(--muted); font-size: 12px; }
+  .grow { flex: 1; }
+</style>
+</head>
+<body>
+
+<div class="row">
+  <div id="conn"><span id="dot"></span><span id="connText">Connecting…</span></div>
+  <span id="err"></span>
+</div>
+
+<div class="card" id="display">
+  <div id="func">—</div>
+  <div><span id="value">-----</span><span id="unit"></span></div>
+  <div class="badges" id="badges"></div>
+</div>
+
+<div class="card row" id="buttons">
+  <span class="hint">Meter buttons (click = tap, hold the mouse ≈ long press):</span>
+  <button data-btn="select">Select</button>
+  <button data-btn="range">Range</button>
+  <button data-btn="hold">Hold</button>
+  <button data-btn="rel">Rel</button>
+  <button data-btn="hz">Hz</button>
+  <button data-btn="maxmin">Max/Min</button>
+</div>
+
+<div class="card">
+  <div class="row" style="margin-bottom:8px">
+    <span>Window</span>
+    <select id="window">
+      <option value="30">30 s</option>
+      <option value="120" selected>2 min</option>
+      <option value="300">5 min</option>
+      <option value="0">All</option>
+    </select>
+    <div class="stats"><span>min <b id="stMin">–</b></span><span>avg <b id="stAvg">–</b></span><span>max <b id="stMax">–</b></span><span>n <b id="stN">0</b></span></div>
+    <span class="grow"></span>
+    <button id="clear">Clear</button>
+  </div>
+  <canvas id="graph"></canvas>
+</div>
+
+<div class="card row">
+  <button id="rec" class="rec">● Record</button>
+  <span id="recInfo" class="hint">Not recording</span>
+  <span class="grow"></span>
+  <button id="openSheet" disabled>Open in spreadsheet</button>
+  <button id="saveCopy" disabled>Save copy…</button>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var PLUGIN = 'minerva_multimeter_';
+  var EVENT = 'multimeter.reading';
+  var MAX_POINTS = 20000;              // ~2 hours at 3 Hz
+  var PREFIX_MULT = { n: 1e-9, 'µ': 1e-6, u: 1e-6, m: 1e-3, '': 1, k: 1e3, M: 1e6, G: 1e9 };
+
+  var $ = function (id) { return document.getElementById(id); };
+  var points = [];                     // {t: ms, v: base-unit value}
+  var series = { function: '', unit: '' };
+  var state = { connected: false, recording: { recording: false } };
+  var lastEventAt = 0;
+  var lastPath = '';
+
+  // ---------- bridge ----------
+  function bridgeReady() { return typeof window.minerva !== 'undefined' && window.minerva && typeof window.minerva.call === 'function'; }
+  function call(tool, args) { return window.minerva.call(PLUGIN + tool, args || {}); }
+
+  // ---------- display ----------
+  function renderReading(r) {
+    $('func').textContent = r.function + (r.flags.indexOf('auto') >= 0 ? '  ·  auto' : '');
+    if (r.overload) { $('value').textContent = 'OL'; $('unit').textContent = r.prefix + r.unit; }
+    else {
+      var parts = r.display.split(' ');
+      $('value').textContent = parts[0];
+      $('unit').textContent = parts.slice(1).join(' ');
+    }
+    var badges = $('badges'); badges.innerHTML = '';
+    r.flags.forEach(function (f) {
+      if (f === 'auto') return;
+      var b = document.createElement('span');
+      b.className = 'badge' + (f === 'low_battery' ? ' bat' : f === 'overload' ? ' ol' : '');
+      b.textContent = { hold: 'HOLD', rel: 'REL', low_battery: 'BAT', min: 'MIN', max: 'MAX', overload: 'OL', maxmin: 'MAX/MIN' }[f] || f.toUpperCase();
+      badges.appendChild(b);
+    });
+  }
+
+  function addPoint(r) {
+    // A function or unit change is a new measurement; the old trace is meaningless against it.
+    if (series.function !== r.function || series.unit !== r.unit) {
+      points = []; series = { function: r.function, unit: r.unit };
+    }
+    if (!r.overload) {
+      var mult = PREFIX_MULT[r.prefix]; if (mult === undefined) mult = 1;
+      points.push({ t: Date.parse(r.timestamp) || Date.now(), v: r.value * mult });
+      if (points.length > MAX_POINTS) points.splice(0, points.length - MAX_POINTS);
+    }
+  }
+
+  function onReading(r) {
+    lastEventAt = Date.now();
+    renderReading(r);
+    addPoint(r);
+    draw();
+  }
+
+  function renderState(st) {
+    state = st || state;
+    $('dot').className = state.connected ? 'on' : '';
+    $('connText').textContent = state.connected ? ('Connected to ' + (state.name || 'meter')) : 'Not connected';
+    $('err').textContent = state.error || '';
+    var rec = state.recording || {};
+    $('rec').className = 'rec' + (rec.recording ? ' on' : '');
+    $('rec').textContent = rec.recording ? '■ Stop' : '● Record';
+    $('recInfo').textContent = rec.recording
+      ? ('Recording: ' + rec.rows + ' rows, ' + Math.round(rec.seconds) + ' s')
+      : (lastPath ? 'Last recording: ' + lastPath.split('/').pop() : 'Not recording');
+    if (rec.recording) lastPath = rec.path;
+    $('openSheet').disabled = !lastPath;
+    $('saveCopy').disabled = !lastPath;
+    document.querySelectorAll('#buttons button').forEach(function (b) { b.disabled = !state.connected; });
+  }
+
+  // ---------- graph ----------
+  function fmt(v) {
+    if (!isFinite(v)) return '–';
+    var a = Math.abs(v), p = '', m = 1;
+    if (a >= 1e9) { p = 'G'; m = 1e9; } else if (a >= 1e6) { p = 'M'; m = 1e6; } else if (a >= 1e3) { p = 'k'; m = 1e3; }
+    else if (a > 0 && a < 1e-6) { p = 'n'; m = 1e-9; } else if (a > 0 && a < 1e-3) { p = 'µ'; m = 1e-6; } else if (a > 0 && a < 1) { p = 'm'; m = 1e-3; }
+    return (v / m).toPrecision(4).replace(/\.?0+$/, '') + ' ' + p + series.unit;
+  }
+
+  function visible() {
+    var win = parseInt($('window').value, 10) * 1000;
+    if (!win || !points.length) return points;
+    var cutoff = points[points.length - 1].t - win;
+    var i = points.length - 1;
+    while (i > 0 && points[i - 1].t >= cutoff) i--;
+    return points.slice(i);
+  }
+
+  function draw() {
+    var c = $('graph'), dpr = window.devicePixelRatio || 1;
+    var W = c.clientWidth, H = c.clientHeight;
+    if (c.width !== W * dpr || c.height !== H * dpr) { c.width = W * dpr; c.height = H * dpr; }
+    var g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, W, H);
+    var pts = visible();
+    var n = pts.length;
+    $('stN').textContent = n;
+    if (n < 2) { $('stMin').textContent = $('stAvg').textContent = $('stMax').textContent = '–'; return; }
+    var min = Infinity, max = -Infinity, sum = 0;
+    pts.forEach(function (p) { if (p.v < min) min = p.v; if (p.v > max) max = p.v; sum += p.v; });
+    $('stMin').textContent = fmt(min); $('stAvg').textContent = fmt(sum / n); $('stMax').textContent = fmt(max);
+    var pad = { l: 64, r: 10, t: 10, b: 22 };
+    var span = max - min || Math.abs(max) * 0.1 || 1;
+    var lo = min - span * 0.08, hi = max + span * 0.08;
+    var t0 = pts[0].t, t1 = pts[n - 1].t, dt = (t1 - t0) || 1;
+    var x = function (t) { return pad.l + (t - t0) / dt * (W - pad.l - pad.r); };
+    var y = function (v) { return pad.t + (hi - v) / (hi - lo) * (H - pad.t - pad.b); };
+    g.strokeStyle = '#2c3038'; g.fillStyle = '#8a919c'; g.font = '11px Menlo, monospace'; g.textAlign = 'right';
+    for (var k = 0; k <= 4; k++) {
+      var v = lo + (hi - lo) * k / 4, yy = y(v);
+      g.beginPath(); g.moveTo(pad.l, yy); g.lineTo(W - pad.r, yy); g.stroke();
+      g.fillText(fmt(v), pad.l - 6, yy + 4);
+    }
+    g.textAlign = 'center';
+    g.fillText('-' + Math.round(dt / 1000) + ' s', pad.l, H - 6);
+    g.fillText('now', W - pad.r, H - 6);
+    g.strokeStyle = '#4fc3f7'; g.lineWidth = 1.5; g.beginPath();
+    pts.forEach(function (p, i) { if (i) g.lineTo(x(p.t), y(p.v)); else g.moveTo(x(p.t), y(p.v)); });
+    g.stroke();
+  }
+
+  // ---------- controls ----------
+  document.querySelectorAll('#buttons button').forEach(function (b) {
+    var downAt = 0;
+    b.addEventListener('mousedown', function () { downAt = Date.now(); });
+    b.addEventListener('click', function () {
+      var long = downAt && (Date.now() - downAt) > 600; downAt = 0;
+      call('press', { button: b.dataset.btn, long: long }).catch(function (e) { $('err').textContent = String(e.message || e); });
+    });
+  });
+  $('window').addEventListener('change', draw);
+  $('clear').addEventListener('click', function () { points = []; draw(); });
+  $('rec').addEventListener('click', function () {
+    var p = state.recording && state.recording.recording ? call('record_stop') : call('record_start');
+    p.then(function (res) { if (res && res.path) lastPath = res.path; return call('status'); })
+     .then(renderState)
+     .catch(function (e) { $('err').textContent = String(e.message || e); });
+  });
+  $('openSheet').addEventListener('click', function () {
+    if (!lastPath) return;
+    window.minerva.call('minerva_create_spreadsheet_editor', { file_path: lastPath })
+      .catch(function (e) { $('err').textContent = String(e.message || e); });
+  });
+  $('saveCopy').addEventListener('click', function () {
+    call('record_export', {}).then(function (res) {
+      if (res && res.path) $('recInfo').textContent = 'Saved copy: ' + res.path;
+    }).catch(function (e) { $('err').textContent = String(e.message || e); });
+  });
+  window.addEventListener('resize', draw);
+
+  // ---------- startup ----------
+  function seed() {
+    call('status').then(renderState).catch(function () {});
+    call('read', { count: 600 }).then(function (res) {
+      (res.history || [res.reading]).forEach(function (r) { if (r) { addPoint(r); } });
+      if (res.reading) renderReading(res.reading);
+      draw();
+    }).catch(function () {});
+  }
+
+  // Events are the live path; polling backs it up if none arrive (bridge
+  // wiring differs between webview backends).
+  function poll() {
+    if (Date.now() - lastEventAt > 3000 && state.connected) {
+      call('read').then(function (res) { if (res && res.reading) { renderReading(res.reading); addPoint(res.reading); draw(); } }).catch(function () {});
+    }
+    if (Date.now() - lastEventAt > 3000) call('status').then(renderState).catch(function () {});
+  }
+
+  function start(attempt) {
+    if (!bridgeReady()) {
+      if (attempt < 20) return setTimeout(function () { start(attempt + 1); }, 500);
+      $('err').textContent = 'Minerva bridge not available'; return;
+    }
+    window.minerva.onPluginEvent(function (name, payload) { if (name === EVENT) onReading(payload); });
+    window.minerva.onPluginState(function (st) { renderState(st); });
+    seed();
+    setInterval(poll, 2000);
+  }
+  start(0);
+})();
+</script>
+</body>
+</html>
