@@ -24,7 +24,7 @@ import (
 const (
 	protocolVersion = "2024-11-05"
 	serverName      = "multimeter"
-	serverVersion   = "0.1.0"
+	serverVersion   = "0.2.0"
 	pluginID        = "multimeter"
 	eventReading    = "multimeter.reading"
 )
@@ -56,6 +56,8 @@ type server struct {
 	capSeq   int
 	meter    *Meter
 	recorder *Recorder
+	guide    guideStore
+	lastSlot string
 	dataDir  string
 }
 
@@ -133,6 +135,37 @@ var toolList = []map[string]interface{}{
 		},
 	},
 	{
+		"name":        "guide_set",
+		"description": "Show the user how to set up the meter in the MultiMeter guide panel (open it first with minerva_plugin_open_panel plugin_id=multimeter panel_name=multimeter_guide): the target dial slot, which jack the red lead goes in (black is always COM), and a one-line instruction such as 'red probe on the 3.3 V pin, black on ground'. The panel also draws the dial position the meter is on right now, so the user sees target versus actual. Slots: V (volts DC/AC, Select toggles AC), mV, OHM (ohms; Select cycles continuity and diode), HZ, CAP, TEMP, uA, mA, A. Current slots add a series-measurement warning automatically. Returns the guide and the live dial slot.",
+		"inputSchema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"slot":        map[string]interface{}{"type": "string", "enum": []string{"V", "mV", "OHM", "HZ", "CAP", "TEMP", "uA", "mA", "A"}},
+				"instruction": map[string]interface{}{"type": "string", "description": "What to do with the probes, in the user's terms."},
+				"warning":     map[string]interface{}{"type": "string", "description": "Optional safety line shown in amber."},
+			},
+			"required": []string{"slot", "instruction"},
+		},
+	},
+	{
+		"name":        "guide_clear",
+		"description": "Remove the current guide from the guide panel.",
+		"inputSchema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
+	},
+	{
+		"name":        "wait_for",
+		"description": "Block until the meter reports the wanted dial slot (default: the guide's slot) for settle_ms, or timeout_s passes (max 25; call again to keep waiting). nonzero=true also waits for a non-zero, non-overload reading, i.e. the probes are on something. Returns {matched, reading, waited_s} and, when not matched, the live dial slot so you can tell the user what the meter is actually on. The meter cannot see which jack a lead is in; if the reading stays zero on the right slot, ask about the leads and show the guide panel.",
+		"inputSchema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"slot":      map[string]interface{}{"type": "string", "enum": []string{"V", "mV", "OHM", "HZ", "CAP", "TEMP", "uA", "mA", "A"}},
+				"nonzero":   map[string]interface{}{"type": "boolean"},
+				"settle_ms": map[string]interface{}{"type": "number", "description": "How long the condition must hold (default 1000)."},
+				"timeout_s": map[string]interface{}{"type": "number", "description": "Seconds to wait, 1-25 (default 20)."},
+			},
+		},
+	},
+	{
 		"name":        "record_start",
 		"description": "Start logging every reading to a CSV (timestamp, value, unit, function, flags, raw). Omit path to write into the plugin's data directory with a timestamped name. Returns the path. One recording at a time.",
 		"inputSchema": map[string]interface{}{
@@ -173,6 +206,8 @@ func (s *server) callTool(id json.RawMessage, params json.RawMessage) {
 		st := s.meter.Status()
 		st["success"] = true
 		st["recording"] = s.recorder.Status()
+		st["guide"] = s.guide.Get()
+		st["dial"] = s.liveDial()
 		s.respondTool(id, st)
 	case "read":
 		// Godot serialises every number as a float (2 arrives as 2.0).
@@ -202,6 +237,14 @@ func (s *server) callTool(id json.RawMessage, params json.RawMessage) {
 			return
 		}
 		s.respondTool(id, map[string]interface{}{"success": true, "button": a.Button, "long": a.Long})
+	case "guide_set":
+		s.respondTool(id, s.toolGuideSet(p.Args))
+	case "guide_clear":
+		s.guide.Clear()
+		s.pushState()
+		s.respondTool(id, map[string]interface{}{"success": true})
+	case "wait_for":
+		s.respondTool(id, s.toolWaitFor(p.Args))
 	case "record_start":
 		var a struct {
 			Path string `json:"path"`
@@ -302,6 +345,8 @@ func (s *server) pushState() {
 	st := s.meter.Status()
 	delete(st, "last")
 	st["recording"] = s.recorder.Status()
+	st["guide"] = s.guide.Get()
+	st["dial"] = s.liveDial()
 	s.notify("minerva/plugin_state", map[string]interface{}{"state": st})
 }
 
@@ -350,6 +395,11 @@ func main() {
 		func(r Reading) {
 			s.recorder.Add(r)
 			s.notify("minerva/plugin_event", map[string]interface{}{"event": eventReading, "payload": r})
+			// A dial move is a state change the guide panel and the LLM care about.
+			if r.Slot != s.lastSlot {
+				s.lastSlot = r.Slot
+				s.pushState()
+			}
 		},
 		s.pushState,
 	)

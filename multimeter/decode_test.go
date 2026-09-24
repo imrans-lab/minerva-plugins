@@ -37,7 +37,7 @@ func TestDecode(t *testing.T) {
 		if r.Function != c.function || r.Display != c.display || r.Overload != c.overload {
 			t.Errorf("%s: got %s %q ol=%v, want %s %q ol=%v", c.raw, r.Function, r.Display, r.Overload, c.function, c.display, c.overload)
 		}
-		if !c.overload && r.Value != c.value {
+		if r.Value != c.value {
 			t.Errorf("%s: value %v, want %v", c.raw, r.Value, c.value)
 		}
 		if len(r.Flags) != len(c.flags) {

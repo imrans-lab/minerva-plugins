@@ -1,7 +1,7 @@
 {
   "id": "multimeter",
   "name": "MultiMeter",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Read an OWON B41T+ Bluetooth digital multimeter live inside Minerva. Your AI agent can read the current measurement, watch trends, press the meter's buttons, and record readings to CSV; the panel shows the live value with a rolling graph. Needs the meter powered on with its Bluetooth enabled and a Bluetooth radio on this computer; nothing else to install.",
   "price": {
     "amount_minor": 0,
@@ -31,6 +31,18 @@
       "description": "Press a front-panel button (select, range, hold, rel, hz, maxmin)."
     },
     {
+      "name": "minerva_multimeter_guide_set",
+      "description": "Show the user the target dial slot, lead jacks and an instruction in the guide panel."
+    },
+    {
+      "name": "minerva_multimeter_guide_clear",
+      "description": "Clear the guide panel."
+    },
+    {
+      "name": "minerva_multimeter_wait_for",
+      "description": "Block up to 25 s until the meter reports the wanted dial slot (and optionally a non-zero reading)."
+    },
+    {
       "name": "minerva_multimeter_record_start",
       "description": "Start logging readings to a CSV."
     },
@@ -43,6 +55,30 @@
       "description": "Copy the last recording to a chosen path (host save dialog when no path is given)."
     }
   ],
+  "skills": [
+    {
+      "id": "minerva_multimeter_diagnose",
+      "title": "Diagnose a circuit with the OWON B41T+ multimeter",
+      "target": "all",
+      "summary": "Use when a person wants to measure or troubleshoot a circuit with the MultiMeter plugin: guide them step by step, prove each step from the meter itself, and show the meter face when a reading makes no sense.",
+      "preconditions": "The multimeter plugin is RUNNING (minerva_plugin_list; minerva_plugin_start id=multimeter) and minerva_multimeter_status reports connected. If not connected, tell the user to turn the meter on and enable its Bluetooth (the blue REL/Bluetooth button), then check again.",
+      "outcome": "The user has the measurement they came for, or a clear finding about what is wrong (no supply, open trace, wrong lead placement), each step confirmed by a reading from the meter rather than by asking.",
+      "steps": "1. Ask what is under test and what value they expect (e.g. '3.3 V rail', 'is this fuse open').\n2. Open the guide panel once: minerva_plugin_open_panel plugin_id=multimeter panel_name=multimeter_guide.\n3. minerva_multimeter_guide_set with the slot (V for supply rails, OHM for continuity/fuses/resistors, mA/A/uA only for current), an instruction in their words ('black probe on ground, red probe on the 3.3 V pin'), and a warning when needed. Say the same thing in chat in one line.\n4. minerva_multimeter_wait_for (timeout_s 25, re-call while the user is still moving) until matched. If it returns not matched, its live.slot tells you what the dial is actually on; say so ('the meter is still on ohms').\n5. For a value: minerva_multimeter_wait_for nonzero=true once the probes are placed, then minerva_multimeter_read. Interpret against the expectation. Prefer minerva_multimeter_press select to switch DC/AC or ohms/continuity/diode rather than asking the user to touch the meter.\n6. Reading is a hard zero on the right slot when a value was expected: do NOT guess. Point at the guide panel and ask 'is this how your leads are plugged in?' (red in VΩ for volts/ohms, black in COM), then whether the probes are on bare metal. Repeat step 5.\n7. Current measurements: the meter cannot see which jack the red lead is in. Before the user probes, require an explicit 'moved it' for the red lead to the mA/uA or 20A jack, and remind them current is measured in series. Never let them put current-mode leads across a supply.\n8. When done: minerva_multimeter_guide_clear, and offer minerva_multimeter_record_start if they want a trend.",
+      "system_prompt": "The meter reports its own dial position and value 2-3 times a second; use that instead of asking 'did you do it'. Slots: V, mV, OHM (ohms, continuity, diode via Select), HZ, CAP, TEMP, uA, mA, A. Red lead: VΩ jack for V/mV/OHM/HZ/CAP; mA µA TEMP jack for uA/mA/TEMP; 20A jack for A. Black lead always COM. Lead placement is invisible to the meter: the guide picture and the user's confirmation are the only checks. Keep each instruction to one physical action.",
+      "tool_deps": [
+        "minerva_plugin_list",
+        "minerva_plugin_start",
+        "minerva_plugin_open_panel",
+        "minerva_multimeter_status",
+        "minerva_multimeter_guide_set",
+        "minerva_multimeter_guide_clear",
+        "minerva_multimeter_wait_for",
+        "minerva_multimeter_read",
+        "minerva_multimeter_press",
+        "minerva_multimeter_record_start"
+      ]
+    }
+  ],
   "ui": {
     "ipc_messages": [],
     "panels": [
@@ -50,6 +86,12 @@
         "name": "multimeter_panel",
         "kind": "html",
         "entry": "ui/multimeter_panel.html",
+        "ipc_channels": []
+      },
+      {
+        "name": "multimeter_guide",
+        "kind": "html",
+        "entry": "ui/multimeter_guide.html",
         "ipc_channels": []
       }
     ]
@@ -115,6 +157,15 @@
           "type": "string"
         },
         "recording": {
+          "type": "object"
+        },
+        "guide": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "dial": {
           "type": "object"
         }
       }

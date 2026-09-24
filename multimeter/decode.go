@@ -44,6 +44,7 @@ type Reading struct {
 	Overload  bool      `json:"overload"`
 	Flags     []string  `json:"flags"`
 	Raw       string    `json:"raw"`
+	Slot      string    `json:"slot"` // rotary-dial position this reading implies, see guide.go
 }
 
 // Decode turns one notification packet into a Reading.
@@ -78,9 +79,11 @@ func Decode(pkt []byte, at time.Time) (Reading, error) {
 	}
 	decimals := int(w0 & 7)
 	if decimals == 7 || w1&(1<<6) != 0 {
+		// JSON has no infinity, so an overload carries value 0 and the flag.
 		r.Overload = true
-		r.Value = math.Inf(1)
+		r.Value = 0
 		r.Display = "OL"
+		r.Slot = slotFor(r)
 		return r, nil
 	}
 	digits := float64(w2 & 0x7FFF)
@@ -89,5 +92,6 @@ func Decode(pkt []byte, at time.Time) (Reading, error) {
 	}
 	r.Value = digits / math.Pow10(decimals)
 	r.Display = strings.TrimSpace(strconv.FormatFloat(r.Value, 'f', decimals, 64) + " " + r.Prefix + r.Unit)
+	r.Slot = slotFor(r)
 	return r, nil
 }
