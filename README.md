@@ -46,6 +46,30 @@ scripts/scan-secret-history.sh --range "$(git merge-base origin/main HEAD)..HEAD
 The same scan runs in CI on every pull request and on pushes to `main`;
 `--all-history` re-scans everything and is also what a manual CI run does.
 
+## Dependency updates
+
+`.github/dependabot.yml` schedules weekly update PRs for GitHub Actions (the
+workflows and the `pcb-setup` composite action) and the first-party Go, Rust,
+and Python manifests. GitHub activates the schedule when the configuration
+reaches the default branch. Updates go through normal PR review and the
+applicable existing CI workflows; they are not auto-merged.
+
+Dependabot does not update our custom `*/scripts/runtime-bundle.lock` files,
+download URLs or versions embedded in scripts, or copied third-party source
+under `vendored/`. When reviewing Python updates, reconcile the worker's
+`pyproject.toml` with its release runtime-bundle pins and validate the bundled
+runtime before merging. Updating the development manifest alone does not
+update the shipped runtime. Review intentional geometry and output-format
+pins against their compatibility tests and golden files. Dependabot updates
+each Go module on its own and does not read `go.work`, so a bump in `shared`
+may need matching bumps in the modules that use it.
+
+Add new first-party manifest directories, and the directory of any new
+composite action, to the configuration as they are introduced. Upstream
+source vendored as a Git submodule can use Dependabot's `gitsubmodule`
+ecosystem once such a submodule exists; plain copied source needs a separate
+upstream-update process.
+
 ## License
 
 See [LICENSE.md](LICENSE.md).

@@ -1,0 +1,49 @@
+version: 2
+
+# Explicit paths keep copied third-party source out of update PRs.
+# Updates are reviewed and tested by the normal pull_request workflows.
+updates:
+  # "/" covers .github/workflows; a composite action is found only in the
+  # directory holding its action.yml.
+  - package-ecosystem: github-actions
+    directories:
+      - /
+      - /.github/actions/pcb-setup
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: gomod
+    directories:
+      - /cad
+      - /codetools
+      - /council
+      - /multimeter
+      - /nametag-maker
+      - /pcb
+      - /presentation
+      - /shared
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: cargo
+    directories:
+      - /3d-gen
+      - /drive
+      - /movie-gen
+      - /scansort
+      - /shared/rust/minerva-media-client
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: pip
+    directories:
+      - /cad/worker
+      - /codetools/worker
+      - /pcb/worker
+      - /pcb/spikes/gerber
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
