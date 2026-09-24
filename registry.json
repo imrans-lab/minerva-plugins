@@ -108,6 +108,23 @@
       }
     },
     {
+      "id": "multimeter",
+      "name": "MultiMeter",
+      "version": "0.1.0",
+      "manifest_version": "0.1.0",
+      "release_tag": "multimeter-v0.1.0",
+      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/multimeter-v0.1.0/multimeter/manifest.json",
+      "downloads": {
+        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/multimeter-v0.1.0/multimeter-0.1.0-linux-x86_64.tar.gz",
+        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/multimeter-v0.1.0/multimeter-0.1.0-macos-universal.tar.gz"
+      },
+      "description": "Read an OWON B41T+ Bluetooth digital multimeter live inside Minerva. Your AI agent can read the current measurement, watch trends, press the meter's buttons, and record readings to CSV; the panel shows the live value with a rolling graph. Needs the meter powered on with its Bluetooth enabled and a Bluetooth radio on this computer; nothing else to install.",
+      "price": {
+        "amount_minor": 0,
+        "currency": "USD"
+      }
+    },
+    {
       "id": "pcb",
       "name": "PCB Editor",
       "version": "0.8.3",
