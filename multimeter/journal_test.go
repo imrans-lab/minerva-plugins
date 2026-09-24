@@ -30,7 +30,7 @@ func encodePacket(fn, prefix, dec int, flags uint16, counts int) string {
 // journal keeps only journalSize edges and counts the rest as missed.
 // Sequence numbers are checked relative to the run's first edge.
 func TestJournalFromReadings(t *testing.T) {
-	s := &server{}
+	s := &server{meter: NewMeter(func(Reading) {}, func() {})}
 	d := &s.changes
 	at := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
 
@@ -117,7 +117,7 @@ func TestJournalFromReadings(t *testing.T) {
 	expect("same cursor again", d.Since(first.Cursor), 5)
 
 	// The dial is still on V, but the settled value was undone by contact_lost.
-	if e, ok := waitFor(`{"slot":"V","cursor":0}`); !ok || e.Seq != base+3 {
+	if e, ok := waitFor(`{"slot":"V","cursor":0,"timeout_s":1}`); !ok || e.Seq != base+3 {
 		t.Errorf("wait_for V after the session: %+v %v, want edge %d", e, ok, base+3)
 	}
 	if e, ok := d.lastMatch(0, "V", true); ok {
@@ -129,11 +129,11 @@ func TestJournalFromReadings(t *testing.T) {
 	// packet straggles in.
 	woke := d.Changed()
 	feed(repeat(2, vdc(3290, holdAuto), vdc(3291, holdAuto))...)
-	if e, ok := waitFor(`{"slot":"V","nonzero":true,"cursor":0}`); !ok || e.Seq != base+7 {
+	if e, ok := waitFor(`{"slot":"V","nonzero":true,"cursor":0,"timeout_s":1}`); !ok || e.Seq != base+7 {
 		t.Errorf("wait_for nonzero V: %+v %v, want edge %d", e, ok, base+7)
 	}
 	feed(repeat(4, ohmOL)...)
-	if e, ok := waitFor(fmt.Sprintf(`{"slot":"OHM","cursor":%d}`, first.Cursor)); !ok || e.Seq != base+8 {
+	if e, ok := waitFor(fmt.Sprintf(`{"slot":"OHM","cursor":%d,"timeout_s":1}`, first.Cursor)); !ok || e.Seq != base+8 {
 		t.Errorf("wait_for OHM: %+v %v, want edge %d", e, ok, base+8)
 	}
 	if e, ok := d.lastMatch(0, "V", false); ok {

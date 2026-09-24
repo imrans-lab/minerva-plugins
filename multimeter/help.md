@@ -74,6 +74,11 @@ prefer pressing Select yourself over asking the person to.
 **After ANY pause, call `minerva_multimeter_changes` first.** The person
 keeps working while you are not answering. Pass the cursor from your
 previous call (omit it the very first time) and keep the returned cursor.
+A cursor of 0 means all retained history for `changes` and `wait_for`, and
+"from now on" for `watch_start`, because a watch that replayed history would
+wake you about the past. Leaving the cursor out means "from now on" for
+`watch_start` and all history for `changes`; `wait_for` without a cursor
+skips the journal and judges only the live meter.
 
 ## Reading `changes`
 

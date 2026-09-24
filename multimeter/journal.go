@@ -181,8 +181,9 @@ func (d *edgeDetector) resetSettle() {
 }
 
 // Observe feeds one reading and returns the edges it produced, if any.
-// Readings while disconnected are stragglers from a dropped link (the
-// notify callback races the reconnect loop) and are ignored.
+// Readings while disconnected are ignored: stragglers from a dropped link
+// (the notify callback races the reconnect loop), and the first readings of
+// a new link, which the meter subscribes to before it flags itself connected.
 func (d *edgeDetector) Observe(r Reading) []Edge {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -359,11 +360,37 @@ func slotLabel(r Reading) string {
 	return r.Function
 }
 
+// holdsNow is lastMatch for the present, whatever the journal kept: the
+// dial is on slot right now or, with nonzero, a non-zero value is settled
+// there (any slot when slot is empty) and the latest reading is still a
+// value, as wait_for's live path requires. The edge it returns only
+// describes that state; it is not in the journal.
+func (d *edgeDetector) holdsNow(slot string, nonzero bool) (Edge, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	n := len(d.window)
+	if !d.connected || n == 0 {
+		return Edge{}, false
+	}
+	last := d.window[n-1]
+	if !nonzero {
+		if slotLabel(last) != slot {
+			return Edge{}, false
+		}
+		return Edge{Kind: EdgeDial, At: last.Timestamp, Slot: last.Slot, Reading: &last}, true
+	}
+	r := d.settled
+	if !d.haveSettled || classify(r) != classValue || r.Value == 0 || classify(last) != classValue ||
+		last.Value == 0 || last.Slot != r.Slot || (slot != "" && r.Slot != slot) {
+		return Edge{}, false
+	}
+	return Edge{Kind: EdgeSettled, At: r.Timestamp, Slot: r.Slot, Reading: &r}, true
+}
+
 // lastMatch finds the newest edge after cursor showing the dial on slot or,
 // with nonzero, a non-zero value settled on it (on any slot when slot is
-// empty), provided no later edge has
-// undone it: a disconnect or dial move, and for nonzero also a later
-// settled, contact_lost or overload edge.
+// empty), provided no later edge has undone it: a disconnect or dial move,
+// and for nonzero also a later settled, contact_lost or overload edge.
 func (d *edgeDetector) lastMatch(cursor int, slot string, nonzero bool) (Edge, bool) {
 	var match Edge
 	found := false

@@ -56,10 +56,17 @@ func (h *fakeHost) quiet(what string, d time.Duration) {
 }
 
 // expectNotify reads the next message as a minerva_terminal_notify request
-// and checks its line against the notify contract.
+// and checks it with checkNotify.
 func (h *fakeHost) expectNotify(to, mustContain string) (string, string) {
 	h.t.Helper()
 	m, _ := h.untilRequest("notify to " + to)
+	return h.checkNotify(m, to, mustContain)
+}
+
+// checkNotify checks m is a minerva_terminal_notify request to to whose line
+// keeps the notify contract, and returns its request id and line.
+func (h *fakeHost) checkNotify(m map[string]json.RawMessage, to, mustContain string) (string, string) {
+	h.t.Helper()
 	var p struct {
 		Capability string `json:"capability"`
 		Args       struct {
@@ -97,7 +104,8 @@ func (h *fakeHost) reply(id, result string) {
 // that stays held gets exactly notifyAttempts offers, then nothing more. A
 // watch with a terminal and a short timeout notifies that terminal once with
 // "nothing happened" and no list request, then nothing more. A replaced then
-// stopped watch notifies nobody when its edge arrives. A host that never
+// stopped watch notifies nobody when its edge arrives. A dial watch armed
+// while the dial is already on its slot notifies once with no new edge. A host that never
 // answers the list call costs one request: the watch gives up at the
 // deadline, sends nothing more, and a late answer changes nothing. The dial
 // move and the settle also go out as their declared plugin events.
@@ -204,6 +212,20 @@ func TestWatchWakesHarnessTerminals(t *testing.T) {
 	}
 	feed(ohmOL, ohmOL, ohmOL, ohmOL)
 	h.quiet("after watch_stop", 300*time.Millisecond)
+
+	// The dial is already on OHM when the watch is armed: it fires from the
+	// live state with no new edge.
+	h.write(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"watch_start","arguments":{"condition":"dial","slot":"OHM","terminal":"t1"}}}`)
+	// The notify may overtake the tool reply, so take both in either order.
+	first7, _ := h.untilRequest("watch_start reply or notify")
+	second7, _ := h.untilRequest("watch_start reply or notify")
+	if string(first7["id"]) != "7" {
+		first7, second7 = second7, first7
+	}
+	h.toolResult(first7, 7)
+	id, _ = h.checkNotify(second7, "t1", "the dial reached OHM")
+	h.reply(id, written)
+	h.quiet("after the live-state watch", 300*time.Millisecond)
 
 	// Every earlier delivery has finished, so no goroutine reads the deadline
 	// while it changes.

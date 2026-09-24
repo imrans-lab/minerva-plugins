@@ -93,16 +93,19 @@ func (w *watchState) release(a *armedWatch) bool {
 	return true
 }
 
-// watchMatch returns the edge after the watch's cursor that fires it. dial
-// and settled judge as wait_for does (lastMatch): the newest match no later
-// edge undid, so the line never claims a state the meter has left. any
-// fires on the first edge.
+// watchMatch returns the edge that fires the watch. dial and settled judge
+// as wait_for does (lastMatch): the newest match after the cursor that no
+// later edge undid, so the line never claims a state the meter has left;
+// failing that, the meter already in that state (holdsNow), so a person who
+// finished the step before the watch was armed is not left waiting. any
+// fires on the first edge after the cursor.
 func (s *server) watchMatch(w watchSpec) (Edge, bool) {
-	switch w.Condition {
-	case WatchDial:
-		return s.changes.lastMatch(w.Cursor, w.Slot, false)
-	case WatchSettled:
-		return s.changes.lastMatch(w.Cursor, w.Slot, true)
+	if w.Condition == WatchDial || w.Condition == WatchSettled {
+		nonzero := w.Condition == WatchSettled
+		if e, ok := s.changes.lastMatch(w.Cursor, w.Slot, nonzero); ok {
+			return e, true
+		}
+		return s.changes.holdsNow(w.Slot, nonzero)
 	}
 	if edges := s.changes.Since(w.Cursor).Edges; len(edges) > 0 {
 		return edges[0], true
