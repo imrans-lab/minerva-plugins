@@ -48,7 +48,8 @@ type outResponse struct {
 	Error   *rpcError       `json:"error,omitempty"`
 }
 
-// server ties the stdout writer, the meter and the recorder together.
+// server ties the stdout writer, the meter, the recorder and the change
+// journal together.
 type server struct {
 	out      sync.Mutex
 	enc      *json.Encoder
@@ -56,7 +57,7 @@ type server struct {
 	meter    *Meter
 	recorder *Recorder
 	guide    guideStore
-	lastSlot string
+	changes  edgeDetector
 	dataDir  string
 }
 
@@ -153,7 +154,7 @@ var toolList = []map[string]interface{}{
 	},
 	{
 		"name":        "wait_for",
-		"description": "Block until the meter reports the wanted dial slot (default: the guide's slot) for settle_ms, or timeout_s passes (max 25; call again to keep waiting). nonzero=true also waits for a non-zero, non-overload reading, i.e. the probes are on something. Returns {matched, reading, waited_s} and, when not matched, the live dial slot so you can tell the user what the meter is actually on. The meter cannot see which jack a lead is in; if the reading stays zero on the right slot, ask about the leads and show the guide panel.",
+		"description": "Block until the meter reports the wanted dial slot (default: the guide's slot) for settle_ms, or timeout_s passes (max 25; call again to keep waiting). nonzero=true also waits for a non-zero, non-overload reading, i.e. the probes are on something. Pass cursor (from changes, or an edge's seq) so what the user already did counts: if since that cursor the dial reached the slot (with nonzero: a value settled on it), wait_for answers at once with {matched, edge, reading} instead of waiting for it to happen again. Returns {matched, reading, waited_s} and, when not matched, the live dial slot so you can tell the user what the meter is actually on. The meter cannot see which jack a lead is in; if the reading stays zero on the right slot, ask about the leads and show the guide panel.",
 		"inputSchema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -161,6 +162,17 @@ var toolList = []map[string]interface{}{
 				"nonzero":   map[string]interface{}{"type": "boolean"},
 				"settle_ms": map[string]interface{}{"type": "number", "description": "How long the condition must hold (default 1000)."},
 				"timeout_s": map[string]interface{}{"type": "number", "description": "Seconds to wait, 1-25 (default 20)."},
+				"cursor":    map[string]interface{}{"type": "number", "description": "Journal cursor; an edge after it that already meets the condition is returned at once."},
+			},
+		},
+	},
+	{
+		"name":        "changes",
+		"description": "What happened at the bench since you last looked, oldest first: the dial moved to a slot, a reading settled at a new value (held steady about a second; small wobble is not reported), the reading fell back to near zero (probes lifted, contact lost), OL (open circuit on OHM, over range elsewhere), HOLD or REL turned on or off, the meter connected or disconnected. The user keeps working while you are not answering, so after any pause call changes first, with the cursor from your previous call (omit it the first time), and keep the returned cursor for next time. Returns {edges: [{seq, kind, at, summary, slot, reading}], cursor}; missed > 0 means that many older edges fell out of the journal (it keeps the last 200); reset=true means the plugin restarted since your cursor, so every kept edge is returned.",
+		"inputSchema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"cursor": map[string]interface{}{"type": "number", "description": "The cursor from your previous changes call; omit or 0 for everything kept."},
 			},
 		},
 	},
@@ -244,6 +256,20 @@ func (s *server) callTool(id json.RawMessage, params json.RawMessage) {
 		s.respondTool(id, map[string]interface{}{"success": true})
 	case "wait_for":
 		s.respondTool(id, s.toolWaitFor(p.Args))
+	case "changes":
+		var a struct {
+			Cursor float64 `json:"cursor"`
+		}
+		json.Unmarshal(p.Args, &a)
+		c := s.changes.Since(int(a.Cursor))
+		out := map[string]interface{}{"success": true, "edges": c.Edges, "cursor": c.Cursor}
+		if c.Missed > 0 {
+			out["missed"] = c.Missed
+		}
+		if c.Reset {
+			out["reset"] = true
+		}
+		s.respondTool(id, out)
 	case "record_start":
 		var a struct {
 			Path string `json:"path"`
@@ -395,12 +421,17 @@ func main() {
 			s.recorder.Add(r)
 			s.notify("minerva/plugin_event", map[string]interface{}{"event": eventReading, "payload": r})
 			// A dial move is a state change the guide panel and the LLM care about.
-			if r.Slot != s.lastSlot {
-				s.lastSlot = r.Slot
-				s.pushState()
+			for _, e := range s.changes.Observe(r) {
+				if e.Kind == EdgeDial {
+					s.pushState()
+					break
+				}
 			}
 		},
-		s.pushState,
+		func() {
+			s.changes.SetConnected(s.meter.Status()["connected"] == true, time.Now())
+			s.pushState()
+		},
 	)
 	// MULTIMETER_NO_BLE lets the MCP smoke and the decoder tests run on a
 	// runner with no Bluetooth radio.

@@ -45,6 +45,8 @@ type Reading struct {
 	Flags     []string  `json:"flags"`
 	Raw       string    `json:"raw"`
 	Slot      string    `json:"slot"` // rotary-dial position this reading implies, see guide.go
+
+	decimals int // digits after the point on the display; one count is 10^-decimals
 }
 
 // Decode turns one notification packet into a Reading.
@@ -91,6 +93,7 @@ func Decode(pkt []byte, at time.Time) (Reading, error) {
 		digits = -digits
 	}
 	r.Value = digits / math.Pow10(decimals)
+	r.decimals = decimals
 	r.Display = strings.TrimSpace(strconv.FormatFloat(r.Value, 'f', decimals, 64) + " " + r.Prefix + r.Unit)
 	r.Slot = slotFor(r)
 	return r, nil

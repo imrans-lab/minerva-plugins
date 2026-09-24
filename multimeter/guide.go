@@ -104,14 +104,16 @@ func (s *server) toolGuideSet(args json.RawMessage) map[string]interface{} {
 
 // toolWaitFor blocks until the meter reports the wanted slot (default: the
 // guide's slot), optionally also a settled non-zero reading, or the timeout
-// passes. The timeout stays under the host's MCP deadline; callers re-invoke
-// for longer waits.
+// passes. With a cursor, a journal edge after it that already meets the
+// condition answers at once. The timeout stays under the host's MCP
+// deadline; callers re-invoke for longer waits.
 func (s *server) toolWaitFor(args json.RawMessage) map[string]interface{} {
 	var a struct {
-		Slot     string  `json:"slot"`
-		NonZero  bool    `json:"nonzero"`
-		SettleMs float64 `json:"settle_ms"`
-		Timeout  float64 `json:"timeout_s"`
+		Slot     string   `json:"slot"`
+		NonZero  bool     `json:"nonzero"`
+		SettleMs float64  `json:"settle_ms"`
+		Timeout  float64  `json:"timeout_s"`
+		Cursor   *float64 `json:"cursor"`
 	}
 	json.Unmarshal(args, &a)
 	if a.Slot == "" {
@@ -121,6 +123,11 @@ func (s *server) toolWaitFor(args json.RawMessage) map[string]interface{} {
 	}
 	if _, ok := jackForSlot[a.Slot]; !ok {
 		return toolErr("bad_slot", "no slot given and no guide is set")
+	}
+	if a.Cursor != nil {
+		if e, ok := s.changes.lastMatch(int(*a.Cursor), a.Slot, a.NonZero); ok {
+			return map[string]interface{}{"success": true, "matched": true, "edge": e, "reading": e.Reading, "waited_s": 0}
+		}
 	}
 	if a.Timeout <= 0 || a.Timeout > 25 {
 		a.Timeout = 20
