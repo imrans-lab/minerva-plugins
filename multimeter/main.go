@@ -52,8 +52,7 @@ type outResponse struct {
 type server struct {
 	out      sync.Mutex
 	enc      *json.Encoder
-	in       *bufio.Scanner
-	capSeq   int
+	caps     capRouter
 	meter    *Meter
 	recorder *Recorder
 	guide    guideStore
@@ -409,22 +408,7 @@ func main() {
 		go s.meter.Run()
 	}
 
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 1<<20), 4<<20)
-	s.in = scanner
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		var msg rpcRequest
-		if err := json.Unmarshal(line, &msg); err != nil {
-			s.fail(json.RawMessage("null"), -32700, "Parse error")
-			continue
-		}
-		s.dispatch(&msg)
-	}
-	if err := scanner.Err(); err != nil {
+	if err := s.serve(os.Stdin); err != nil {
 		log.Printf("stdin read error: %v", err)
 		os.Exit(1)
 	}
