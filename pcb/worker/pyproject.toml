@@ -49,7 +49,7 @@ requires-python = ">=3.12,<3.13"
 # recorded in pcb/spikes/cam/DECISION.md:100, and the same treatment the already
 # tolerated native dep (rtree, via the dev extra) gets.
 dependencies = [
-    "pyyaml>=6.0,<7",
+    "pyyaml>=6.0.3,<7",
     "gerber-writer==0.4.3.3",
     "pyclipper==1.4.0",
     # gerbonara: the independent Gerber + Excellon READER pcb.fab_preview
