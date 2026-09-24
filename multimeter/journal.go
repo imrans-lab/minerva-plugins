@@ -360,7 +360,8 @@ func slotLabel(r Reading) string {
 }
 
 // lastMatch finds the newest edge after cursor showing the dial on slot or,
-// with nonzero, a non-zero value settled on it, provided no later edge has
+// with nonzero, a non-zero value settled on it (on any slot when slot is
+// empty), provided no later edge has
 // undone it: a disconnect or dial move, and for nonzero also a later
 // settled, contact_lost or overload edge.
 func (d *edgeDetector) lastMatch(cursor int, slot string, nonzero bool) (Edge, bool) {
@@ -368,7 +369,7 @@ func (d *edgeDetector) lastMatch(cursor int, slot string, nonzero bool) (Edge, b
 	found := false
 	for _, e := range d.Since(cursor).Edges {
 		switch {
-		case e.Slot == slot && ((!nonzero && e.Kind == EdgeDial) || (nonzero && e.Kind == EdgeSettled && e.Reading.Value != 0)):
+		case (slot == "" || e.Slot == slot) && ((!nonzero && e.Kind == EdgeDial) || (nonzero && e.Kind == EdgeSettled && e.Reading.Value != 0)):
 			match, found = e, true
 		case e.Kind == EdgeDisconnected || e.Kind == EdgeDial:
 			found = false

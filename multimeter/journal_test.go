@@ -9,6 +9,14 @@ import (
 	"time"
 )
 
+// encodePacket builds a meter packet as hex: function index, prefix index,
+// decimals, flag bits, counts.
+func encodePacket(fn, prefix, dec int, flags uint16, counts int) string {
+	w0 := uint16(fn<<6 | prefix<<3 | dec)
+	w2 := uint16(counts)
+	return hex.EncodeToString([]byte{byte(w0), byte(w0 >> 8), byte(flags), byte(flags >> 8), byte(w2), byte(w2 >> 8)})
+}
+
 // A bench session replayed as packets through Decode, 400 ms apart (the
 // meter's rate), stamped with their own times. The V floating packets are
 // live captures from the owner's meter; the rest use the same encoding.
@@ -26,17 +34,11 @@ func TestJournalFromReadings(t *testing.T) {
 	d := &s.changes
 	at := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
 
-	// encode builds a packet: function index, prefix index, decimals, flag bits, counts.
-	encode := func(fn, prefix, dec int, flags uint16, counts int) string {
-		w0 := uint16(fn<<6 | prefix<<3 | dec)
-		w2 := uint16(counts)
-		return hex.EncodeToString([]byte{byte(w0), byte(w0 >> 8), byte(flags), byte(flags >> 8), byte(w2), byte(w2 >> 8)})
-	}
 	const auto, holdAuto = 4, 5
-	vdc := func(counts int, flags uint16) string { return encode(0, 4, 3, flags, counts) } // x.xxx V
-	floatingMV := []string{encode(0, 3, 2, auto, 12), encode(0, 3, 2, auto, 15), encode(0, 3, 2, auto, 9)}
+	vdc := func(counts int, flags uint16) string { return encodePacket(0, 4, 3, flags, counts) } // x.xxx V
+	floatingMV := []string{encodePacket(0, 3, 2, auto, 12), encodePacket(0, 3, 2, auto, 15), encodePacket(0, 3, 2, auto, 9)}
 	floatingV := []string{"24f004001500", "24f004001e00", "24f004000000"}
-	ohmOL := encode(4, 6, 7, auto, 0)
+	ohmOL := encodePacket(4, 6, 7, auto, 0)
 
 	feed := func(raws ...string) {
 		t.Helper()

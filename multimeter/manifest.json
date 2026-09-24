@@ -47,6 +47,14 @@
       "description": "What happened at the bench since a cursor: dial moves, settled values, probes lifted, OL, HOLD/REL, connect/disconnect. Call first after any pause."
     },
     {
+      "name": "minerva_multimeter_watch_start",
+      "description": "Arm a watch (dial reaches a slot, a non-zero reading settles, or any change) and end your turn; one line wakes your Minerva terminal when it happens or the timeout passes."
+    },
+    {
+      "name": "minerva_multimeter_watch_stop",
+      "description": "Disarm the watch before it fires."
+    },
+    {
       "name": "minerva_multimeter_record_start",
       "description": "Start logging readings to a CSV."
     },
@@ -134,6 +142,60 @@
           }
         }
       }
+    },
+    {
+      "name": "multimeter.dial_changed",
+      "description": "The dial moved to a new slot (or the first reading after connecting named it): one change-journal edge with kind dial.",
+      "payload_schema": {
+        "type": "object",
+        "properties": {
+          "seq": {
+            "type": "number"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "at": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "slot": {
+            "type": "string"
+          },
+          "reading": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "name": "multimeter.reading_settled",
+      "description": "A reading held steady about a second at a value that differs from the last settled one: one change-journal edge with kind settled.",
+      "payload_schema": {
+        "type": "object",
+        "properties": {
+          "seq": {
+            "type": "number"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "at": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "slot": {
+            "type": "string"
+          },
+          "reading": {
+            "type": "object"
+          }
+        }
+      }
     }
   ],
   "state": {
@@ -172,7 +234,9 @@
   },
   "permissions": {
     "host_capabilities": [
-      "host.dialogs.file_picker"
+      "host.dialogs.file_picker",
+      "mcp.proxy:minerva_terminal_list",
+      "mcp.proxy:minerva_terminal_notify"
     ],
     "network": {
       "mode": "none"

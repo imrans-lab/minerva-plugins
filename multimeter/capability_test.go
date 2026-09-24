@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -85,7 +86,12 @@ func (h *fakeHost) expectCapability(capability string) string {
 // tool result.
 func (h *fakeHost) expectTool(id int) map[string]interface{} {
 	h.t.Helper()
-	m := h.next(fmt.Sprintf("tool response %d", id))
+	return h.toolResult(h.next(fmt.Sprintf("tool response %d", id)), id)
+}
+
+// toolResult decodes m as the response to tools/call id.
+func (h *fakeHost) toolResult(m map[string]json.RawMessage, id int) map[string]interface{} {
+	h.t.Helper()
 	if string(m["id"]) != fmt.Sprint(id) {
 		h.t.Fatalf("want response to %d, got %v", id, m)
 	}
@@ -118,7 +124,7 @@ func TestCapabilityFromAnyGoroutine(t *testing.T) {
 	}
 	background := make(chan outcome, 1)
 	go func() {
-		raw, err := s.callCapability("test.background", map[string]interface{}{})
+		raw, err := s.callCapability(context.Background(), "test.background", map[string]interface{}{})
 		background <- outcome{raw, err}
 	}()
 	bgID := h.expectCapability("test.background")

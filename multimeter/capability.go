@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -58,6 +59,13 @@ func (r *capRouter) deliver(id string, reply capReply) {
 	if has {
 		ch <- reply
 	}
+}
+
+// forget drops a waiter that gave up; a reply that arrives later is ignored.
+func (r *capRouter) forget(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.pending, id)
 }
 
 // closeAll fails every outstanding and future call once stdin is gone.
@@ -163,14 +171,22 @@ func (s *server) serve(in io.Reader) error {
 }
 
 // callCapability asks the host for a capability and blocks until the reply
-// with its id arrives. Safe from any goroutine, including a tool handler.
-func (s *server) callCapability(capability string, args map[string]interface{}) (json.RawMessage, error) {
+// with its id arrives or ctx ends. Safe from any goroutine, including a tool
+// handler. Background callers pass a deadline so a host that never answers
+// cannot strand them.
+func (s *server) callCapability(ctx context.Context, capability string, args map[string]interface{}) (json.RawMessage, error) {
 	id, reply := s.caps.register()
 	s.send(map[string]interface{}{
 		"jsonrpc": "2.0", "id": json.RawMessage(id), "method": "minerva/capability",
 		"params": map[string]interface{}{"capability": capability, "args": args},
 	})
-	r := <-reply
+	var r capReply
+	select {
+	case r = <-reply:
+	case <-ctx.Done():
+		s.caps.forget(id)
+		return nil, fmt.Errorf("%s: %w", capability, ctx.Err())
+	}
 	if !r.ok {
 		return nil, fmt.Errorf("stdin closed waiting for %s", capability)
 	}
@@ -181,8 +197,9 @@ func (s *server) callCapability(capability string, args map[string]interface{}) 
 }
 
 // pickSavePath pops the host save dialog. Empty path means the user cancelled.
+// No deadline: a person may take any time to choose.
 func (s *server) pickSavePath(title, initial string) (string, error) {
-	raw, err := s.callCapability("host.dialogs.file_picker", map[string]interface{}{
+	raw, err := s.callCapability(context.Background(), "host.dialogs.file_picker", map[string]interface{}{
 		"mode": "save", "title": title, "initial_path": initial, "filters": []string{"*.csv"},
 	})
 	if err != nil {

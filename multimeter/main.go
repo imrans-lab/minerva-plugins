@@ -27,6 +27,8 @@ const (
 	serverVersion   = "0.2.0"
 	pluginID        = "multimeter"
 	eventReading    = "multimeter.reading"
+	eventDial       = "multimeter.dial_changed"
+	eventSettled    = "multimeter.reading_settled"
 )
 
 type rpcRequest struct {
@@ -58,6 +60,7 @@ type server struct {
 	recorder *Recorder
 	guide    guideStore
 	changes  edgeDetector
+	watch    watchState
 	dataDir  string
 }
 
@@ -177,6 +180,26 @@ var toolList = []map[string]interface{}{
 		},
 	},
 	{
+		"name":        "watch_start",
+		"description": "Get woken when the user has done the next step, instead of blocking: set the guide (guide_set), call watch_start, then end your turn; when the condition is met, or timeout_s passes, one line saying what happened arrives in your terminal as a new message, and you then call changes with the returned cursor. Works only for an agent running in a Minerva terminal tab. condition: dial (the dial reaches slot; default the guide's slot), settled (a non-zero reading settles, on slot if given), any (anything changes at the bench). One watch at a time: calling watch_start again replaces the armed watch (the reply's replaced shows the old one). Returns {watching: {condition, slot, timeout_s, terminal, cursor}}.",
+		"inputSchema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"condition": map[string]interface{}{"type": "string", "enum": []string{"dial", "settled", "any"}},
+				"slot":      map[string]interface{}{"type": "string", "enum": []string{"V", "mV", "OHM", "HZ", "CAP", "TEMP", "uA", "mA", "A"}},
+				"timeout_s": map[string]interface{}{"type": "number", "description": "Seconds to watch before waking you with 'nothing happened' (default 600, max 3600)."},
+				"terminal":  map[string]interface{}{"type": "string", "description": "Minerva terminal to wake: your $MINERVA_TERMINAL_ID or tab name. Omit to wake every terminal that is running an agent harness."},
+				"cursor":    map[string]interface{}{"type": "number", "description": "Journal cursor from changes; if what you are watching for already happened after it and still holds, you are woken at once. Omit or pass 0 to count only what happens from now on; a cursor from before the plugin restarted is treated the same and reported as cursor_reset."},
+			},
+			"required": []string{"condition"},
+		},
+	},
+	{
+		"name":        "watch_stop",
+		"description": "Disarm the watch set by watch_start if it has not fired yet. Returns {stopped, watch}.",
+		"inputSchema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
+	},
+	{
 		"name":        "record_start",
 		"description": "Start logging every reading to a CSV (timestamp, value, unit, function, flags, raw). Omit path to write into the plugin's data directory with a timestamped name. Returns the path. One recording at a time.",
 		"inputSchema": map[string]interface{}{
@@ -270,6 +293,10 @@ func (s *server) callTool(id json.RawMessage, params json.RawMessage) {
 			out["reset"] = true
 		}
 		s.respondTool(id, out)
+	case "watch_start":
+		s.respondTool(id, s.toolWatchStart(p.Args))
+	case "watch_stop":
+		s.respondTool(id, s.toolWatchStop())
 	case "record_start":
 		var a struct {
 			Path string `json:"path"`
@@ -375,6 +402,23 @@ func (s *server) pushState() {
 	s.notify("minerva/plugin_state", map[string]interface{}{"state": st})
 }
 
+// onReading records one reading, publishes it, and publishes the dial-moved
+// and reading-settled edges it produced as their own events.
+func (s *server) onReading(r Reading) {
+	s.recorder.Add(r)
+	s.notify("minerva/plugin_event", map[string]interface{}{"event": eventReading, "payload": r})
+	for _, e := range s.changes.Observe(r) {
+		switch e.Kind {
+		case EdgeDial:
+			s.notify("minerva/plugin_event", map[string]interface{}{"event": eventDial, "payload": e})
+			// The guide panel draws the live dial from plugin state.
+			s.pushState()
+		case EdgeSettled:
+			s.notify("minerva/plugin_event", map[string]interface{}{"event": eventSettled, "payload": e})
+		}
+	}
+}
+
 func (s *server) dispatch(msg *rpcRequest) {
 	isNotification := len(msg.ID) == 0 || string(msg.ID) == "null"
 	switch msg.Method {
@@ -417,17 +461,7 @@ func main() {
 
 	s := &server{enc: json.NewEncoder(os.Stdout), recorder: &Recorder{}, dataDir: runtime.DataDir(pluginID)}
 	s.meter = NewMeter(
-		func(r Reading) {
-			s.recorder.Add(r)
-			s.notify("minerva/plugin_event", map[string]interface{}{"event": eventReading, "payload": r})
-			// A dial move is a state change the guide panel and the LLM care about.
-			for _, e := range s.changes.Observe(r) {
-				if e.Kind == EdgeDial {
-					s.pushState()
-					break
-				}
-			}
-		},
+		s.onReading,
 		func() {
 			s.changes.SetConnected(s.meter.Status()["connected"] == true, time.Now())
 			s.pushState()
