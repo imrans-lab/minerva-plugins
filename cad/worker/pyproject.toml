@@ -9,7 +9,7 @@ dependencies = [
     # exists and every feature read raises (PLG 01a0c856803a). build123d 0.10.0
     # holds cadquery-ocp on the 7.8 line.
     "build123d==0.10.0",
-    "ocp-gordon==0.2.2",
+    "ocp-gordon==0.3.1",
     # The clearance backend. The release bundle installs the same wheel
     # (scripts/runtime-bundle.lock PIP_NO_DEPS_PKGS); a venv built from this
     # file alone must reach the same geometry backends, or every clearance,
