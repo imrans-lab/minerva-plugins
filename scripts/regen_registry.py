@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 
-PLUGIN_DIRS = ["3d-gen", "cad", "codetools", "council", "drive", "movie-gen", "pcb", "presentation", "scansort"]  # sorted
+PLUGIN_DIRS = ["3d-gen", "cad", "codetools", "council", "drive", "movie-gen", "multimeter", "pcb", "presentation", "scansort"]  # sorted
 
 REGISTRY_VERSION = 2
 

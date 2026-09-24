@@ -1,0 +1,185 @@
+name: multimeter
+
+# Test + package + release for the MultiMeter plugin (OWON B41T+ over BLE).
+# Mirrors cad.yml minus everything Python: the backend is one static Go
+# binary. macOS builds need cgo for CoreBluetooth, so the universal binary is
+# two cgo builds joined with lipo. Windows is not shipped yet (tinygo
+# bluetooth's Windows backend is unverified on the owner's machine); it is
+# compiled below only so a break there is visible early.
+
+on:
+  push:
+    branches: [main, "dcr/**"]
+    paths:
+      - "multimeter/**"
+      - ".github/workflows/multimeter.yml"
+      - "scripts/**"
+      - "shared/**"
+      - "go.work"
+  pull_request:
+    paths:
+      - "multimeter/**"
+      - ".github/workflows/multimeter.yml"
+      - "scripts/**"
+      - "shared/**"
+      - "go.work"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: multimeter (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            runs-on: ubuntu-22.04
+            goos: linux
+            goarch: amd64
+            cgo: "0"
+          - target: macos-universal
+            runs-on: macos-14
+            goos: darwin
+            goarch: ""
+            cgo: "1"
+    runs-on: ${{ matrix.runs-on }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: multimeter
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: false
+
+      - name: Go vet + test (decoder table, no radio needed)
+        run: |
+          go vet ./...
+          go test -count=1 ./...
+
+      - name: Build (native)
+        if: matrix.target != 'macos-universal'
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: ${{ matrix.cgo }}
+        run: |
+          mkdir -p build
+          go build -o build/multimeter-plugin .
+
+      - name: Build (macOS universal — cgo amd64 + arm64, lipo)
+        if: matrix.target == 'macos-universal'
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          mkdir -p build
+          GOOS=darwin GOARCH=amd64 go build -o build/multimeter-plugin.amd64 .
+          GOOS=darwin GOARCH=arm64 go build -o build/multimeter-plugin.arm64 .
+          lipo -create build/multimeter-plugin.amd64 build/multimeter-plugin.arm64 \
+            -output build/multimeter-plugin
+          lipo -info build/multimeter-plugin
+
+      - name: Windows compile check (not shipped)
+        if: matrix.target == 'linux-x86_64'
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: go build -o /dev/null .
+
+      - name: Smoke (MCP handshake with the radio disabled)
+        env:
+          MULTIMETER_NO_BLE: "1"
+        run: python3 ../scripts/smoke/mcp_smoke.py "$PWD/build/multimeter-plugin"
+
+      - name: Pack release tarball
+        run: |
+          PLATFORM="${{ matrix.target }}"
+          VERSION=$(python3 -c 'import json; print(json.load(open("manifest.json"))["version"])')
+          mkdir -p dist
+          PACKDIR="dist/multimeter-${VERSION}-${PLATFORM}"
+          mkdir -p "$PACKDIR"
+          cp build/multimeter-plugin "$PACKDIR/"
+          python3 -c "import json,sys; m=json.load(open('manifest.json')); m.pop('setup',None); json.dump(m,open(sys.argv[1],'w'),indent=2)" "$PACKDIR/manifest.json"
+          cp -r ui "$PACKDIR/"
+          cp README.md "$PACKDIR/"
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd "$PACKDIR" && find . -type f ! -name SHA256SUMS -print0 \
+              | xargs -0 sha256sum | sed 's| \./| |' > SHA256SUMS)
+          else
+            (cd "$PACKDIR" && find . -type f ! -name SHA256SUMS -print0 \
+              | xargs -0 shasum -a 256 | sed 's| \./| |' > SHA256SUMS)
+          fi
+          tar -czf "dist/multimeter-${VERSION}-${PLATFORM}.tar.gz" -C "$PACKDIR" .
+          tar -tzf "dist/multimeter-${VERSION}-${PLATFORM}.tar.gz"
+          ls -la "dist/multimeter-${VERSION}-${PLATFORM}.tar.gz"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: multimeter-${{ matrix.target }}
+          path: multimeter/dist/multimeter-*-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  secret-scan:
+    uses: ./.github/workflows/secret-scan.yml
+    permissions:
+      contents: read
+
+  release:
+    name: Publish release
+    concurrency: multimeter-release
+    needs: [build, secret-scan]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all matrix tarballs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: multimeter-*
+          path: artifacts/
+          merge-multiple: true
+
+      - name: Compute tag + prerelease flag
+        id: tag
+        shell: bash
+        run: |
+          VERSION=$(python3 -c 'import json; print(json.load(open("multimeter/manifest.json"))["version"])')
+          if [ "$GITHUB_REF_NAME" = "main" ]; then
+            TAG="multimeter-v${VERSION}"
+            PRE="false"
+          else
+            SAFE_BRANCH=$(echo "$GITHUB_REF_NAME" | sed 's|/|-|g; s|[^a-zA-Z0-9_.-]|-|g')
+            TAG="multimeter-v${VERSION}-branch-${SAFE_BRANCH}"
+            PRE="true"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRE" >> "$GITHUB_OUTPUT"
+          echo "Computed: tag=$TAG prerelease=$PRE"
+          bash scripts/release-publish-guard.sh "$TAG" "$PRE"
+
+      - name: Publish GitHub Release
+        if: steps.tag.outputs.publish == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          prerelease: ${{ steps.tag.outputs.prerelease == 'true' }}
+          target_commitish: ${{ github.sha }}
+          files: artifacts/multimeter-*.tar.gz
+          generate_release_notes: true
+          fail_on_unmatched_files: true

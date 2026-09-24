@@ -114,7 +114,16 @@ func (m *Meter) connectOnce() error {
 	select {
 	case res = <-found:
 	case err := <-scanErr:
-		return fmt.Errorf("scan: %w", err)
+		// Scan also returns (nil) right after the callback stops it, so a
+		// result may be waiting alongside a nil error.
+		select {
+		case res = <-found:
+		default:
+			if err == nil {
+				err = errors.New("scan ended without finding the meter")
+			}
+			return fmt.Errorf("scan: %w", err)
+		}
 	case <-time.After(20 * time.Second):
 		m.adapter.StopScan()
 		return errors.New("no OWON meter found; turn it on and enable Bluetooth on it")
