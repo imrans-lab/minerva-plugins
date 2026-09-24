@@ -94,7 +94,7 @@ func (s *server) toolGuideSet(args json.RawMessage) map[string]interface{} {
 	if !ok {
 		return toolErr("bad_slot", "slot must be one of V, mV, OHM, HZ, CAP, TEMP, uA, mA, A")
 	}
-	if a.Warning == "" && (jack == "20A" || jack == "MAUA") {
+	if a.Warning == "" && (a.Slot == "uA" || a.Slot == "mA" || a.Slot == "A") {
 		a.Warning = "Current is measured in series. Never put the leads across a voltage source in this mode: the fuse blows."
 	}
 	s.guide.Set(Guide{Slot: a.Slot, RedJack: jack, Instruction: a.Instruction, Warning: a.Warning})

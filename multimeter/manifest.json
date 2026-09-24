@@ -20,51 +20,51 @@
   "tools": [
     {
       "name": "minerva_multimeter_status",
-      "description": "Meter connection state, identity, latest reading, recording state."
+      "description": "Read minerva_plugin_help id=multimeter first. Meter connection state, identity, latest reading, recording state."
     },
     {
       "name": "minerva_multimeter_read",
-      "description": "Latest measurement, optionally with recent history."
+      "description": "Read minerva_plugin_help id=multimeter first. Latest measurement, optionally with recent history."
     },
     {
       "name": "minerva_multimeter_press",
-      "description": "Press a front-panel button (select, range, hold, rel, hz, maxmin)."
+      "description": "Read minerva_plugin_help id=multimeter first. Press a front-panel button (select, range, hold, rel, hz, maxmin)."
     },
     {
       "name": "minerva_multimeter_guide_set",
-      "description": "Show the user the target dial slot, lead jacks and an instruction in the guide panel."
+      "description": "Read minerva_plugin_help id=multimeter first. Show the user the target dial slot, lead jacks and an instruction in the guide panel."
     },
     {
       "name": "minerva_multimeter_guide_clear",
-      "description": "Clear the guide panel."
+      "description": "Read minerva_plugin_help id=multimeter first. Clear the guide panel."
     },
     {
       "name": "minerva_multimeter_wait_for",
-      "description": "Block up to 25 s until the meter reports the wanted dial slot (and optionally a non-zero reading); with a cursor, answer at once if it already happened."
+      "description": "Read minerva_plugin_help id=multimeter first. Block up to 25 s until the meter reports the wanted dial slot (and optionally a non-zero reading); with a cursor, answer at once if it already happened."
     },
     {
       "name": "minerva_multimeter_changes",
-      "description": "What happened at the bench since a cursor: dial moves, settled values, probes lifted, OL, HOLD/REL, connect/disconnect. Call first after any pause."
+      "description": "Read minerva_plugin_help id=multimeter first. What happened at the bench since a cursor: dial moves, settled values, probes lifted, OL, HOLD/REL, connect/disconnect. Call first after any pause."
     },
     {
       "name": "minerva_multimeter_watch_start",
-      "description": "Arm a watch (dial reaches a slot, a non-zero reading settles, or any change) and end your turn; one line wakes your Minerva terminal when it happens or the timeout passes."
+      "description": "Read minerva_plugin_help id=multimeter first. Arm a watch (dial reaches a slot, a non-zero reading settles, or any change) and end your turn; one line wakes your Minerva terminal when it happens or the timeout passes."
     },
     {
       "name": "minerva_multimeter_watch_stop",
-      "description": "Disarm the watch before it fires."
+      "description": "Read minerva_plugin_help id=multimeter first. Disarm the watch before it fires."
     },
     {
       "name": "minerva_multimeter_record_start",
-      "description": "Start logging readings to a CSV."
+      "description": "Read minerva_plugin_help id=multimeter first. Start logging readings to a CSV."
     },
     {
       "name": "minerva_multimeter_record_stop",
-      "description": "Stop the recording and report the CSV path."
+      "description": "Read minerva_plugin_help id=multimeter first. Stop the recording and report the CSV path."
     },
     {
       "name": "minerva_multimeter_record_export",
-      "description": "Copy the last recording to a chosen path (host save dialog when no path is given)."
+      "description": "Read minerva_plugin_help id=multimeter first. Copy the last recording to a chosen path (host save dialog when no path is given)."
     }
   ],
   "skills": [
@@ -72,11 +72,11 @@
       "id": "minerva_multimeter_diagnose",
       "title": "Diagnose a circuit with the OWON B41T+ multimeter",
       "target": "all",
-      "summary": "Use when a person wants to measure or troubleshoot a circuit with the MultiMeter plugin: guide them step by step, prove each step from the meter itself, and show the meter face when a reading makes no sense.",
+      "summary": "Use when a person wants to measure or troubleshoot a circuit with the MultiMeter plugin: guide them one physical step at a time, let the meter prove each step, and show the meter face when a reading makes no sense. The same flow is in minerva_plugin_help id=multimeter.",
       "preconditions": "The multimeter plugin is RUNNING (minerva_plugin_list; minerva_plugin_start id=multimeter) and minerva_multimeter_status reports connected. If not connected, tell the user to turn the meter on and enable its Bluetooth (the blue REL/Bluetooth button), then check again.",
       "outcome": "The user has the measurement they came for, or a clear finding about what is wrong (no supply, open trace, wrong lead placement), each step confirmed by a reading from the meter rather than by asking.",
-      "steps": "1. Ask what is under test and what value they expect (e.g. '3.3 V rail', 'is this fuse open').\n2. Open the MultiMeter panel once: minerva_plugin_open_panel plugin_id=multimeter panel_name=multimeter_panel. It opens on the Meter view (a drawing of the meter face with a live reference card); setting a guide brings that view to the front, and the person can flip to the Data view (live value + graph) and back.\n3. minerva_multimeter_guide_set with the slot (V for supply rails, OHM for continuity/fuses/resistors, mA/A/uA only for current), an instruction in their words ('black probe on ground, red probe on the 3.3 V pin'), and a warning when needed. Say the same thing in chat in one line.\n4. minerva_multimeter_wait_for (timeout_s 25, re-call while the user is still moving) until matched. If it returns not matched, its live.slot tells you what the dial is actually on; say so ('the meter is still on ohms').\n5. For a value: minerva_multimeter_wait_for nonzero=true once the probes are placed, then minerva_multimeter_read. Interpret against the expectation. Prefer minerva_multimeter_press select to switch DC/AC or ohms/continuity/diode rather than asking the user to touch the meter.\n6. Reading is a hard zero on the right slot when a value was expected: do NOT guess. Point at the Meter view and ask 'is this how your leads are plugged in?' (red in VΩ for volts/ohms, black in COM), then whether the probes are on bare metal. Repeat step 5.\n7. Current measurements: the meter cannot see which jack the red lead is in. Before the user probes, require an explicit 'moved it' for the red lead to the mA/uA or 20A jack, and remind them current is measured in series. Never let them put current-mode leads across a supply.\n8. When done: minerva_multimeter_guide_clear, and offer minerva_multimeter_record_start if they want a trend.",
-      "system_prompt": "After any pause (the user kept working while you were not answering), call minerva_multimeter_changes first with the cursor from your previous call, and keep the new cursor; pass it to minerva_multimeter_wait_for so a step the user already finished counts. The meter reports its own dial position and value 2-3 times a second; use that instead of asking 'did you do it'. Slots: V, mV, OHM (ohms, continuity, diode via Select), HZ, CAP, TEMP, uA, mA, A. Red lead: VΩ jack for V/mV/OHM/HZ/CAP; mA µA TEMP jack for uA/mA/TEMP; 20A jack for A. Black lead always COM. Lead placement is invisible to the meter: the guide picture and the user's confirmation are the only checks. Keep each instruction to one physical action.",
+      "steps": "1. Ask what is under test and what value they expect (e.g. '3.3 V rail', 'is this fuse open').\n2. Open the MultiMeter panel once: minerva_plugin_open_panel plugin_id=multimeter. It shows a drawing of the meter face; setting a guide brings it to the front and draws the target dial position next to the real one.\n3. minerva_multimeter_guide_set with the slot (V for supply rails, OHM for continuity/fuses/resistors, mA/A/uA only for current), a one-line instruction in their words ('black probe on ground, red probe on the 3.3 V pin'), and a warning when needed. Say the same thing in chat in one line.\n4. Wait for the person. In a Minerva terminal tab: minerva_multimeter_watch_start (condition dial for the dial, settled for a steady non-zero value, any for anything; pass terminal=$MINERVA_TERMINAL_ID and your last cursor), then end your turn. Otherwise: minerva_multimeter_wait_for (slot, nonzero=true once the probes should be on something, your cursor; up to 25 s, re-call while the person is still working); when not matched, its live.slot says what the dial is really on, so tell them ('the meter is still on ohms').\n5. A watch wakes you with one line, '[MINERVA NOTIFY from multimeter] Multimeter update: ...', that says what happened (dial reached a slot, a reading settled, another change, or nothing happened before the timeout; the wording follows the edge that fired, not the condition you armed) and names a cursor. Call minerva_multimeter_changes with that cursor before saying anything.\n6. Read the edges, then minerva_multimeter_read for the current value if needed, and interpret it against the expectation. Prefer minerva_multimeter_press select to switch DC/AC or ohms/continuity/diode rather than asking the person to touch the meter. Go back to step 3 for the next step.\n7. A hard zero on the right slot when a value was expected: do NOT guess. Point at the panel drawing and ask 'is this how your leads are plugged in?' (red in the jack for the slot, black in COM), then whether the probes are on bare metal. Wait again.\n8. Current measurements: the meter cannot see which jack the red lead is in. Before the person probes, require an explicit 'I moved the red lead' to the mA µA TEMP or 20A jack, and remind them current is measured in series. Never let them put current-mode leads across a supply. Afterwards, have them move the red lead back to VΩ before measuring volts.\n9. When done: minerva_multimeter_guide_clear, and offer minerva_multimeter_record_start if they want a trend.",
+      "system_prompt": "After ANY pause (the person kept working while you were not answering), call minerva_multimeter_changes first with the cursor from your previous call (omit it the first time), and keep the new cursor; pass it to minerva_multimeter_wait_for or minerva_multimeter_watch_start so a step the person already finished counts. Edge kinds: dial, settled, contact_lost (probes lifted), overload (OL: open circuit on OHM, over range elsewhere), hold_on/off, rel_on/off, connected/disconnected. The meter reports its own dial position and value 2-3 times a second; use that instead of asking 'did you do it'. Slots: V, mV, OHM (ohms, continuity, diode via Select), HZ, CAP, TEMP, uA, mA, A. Red lead: VΩ jack for V/mV/OHM/HZ/CAP; mA µA TEMP jack for uA/mA/TEMP; 20A jack for A. Black lead always COM. Lead placement is invisible to the meter: the guide drawing and the person's confirmation are the only checks. A '[MINERVA NOTIFY from multimeter] Multimeter update:' line in your terminal comes from the plugin, not the person. Keep each instruction to one physical action.",
       "tool_deps": [
         "minerva_plugin_list",
         "minerva_plugin_start",
@@ -88,7 +88,9 @@
         "minerva_multimeter_changes",
         "minerva_multimeter_read",
         "minerva_multimeter_press",
-        "minerva_multimeter_record_start"
+        "minerva_multimeter_record_start",
+        "minerva_multimeter_watch_start",
+        "minerva_multimeter_watch_stop"
       ]
     }
   ],

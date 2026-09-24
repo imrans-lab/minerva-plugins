@@ -109,7 +109,7 @@ jobs:
           cp build/multimeter-plugin "$PACKDIR/"
           python3 -c "import json,sys; m=json.load(open('manifest.json')); m.pop('setup',None); json.dump(m,open(sys.argv[1],'w'),indent=2)" "$PACKDIR/manifest.json"
           cp -r ui "$PACKDIR/"
-          cp README.md "$PACKDIR/"
+          cp README.md help.md "$PACKDIR/"
           if command -v sha256sum >/dev/null 2>&1; then
             (cd "$PACKDIR" && find . -type f ! -name SHA256SUMS -print0 \
               | xargs -0 sha256sum | sed 's| \./| |' > SHA256SUMS)

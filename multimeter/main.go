@@ -112,12 +112,12 @@ func toolErr(code, msg string) map[string]interface{} {
 var toolList = []map[string]interface{}{
 	{
 		"name":        "status",
-		"description": "Connection state of the OWON B41T+ multimeter: connected, meter name and address, firmware/serial, the latest reading, any connection error, and whether a recording is running. The plugin scans and reconnects on its own; a disconnected status with an error names what to do.",
+		"description": "Read minerva_plugin_help id=multimeter first. Connection state of the OWON B41T+ multimeter: connected, meter name and address, firmware/serial, the latest reading, any connection error, and whether a recording is running. The plugin scans and reconnects on its own; a disconnected status with an error names what to do.",
 		"inputSchema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
 	},
 	{
 		"name":        "read",
-		"description": "The latest measurement from the meter: {value, unit, prefix, function, display, flags, overload, timestamp}. Value is in the displayed unit with prefix (e.g. value 3.0 with prefix k and unit Ω). Pass count > 1 to also get the last N readings oldest-first (up to 600, ~3 minutes) for trends. Returns not_connected when the meter is away.",
+		"description": "Read minerva_plugin_help id=multimeter first. The latest measurement from the meter: {value, unit, prefix, function, display, flags, overload, timestamp}. Value is in the displayed unit with prefix (e.g. value 3.0 with prefix k and unit Ω). Pass count > 1 to also get the last N readings oldest-first (up to 600, ~3 minutes) for trends. Returns not_connected when the meter is away.",
 		"inputSchema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -127,7 +127,7 @@ var toolList = []map[string]interface{}{
 	},
 	{
 		"name":        "press",
-		"description": "Press one of the meter's front-panel buttons remotely: select (cycles the sub-function, e.g. V DC→V AC), range (manual/auto range), hold, rel (relative zero), hz (frequency/duty on AC functions), maxmin. long=true holds the button, which on the physical meter changes the action (e.g. long range returns to autorange). The rotary dial cannot be moved remotely.",
+		"description": "Read minerva_plugin_help id=multimeter first. Press one of the meter's front-panel buttons remotely: select (cycles the sub-function, e.g. V DC→V AC), range (manual/auto range), hold, rel (relative zero), hz (frequency/duty on AC functions), maxmin. long=true holds the button, which on the physical meter changes the action (e.g. long range returns to autorange). The rotary dial cannot be moved remotely.",
 		"inputSchema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -139,7 +139,7 @@ var toolList = []map[string]interface{}{
 	},
 	{
 		"name":        "guide_set",
-		"description": "Show the user how to set up the meter: the MultiMeter panel (open it once with minerva_plugin_open_panel plugin_id=multimeter) opens on its Meter view, a drawing of the meter face, and brings it to the front when a guide is set: the target dial slot, which jack the red lead goes in (black is always COM), and a one-line instruction such as 'red probe on the 3.3 V pin, black on ground'. The panel also draws the dial position the meter is on right now, so the user sees target versus actual. Slots: V (volts DC/AC, Select toggles AC), mV, OHM (ohms; Select cycles continuity and diode), HZ, CAP, TEMP, uA, mA, A. Current slots add a series-measurement warning automatically. Returns the guide and the live dial slot.",
+		"description": "Read minerva_plugin_help id=multimeter first. Show the user how to set up the meter: the MultiMeter panel (open it once with minerva_plugin_open_panel plugin_id=multimeter) opens on its Meter view, a drawing of the meter face, and brings it to the front when a guide is set: the target dial slot, which jack the red lead goes in (black is always COM), and a one-line instruction such as 'red probe on the 3.3 V pin, black on ground'. The panel also draws the dial position the meter is on right now, so the user sees target versus actual. Slots: V (volts DC/AC, Select toggles AC), mV, OHM (ohms; Select cycles continuity and diode), HZ, CAP, TEMP, uA, mA, A. Current slots add a series-measurement warning automatically. Returns the guide and the live dial slot.",
 		"inputSchema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -152,12 +152,12 @@ var toolList = []map[string]interface{}{
 	},
 	{
 		"name":        "guide_clear",
-		"description": "Remove the current guide; the Meter view goes back to its live reference card.",
+		"description": "Read minerva_plugin_help id=multimeter first. Remove the current guide; the Meter view goes back to its live reference card.",
 		"inputSchema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
 	},
 	{
 		"name":        "wait_for",
-		"description": "Block until the meter reports the wanted dial slot (default: the guide's slot) for settle_ms, or timeout_s passes (max 25; call again to keep waiting). nonzero=true also waits for a non-zero, non-overload reading, i.e. the probes are on something. Pass cursor (from changes, or an edge's seq) so what the user already did counts: if since that cursor the dial reached the slot (with nonzero: a value settled on it), wait_for answers at once with {matched, edge, reading} instead of waiting for it to happen again. Returns {matched, reading, waited_s} and, when not matched, the live dial slot so you can tell the user what the meter is actually on. The meter cannot see which jack a lead is in; if the reading stays zero on the right slot, ask about the leads and show the guide panel.",
+		"description": "Read minerva_plugin_help id=multimeter first. Block until the meter reports the wanted dial slot (default: the guide's slot) for settle_ms, or timeout_s passes (max 25; call again to keep waiting). nonzero=true also waits for a non-zero, non-overload reading, i.e. the probes are on something. Pass cursor (from changes, or an edge's seq) so what the user already did counts: if since that cursor the dial reached the slot (with nonzero: a value settled on it), wait_for answers at once with {matched, edge, reading} instead of waiting for it to happen again. Returns {matched, reading, waited_s} and, when not matched, the live dial slot so you can tell the user what the meter is actually on. The meter cannot see which jack a lead is in; if the reading stays zero on the right slot, ask about the leads and show the guide panel.",
 		"inputSchema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -171,7 +171,7 @@ var toolList = []map[string]interface{}{
 	},
 	{
 		"name":        "changes",
-		"description": "What happened at the bench since you last looked, oldest first: the dial moved to a slot, a reading settled at a new value (held steady about a second; small wobble is not reported), the reading fell back to near zero (probes lifted, contact lost), OL (open circuit on OHM, over range elsewhere), HOLD or REL turned on or off, the meter connected or disconnected. The user keeps working while you are not answering, so after any pause call changes first, with the cursor from your previous call (omit it the first time), and keep the returned cursor for next time. Returns {edges: [{seq, kind, at, summary, slot, reading}], cursor}; missed > 0 means that many older edges fell out of the journal (it keeps the last 200); reset=true means the plugin restarted since your cursor, so every kept edge is returned.",
+		"description": "Read minerva_plugin_help id=multimeter first. What happened at the bench since you last looked, oldest first: the dial moved to a slot, a reading settled at a new value (held steady about a second; small wobble is not reported), the reading fell back to near zero (probes lifted, contact lost), OL (open circuit on OHM, over range elsewhere), HOLD or REL turned on or off, the meter connected or disconnected. The user keeps working while you are not answering, so after any pause call changes first, with the cursor from your previous call (omit it the first time), and keep the returned cursor for next time. Returns {edges: [{seq, kind, at, summary, slot, reading}], cursor}; missed > 0 means that many older edges fell out of the journal (it keeps the last 200); reset=true means the plugin restarted since your cursor, so every kept edge is returned.",
 		"inputSchema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -181,7 +181,7 @@ var toolList = []map[string]interface{}{
 	},
 	{
 		"name":        "watch_start",
-		"description": "Get woken when the user has done the next step, instead of blocking: set the guide (guide_set), call watch_start, then end your turn; when the condition is met, or timeout_s passes, one line saying what happened arrives in your terminal as a new message, and you then call changes with the returned cursor. Works only for an agent running in a Minerva terminal tab. condition: dial (the dial reaches slot; default the guide's slot), settled (a non-zero reading settles, on slot if given), any (anything changes at the bench). One watch at a time: calling watch_start again replaces the armed watch (the reply's replaced shows the old one). Returns {watching: {condition, slot, timeout_s, terminal, cursor}}.",
+		"description": "Read minerva_plugin_help id=multimeter first. Get woken when the user has done the next step, instead of blocking: set the guide (guide_set), call watch_start, then end your turn; when the condition is met, or timeout_s passes, one line saying what happened arrives in your terminal as a new message, and you then call changes with the returned cursor. Works only for an agent running in a Minerva terminal tab. condition: dial (the dial reaches slot; default the guide's slot), settled (a non-zero reading settles, on slot if given), any (anything changes at the bench). One watch at a time: calling watch_start again replaces the armed watch (the reply's replaced shows the old one). Returns {watching: {condition, slot, timeout_s, terminal, cursor}}.",
 		"inputSchema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -196,12 +196,12 @@ var toolList = []map[string]interface{}{
 	},
 	{
 		"name":        "watch_stop",
-		"description": "Disarm the watch set by watch_start if it has not fired yet. Returns {stopped, watch}.",
+		"description": "Read minerva_plugin_help id=multimeter first. Disarm the watch set by watch_start if it has not fired yet. Returns {stopped, watch}.",
 		"inputSchema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
 	},
 	{
 		"name":        "record_start",
-		"description": "Start logging every reading to a CSV (timestamp, value, unit, function, flags, raw). Omit path to write into the plugin's data directory with a timestamped name. Returns the path. One recording at a time.",
+		"description": "Read minerva_plugin_help id=multimeter first. Start logging every reading to a CSV (timestamp, value, unit, function, flags, raw). Omit path to write into the plugin's data directory with a timestamped name. Returns the path. One recording at a time.",
 		"inputSchema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -211,7 +211,7 @@ var toolList = []map[string]interface{}{
 	},
 	{
 		"name":        "record_export",
-		"description": "Copy the most recent recording (running or finished) to a path of the user's choosing. Pass path to write there directly; omit it to pop the host's save dialog. Returns {path, rows} or {cancelled: true}.",
+		"description": "Read minerva_plugin_help id=multimeter first. Copy the most recent recording (running or finished) to a path of the user's choosing. Pass path to write there directly; omit it to pop the host's save dialog. Returns {path, rows} or {cancelled: true}.",
 		"inputSchema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -221,7 +221,7 @@ var toolList = []map[string]interface{}{
 	},
 	{
 		"name":        "record_stop",
-		"description": "Stop the running recording and return {path, rows, seconds}. Open the CSV with minerva_create_spreadsheet_editor to chart it.",
+		"description": "Read minerva_plugin_help id=multimeter first. Stop the running recording and return {path, rows, seconds}. Open the CSV with minerva_create_spreadsheet_editor to chart it.",
 		"inputSchema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
 	},
 }
