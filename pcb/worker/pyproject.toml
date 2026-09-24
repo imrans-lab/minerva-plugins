@@ -100,7 +100,7 @@ circuit_synth = [
     "circuit-synth==0.12.1",
 ]
 dev = [
-    "pytest>=7.0",
+    "pytest>=9.1.1",
     # pygerber: independent, actively-maintained X3-aware reader used ONLY by the
     # gerber test suite for round-trip parsing of every emitted layer (not a
     # runtime dependency). Pinned to the spike's validated version.
