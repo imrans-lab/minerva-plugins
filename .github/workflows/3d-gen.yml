@@ -132,7 +132,7 @@ jobs:
           ls -la "dist/gen3d-${VERSION}-${PLATFORM}.tar.gz"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gen3d-${{ matrix.target }}
           path: 3d-gen/dist/gen3d-*-${{ matrix.target }}.tar.gz
