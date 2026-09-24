@@ -1,0 +1,61 @@
+{
+  "id": "multimeter",
+  "name": "MultiMeter",
+  "version": "0.1.0",
+  "description": "Read an OWON B41T+ Bluetooth digital multimeter live inside Minerva. Your AI agent can read the current measurement, watch trends, press the meter's buttons, and record readings to CSV; the panel shows the live value with a rolling graph. Needs the meter powered on with its Bluetooth enabled and a Bluetooth radio on this computer; nothing else to install.",
+  "price": {"amount_minor": 0, "currency": "USD"},
+  "host_api_version": "1",
+  "release_targets": ["linux-x86_64", "macos-universal"],
+  "backend": {"transport": "stdio", "entrypoint": "./multimeter-plugin", "args": []},
+  "tools": [
+    {"name": "minerva_multimeter_status", "description": "Meter connection state, identity, latest reading, recording state."},
+    {"name": "minerva_multimeter_read", "description": "Latest measurement, optionally with recent history."},
+    {"name": "minerva_multimeter_press", "description": "Press a front-panel button (select, range, hold, rel, hz, maxmin)."},
+    {"name": "minerva_multimeter_record_start", "description": "Start logging readings to a CSV."},
+    {"name": "minerva_multimeter_record_stop", "description": "Stop the recording and report the CSV path."}
+  ],
+  "events": [
+    {
+      "name": "multimeter.reading",
+      "description": "One decoded measurement, emitted for every packet the meter sends (2-3 per second).",
+      "payload_schema": {
+        "type": "object",
+        "properties": {
+          "timestamp": {"type": "string"},
+          "function": {"type": "string"},
+          "unit": {"type": "string"},
+          "prefix": {"type": "string"},
+          "value": {"type": "number"},
+          "display": {"type": "string"},
+          "overload": {"type": "boolean"},
+          "flags": {"type": "array", "items": {"type": "string"}},
+          "raw": {"type": "string"}
+        }
+      }
+    }
+  ],
+  "state": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "connected": {"type": "boolean"},
+        "name": {"type": "string"},
+        "address": {"type": "string"},
+        "info": {"type": "object"},
+        "error": {"type": "string"},
+        "recording": {"type": "object"}
+      }
+    }
+  },
+  "permissions": {
+    "host_capabilities": [],
+    "network": {"mode": "none"},
+    "filesystem": {"mode": "none", "paths": []}
+  },
+  "autostart": false,
+  "auto_reload": false,
+  "setup": {
+    "requires": [{"tool": "go", "min": "1.22"}],
+    "steps": [{"type": "go_build", "package": "./", "output": "multimeter-plugin"}]
+  }
+}

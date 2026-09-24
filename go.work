@@ -1,9 +1,10 @@
-go 1.22
+go 1.25.0
 
 use (
 	./cad
 	./codetools
 	./council
+	./multimeter
 	./nametag-maker
 	./pcb
 	./presentation
