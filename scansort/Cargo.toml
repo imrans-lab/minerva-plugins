@@ -35,6 +35,6 @@ directories = "5"
 # R2: text extraction + rendering
 justpdf = "0.1"
 image = "0.25"
-base64 = "0.22"
+base64 = "0.23"
 docx-rust = "0.1"
 calamine = "0.34"
