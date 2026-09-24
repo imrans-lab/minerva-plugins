@@ -126,7 +126,7 @@ jobs:
           zstd --version
 
       - name: Cache PBS downloads
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           # Cache the python-build-standalone tarballs (~25-50MB each, ~5min
           # download cold). Key on the lock file so a version bump invalidates.
