@@ -136,7 +136,7 @@ var toolList = []map[string]interface{}{
 	},
 	{
 		"name":        "guide_set",
-		"description": "Show the user how to set up the meter in the MultiMeter guide panel (open it first with minerva_plugin_open_panel plugin_id=multimeter panel_name=multimeter_guide): the target dial slot, which jack the red lead goes in (black is always COM), and a one-line instruction such as 'red probe on the 3.3 V pin, black on ground'. The panel also draws the dial position the meter is on right now, so the user sees target versus actual. Slots: V (volts DC/AC, Select toggles AC), mV, OHM (ohms; Select cycles continuity and diode), HZ, CAP, TEMP, uA, mA, A. Current slots add a series-measurement warning automatically. Returns the guide and the live dial slot.",
+		"description": "Show the user how to set up the meter: the MultiMeter panel (open it once with minerva_plugin_open_panel plugin_id=multimeter) opens on its Meter view, a drawing of the meter face, and brings it to the front when a guide is set: the target dial slot, which jack the red lead goes in (black is always COM), and a one-line instruction such as 'red probe on the 3.3 V pin, black on ground'. The panel also draws the dial position the meter is on right now, so the user sees target versus actual. Slots: V (volts DC/AC, Select toggles AC), mV, OHM (ohms; Select cycles continuity and diode), HZ, CAP, TEMP, uA, mA, A. Current slots add a series-measurement warning automatically. Returns the guide and the live dial slot.",
 		"inputSchema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -149,7 +149,7 @@ var toolList = []map[string]interface{}{
 	},
 	{
 		"name":        "guide_clear",
-		"description": "Remove the current guide from the guide panel.",
+		"description": "Remove the current guide; the Meter view goes back to its live reference card.",
 		"inputSchema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
 	},
 	{
