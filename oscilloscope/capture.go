@@ -34,6 +34,7 @@ type Measurement struct {
 	Flags     []string `json:"quality_flags"`
 }
 type Capture struct {
+	SettingsRevision   uint64         `json:"settings_revision"`
 	Success            bool           `json:"success"`
 	SettlingSamples    int            `json:"settling_samples_discarded"`
 	ZeroADC            [2]float64     `json:"zero_adc"`

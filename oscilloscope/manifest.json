@@ -1,7 +1,7 @@
 {
   "id": "oscilloscope",
   "name": "Oscilloscope",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "See and measure two-channel waveforms from a Hantek 6022BE USB oscilloscope inside Minerva. People and AI agents share capture controls, probe settings, measurements and saved data. Requires the scope and USB access; firmware and native dependencies are included.",
   "price": {
     "amount_minor": 0,
@@ -45,6 +45,22 @@
     {
       "name": "minerva_oscilloscope_save",
       "description": "Save capture JSON and CSV."
+    },
+    {
+      "name": "minerva_oscilloscope_retain",
+      "description": "Pin or release capture evidence."
+    },
+    {
+      "name": "minerva_oscilloscope_show_capture",
+      "description": "Freeze and display exact capture evidence with an optional highlight."
+    },
+    {
+      "name": "minerva_oscilloscope_evaluate",
+      "description": "Check a capture against explicit tolerances."
+    },
+    {
+      "name": "minerva_oscilloscope_panel_sync",
+      "description": "Report panel viewport and displayed capture telemetry."
     }
   ],
   "ui": {

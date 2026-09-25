@@ -60,7 +60,7 @@ func TestCaptureAndControlContract(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if r.(Capture).Raw != nil {
+	if _, ok := r.(map[string]any)["raw_interleaved_u8"]; ok {
 		t.Fatal("default reply contains raw")
 	}
 	if _, e = s.call("read", json.RawMessage(`{"id":"expired"}`)); e == nil {

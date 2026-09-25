@@ -74,6 +74,7 @@ func parseFirmware(data string) ([]firmwareRecord, error) {
 }
 
 type Hardware struct {
+	context     context.Context
 	ctx         *gousb.Context
 	dev         *gousb.Device
 	intf        *gousb.Interface
@@ -103,7 +104,10 @@ func (h *Hardware) Close() {
 	}
 	h.ep = nil
 }
-func writeControl(d *gousb.Device, request byte, address uint16, data []byte) error {
+func writeControl(ctx context.Context, d *gousb.Device, request byte, address uint16, data []byte) error {
+	if err := controlDeadline(ctx, d); err != nil {
+		return err
+	}
 	n, e := d.Control(0x40, request, address, 0, data)
 	if e != nil {
 		return e
@@ -114,9 +118,13 @@ func writeControl(d *gousb.Device, request byte, address uint16, data []byte) er
 	return nil
 }
 func (h *Hardware) command(request, value byte) error {
-	return writeControl(h.dev, request, 0, []byte{value})
+	return writeControl(h.context, h.dev, request, 0, []byte{value})
 }
-func (h *Hardware) Open() (err error) {
+func (h *Hardware) Open(ctx context.Context) (err error) {
+	h.context = ctx
+	if err = ctx.Err(); err != nil {
+		return err
+	}
 	defer func() {
 		if err != nil {
 			h.Close()
@@ -148,21 +156,25 @@ func (h *Hardware) Open() (err error) {
 			return e
 		}
 		h.dev.ControlTimeout = time.Second
-		if e = writeControl(h.dev, 0xa0, 0xe600, []byte{1}); e != nil {
+		if e = writeControl(ctx, h.dev, 0xa0, 0xe600, []byte{1}); e != nil {
 			return fmt.Errorf("stop FX2 CPU: %w", e)
 		}
 		for _, r := range records {
-			if e = writeControl(h.dev, 0xa0, r.address, r.data); e != nil {
+			if e = writeControl(ctx, h.dev, 0xa0, r.address, r.data); e != nil {
 				return fmt.Errorf("load firmware RAM: %w; unplug/replug scope", e)
 			}
 		}
-		if e = writeControl(h.dev, 0xa0, 0xe600, []byte{0}); e != nil {
+		if e = writeControl(ctx, h.dev, 0xa0, 0xe600, []byte{0}); e != nil {
 			return fmt.Errorf("start FX2 CPU: %w", e)
 		}
 		h.dev.Close()
 		h.dev = nil
 		for i := 0; i < 40; i++ {
-			time.Sleep(100 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(100 * time.Millisecond):
+			}
 			h.dev, err = h.ctx.OpenDeviceWithVIDPID(0x04b5, 0x6022)
 			if h.dev != nil {
 				break
@@ -200,6 +212,9 @@ func (h *Hardware) Open() (err error) {
 	h.zero = [2]float64{128, 128}
 	h.calibration = "nominal (EEPROM offset unavailable)"
 	cal := make([]byte, 32)
+	if e := controlDeadline(ctx, h.dev); e != nil {
+		return e
+	}
 	n, e := h.dev.Control(0xc0, 0xa2, 8, 0, cal)
 	if e == nil && n == 32 && cal[14] > 0 && cal[14] < 255 && cal[15] > 0 && cal[15] < 255 {
 		h.zero = [2]float64{float64(cal[14]), float64(cal[15])}
@@ -207,7 +222,8 @@ func (h *Hardware) Open() (err error) {
 	}
 	return nil
 }
-func (h *Hardware) Capture(rate, samples int) (raw []byte, err error) {
+func (h *Hardware) Capture(ctx context.Context, rate, samples int) (raw []byte, err error) {
+	h.context = ctx
 	code, ok := rates[rate]
 	if !ok {
 		return nil, fmt.Errorf("unsupported rate")
@@ -226,7 +242,7 @@ func (h *Hardware) Capture(rate, samples int) (raw []byte, err error) {
 			err = e
 		}
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	// Discard the first 512 sample pairs after restarting the ADC/FIFO.
 	// This settling interval is declared in capture metadata.
@@ -239,4 +255,23 @@ func (h *Hardware) Capture(rate, samples int) (raw []byte, err error) {
 		return nil, fmt.Errorf("short USB capture: %d/%d bytes", n, len(raw))
 	}
 	return raw[1024:], nil
+}
+
+// libusb control operations cannot be interrupted in Go; bound each by the
+// remaining acquisition deadline (up to one second). Discovery/close are native.
+func controlDeadline(ctx context.Context, d *gousb.Device) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	d.ControlTimeout = time.Second
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining < time.Millisecond {
+			return context.DeadlineExceeded
+		}
+		if remaining < d.ControlTimeout {
+			d.ControlTimeout = remaining
+		}
+	}
+	return nil
 }

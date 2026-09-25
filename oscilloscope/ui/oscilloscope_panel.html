@@ -16,6 +16,14 @@ button,select{background:#2a2e36;color:var(--text);border:1px solid var(--line);
 @media(max-width:850px){body{padding:8px;gap:8px}.card{padding:8px 10px}.toolbar{gap:6px}.toolbar button,.toolbar select{font-size:12px;padding:5px 7px}.scales{gap:6px}.quick-metrics b{font-size:17px}.quick-channel{gap:5px}.quick-metrics{gap:5px}.quick-metrics button{padding:4px 5px}.quick-metrics span{font-size:10px}#model{display:none}}
 @media(max-width:560px){#frame{gap:6px}#views{width:100%}#views button{flex:1;padding:5px}#quick{gap:6px}.quick-channel{flex-wrap:wrap;padding:5px}.channel-name{font-size:10px}.quick-metrics{width:100%}.quick-metrics b{font-size:14px}.scales label{font-size:10px}.plotbar{font-size:9px}.view{gap:6px}body{gap:6px;padding:6px}}
 @media(max-height:520px){body{padding:6px;gap:5px}.view{gap:5px}#frame{padding:5px 8px}.toolbar{padding:5px 8px}.quick-channel{padding:4px 8px}.quick-metrics button{padding:2px 5px}.quick-metrics b{font-size:15px}#fitInfo{display:none}}
+
+/* Disclosure headers stay visible; expanded bodies share the remaining space. */
+.disclosure{min-height:0;padding:0;overflow:hidden}.disclosure summary{padding:9px 12px;cursor:pointer;font-weight:600;font-size:13px}.disclosure summary:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}.summary-value{font-size:11px;font-weight:400;color:var(--muted);margin-left:8px}.card-content{padding:0 12px 10px;min-height:0;overflow:auto}.disclosure[open]{display:flex;flex-direction:column}.disclosure::details-content{min-height:0;overflow:auto}.disclosure[open] .card-content{flex:1}
+#view-measurements,#view-settings{overflow:hidden}.measurements,.settings-grid{flex:1;min-height:0;align-content:start;grid-template-columns:1fr;gap:8px}.measurements:has(#measurement1[open]):not(:has(#measurement2[open])){grid-template-rows:minmax(0,1fr) auto}.measurements:has(#measurement2[open]):not(:has(#measurement1[open])){grid-template-rows:auto minmax(0,1fr)}.measurements:has(#measurement1[open]):has(#measurement2[open]){grid-template-rows:repeat(2,minmax(0,1fr))}
+.settings-grid{display:flex;flex-direction:column}.settings-grid .disclosure{flex:none}.settings-grid .disclosure[open]{flex:1;min-height:44px}.metrics{grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}.metric{padding:6px}.metric b{font-size:18px}.flags{margin-top:6px}.settings-grid label{margin:7px 0}.settings-grid .hint{margin:6px 0;font-size:11px}.details{margin:5px 0;font-size:11px;gap:3px 14px}
+#captureDetails{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}#saved{flex:none;max-height:44px;overflow:auto}#saved:empty{display:none}
+@media(min-width:1000px){.measurements{grid-template-columns:1fr 1fr!important;grid-template-rows:minmax(0,1fr)!important;align-items:start}.measurements .disclosure[open]{height:100%}.settings-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));grid-template-rows:minmax(0,1fr);align-items:start}.settings-grid .disclosure[open]{height:100%}.metrics{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:600px){.metrics{grid-template-columns:repeat(4,minmax(0,1fr));gap:3px}.metric{padding:4px}.metric b{font-size:13px}.metric span{font-size:10px}.flags{font-size:11px}.disclosure summary{padding:7px 9px;font-size:12px}.card-content{padding:0 9px 7px}.summary-value{font-size:10px}.quick-metrics b{font-size:13px}.quick-channel{padding:4px}.scales select{max-width:88px}.toolbar{gap:4px}.toolbar .grow{display:none}#annotation{font-size:10px}}
 </style></head><body>
 <div id="frame" class="row card"><div id="conn"><span id="dot"></span>Oscilloscope</div><span id="model" class="hint">Hantek 6022BE</span><span id="status">Connecting…</span><span class="grow"></span><div id="views" role="tablist" aria-label="Oscilloscope pages"><button id="tab-scope" data-view="scope" role="tab" aria-controls="view-scope" aria-selected="true" class="on">Scope</button><button id="tab-measurements" data-view="measurements" role="tab" aria-controls="view-measurements" aria-selected="false" tabindex="-1">Measurements</button><button id="tab-settings" data-view="settings" role="tab" aria-controls="view-settings" aria-selected="false" tabindex="-1">Settings</button></div></div>
 <div id="error" role="alert"></div>
@@ -27,19 +35,20 @@ button,select{background:#2a2e36;color:var(--text);border:1px solid var(--line);
 <div id="annotation">Click Frequency or Duty cycle to highlight a measurement.</div><div id="fitInfo"></div>
 </section>
 <section id="view-measurements" class="view" role="tabpanel" aria-labelledby="tab-measurements" hidden>
-<div class="row card"><span id="captureDetails" class="hint">No capture yet.</span><span class="grow"></span><button id="save" disabled>Save Capture</button></div>
-<div class="measurements"><div class="card" id="measurement1"><div class="channel yellow">CH1 measurements</div><div id="metrics1" class="metrics"></div><div id="flags1" class="flags"></div></div><div class="card" id="measurement2"><div class="channel cyan">CH2 measurements</div><div id="metrics2" class="metrics"></div><div id="flags2" class="flags"></div></div></div>
-<div class="card hint">Click a timing measurement to inspect its cycle on the Scope page. Measurements use the full capture; the graph shows up to 4096 consecutive samples. Voltage uses factory zero-offset correction when available and nominal gain.</div><div id="saved" role="status"></div>
+<div class="row card"><span id="captureDetails" class="hint" title="Measurements use the full capture. Click timing to inspect a cycle on Scope.">No capture yet.</span><span class="grow"></span><button id="save" disabled>Save Capture</button></div>
+<div class="measurements"><details class="card disclosure" id="measurement1" open><summary class="yellow">CH1 measurements <span id="measureSummary1" class="summary-value"></span></summary><div class="card-content"><div id="metrics1" class="metrics"></div><div id="flags1" class="flags"></div></div></details><details class="card disclosure" id="measurement2"><summary class="cyan">CH2 measurements <span id="measureSummary2" class="summary-value"></span></summary><div class="card-content"><div id="metrics2" class="metrics"></div><div id="flags2" class="flags"></div></div></details></div>
+<div id="saved" role="status"></div>
 </section>
 <section id="view-settings" class="view" role="tabpanel" aria-labelledby="tab-settings" hidden>
-<div class="settings-grid"><div class="card"><h2>Acquisition</h2><label>Sample rate<select id="sampleRate"><option value="100000">100 kS/s</option><option value="200000" selected>200 kS/s</option><option value="500000">500 kS/s</option><option value="1000000">1 MS/s</option></select></label><label>Rising-edge trigger<select id="trigger"><option value="1">CH1</option><option value="2">CH2</option></select></label><p class="hint">Both channels are captured. Software alignment; separate captures have gaps. 8192 samples per channel, after discarding 512 startup sample pairs.</p></div>
-<div class="card"><h2>Probe attenuation</h2><label class="yellow">CH1 switch<select id="probe1"><option value="" disabled>Unconfirmed · 1× assumed</option><option value="1">1×</option><option value="10">10×</option></select></label><label class="cyan">CH2 switch<select id="probe2"><option value="" disabled>Unconfirmed · 1× assumed</option><option value="1">1×</option><option value="10">10×</option></select></label><p class="hint">Match these to the physical probe switches. The scope cannot detect probe position. Settings apply to new captures; frozen readings keep their original factors.</p></div>
-<div class="card"><h2>Hantek 6022BE</h2><dl class="details"><dt>Connection</dt><dd id="deviceConnection">Checking…</dd><dt>Serial</dt><dd id="deviceSerial">—</dd><dt>Firmware</dt><dd id="deviceFirmware">—</dd><dt>Calibration</dt><dd id="deviceCalibration">—</dd><dt>Input</dt><dd>DC coupling · ±5 V at BNC</dd></dl><p class="hint">Tip → signal GPIO; ground clip → board GND. Close other scope applications to release USB access.</p></div></div>
+<div class="settings-grid"><details class="card disclosure" id="settings-acquisition"><summary>Acquisition<span id="summary-acquisition" class="summary-value"></span></summary><div class="card-content"><label>Sample rate<select id="sampleRate"><option value="100000">100 kS/s</option><option value="200000" selected>200 kS/s</option><option value="500000">500 kS/s</option><option value="1000000">1 MS/s</option></select></label><label>Rising-edge trigger<select id="trigger"><option value="1">CH1</option><option value="2">CH2</option></select></label><p class="hint">Both channels are captured. Software alignment; separate captures have gaps. 8192 samples per channel, after discarding 512 startup sample pairs.</p></div></details>
+<details class="card disclosure" id="settings-probes"><summary>Probe attenuation<span id="summary-probes" class="summary-value"></span></summary><div class="card-content"><label class="yellow">CH1 switch<select id="probe1"><option value="">Unconfirmed · 1× assumed</option><option value="1">1×</option><option value="10">10×</option></select></label><label class="cyan">CH2 switch<select id="probe2"><option value="">Unconfirmed · 1× assumed</option><option value="1">1×</option><option value="10">10×</option></select></label><p class="hint">Match these to the physical probe switches. The scope cannot detect probe position. Settings apply to new captures; frozen readings keep their original factors.</p></div></details>
+<details class="card disclosure" id="settings-device"><summary>Hantek 6022BE<span id="summary-device" class="summary-value"></span></summary><div class="card-content"><dl class="details"><dt>Connection</dt><dd id="deviceConnection">Checking…</dd><dt>Serial</dt><dd id="deviceSerial">—</dd><dt>Firmware</dt><dd id="deviceFirmware">—</dd><dt>Calibration</dt><dd id="deviceCalibration">—</dd><dt>Input</dt><dd>DC coupling · ±5 V at BNC</dd></dl><p class="hint">Tip → signal GPIO; ground clip → board GND. Close other scope applications to release USB access.</p></div></details></div>
 </section>
 <script>
 'use strict';
 const $ = id => document.getElementById(id);
 const colors = ['#ffce54', '#4ed8ef'];
+let appliedDisplayRevision = -1, lastPanelSync = 0;
 let activeView = 'scope';
 let state = {}, capture = null, busy = false, mouse = null, annotation = null;
 function showView(name) {
@@ -68,7 +77,7 @@ $('noticeSettings').onclick = () => showView('settings');
 });
 function updateNotice() {
   const unconfirmed = capture && [1,2].filter(ch => $('show'+ch).checked && !capture.settings.probe_confirmed[ch-1]);
-  const text = state.error ? 'Scope connection needs attention.' : unconfirmed?.length ? unconfirmed.map(ch=>'CH'+ch).join(' / ')+' voltage assumes 1×. Confirm probe switches in Settings.' : '';
+  const text = state.error ? 'Scope connection needs attention.' : unconfirmed?.length ? unconfirmed.map(ch=>'CH'+ch+' assumes '+capture.settings.probe_ratio[ch-1]+'×').join(' / ')+'. Confirm probe switches in Settings.' : '';
   $('scopeNotice').hidden = !text;
   $('noticeText').textContent = text;
   $('noticeText').title = text;
@@ -82,23 +91,27 @@ function fmt(v, u) {
 async function call(name, args = {}) {
   if (!window.minerva) throw Error('Waiting for Minerva bridge');
   const r = await window.minerva.call('minerva_oscilloscope_' + name, args);
-  if (r.success === false) throw Error(r.error || r.error_message);
+  if (r.success === false) throw Error(r.error?.message || r.error || r.error_message);
+  if(r.channels) { r.measurements=[null,null]; r.preview_v=[[],[]]; for(const ch of r.channels){r.measurements[ch.channel-1]=ch.measurement;r.preview_v[ch.channel-1]=ch.preview_v||[];} }
   return r;
 }
 function updateState(s) {
   state = s;
   $('dot').classList.toggle('on',!!s.connected);
   $('deviceConnection').textContent = s.connected ? 'Connected' : 'Disconnected · Run to connect';
-  $('deviceSerial').textContent = s.serial || '—';
-  $('deviceFirmware').textContent = s.firmware || '—';
-  $('deviceCalibration').textContent = s.calibration || 'Not available';
+  $('deviceSerial').textContent = s.capabilities?.serial || '—';
+  $('deviceFirmware').textContent = s.capabilities?.firmware || '—';
+  $('deviceCalibration').textContent = s.capabilities?.calibration || 'Not available';
+  $('summary-acquisition').textContent=fmt(s.settings.sample_rate_hz,'S/s')+' · trigger CH'+s.settings.trigger_channel;
+  $('summary-probes').textContent=s.settings.probe_confirmed.every(Boolean)?'Switches confirmed':'Confirm physical switches';
+  $('summary-device').textContent=s.connected?'Connected':'Disconnected';
   updateNotice();
-  $('status').textContent = s.running ? '● LIVE' : s.latest ? '❚❚ FROZEN' : '○ Ready';
-  $('status').className = 'status ' + (s.running ? 'live' : s.latest ? 'frozen' : '');
+  $('status').textContent = s.running ? '● LIVE' : s.displayed_capture_id ? '❚❚ FROZEN' : '○ Ready';
+  $('status').className = 'status ' + (s.running ? 'live' : s.displayed_capture_id ? 'frozen' : '');
   $('run').textContent = s.running ? '❚❚ Freeze' : '▶ Run';
   $('sampleRate').value = s.settings.sample_rate_hz;
   $('trigger').value = s.settings.trigger_channel;
-  [1,2].forEach(ch => $('probe'+ch).value = s.settings.probe_confirmed[ch-1] ? s.settings.probe_ratio[ch-1] : '');
+  [1,2].forEach(ch => { $('probe'+ch).options[0].textContent='Unconfirmed · '+s.settings.probe_ratio[ch-1]+'× assumed'; $('probe'+ch).value = s.settings.probe_confirmed[ch-1] ? s.settings.probe_ratio[ch-1] : ''; });
   $('error').textContent = s.error || '';
   $('save').disabled = !capture;
   $('fit').disabled = !capture;
@@ -148,7 +161,8 @@ function updateCapture(c) {
       box.append(d);
       if(title === 'Frequency' || title === 'Duty cycle') { const copy=d.cloneNode(true); copy.onclick=d.onclick; quick.append(copy); }
     });
-    $('flags'+ch).textContent = m.quality_flags.map(x => reasons[x] || x.replaceAll('_',' ')).join(' ');
+    $('measureSummary'+ch).textContent=fmt(m.frequency_hz,'Hz');
+    $('flags'+ch).textContent = m.quality_flags.map(x => x==='probe_attenuation_unconfirmed' ? 'Voltage assumes '+c.settings.probe_ratio[ch-1]+'×. Confirm the physical switch.' : reasons[x] || x.replaceAll('_',' ')).join(' ');
     $('flags'+ch).title = $('flags'+ch).textContent;
     $('measurement'+ch).title = $('flags'+ch).textContent;
     $('quick'+ch).hidden = !$('show'+ch).checked;
@@ -169,7 +183,9 @@ function draw() {
   g.strokeStyle = '#2c3038'; g.lineWidth = 1;
   for (let x=0; x<=10; x++) {
     const px=left+x*w/10; g.beginPath(); g.moveTo(px,top); g.lineTo(px,bottom); g.stroke();
-    g.fillStyle='#8399aa'; g.fillText(fmt(x*span/10,'s'),px-12,H-12);
+    g.fillStyle='#8399aa';
+    const labelStep=Math.max(1,Math.ceil(85/(w/10)));
+    if(x%labelStep===0 || x===10){g.textAlign=x===0?'left':x===10?'right':'center';g.fillText(fmt(x*span/10,'s'),px,H-12);g.textAlign='left';}
   }
   for (let y=0; y<=8; y++) {
     const py=top+y*h/8; g.beginPath(); g.moveTo(left,py); g.lineTo(right,py); g.stroke();
@@ -221,8 +237,23 @@ function draw() {
   }
 }
 async function refresh() {
-  updateState(await call('status'));
-  if(state.latest && state.latest.id!==capture?.id) updateCapture(await call('read',{id:state.latest.id,preview:true}));
+  updateState(await call('status',{include:['display','capabilities']}));
+  const display=state.display;
+  const id=state.displayed_capture_id;
+  if(id && id!==capture?.id) updateCapture(await call('read',{id,detail:'preview'}));
+  if(display && display.revision!==appliedDisplayRevision) {
+    const previouslyApplied=appliedDisplayRevision;
+    appliedDisplayRevision=display.revision;
+    annotation=display.highlight==='cycle'?{ch:display.channel,kind:'frequency'}:display.highlight==='high'?{ch:display.channel,kind:'duty'}:null;
+    if(display.mode==='frozen' && display.channel && (previouslyApplied>=0 || annotation)) {
+      $('show'+display.channel).checked=true;showView('scope');
+    }
+    if(capture)updateCapture(capture);
+  }
+  if(Date.now()-lastPanelSync>1500){
+    await call('panel_sync',{id:capture?.id||'',revision:Math.max(0,appliedDisplayRevision),page:activeView,width:innerWidth,height:innerHeight});
+    lastPanelSync=Date.now();
+  }
 }
 async function action(fn) {
   if(busy) return;
@@ -230,12 +261,12 @@ async function action(fn) {
   try { await fn(); } catch(e) { $('error').textContent=e.message; } finally { busy=false; }
 }
 $('run').onclick=()=>action(async()=>{updateState(await call(state.running?'stop':'run')); await refresh();});
-$('single').onclick=()=>action(async()=>{updateState(await call('stop')); updateCapture(await call('capture')); await refresh();});
+$('single').onclick=()=>action(async()=>{updateState(await call('stop')); updateCapture(await call('capture',{detail:'preview',pin:false})); await refresh();});
 $('save').onclick=()=>action(async()=>{if(!capture) throw Error('No capture yet'); const r=await call('save',{id:capture.id}); $('saved').textContent='Saved '+r.json_path+' and '+r.csv_path;});
 $('sampleRate').onchange=()=>action(async()=>updateState(await call('configure',{sample_rate_hz:Number($('sampleRate').value)})));
 $('trigger').onchange=()=>action(async()=>updateState(await call('configure',{trigger_channel:Number($('trigger').value)})));
 [1,2].forEach(ch=>{
-  $('probe'+ch).onchange=()=>action(async()=>{const value=Number($('probe'+ch).value); if(value) updateState(await call('configure',{['probe_ch'+ch]:value}));});
+  $('probe'+ch).onchange=()=>action(async()=>{const value=Number($('probe'+ch).value); updateState(await call('configure',{probes:[value?{channel:ch,ratio:value,confirmed:true}:{channel:ch,confirmed:false}]}));});
   $('vdiv'+ch).onchange=draw;
   $('show'+ch).onchange=()=>{$('quick'+ch).hidden=!$('show'+ch).checked;if(annotation?.ch===ch&&!$('show'+ch).checked) annotation=null; if(capture) updateCapture(capture); else draw();};
 });

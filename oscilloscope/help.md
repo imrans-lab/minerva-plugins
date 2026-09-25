@@ -1,58 +1,95 @@
-# Oscilloscope: Hantek 6022BE
+# Oscilloscope MCP 0.2 — Hantek 6022BE
 
-Start with `minerva_oscilloscope_status`. Open the panel with
-`minerva_plugin_open_panel plugin_id=oscilloscope`.
+Use `minerva_oscilloscope_capture {}` for a fresh, compact measurement. It waits
+for acquisition and pins the result. Default summary has no waveform arrays.
+Do not call run then read just to obtain one measurement. `run` is for continuous
+acquisition and now returns only after a fresh capture succeeds.
 
-Ask which channel is connected and the physical 1×/10× probe switch position.
-Set `configure` probe_ch1/probe_ch2 only when confirmed. Defaults display 1×,
-explicitly marked unconfirmed. Probe contact and physical attenuation cannot
-be detected automatically. For the ESP32 example, CH1 tip goes to the signal
-GPIO and its ground clip to board GND.
+## Evidence workflow
 
-`run` starts repeated finite captures; `stop` freezes the last capture.
-The panel has Scope, Measurements and Settings tabs with a shared LIVE/FROZEN
-indicator. Scope keeps frequency and duty cycle above the trace and fills the
-available panel height without scrolling. Measurements includes all readings,
-quality explanations, capture identity and Save Capture. Settings contains
-sampling, trigger, probe factors and Hantek connection information. Switching
-tabs preserves acquisition and capture state.
-The panel labels this Run / Freeze and retains the waveform and measurement
-cards together. Single capture acquires once and leaves the panel frozen.
-Click Frequency or Period to mark a measured cycle; click Duty cycle to shade
-samples above its midpoint threshold. Cards average all complete cycles, while
-the highlight reports one actual cycle. If no complete cycle fits in the preview,
-the panel explains why it cannot highlight one. Fit Signal changes display scales
-only and stays within the available preview. CH1/CH2 checkboxes control trace and
-Scope readout visibility, not acquisition. Measurements still lists both channels.
+1. `capture {"channels":[1]}` → capture ID, named channel measurements, immutable
+   settings, quality flags and retention. Both channels are physically acquired.
+2. `evaluate {"id":"…","checks":[{"channel":1,"metric":"duty_percent",
+   "target":50,"tolerance":{"kind":"absolute","value":5}}]}` → pass, fail or
+   inconclusive with measured values and inclusive bounds. Duty tolerance is in
+   percentage points; relative_percent is a percentage of the target magnitude.
+3. `show_capture {"id":"…","channel":1,"highlight":"high"}` → stops live
+   acquisition and selects this exact waveform on the shared Scope page.
+4. `save {"id":"…"}` → JSON/CSV paths, or `retain {"id":"…","action":"release"}`
+   when discussion of the evidence is complete. Saved files persist; pins do not.
 
-Measurements include period_us and an optional visible_cycle with zero-based
-start_sample/end_sample indices in the full capture and threshold_v. Subtract
-preview_start_sample to locate that evidence in preview_v; end_sample marks the
-next rising edge. Flat or unreliable timing returns null, with quality reasons.
-`capture` acquires once without changing run state. `read` returns measurements
-and a capture ID; use preview=true for at most 4096 consecutive samples per
-channel, raw=true for full base64 interleaved CH1/CH2 bytes. An id pins a retained
-capture (last 16 in memory); expired IDs return errors. `save` writes that capture
-to the plugin's user-data directory as JSON and CSV and returns both paths.
-CSV includes time, calibrated volts and raw ADC codes. JSON includes settings,
-factory zero offsets, conversion scale, raw bytes and quality metadata.
+At most 8 unique pinned captures survive live-ring eviction; the unpinned live
+ring holds 16. A full pin set rejects capture before USB access. Use pin:false
+for transient captures, and status(include:["retention"]) to list pins. Pins are
+lost on backend restart. The displayed frozen capture has its own reference;
+releasing a pin cannot remove it from the panel. No silent fallback for an
+explicit unavailable ID. Capture IDs include a random backend-session prefix.
 
-Sampling options: 100000, 200000 (default), 500000, 1000000 samples/s per channel.
-Both channels are always acquired, 8192 samples each. BNC range stays ±5 V;
-vertical display zoom changes no hardware gain. DC coupling only.
+`read` is read-only; default is latest summary. detail:"preview" adds up to 4096
+consecutive voltage samples per selected channel. detail:"raw" returns base 64
+interleaved CH1/CH2 ADC bytes, irrespective of output channel filtering. Metadata
+includes preview start/stride, sample rate/count, duration_us, zero offsets and
+scale. Each channels[] record names its channel and measurement; period_us and
+visible_cycle start_sample/end_sample/threshold_v provide timing evidence.
+The cycle end marks the next rising edge. Subtract preview_start_sample to locate
+these absolute sample indices in the preview. Legacy preview/raw boolean flags
+remain supported on read, but cannot be combined with detail.
 
-Frequency and duty require at least three consistent rising edges, at least
-10 samples per cycle, and a discernible voltage swing. Null is unknown, never
-zero. Quality flags identify clipping, irregular/insufficient cycles and
-unconfirmed probe factors. Gain is nominal; factory EEPROM zero offsets are
-used when valid. No EEPROM writes. 512 settling pairs are discarded after each
-ADC restart. Software-triggered alignment and separate captures have gaps;
-watches guaranteeing every transient is caught are not supported.
+## State and configuration
 
-Firmware is loaded into volatile RAM after connection when required. An unknown
-already-loaded firmware is rejected: unplug/replug before using this plugin.
-Close other scope software to release exclusive USB access. On Linux use the
-upstream USB access rules if access is denied.
+`status` is compact and read-only. include:["capabilities","retention","display"]
+adds device limits/identity, pin IDs and display/panel telemetry. display_revision
+is exposed as display.revision. `panel_sync` is for the panel to report the capture,
+revision, page and viewport it applied; telemetry is not proof a human saw it.
+`show_capture` selects evidence even if the panel is closed. Open it via
+`minerva_plugin_open_panel plugin_id=oscilloscope`; no tool claims confirmed
+rendering. Highlight unavailable means no valid complete cycle in the preview.
 
-The panel and tools use the same acquisition state. Status settings describe
-future captures; each retained capture keeps the settings actually used for it.
+`stop` means Freeze; repeated calls retain an already selected older capture.
+`run` returns the display to live and clears the explicit selection. Single
+capture preserves Run/Freeze state; while frozen, it selects the new capture.
+Panel tabs share state. Measurements has independently collapsible CH1/CH2 cards
+(CH1 initially open); Settings cards start closed. Scope fills available height.
+Expanded card bodies may scroll when many cards are opened in a small viewport;
+headers and page controls remain accessible.
+
+`configure` changes persistent settings atomically. Sample rates are 100000,
+200000, 500000, 1000000; software rising-edge trigger channel is 1 or 2. A capture's
+optional settings:{sample_rate_hz,trigger_channel} affects only that acquisition.
+Each capture records its actual settings and the base persistent revision.
+
+Ask the user which channel and physical 1×/10× probe switch position they use.
+`configure {"probes":[{"channel":1,"ratio":10,"confirmed":true}]}` records an
+explicit confirmation. A ratio change clears confirmation unless explicitly
+provided; confirmed:false clears it. Legacy probe_ch 1/probe_ch 2 set ratios only,
+not confirmation. Never mark a switch confirmed based on the apparent voltage.
+Frozen evidence keeps its original probe factor and confirmation.
+
+## Limits, quality and errors
+
+Hardware fixed range ±5 V at BNC, DC coupling, 8192 samples/channel. Both channels
+are always acquired. 512 startup pairs are discarded. Display scales change no
+hardware gain. Factory EEPROM zero offsets are used when available; gain remains
+nominal. Captures have gaps: no guarantee of catching every glitch. Firmware is
+loaded into volatile RAM only; no EEPROM writes. Only one program can own USB.
+Linux may require upstream USB access rules. Tip→signal GPIO, ground→board GND.
+
+Unknown timing is null with reasons (flat, too few cycles/samples, irregular
+period), not 0 Hz. Evaluate treats invalid timing as inconclusive. Unconfirmed
+attenuation or clipping makes voltage checks inconclusive, without invalidating
+otherwise valid timing. Overall verdict is fail if any check fails, otherwise
+inconclusive if any check is inconclusive, else pass. Bounds use six decimal
+places; target magnitude/resolved bounds <=1e 12, tolerance 0..1e 6, 1..32 checks.
+Relative tolerance around zero is rejected. Saved JSON preserves full evidence.
+
+Failures have success:false, error:{code,message,retryable,suggested_action} and
+MCP isError:true. Quality limitations on successful captures are not tool errors.
+Codes include INVALID_ARGUMENT, DEVICE_NOT_FOUND, DEVICE_BUSY, PERMISSION_DENIED,
+UNSUPPORTED_FIRMWARE, ACQUISITION_TIMEOUT, USB_DISCONNECTED, USB_ERROR, NO_CAPTURE,
+CAPTURE_EXPIRED, PIN_LIMIT and SAVE_FAILED. Follow suggested_action; avoid blind
+retries. Unknown loaded firmware requires unplug/replug.
+
+Acquisition timeout_ms defaults 8000, allowed 100..15000. USB controls and reads
+honor the remaining deadline; native USB discovery/close and waiting for an
+in-flight operation can extend cleanup beyond it. A timed-out run stays stopped
+and cannot start later. Read-only state access does not hold the USB lock.
