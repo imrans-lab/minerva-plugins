@@ -10,6 +10,12 @@ be detected automatically. For the ESP32 example, CH1 tip goes to the signal
 GPIO and its ground clip to board GND.
 
 `run` starts repeated finite captures; `stop` freezes the last capture.
+The panel has Scope, Measurements and Settings tabs with a shared LIVE/FROZEN
+indicator. Scope keeps frequency and duty cycle above the trace and fills the
+available panel height without scrolling. Measurements includes all readings,
+quality explanations, capture identity and Save Capture. Settings contains
+sampling, trigger, probe factors and Hantek connection information. Switching
+tabs preserves acquisition and capture state.
 The panel labels this Run / Freeze and retains the waveform and measurement
 cards together. Single capture acquires once and leaves the panel frozen.
 Click Frequency or Period to mark a measured cycle; click Duty cycle to shade
@@ -17,7 +23,7 @@ samples above its midpoint threshold. Cards average all complete cycles, while
 the highlight reports one actual cycle. If no complete cycle fits in the preview,
 the panel explains why it cannot highlight one. Fit Signal changes display scales
 only and stays within the available preview. CH1/CH2 checkboxes control trace and
-measurement-card visibility, not acquisition.
+Scope readout visibility, not acquisition. Measurements still lists both channels.
 
 Measurements include period_us and an optional visible_cycle with zero-based
 start_sample/end_sample indices in the full capture and threshold_v. Subtract

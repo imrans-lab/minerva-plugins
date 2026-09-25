@@ -21,7 +21,7 @@ python3 scripts/package.py --target linux-x86_64
 ```
 
 The script builds pinned libusb and firmware sources, bundles dependencies and
-corresponding sources/licenses, and produces `dist/oscilloscope-0.1.1-<target>.tar.gz`
+corresponding sources/licenses, and produces `dist/oscilloscope-0.1.2-<target>.tar.gz`
 with SHA256SUMS. Install this URL with `minerva_plugin_marketplace_install`,
 then start `oscilloscope` and open `oscilloscope_panel`. A public registry entry
 must only be generated after the corresponding release assets exist.
