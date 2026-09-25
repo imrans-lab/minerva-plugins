@@ -127,13 +127,13 @@
     {
       "id": "oscilloscope",
       "name": "Oscilloscope",
-      "version": "0.1.1",
-      "manifest_version": "0.1.1",
-      "release_tag": "oscilloscope-v0.1.1",
-      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/oscilloscope-v0.1.1/oscilloscope/manifest.json",
+      "version": "0.1.2",
+      "manifest_version": "0.1.2",
+      "release_tag": "oscilloscope-v0.1.2",
+      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/oscilloscope-v0.1.2/oscilloscope/manifest.json",
       "downloads": {
-        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/oscilloscope-v0.1.1/oscilloscope-0.1.1-macos-universal.tar.gz",
-        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/oscilloscope-v0.1.1/oscilloscope-0.1.1-linux-x86_64.tar.gz"
+        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/oscilloscope-v0.1.2/oscilloscope-0.1.2-macos-universal.tar.gz",
+        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/oscilloscope-v0.1.2/oscilloscope-0.1.2-linux-x86_64.tar.gz"
       },
       "description": "See and measure two-channel waveforms from a Hantek 6022BE USB oscilloscope inside Minerva. People and AI agents share capture controls, probe settings, measurements and saved data. Requires the scope and USB access; firmware and native dependencies are included.",
       "price": {
