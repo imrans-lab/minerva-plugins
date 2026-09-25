@@ -61,7 +61,7 @@ Each capture records its actual settings and the base persistent revision.
 Ask the user which channel and physical 1×/10× probe switch position they use.
 `configure {"probes":[{"channel":1,"ratio":10,"confirmed":true}]}` records an
 explicit confirmation. A ratio change clears confirmation unless explicitly
-provided; confirmed:false clears it. Legacy probe_ch 1/probe_ch 2 set ratios only,
+provided; confirmed:false clears it. Legacy probe_ch1/probe_ch2 set ratios only,
 not confirmation. Never mark a switch confirmed based on the apparent voltage.
 Frozen evidence keeps its original probe factor and confirmation.
 
