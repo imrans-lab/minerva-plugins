@@ -14,7 +14,15 @@ type Settings struct {
 	Confirmed [2]bool `json:"probe_confirmed"`
 	Trigger   int     `json:"trigger_channel"`
 }
+type Cycle struct {
+	Start     int     `json:"start_sample"`
+	End       int     `json:"end_sample"`
+	Threshold float64 `json:"threshold_v"`
+}
+
 type Measurement struct {
+	PeriodUS  *float64 `json:"period_us"`
+	Cycle     *Cycle   `json:"visible_cycle"`
 	Min       float64  `json:"min_v"`
 	Max       float64  `json:"max_v"`
 	Vpp       float64  `json:"vpp_v"`
@@ -48,7 +56,7 @@ func measure(v []float64, raw []byte, rate int, confirmed bool) (m Measurement, 
 	// Godot validates JSON numeric round trips. Six decimal places exceed
 	// this 8-bit instrument's precision and avoid binary-tail mismatches.
 	defer func() {
-		for _, p := range []*float64{&m.Min, &m.Max, &m.Vpp, &m.Mean, &m.RMS, m.Frequency, m.Duty} {
+		for _, p := range []*float64{&m.Min, &m.Max, &m.Vpp, &m.Mean, &m.RMS, m.Frequency, m.Duty, m.PeriodUS} {
 			if p != nil {
 				*p = math.Round(*p*1e6) / 1e6
 			}
@@ -80,19 +88,7 @@ func measure(v []float64, raw []byte, rate int, confirmed bool) (m Measurement, 
 		m.Flags = append(m.Flags, "no_clear_periodic_signal")
 		return
 	}
-	low := m.Min + m.Vpp*.35
-	high := m.Min + m.Vpp*.65
-	armed := false
-	var rises []int
-	for i, x := range v {
-		if x < low {
-			armed = true
-		}
-		if armed && x > high {
-			rises = append(rises, i)
-			armed = false
-		}
-	}
+	rises := risingEdges(v, m.Min, m.Vpp)
 	if len(rises) < 3 {
 		m.Flags = append(m.Flags, "too_few_cycles")
 		return
@@ -111,6 +107,8 @@ func measure(v []float64, raw []byte, rate int, confirmed bool) (m Measurement, 
 	}
 	f := float64(rate) / period
 	m.Frequency = &f
+	periodUS := period * 1e6 / float64(rate)
+	m.PeriodUS = &periodUS
 	mid := (m.Min + m.Max) / 2
 	highCount := 0
 	for _, x := range v[rises[0]:rises[len(rises)-1]] {
@@ -122,6 +120,24 @@ func measure(v []float64, raw []byte, rate int, confirmed bool) (m Measurement, 
 	m.Duty = &duty
 	return
 }
+
+// Use the same hysteresis for timing measurements and visible cycle evidence.
+func risingEdges(v []float64, min, vpp float64) []int {
+	low, high := min+vpp*.35, min+vpp*.65
+	armed := false
+	var rises []int
+	for i, x := range v {
+		if x < low {
+			armed = true
+		}
+		if armed && x > high {
+			rises = append(rises, i)
+			armed = false
+		}
+	}
+	return rises
+}
+
 func makeCapture(raw []byte, settings Settings, zero [2]float64, cal string, seq uint64) *Capture {
 	c := &Capture{Success: true, SettlingSamples: 512, ZeroADC: zero, VoltsPerCountAtBNC: 0.04, ID: fmt.Sprintf("%d-%d", time.Now().UnixMilli(), seq), Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Settings: settings, Calibration: cal, Raw: raw, TriggerIndex: -1, PreviewStride: 1}
 	var volts [2][]float64
@@ -154,6 +170,16 @@ func makeCapture(raw []byte, settings Settings, zero [2]float64, cal string, seq
 	c.PreviewStart = start
 	for ch := 0; ch < 2; ch++ {
 		c.Preview[ch] = append([]float64(nil), volts[ch][start:end]...)
+		m := &c.Measurements[ch]
+		if m.Frequency != nil {
+			rises := risingEdges(volts[ch], m.Min, m.Vpp)
+			for i := 1; i < len(rises); i++ {
+				if rises[i-1] >= start && rises[i] < end {
+					m.Cycle = &Cycle{Start: rises[i-1], End: rises[i], Threshold: math.Round((m.Min+m.Max)/2*1e6) / 1e6}
+					break
+				}
+			}
+		}
 	}
 	return c
 }

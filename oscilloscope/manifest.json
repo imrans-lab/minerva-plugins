@@ -1,7 +1,7 @@
 {
   "id": "oscilloscope",
   "name": "Oscilloscope",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "See and measure two-channel waveforms from a Hantek 6022BE USB oscilloscope inside Minerva. People and AI agents share capture controls, probe settings, measurements and saved data. Requires the scope and USB access; firmware and native dependencies are included.",
   "price": {
     "amount_minor": 0,

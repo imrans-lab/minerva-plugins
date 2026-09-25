@@ -4,8 +4,8 @@ Hantek 6022BE USB oscilloscope for Minerva. Go/libusb acquisition backend,
 HTML Canvas panel, and seven MCP tools shared by people and agents.
 
 First version: two channels at 100/200/500 kS/s or 1 MS/s, ±5 V BNC range,
-software rising-edge alignment, Run/Stop/Single, probe factors, frequency,
-duty cycle, voltage statistics, cursor inspection and capture JSON/CSV export.
+software rising-edge alignment, Run/Freeze/Single, probe factors, frequency,
+duty cycle, period, clickable cycle/high-time annotations, voltage statistics, cursor inspection and capture JSON/CSV export.
 Actual throughput is host-dependent. Acquisitions are separate, with gaps.
 
 ## Build and marketplace package
@@ -21,7 +21,7 @@ python3 scripts/package.py --target linux-x86_64
 ```
 
 The script builds pinned libusb and firmware sources, bundles dependencies and
-corresponding sources/licenses, and produces `dist/oscilloscope-0.1.0-<target>.tar.gz`
+corresponding sources/licenses, and produces `dist/oscilloscope-0.1.1-<target>.tar.gz`
 with SHA256SUMS. Install this URL with `minerva_plugin_marketplace_install`,
 then start `oscilloscope` and open `oscilloscope_panel`. A public registry entry
 must only be generated after the corresponding release assets exist.

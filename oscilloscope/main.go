@@ -282,7 +282,7 @@ func main() {
 		var err error
 		switch r.Method {
 		case "initialize":
-			result = map[string]any{"protocolVersion": "2024-11-05", "capabilities": map[string]any{"tools": map[string]any{}}, "serverInfo": map[string]string{"name": "oscilloscope", "version": "0.1.0"}}
+			result = map[string]any{"protocolVersion": "2024-11-05", "capabilities": map[string]any{"tools": map[string]any{}}, "serverInfo": map[string]string{"name": "oscilloscope", "version": "0.1.1"}}
 		case "ping":
 			result = map[string]any{}
 		case "tools/list":

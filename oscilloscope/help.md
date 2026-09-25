@@ -10,6 +10,19 @@ be detected automatically. For the ESP32 example, CH1 tip goes to the signal
 GPIO and its ground clip to board GND.
 
 `run` starts repeated finite captures; `stop` freezes the last capture.
+The panel labels this Run / Freeze and retains the waveform and measurement
+cards together. Single capture acquires once and leaves the panel frozen.
+Click Frequency or Period to mark a measured cycle; click Duty cycle to shade
+samples above its midpoint threshold. Cards average all complete cycles, while
+the highlight reports one actual cycle. If no complete cycle fits in the preview,
+the panel explains why it cannot highlight one. Fit Signal changes display scales
+only and stays within the available preview. CH1/CH2 checkboxes control trace and
+measurement-card visibility, not acquisition.
+
+Measurements include period_us and an optional visible_cycle with zero-based
+start_sample/end_sample indices in the full capture and threshold_v. Subtract
+preview_start_sample to locate that evidence in preview_v; end_sample marks the
+next rising edge. Flat or unreliable timing returns null, with quality reasons.
 `capture` acquires once without changing run state. `read` returns measurements
 and a capture ID; use preview=true for at most 4096 consecutive samples per
 channel, raw=true for full base64 interleaved CH1/CH2 bytes. An id pins a retained

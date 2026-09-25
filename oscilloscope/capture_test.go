@@ -22,6 +22,15 @@ func TestCaptureAndControlContract(t *testing.T) {
 	if m.Frequency == nil || math.Abs(*m.Frequency-100) > .1 || m.Duty == nil || math.Abs(*m.Duty-50) > .1 {
 		t.Fatalf("timing: %+v", m)
 	}
+	if m.PeriodUS == nil || *m.PeriodUS != 10000 || m.Cycle == nil || m.Cycle.Start != 2000 || m.Cycle.End != 4000 || m.Cycle.Threshold != 1.64 {
+		t.Fatalf("cycle evidence: %+v", m)
+	}
+	if m.Cycle.Start < c.PreviewStart || m.Cycle.End >= c.PreviewStart+len(c.Preview[0]) {
+		t.Fatal("cycle outside preview")
+	}
+	if c.Measurements[1].Cycle != nil || c.Measurements[1].PeriodUS != nil {
+		t.Fatal("flat channel has timing evidence")
+	}
 	if math.Abs(m.Vpp-3.28) > 1e-9 || m.Min != 0 || c.TriggerIndex < 0 {
 		t.Fatalf("scaling or trigger: %+v", c)
 	}
