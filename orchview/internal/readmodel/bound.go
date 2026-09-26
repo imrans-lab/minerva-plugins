@@ -30,6 +30,9 @@ var fieldGroups = []string{"title", "revision", "stage", "owner", "links", "acce
 // Query is the bounded request. It is parsed from tool arguments, which carry
 // no authority: identity arrives separately as a Caller.
 type Query struct {
+	// Root, when set, is the id of the node whose subtree is returned; Depth
+	// then counts levels below it.
+	Root         string
 	Depth        int
 	MaxNodes     int
 	Fields       map[string]bool
@@ -55,6 +58,8 @@ func ParseQuery(raw json.RawMessage) (Query, []string, error) {
 	for name, value := range args {
 		var err error
 		switch name {
+		case "root":
+			err = json.Unmarshal(value, &q.Root)
 		case "depth":
 			err = json.Unmarshal(value, &q.Depth)
 		case "max_nodes":
@@ -123,8 +128,12 @@ type Reply struct {
 	Continuation string `json:"continuation,omitempty"`
 	// ContinuationReset says a continuation was cut against records that
 	// have since changed, so this page restarts from the first node.
-	ContinuationReset bool     `json:"continuation_reset,omitempty"`
-	IgnoredArguments  []string `json:"ignored_arguments,omitempty"`
+	ContinuationReset bool `json:"continuation_reset,omitempty"`
+	// RootNotFound echoes a requested root that is not in this caller's
+	// view; the tree is then empty. A root outside the view and a root that
+	// does not exist read the same.
+	RootNotFound     string   `json:"root_not_found,omitempty"`
+	IgnoredArguments []string `json:"ignored_arguments,omitempty"`
 }
 
 // Snapshot is everything one read composes: W1 records and the host's
@@ -136,12 +145,29 @@ type Snapshot struct {
 
 // Build returns one bounded page of the tree the caller may see.
 func Build(snap Snapshot, caller Caller, q Query, ignored []string) Reply {
-	f := buildForest(snap.Records, snap.Sessions, caller)
+	return page(buildForest(snap.Records, snap.Sessions, caller), caller, q, ignored)
+}
+
+// page bounds an authorized forest to one reply.
+func page(f forest, caller Caller, q Query, ignored []string) Reply {
 	reply := Reply{Caller: caller.Principal, Scope: "full", Cursor: cursorOf(f.included), IgnoredArguments: ignored}
 	if caller.Restricted {
 		reply.Scope = "restricted"
 	}
-	flat := flatten(f.roots, q.Depth)
+	roots, parent := f.roots, ""
+	if q.Root != "" {
+		node, above, ok := findNode(f.roots, q.Root, "")
+		if !ok {
+			reply.RootNotFound = clip(q.Root, 200)
+			reply.Tree = []*Node{}
+			return reply
+		}
+		roots, parent = []*Node{node}, above
+	}
+	flat := flatten(roots, q.Depth)
+	if len(flat) > 0 {
+		flat[0].parent = parent
+	}
 	reply.NodesTotal = len(flat)
 
 	offset := 0
@@ -206,6 +232,19 @@ func flatten(roots []*Node, maxDepth int) []flatEntry {
 		walk(r, "", 0)
 	}
 	return out
+}
+
+// findNode returns the node with the id and its parent's id.
+func findNode(nodes []*Node, id, parent string) (*Node, string, bool) {
+	for _, n := range nodes {
+		if n.ID == id {
+			return n, parent, true
+		}
+		if found, above, ok := findNode(n.Children, id, n.ID); ok {
+			return found, above, true
+		}
+	}
+	return nil, "", false
 }
 
 // fitCount estimates how many entries fit under max_nodes and the byte
@@ -291,15 +330,20 @@ func mustJSON(v any) []byte {
 func cursorOf(records []Record) string {
 	lines := make([]string, 0, len(records))
 	for _, r := range records {
-		rev := "-"
-		if r.Revision != nil {
-			rev = strconv.Itoa(*r.Revision)
-		}
-		lines = append(lines, strings.Join([]string{r.Key(), rev, r.Status, r.UpdatedAt}, "|"))
+		lines = append(lines, recordLine(r))
 	}
 	sort.Strings(lines)
 	sum := sha256.Sum256([]byte(strings.Join(lines, "\n")))
 	return "r1:" + hex.EncodeToString(sum[:16])
+}
+
+// recordLine is one record's part of a cursor.
+func recordLine(r Record) string {
+	rev := "-"
+	if r.Revision != nil {
+		rev = strconv.Itoa(*r.Revision)
+	}
+	return strings.Join([]string{r.Key(), rev, r.Status, r.UpdatedAt}, "|")
 }
 
 func encodeContinuation(cursor string, offset int) string {

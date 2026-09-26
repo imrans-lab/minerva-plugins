@@ -26,6 +26,66 @@
           "max_nodes": {"type": "integer", "minimum": 1, "maximum": 2000}
         }
       }
+    },
+    {
+      "name": "minerva_orchview_tree",
+      "description": "Read the orchestration work tree (objectives, their tasks, each dispatch attempt, the roles in it and the agents holding them) from the same read model the Orchestration View panel shows. Each node keeps what the work records say (stage, owner, links, remaining acceptance criteria) apart from what Minerva last observed of the agent's session (activity, unknown when there is no evidence, never idle). Read-only.\n\nBounds: `root` (a node id from an earlier reply; omit it for every objective) picks one subtree. `depth` (0-4, default 4) counts levels below it; a node at the limit reports `children_hidden`. `fields` picks optional groups from title, revision, stage, owner, links, acceptance (default all; id, kind, flags and activity always come). `max_nodes` (1-2000, default 200) caps one page, and every reply also stays under 64 KiB.\n\nCursor: a reply that stops early says `truncated` and carries `continuation`; pass it back as `continuation` for the next page. A continuation cut against records that have since changed restarts at the first node and says `continuation_reset`. Every reply's `cursor` digests the recorded state of the whole view; pass it to minerva_orchview_changes to learn what changed.\n\nIdentity: `identity` names whom the reply was evaluated for. Minerva passes no caller identity on plugin tool calls yet, so a call from the owner's host gets the owner's full view and says so (source host_default_owner). Through the agent-container gateway, the gateway stamps `caller` and `caller_role` with the session's registered identity and role, and the reply holds only records addressed to them, their descendants, and their ancestors as partial context (source caller_argument). A container cannot set `caller` itself, and a `caller` only ever narrows a view.",
+      "input_schema": {
+        "properties": {
+          "continuation": {
+            "description": "Continuation from a truncated reply.",
+            "type": "string"
+          },
+          "depth": {
+            "description": "Levels below root to include.",
+            "maximum": 4,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "fields": {
+            "description": "Optional field groups to include.",
+            "items": {
+              "enum": [
+                "title",
+                "revision",
+                "stage",
+                "owner",
+                "links",
+                "acceptance"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "max_nodes": {
+            "description": "Most nodes on one page.",
+            "maximum": 2000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "root": {
+            "description": "Id of the node whose subtree to return; omit for every objective.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "minerva_orchview_changes",
+      "description": "Report what changed in the orchestration work tree since an earlier reply, from the same read model as minerva_orchview_tree: each record node (objective, task, attempt) that was added, changed or removed, with its current stage, owner, links and activity. Only recorded changes count; observed activity alone does not. Read-only.\n\nBounds: at most 200 changes and 64 KiB per reply; `changes_total` counts them all and `truncated` says the list stops short, in which case read the tree again.\n\nCursor: pass the `cursor` of an earlier minerva_orchview_tree or minerva_orchview_changes reply. `unchanged` says nothing recorded moved. `reset` says the cursor is not one this backend remembers for this caller (too old, from before a restart, or cut for another view): read the tree again. Each reply's `cursor` is the next one to pass.\n\nIdentity: as for minerva_orchview_tree. The host path is answered for the owner and says so; through the agent-container gateway the reply is evaluated for the gateway-stamped `caller`, and a cursor is only compared with the view of the caller it was cut for.",
+      "input_schema": {
+        "properties": {
+          "cursor": {
+            "description": "Cursor from an earlier tree or changes reply.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "cursor"
+        ],
+        "type": "object"
+      }
     }
   ],
   "ui": {

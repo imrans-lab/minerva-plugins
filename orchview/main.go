@@ -5,8 +5,9 @@
 //
 // The backend reads W1 work records from Docket and harness-session evidence
 // from Minerva through host capabilities (minerva/capability requests on the
-// same stdio pair) and answers the panel's tree channel from the read model in
-// internal/readmodel. It never writes anything.
+// same stdio pair) and answers the panel's tree channel and the agent verbs
+// (verbs.go) from the read model in internal/readmodel. It never writes
+// anything.
 package main
 
 import (
@@ -175,7 +176,7 @@ func (s *server) dispatch(msg rpcRequest) bool {
 			"serverInfo":      map[string]any{"name": serverName, "version": serverVersion},
 		})
 	case "tools/list":
-		s.reply(msg.ID, map[string]any{"tools": []any{panelTreeSpec()}})
+		s.reply(msg.ID, map[string]any{"tools": append([]any{panelTreeSpec()}, verbSpecs()...)})
 	case "tools/call":
 		go s.toolsCall(msg)
 	case "ping":
@@ -200,11 +201,17 @@ func (s *server) toolsCall(msg rpcRequest) {
 		s.fail(msg.ID, -32602, "tools/call: "+err.Error())
 		return
 	}
-	if call.Name != panelTreeTool {
+	var body []byte
+	var err error
+	switch call.Name {
+	case panelTreeTool:
+		body, err = s.panel.tree(context.Background(), call.Arguments)
+	case treeTool, changesTool:
+		body, err = s.panel.verb(context.Background(), call.Name, call.Arguments)
+	default:
 		s.fail(msg.ID, -32601, "unknown tool: "+call.Name)
 		return
 	}
-	body, err := s.panel.tree(context.Background(), call.Arguments)
 	isError := err != nil
 	if isError {
 		body, _ = json.Marshal(map[string]any{"ok": false, "error": err.Error()})

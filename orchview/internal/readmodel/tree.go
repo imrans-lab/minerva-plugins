@@ -149,7 +149,7 @@ func (ix *index) authorize(caller Caller) (map[string]bool, map[string]bool) {
 		// caller. The walk is bounded by the record count against cycles.
 		cur := ix.byKey[k]
 		for step := 0; step <= len(ix.keys); step++ {
-			if addressedTo(cur, caller.Principal) {
+			if caller.addresses(cur) {
 				visible[k] = true
 				break
 			}

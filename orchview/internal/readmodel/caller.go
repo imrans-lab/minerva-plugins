@@ -10,12 +10,23 @@ import (
 // view by naming a principal or a dispatch id.
 //
 // Restricted=false is the owner's full view. Restricted=true limits the tree
-// to records the principal is authorized to see (W1 KB section 5): those
-// assigned, directed or claimed to it, their descendants, and their ancestors
-// as navigation context (marked partial).
+// to records the caller is authorized to see (W1 KB section 5): those
+// assigned, directed or claimed to its principal or its role, their
+// descendants, and their ancestors as navigation context (marked partial).
+// Principal and Role are a session's registered identity and role, the same
+// pair the agent-container gateway scopes Docket by.
 type Caller struct {
 	Principal  string
+	Role       string
 	Restricted bool
+}
+
+// Owner is the unrestricted view the owner's Minerva GUI is shown.
+var Owner = Caller{Principal: "owner", Restricted: false}
+
+// addresses reports whether the record names the caller's principal or role.
+func (c Caller) addresses(r Record) bool {
+	return addressedTo(r, c.Principal) || addressedTo(r, c.Role)
 }
 
 func samePrincipal(a, b string) bool {

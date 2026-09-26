@@ -110,6 +110,12 @@ func TestReadModelOverW1Fixture(t *testing.T) {
 	}
 	nodes := byID(full.Tree, map[string]*Node{})
 
+	// --- Verb parity: a host-path minerva_orchview_tree call gets the page the panel builds. ---
+	if verb, err := NewHistory().Tree(snap, json.RawMessage(`{}`)); err != nil ||
+		string(mustJSON(verb.Reply)) != string(mustJSON(build(t, snap, Owner, `{}`))) {
+		t.Errorf("minerva_orchview_tree and the panel differ over the fixture (err=%v)", err)
+	}
+
 	// Hand-walk. remaining = DONE WHEN bullets of tasks without outcome:accepted
 	// (W1 KB section 3). W1 T0 is done but carries no outcome: tag, so its four
 	// bullets remain; each fixture sibling has one bullet. The objective sums

@@ -16,13 +16,9 @@ import (
 )
 
 // panelTreeTool is the panel's channel. It is the owner's view: the panel
-// runs in the owner's Minerva GUI and the host passes no caller identity on
-// plugin tool calls, so the caller is fixed here and never read from the
-// arguments. The agent-facing verb, with host-supplied identity, is separate.
+// runs in the owner's Minerva GUI, so the caller is fixed to readmodel.Owner
+// and never read from the arguments. The agent-facing verbs are in verbs.go.
 const panelTreeTool = "minerva_orchview_panel_tree"
-
-// ownerCaller is the principal the panel's view is cut for.
-var ownerCaller = readmodel.Caller{Principal: "owner", Restricted: false}
 
 // callBudget bounds one panel read, Docket and session reads included.
 const callBudget = 20 * time.Second
@@ -46,15 +42,53 @@ func panelTreeSpec() map[string]any {
 	}
 }
 
-// panelService answers the panel's reads from one record cache.
+// panelService answers the panel's reads and the agent verbs from one
+// record cache; mu serialises every read, so the cache and the verbs'
+// cursor history are touched by one call at a time.
 type panelService struct {
-	mu    sync.Mutex
-	host  *hostClient
-	cache *readmodel.Cache
+	mu      sync.Mutex
+	host    *hostClient
+	cache   *readmodel.Cache
+	history *readmodel.History
 }
 
 func newPanelService(host *hostClient) *panelService {
-	return &panelService{host: host, cache: readmodel.NewCache(readmodel.DefaultFullReload)}
+	return &panelService{host: host, cache: readmodel.NewCache(readmodel.DefaultFullReload),
+		history: readmodel.NewHistory()}
+}
+
+// snapshotRead is one refreshed view of the records and session evidence.
+type snapshotRead struct {
+	snap     readmodel.Snapshot
+	stats    readmodel.RefreshStats
+	projects []string
+	// evidenceError is why session evidence could not be read; every actor
+	// then reads unknown.
+	evidenceError string
+}
+
+// read refreshes the record cache and reads session evidence. Callers hold mu.
+func (p *panelService) read(ctx context.Context, now time.Time) (snapshotRead, error) {
+	var out snapshotRead
+	projects, err := p.host.projects(ctx)
+	if err != nil {
+		return out, err
+	}
+	out.projects = projects
+	out.stats, err = p.cache.Refresh(ctx, p.host, projects, now)
+	if err != nil {
+		return out, err
+	}
+	if out.stats.IncrementalError != "" {
+		log.Printf("change query failed, reloaded everything: %s", out.stats.IncrementalError)
+	}
+	sessions, err := p.host.sessions(ctx, now)
+	if err != nil {
+		out.evidenceError = clipText(err.Error(), 300)
+		sessions = nil
+	}
+	out.snap = readmodel.Snapshot{Records: p.cache.Records(), Sessions: sessions}
+	return out, nil
 }
 
 // panelReply is the read model's page plus the session evidence it was built
@@ -92,30 +126,18 @@ func (p *panelService) tree(parent context.Context, raw json.RawMessage) ([]byte
 		return nil, err
 	}
 
-	projects, err := p.host.projects(ctx)
+	got, err := p.read(ctx, now)
 	if err != nil {
 		return nil, err
 	}
-	stats, err := p.cache.Refresh(ctx, p.host, projects, now)
-	if err != nil {
-		return nil, err
-	}
-	out := panelReply{ObservedAt: now.Format(time.RFC3339), Projects: projects}
-	sessions, err := p.host.sessions(ctx, now)
-	if err != nil {
-		// No session evidence at all: every actor reads unknown.
-		out.EvidenceError = clipText(err.Error(), 300)
-		sessions = nil
-	}
+	stats, sessions := got.stats, got.snap.Sessions
+	out := panelReply{ObservedAt: now.Format(time.RFC3339), Projects: got.projects, EvidenceError: got.evidenceError}
 	out.Evidence = evidenceDigest(sessions, out.EvidenceError != "")
 	if q.Since != "" && evidenceSince != out.Evidence {
 		q.Since = ""
 	}
-	out.Reply = readmodel.Build(readmodel.Snapshot{Records: p.cache.Records(), Sessions: sessions}, ownerCaller, q, ignored)
+	out.Reply = readmodel.Build(got.snap, readmodel.Owner, q, ignored)
 
-	if stats.IncrementalError != "" {
-		log.Printf("tree: change query failed, reloaded everything: %s", stats.IncrementalError)
-	}
 	log.Printf("tree: full_reload=%v queries=%d gets=%d removed=%d records=%d sessions=%d unchanged=%v nodes=%d/%d continuation=%v",
 		stats.Full, stats.Queries, stats.Gets, stats.Removed, stats.Records, len(sessions),
 		out.Unchanged, out.NodesReturned, out.NodesTotal, q.Continuation != "")
