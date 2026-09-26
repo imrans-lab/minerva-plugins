@@ -1,0 +1,89 @@
+{
+  "id": "oscilloscope",
+  "name": "Oscilloscope",
+  "version": "0.2.0",
+  "description": "See and measure two-channel waveforms from a Hantek 6022BE USB oscilloscope inside Minerva. People and AI agents share capture controls, probe settings, measurements and saved data. Requires the scope and USB access; firmware and native dependencies are included.",
+  "price": {
+    "amount_minor": 0,
+    "currency": "USD"
+  },
+  "host_api_version": "1",
+  "release_targets": [
+    "macos-universal",
+    "linux-x86_64"
+  ],
+  "backend": {
+    "transport": "stdio",
+    "entrypoint": "./oscilloscope-plugin",
+    "args": []
+  },
+  "tools": [
+    {
+      "name": "minerva_oscilloscope_status",
+      "description": "Connection, settings and measurements."
+    },
+    {
+      "name": "minerva_oscilloscope_configure",
+      "description": "Set sample rate, probe attenuation and trigger channel."
+    },
+    {
+      "name": "minerva_oscilloscope_run",
+      "description": "Start repeated two-channel captures."
+    },
+    {
+      "name": "minerva_oscilloscope_stop",
+      "description": "Stop acquisition and retain waveform."
+    },
+    {
+      "name": "minerva_oscilloscope_capture",
+      "description": "Acquire one waveform."
+    },
+    {
+      "name": "minerva_oscilloscope_read",
+      "description": "Read capture measurements, preview or raw samples."
+    },
+    {
+      "name": "minerva_oscilloscope_save",
+      "description": "Save capture JSON and CSV."
+    },
+    {
+      "name": "minerva_oscilloscope_retain",
+      "description": "Pin or release capture evidence."
+    },
+    {
+      "name": "minerva_oscilloscope_show_capture",
+      "description": "Freeze and display exact capture evidence with an optional highlight."
+    },
+    {
+      "name": "minerva_oscilloscope_evaluate",
+      "description": "Check a capture against explicit tolerances."
+    },
+    {
+      "name": "minerva_oscilloscope_panel_sync",
+      "description": "Report panel viewport and displayed capture telemetry."
+    }
+  ],
+  "ui": {
+    "ipc_messages": [],
+    "panels": [
+      {
+        "name": "oscilloscope_panel",
+        "kind": "html",
+        "entry": "ui/oscilloscope_panel.html",
+        "ipc_channels": []
+      }
+    ]
+  },
+  "permissions": {
+    "host_capabilities": [],
+    "network": {
+      "mode": "none"
+    },
+    "filesystem": {
+      "mode": "none",
+      "paths": []
+    }
+  },
+  "autostart": false,
+  "auto_reload": false
+}
