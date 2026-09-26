@@ -6,6 +6,7 @@ use (
 	./council
 	./multimeter
 	./nametag-maker
+	./orchview
 	./oscilloscope
 	./pcb
 	./presentation

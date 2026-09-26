@@ -1,0 +1,267 @@
+{
+ "_about": "Replies recorded 2026-09-26 from the Docket MCP on 127.0.0.1:3010 (project docket, the W1 T0 example set: KB docket:01a0dc3549bc section 7 plus the W1 T4 broken siblings). That build predates docket_get's revision field, so each revision was computed by the W1 definition (events other than comment_*, linked, attached, detached) and added; no claim_holder was recorded because no claims exist yet.",
+ "calls": [
+  {
+   "tool": "docket_query",
+   "args": {
+    "project": "docket",
+    "filter": {
+     "conditions": [
+      {
+       "field": "tags",
+       "op": "eq",
+       "value": "wr:objective"
+      }
+     ]
+    },
+    "detail": "lean",
+    "limit": 1000
+   },
+   "reply": {
+    "count": 1,
+    "items": [
+     {
+      "id": "01a0dc037e2d7bce96c9ec889b03a605",
+      "title": "PLAN — W1 work/dispatch records: a documented template over existing items, one conditional-update primitive, claim/release/reassign on protected fields, inspectable standing authorization, matching queries and GUI"
+     }
+    ]
+   }
+  },
+  {
+   "tool": "docket_query",
+   "args": {
+    "project": "docket",
+    "filter": {
+     "conditions": [
+      {
+       "field": "tags",
+       "op": "eq",
+       "value": "wr:task"
+      }
+     ]
+    },
+    "detail": "lean",
+    "limit": 1000
+   },
+   "reply": {
+    "count": 3,
+    "items": [
+     {
+      "id": "01a0dc0608f97ffa8104157c604edc0a",
+      "title": "W1 T0 — the record template and trust model on paper: objective/task and dispatch-attempt over existing item types, protected fields named, caller identity stated, one hand-filled example, reviewed"
+     },
+     {
+      "id": "01a0dc871bfe7f56be7dc75e7ff184e4",
+      "title": "FIXTURE — W1 T4 broken sibling: unowned task (no assigned_to, no claim, not done)"
+     },
+     {
+      "id": "01a0dc872c3970f0ad4386915b090f5e",
+      "title": "FIXTURE — W1 T4 broken sibling: blocked task (held, blocked by the unowned sibling)"
+     }
+    ]
+   }
+  },
+  {
+   "tool": "docket_query",
+   "args": {
+    "project": "docket",
+    "filter": {
+     "conditions": [
+      {
+       "field": "tags",
+       "op": "eq",
+       "value": "wr:attempt"
+      }
+     ]
+    },
+    "detail": "lean",
+    "limit": 1000
+   },
+   "reply": {
+    "count": 1,
+    "items": [
+     {
+      "id": "01a0dc347a6c7fddb58851c17560980c",
+      "title": "ATTEMPT — W1 T0 implementer, attempt 1 (base ccsandbox bad2da278726)"
+     }
+    ]
+   }
+  },
+  {
+   "tool": "docket_get",
+   "args": {
+    "id": "01a0dc037e2d7bce96c9ec889b03a605",
+    "project": "docket",
+    "include": [
+     "links"
+    ]
+   },
+   "reply": {
+    "created_at": "2026-09-26T04:40:11",
+    "description": "Implementation plan for DCR 01a0dbf43851 (W1). Order 3 of 9; the first item on the critical path (W1 → C1 → B1 → P1 → V1). Filing is not authorization.\n\nGOALS\n- A documented, reusable record template for objective/task and dispatch-attempt, built on EXISTING item types and fields wherever they fit: parent/review/retry references, goal and non-goals, role/actor, input head revision, required integration branches, evidence, result, deferred-validation state. Task outcome is recorded separately from attempt state and from review/test/push/release facts — no single linear status field carries everything.\n- One conditional-mutation primitive (if_revision) so a stale update is refused. Data revisions (lost-update prevention) and ownership claims (who may mutate protected fields) are distinct concepts that may share the primitive.\n- Claim, release and reassign on a defined set of protected work fields; reassignment invalidates the previous holder's claim; a human override is possible and audited.\n- Scoped standing authorization recorded with provenance, independent of assignment, so a human is not re-prompted where authority already exists. Reading a record never claims it, accepts a finding, or authorizes execution.\n- Concise saved queries (unowned, blocked, awaiting review, authorized-for) and a GUI that shows claim holder and authorization from the same state.\n\nNON-GOALS (from the DCR)\n- A mandatory process, provider hierarchy, scheduler or learned model selection.\n- Claim tokens that claim to stop external processes or undo side effects; exactly-once execution from record ownership.\n- A second task database or new schema where existing fields/templates suffice.\n\nTASK ORDER AND WHY\n  T0  record template + trust model, on paper       consumers (C1, P1, V1) code against this; it must be reviewed before any of them start\n  T1  if_revision conditional update                the shared primitive; one implementation with D1\n  T2  claims on protected fields + audited override the handover mechanism; needs T1 for stale-refusal\n  T3  standing authorization records                independent of T2; needs T0's field names\n  T4  saved queries + GUI inspection                needs T2 and T3\n\nHard dependencies: T0 → {T1, T3}; T1 → T2; {T2, T3} → T4.\n\nCROSS-DCR\n- C1 T3 (scoped container Docket access) and B1 T3 (handover) consume T2's claim semantics. P1 T0 maps the task-cycle skill onto T0's template. V1 T0 reads T0's template.\n- T1 is shared with D1 T1: whichever lands first owns it.\n- Caller identity for claims comes from the MCP/gateway caller, reconciled with C1 T1 grants; this plan records the trust model, it does not build the gateway.\n\nWHAT THIS PLAN DOES NOT CLAIM\nIt does not deliver a scheduler, dispatch UI, or any process; it delivers records that a process (P1) can fill and a viewer (V1) can read.",
+    "id": "01a0dc037e2d7bce96c9ec889b03a605",
+    "parent": "docket:01a0dbf438517679bf4f62780dee29f5",
+    "priority": 2,
+    "status": "backlog",
+    "tags": [
+     "W1",
+     "orchestration",
+     "plan",
+     "post-mortem-2026-09",
+     "work-records",
+     "wr:objective"
+    ],
+    "title": "PLAN — W1 work/dispatch records: a documented template over existing items, one conditional-update primitive, claim/release/reassign on protected fields, inspectable standing authorization, matching queries and GUI",
+    "type": "work_item",
+    "updated_at": "2026-09-26T05:34:42",
+    "revision": 2
+   }
+  },
+  {
+   "tool": "docket_get",
+   "args": {
+    "id": "01a0dc0608f97ffa8104157c604edc0a",
+    "project": "docket",
+    "include": [
+     "links"
+    ]
+   },
+   "reply": {
+    "assigned_to": "local:1000@da281b72",
+    "created_at": "2026-09-26T04:42:58",
+    "description": "GOAL\nA Docket KB article (project docket) that is the contract every consumer codes against: which item types represent objective/task and dispatch attempt; which existing fields carry role/actor, input head revision, required integration branches, evidence, result and deferred-validation state; how outcome, attempt state and review/test/push/release facts are kept apart; which fields are PROTECTED (claim-gated); and who the caller is for a claim (MCP caller identity, gateway-stamped identity for containers, human in the GUI).\n\nDONE WHEN\n- The KB article exists with a field-by-field table; every field is an existing Docket field or marked NEW with a one-line reason why nothing existing fits.\n- One real, hand-filled task-cycle record (objective, one task, one dispatch attempt with evidence and result) exists in a Docket project and the article links it.\n- The article states the shared-project trust model in one paragraph: what a stale holder can and cannot do, what a human override records.\n- Codex has reviewed it and its findings are accepted or answered on the item.\n\nTRAPS\n- Do not invent a new schema where a template over work_item + tags + links suffices. The DCR's non-goal is explicit.\n\nLINKS\nPlan 01a0dc037e2d. Blocks T1, T3. Consumed by C1 T3, P1 T0, V1 T0.",
+    "id": "01a0dc0608f97ffa8104157c604edc0a",
+    "links": [
+     {
+      "relation": "blocks",
+      "to": "01a0dc061ee57e45b5f884dd03c2ae11"
+     },
+     {
+      "relation": "blocks",
+      "to": "01a0dc0659ba7db185f5261027d70893"
+     },
+     {
+      "relation": "blocks",
+      "to": "minerva:01a0dc06fb13744e9def33aea64c1195"
+     },
+     {
+      "relation": "blocks",
+      "to": "minerva:01a0dc0810a87bd18b44c9db0f05fcec"
+     },
+     {
+      "relation": "blocks",
+      "to": "plugins.dct:01a0dc08a67470f6b9a717efba68583b"
+     }
+    ],
+    "parent": "docket:01a0dc037e2d7bce96c9ec889b03a605",
+    "priority": 2,
+    "status": "done",
+    "tags": [
+     "T0",
+     "W1",
+     "deferred:t2-conformance",
+     "design",
+     "orchestration",
+     "requires:gitlab.com/imran-tp/ccsandbox@main",
+     "review:requested",
+     "test:not-run",
+     "work-records",
+     "wr:task"
+    ],
+    "title": "W1 T0 — the record template and trust model on paper: objective/task and dispatch-attempt over existing item types, protected fields named, caller identity stated, one hand-filled example, reviewed",
+    "type": "work_item",
+    "updated_at": "2026-09-26T06:26:58",
+    "revision": 4
+   }
+  },
+  {
+   "tool": "docket_get",
+   "args": {
+    "id": "01a0dc871bfe7f56be7dc75e7ff184e4",
+    "project": "docket",
+    "include": [
+     "links"
+    ]
+   },
+   "reply": {
+    "created_at": "2026-09-26T07:03:57",
+    "description": "GOAL\nDeliberately broken sibling of W1 T0 (docket:01a0dc0608f9) for the W1 T4 saved queries (docket:01a0dc0670f3): a wr:task that nobody holds. wr-unowned must return it; wr-blocked must not.\n\nDONE WHEN\n- Never. This is a query fixture; archive it when the W1 queries have their own tests.",
+    "id": "01a0dc871bfe7f56be7dc75e7ff184e4",
+    "links": [
+     {
+      "relation": "blocks",
+      "to": "01a0dc872c3970f0ad4386915b090f5e"
+     }
+    ],
+    "parent": "docket:01a0dc037e2d7bce96c9ec889b03a605",
+    "status": "open",
+    "tags": [
+     "W1",
+     "fixture:w1t4",
+     "wr:task"
+    ],
+    "title": "FIXTURE — W1 T4 broken sibling: unowned task (no assigned_to, no claim, not done)",
+    "type": "work_item",
+    "updated_at": "2026-09-26T07:04:04",
+    "revision": 2
+   }
+  },
+  {
+   "tool": "docket_get",
+   "args": {
+    "id": "01a0dc872c3970f0ad4386915b090f5e",
+    "project": "docket",
+    "include": [
+     "links"
+    ]
+   },
+   "reply": {
+    "assigned_to": "local:1000@da281b72",
+    "blocked_by": "docket:01a0dc871bfe7f56be7dc75e7ff184e4",
+    "created_at": "2026-09-26T07:04:01",
+    "description": "GOAL\nDeliberately broken sibling of W1 T0 (docket:01a0dc0608f9) for the W1 T4 saved queries (docket:01a0dc0670f3): a wr:task with an intended holder that is blocked. wr-blocked must return it; wr-unowned must not.\n\nDONE WHEN\n- Never. This is a query fixture; archive it when the W1 queries have their own tests.",
+    "id": "01a0dc872c3970f0ad4386915b090f5e",
+    "parent": "docket:01a0dc037e2d7bce96c9ec889b03a605",
+    "status": "blocked",
+    "tags": [
+     "W1",
+     "fixture:w1t4",
+     "wr:task"
+    ],
+    "title": "FIXTURE — W1 T4 broken sibling: blocked task (held, blocked by the unowned sibling)",
+    "type": "work_item",
+    "updated_at": "2026-09-26T07:04:05",
+    "revision": 2
+   }
+  },
+  {
+   "tool": "docket_get",
+   "args": {
+    "id": "01a0dc347a6c7fddb58851c17560980c",
+    "project": "docket",
+    "include": [
+     "links"
+    ]
+   },
+   "reply": {
+    "assigned_to": "local:1000@da281b72",
+    "created_at": "2026-09-26T05:33:41",
+    "description": "Dispatch attempt record (template: see the work/dispatch record KB article in this project).\n\nINPUT\n- Task: docket:01a0dc0608f97ffa8104157c604edc0a (parent). Its DONE WHEN is this attempt's acceptance.\n- Input head: gitlab.com/imran-tp/ccsandbox@bad2da278726 (tag base:). Branch main.\n- Role: implementer (tag role:). Actor: local:1000@da281b72 (assigned_to) — a local MCP caller on this machine; no gateway identity exists yet, so this principal is shared by every local agent on the account.\n- Authorized: author Docket records in project docket; static checks and Docket probes; one commit of experiments/docket/docket.dct; no test execution; no push. Test plan: NONE.\n\nOUTPUT\n- One commit on base bad2da278726 containing only experiments/docket/docket.dct; first message line names docket:01a0dc0608f9. Locate with: git log --grep 01a0dc0608f9. This record cannot carry that commit's SHA because the record is inside the commit; the reviewer attempt records it as its base: tag.",
+    "id": "01a0dc347a6c7fddb58851c17560980c",
+    "parent": "docket:01a0dc0608f97ffa8104157c604edc0a",
+    "resolution": "completed: KB docket:01a0dc3549bc + worked example written; one commit of experiments/docket/docket.dct on base bad2da278726 (git log --grep 01a0dc0608f9). Task acceptance is not decided here — review:requested on the task.",
+    "status": "done",
+    "tags": [
+     "base:gitlab.com/imran-tp/ccsandbox@bad2da278726",
+     "result:completed",
+     "role:implementer",
+     "wr:attempt"
+    ],
+    "title": "ATTEMPT — W1 T0 implementer, attempt 1 (base ccsandbox bad2da278726)",
+    "type": "work_item",
+    "updated_at": "2026-09-26T05:34:53",
+    "revision": 5
+   }
+  }
+ ]
+}
