@@ -12,8 +12,8 @@ import (
 // at or after the newest update time already held; only new or updated ids
 // are then read with docket_get. A full reload runs on the first refresh, when
 // the project set changes, every fullReload, and whenever a change query
-// fails. The periodic reload catches edits
-// Docket records without moving updated_at (links, for one).
+// fails. The periodic reload catches edits that Docket records without
+// moving updated_at (links, for one).
 //
 // A Cache is not safe for concurrent use; the backend serialises refreshes.
 type Cache struct {

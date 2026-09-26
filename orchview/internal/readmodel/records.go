@@ -26,8 +26,8 @@ type Record struct {
 	Description string   `json:"description"`
 	Resolution  string   `json:"resolution"`
 	UpdatedAt   string   `json:"updated_at"`
-	// Revision and ClaimHolder are absent on Docket builds before item
-	// revisions and claims (W1 T1/T2); nil and "" then.
+	// Revision and ClaimHolder are absent on older Docket builds that report
+	// no item revision or claim; nil and "" then.
 	Revision    *int   `json:"revision"`
 	ClaimHolder string `json:"claim_holder"`
 	Links       []Link `json:"links"`

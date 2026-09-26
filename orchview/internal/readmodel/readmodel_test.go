@@ -84,7 +84,7 @@ const (
 )
 
 // TestReadModelOverW1Fixture walks the W1 example set (KB docket:01a0dc3549bc
-// section 7 plus the W1 T4 broken siblings) through the loader and the tree,
+// section 7, plus siblings with broken references) through the loader and the tree,
 // then checks the restricted view, the unknown flag and the bounds.
 func TestReadModelOverW1Fixture(t *testing.T) {
 	records, err := Load(context.Background(), loadReplay(t), []string{"docket"})
@@ -110,10 +110,14 @@ func TestReadModelOverW1Fixture(t *testing.T) {
 	}
 	nodes := byID(full.Tree, map[string]*Node{})
 
-	// --- Verb parity: a host-path minerva_orchview_tree call gets the page the panel builds. ---
-	if verb, err := NewHistory().Tree(snap, json.RawMessage(`{}`)); err != nil ||
-		string(mustJSON(verb.Reply)) != string(mustJSON(build(t, snap, Owner, `{}`))) {
-		t.Errorf("minerva_orchview_tree and the panel differ over the fixture (err=%v)", err)
+	// --- Verb parity: a `caller` argument yields exactly the restricted view Build cuts for that principal. ---
+	verb, err := NewHistory().Tree(snap, json.RawMessage(`{"caller":"`+containerPrin+`"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verb.Identity.Source != SourceCallerArgument ||
+		string(mustJSON(verb.Reply)) != string(mustJSON(build(t, snap, Caller{Principal: containerPrin, Restricted: true}, `{}`))) {
+		t.Errorf("minerva_orchview_tree with a caller argument is not the restricted view (identity=%+v, scope=%s)", verb.Identity, verb.Scope)
 	}
 
 	// Hand-walk. remaining = DONE WHEN bullets of tasks without outcome:accepted
