@@ -16,6 +16,11 @@ type Node struct {
 	Stage *Stage      `json:"stage,omitempty"`
 	Owner *Ownership  `json:"owner,omitempty"`
 	Links *CrossLinks `json:"links,omitempty"`
+	// Refs lead to the node's revisions, reviews and runs (refs.go).
+	Refs *Refs `json:"refs,omitempty"`
+	// Metrics is the process's MEASUREMENTS table on a record node; absent
+	// when the record supplies none.
+	Metrics *Metrics `json:"metrics,omitempty"`
 
 	// Blocked is the recorded status "blocked"; Unowned is a task or attempt
 	// that is not done and has neither an intended holder nor a claim holder.
@@ -221,6 +226,11 @@ func buildForest(records []Record, sessions []SessionEvidence, caller Caller) fo
 		n.Links = links
 		if pk, ok := ix.parentOf(r); ok && nodes[pk] != nil {
 			nodes[pk].Children = append(nodes[pk].Children, n)
+			// A review is a role:reviewer attempt under the task (W1 KB
+			// section 2); only attempts in this view are listed.
+			if r.recordKind() == KindAttempt && r.hasTag("role:reviewer") {
+				nodes[pk].Refs.Reviews = append(nodes[pk].Refs.Reviews, k)
+			}
 		} else {
 			n.Orphan = r.recordKind() != KindObjective
 			f.roots = append(f.roots, n)
@@ -242,6 +252,11 @@ func buildForest(records []Record, sessions []SessionEvidence, caller Caller) fo
 	for _, n := range nodes {
 		if l := n.Links; l != nil && len(l.RetryOf)+len(l.RetriedBy)+len(l.Blocks) == 0 && l.BlockedBy == "" {
 			n.Links = nil
+		}
+		if n.Refs.empty() {
+			n.Refs = nil
+		} else {
+			n.Refs.Reviews = firstN(n.Refs.Reviews, maxRefsPerKind)
 		}
 	}
 	return f
@@ -278,6 +293,8 @@ func recordNode(r Record, partial bool) *Node {
 			Resolution: clip(r.Resolution, maxCriterionRunes),
 		},
 		Owner:   &Ownership{AssignedTo: r.AssignedTo, ClaimHolder: r.ClaimHolder, DirectedTo: r.DirectedTo},
+		Refs:    recordRefs(r),
+		Metrics: measurements(r.Description),
 		Blocked: r.Status == "blocked",
 	}
 	if kind == KindTask || kind == KindAttempt {

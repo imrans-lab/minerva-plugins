@@ -17,6 +17,19 @@ import (
 // minerva_<docket tool>; each one used is granted in manifest.json.
 type hostClient struct {
 	call func(ctx context.Context, capability string, args map[string]any) (json.RawMessage, error)
+	// meter counts every capability call; the panel service resets it per
+	// read under its lock.
+	meter hostMeter
+}
+
+// hostMeter is what this backend asked of the host during one read: calls
+// by tool, argument and reply bytes as JSON, and time spent waiting.
+type hostMeter struct {
+	Calls     int            `json:"calls"`
+	ByTool    map[string]int `json:"by_tool"`
+	BytesSent int            `json:"bytes_sent"`
+	BytesRead int            `json:"bytes_read"`
+	WaitMS    float64        `json:"wait_ms"`
 }
 
 // Call implements readmodel.Fetcher.
@@ -32,7 +45,9 @@ func (h *hostClient) Call(ctx context.Context, tool string, args map[string]any)
 // Godot's JSON, which writes integers as floats ("3.0"); integral floats are
 // written back as integers so typed fields decode.
 func (h *hostClient) proxy(ctx context.Context, tool string, args map[string]any) (json.RawMessage, error) {
+	started := time.Now()
 	raw, err := h.call(ctx, "mcp.proxy:"+tool, args)
+	h.count(tool, args, raw, time.Since(started))
 	if err != nil {
 		return nil, err
 	}
@@ -53,6 +68,19 @@ func (h *hostClient) proxy(ctx context.Context, tool string, args map[string]any
 		return nil, fmt.Errorf("%s: %w", tool, err)
 	}
 	return integralNumbers(body)
+}
+
+func (h *hostClient) count(tool string, args map[string]any, reply json.RawMessage, waited time.Duration) {
+	m := &h.meter
+	if m.ByTool == nil {
+		m.ByTool = map[string]int{}
+	}
+	m.Calls++
+	m.ByTool[strings.TrimPrefix(tool, "minerva_")]++
+	sent, _ := json.Marshal(args)
+	m.BytesSent += len(sent)
+	m.BytesRead += len(reply)
+	m.WaitMS += float64(waited.Microseconds()) / 1000
 }
 
 func unwrap(raw json.RawMessage) (json.RawMessage, error) {

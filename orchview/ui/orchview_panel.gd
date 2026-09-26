@@ -14,6 +14,14 @@ extends Control
 ## "Changes since" compares the current tree with a tree the panel kept
 ## earlier (one entry per distinct cursor seen, newest first), by each node's
 ## recorded facts.
+##
+## Navigation goes straight to host tools over capability channels: a record
+## opens in the Docket view through minerva_docket_gui_open; a selected node's
+## runs are asked of minerva_agent_session_job_status, a run's log comes from
+## minerva_agent_session_job_log, and an artifact opens with minerva_os_open.
+##
+## Each refresh cycle is metered: the panel counts its calls and wall time and
+## adds up the `overhead` each backend reply reports; the footer shows it.
 
 signal request(channel: String, payload: Dictionary, reply_id: String)
 
@@ -21,6 +29,11 @@ const Text := preload("orchview_text.gd")
 
 const CHANNEL := "minerva_orchview_panel_tree"
 const CALL_TIMEOUT_MS := 30000
+const NAV_TIMEOUT_MS := 15000
+## The most log the host returns in one read (minerva_agent_session_job_log).
+const LOG_TAIL_BYTES := 49152
+## Job classes that never change once reported.
+const FINAL_RUN_CLASSES: PackedStringArray = ["succeeded", "failed", "timed_out", "interrupted", "unknown"]
 ## No reply for this long makes every node's activity unknown (stale).
 const STALE_AFTER_MS := 30000
 ## A tree larger than this many pages is shown as far as it was read.
@@ -31,6 +44,7 @@ const COLOR_BLOCKED := Color(0.95, 0.45, 0.45)
 const COLOR_UNOWNED := Color(0.95, 0.65, 0.3)
 const COLOR_CHANGED := Color(0.95, 0.9, 0.4)
 const COLOR_UNKNOWN := Color(0.6, 0.6, 0.6)
+const COLUMN_METRICS := 4
 
 @onready var _status: Label = %Status
 @onready var _since_picker: OptionButton = %SincePicker
@@ -38,6 +52,9 @@ const COLOR_UNKNOWN := Color(0.6, 0.6, 0.6)
 @onready var _tree: Tree = %Tree
 @onready var _details: RichTextLabel = %Details
 @onready var _poll_timer: Timer = %PollTimer
+@onready var _overhead: Label = %Overhead
+@onready var _log_dialog: AcceptDialog = %LogDialog
+@onready var _log_text: TextEdit = %LogText
 
 ## id → node Dictionary (children removed); the tree's structure is kept in
 ## _children and _roots, in the order the pages delivered it.
@@ -66,17 +83,28 @@ var _busy: bool = false
 var _reply_seq: int = 0
 var _items: Dictionary = {}
 
+## "session/job" → the host's job status, or {error}; final ones are kept.
+var _runs: Dictionary = {}
+## The outcome of the last navigation click, shown in the status line.
+var _nav_message: String = ""
+## The refresh cycle being metered, the last finished one, and running totals.
+var _cycle: Dictionary = {}
+var _last_overhead: Dictionary = {}
+var _totals: Dictionary = {"cycles": 0, "host_calls": 0, "bytes_read": 0, "nav_calls": 0}
+
 
 func _ready() -> void:
-	_tree.columns = 4
+	_tree.columns = 5
 	_tree.set_column_title(0, "Node")
 	_tree.set_column_title(1, "Recorded stage")
 	_tree.set_column_title(2, "Owner")
 	_tree.set_column_title(3, "Observed activity")
+	_tree.set_column_title(COLUMN_METRICS, "Tokens / time")
 	_tree.set_column_expand_ratio(0, 3)
 	_tree.set_column_expand_ratio(1, 2)
 	_tree.set_column_expand_ratio(2, 2)
 	_tree.set_column_expand_ratio(3, 3)
+	_tree.set_column_expand_ratio(COLUMN_METRICS, 2)
 	_tree.item_selected.connect(_on_item_selected)
 	_tree.item_collapsed.connect(_on_item_collapsed)
 	_details.meta_clicked.connect(_on_link_clicked)
@@ -85,6 +113,7 @@ func _ready() -> void:
 	_poll_timer.timeout.connect(_on_tick)
 	_rebuild_since_picker()
 	_show_status()
+	_overhead.text = Text.overhead_text(_last_overhead, _totals)
 
 
 func _on_panel_loaded(_ctx: Dictionary) -> void:
@@ -115,6 +144,8 @@ func _poll() -> void:
 	if _busy:
 		return
 	_busy = true
+	_cycle = {"started_msec": Time.get_ticks_msec(), "panel_calls": 0, "host_calls": 0, "by_tool": {},
+		"bytes_read": 0, "reply_bytes": 0, "worker_ms": 0.0, "wait_ms": 0.0, "full_reload": false}
 	var args: Dictionary = {}
 	if not _cursor.is_empty():
 		args = {"since": _cursor, "evidence_since": _evidence}
@@ -122,12 +153,14 @@ func _poll() -> void:
 	if not is_inside_tree():
 		return
 	if first.is_empty():
+		_end_cycle()
 		_busy = false
 		_show_status()
 		return
 	var was_stale := _is_stale()
 	_accept_reply(first)
 	if bool(first.get("unchanged", false)):
+		_end_cycle()
 		_busy = false
 		if was_stale:
 			_render()
@@ -141,6 +174,7 @@ func _poll() -> void:
 		if not is_inside_tree():
 			return
 		if page.is_empty():
+			_end_cycle()
 			_busy = false
 			_show_status()
 			return
@@ -149,6 +183,7 @@ func _poll() -> void:
 			pages.clear()
 		pages.append(page)
 		token = str(page.get("continuation", ""))
+	_end_cycle()
 	_apply(pages, not token.is_empty())
 	_busy = false
 
@@ -161,20 +196,11 @@ func _accept_reply(reply: Dictionary) -> void:
 	_evidence_error = str(reply.get("evidence_error", ""))
 
 
-## One call on the tree channel; {} on failure, with _last_error set.
+## One call on the tree channel; {} on failure, with _last_error set. The
+## reply's `overhead` is added to the cycle being metered.
 func _call(args: Dictionary) -> Dictionary:
-	var ipc: Node = get_node_or_null("_MinervaIPC")
-	if ipc == null:
-		_last_error = "this panel is not registered with the host"
-		return {}
-	var reply: Dictionary
-	if ipc.has_method("request_bulk"):
-		reply = await ipc.request_bulk(CHANNEL, args, CALL_TIMEOUT_MS)
-	else:
-		_reply_seq += 1
-		var reply_id := "orchview-%d-%d" % [get_instance_id(), _reply_seq]
-		request.emit(CHANNEL, args, reply_id)
-		reply = await ipc.await_reply(reply_id, CALL_TIMEOUT_MS)
+	_cycle["panel_calls"] = int(_cycle.get("panel_calls", 0)) + 1
+	var reply := await _send(CHANNEL, args, CALL_TIMEOUT_MS)
 	if not bool(reply.get("success", false)):
 		_last_error = str(reply.get("error_message", reply.get("error_code", "the backend did not answer")))
 		return {}
@@ -182,7 +208,51 @@ func _call(args: Dictionary) -> Dictionary:
 	if not body is Dictionary or not bool((body as Dictionary).get("ok", true)):
 		_last_error = str((body as Dictionary).get("error", "unreadable reply")) if body is Dictionary else "unreadable reply"
 		return {}
+	_meter(body.get("overhead"))
 	return body
+
+
+## One request on a declared channel: the host's {success, result} or
+## {success: false, error_code, error_message} reply.
+func _send(channel: String, args: Dictionary, timeout_ms: int) -> Dictionary:
+	var ipc: Node = get_node_or_null("_MinervaIPC")
+	if ipc == null:
+		return {"success": false, "error_message": "this panel is not registered with the host"}
+	if ipc.has_method("request_bulk"):
+		return await ipc.request_bulk(channel, args, timeout_ms)
+	_reply_seq += 1
+	var reply_id := "orchview-%d-%d" % [get_instance_id(), _reply_seq]
+	request.emit(channel, args, reply_id)
+	return await ipc.await_reply(reply_id, timeout_ms)
+
+
+func _meter(reported: Variant) -> void:
+	if not reported is Dictionary:
+		return
+	var o: Dictionary = reported
+	var host: Dictionary = o.get("host") if o.get("host") is Dictionary else {}
+	_cycle["host_calls"] = int(_cycle.get("host_calls", 0)) + int(host.get("calls", 0))
+	_cycle["bytes_read"] = int(_cycle.get("bytes_read", 0)) + int(host.get("bytes_read", 0))
+	_cycle["wait_ms"] = float(_cycle.get("wait_ms", 0.0)) + float(host.get("wait_ms", 0.0))
+	_cycle["reply_bytes"] = int(_cycle.get("reply_bytes", 0)) + int(o.get("reply_bytes", 0))
+	_cycle["worker_ms"] = float(_cycle.get("worker_ms", 0.0)) + float(o.get("worker_ms", 0.0))
+	_cycle["full_reload"] = bool(_cycle.get("full_reload", false)) or bool(o.get("full_reload", false))
+	var by_tool: Dictionary = _cycle.get("by_tool", {})
+	var reported_tools: Dictionary = host.get("by_tool") if host.get("by_tool") is Dictionary else {}
+	for tool: String in reported_tools:
+		by_tool[tool] = int(by_tool.get(tool, 0)) + int(reported_tools[tool])
+	_cycle["by_tool"] = by_tool
+
+
+## Close the metered cycle: keep it as the last and add it to the totals.
+func _end_cycle() -> void:
+	_cycle["wall_ms"] = Time.get_ticks_msec() - int(_cycle.get("started_msec", Time.get_ticks_msec()))
+	_cycle["at"] = _confirmed_at
+	_last_overhead = _cycle
+	_totals["cycles"] = int(_totals["cycles"]) + 1
+	_totals["host_calls"] = int(_totals["host_calls"]) + int(_cycle.get("host_calls", 0))
+	_totals["bytes_read"] = int(_totals["bytes_read"]) + int(_cycle.get("bytes_read", 0))
+	_overhead.text = Text.overhead_text(_last_overhead, _totals)
 
 
 ## Replace the held tree with the pages' nodes.
@@ -321,6 +391,9 @@ func _add_row(parent: TreeItem, id: String, marks: Dictionary, stale: bool) -> v
 	item.set_text(3, Text.activity_text(node, _confirmed_at, stale))
 	if not Text.activity_is_known(node, stale):
 		item.set_custom_color(3, COLOR_UNKNOWN)
+	item.set_text(COLUMN_METRICS, Text.metrics_summary(node))
+	if not Text.is_measured(node):
+		item.set_custom_color(COLUMN_METRICS, COLOR_UNKNOWN)
 	if str(node.get("kind", "")) == "objective":
 		_add_remaining(item, node)
 	for child: String in _children.get(id, PackedStringArray()):
@@ -360,7 +433,7 @@ func _show_details() -> void:
 		return
 	var marks: Dictionary = _changes()["marks"]
 	_details.text = Text.details(_nodes[_selected_id], _nodes, _confirmed_at, _is_stale(),
-		str(marks.get(_selected_id, "")))
+		str(marks.get(_selected_id, "")), _runs)
 
 
 func _show_status() -> void:
@@ -378,6 +451,8 @@ func _show_status() -> void:
 		parts.append("session evidence unavailable: " + _evidence_error)
 	if not _last_error.is_empty():
 		parts.append("last read failed: " + _last_error)
+	if not _nav_message.is_empty():
+		parts.append(_nav_message)
 	_status.text = "  ·  ".join(parts)
 
 
@@ -391,6 +466,7 @@ func _on_item_selected() -> void:
 		return
 	_selected_id = str(item.get_metadata(0))
 	_show_details()
+	_resolve_runs(_selected_id)
 
 
 func _on_item_collapsed(item: TreeItem) -> void:
@@ -403,8 +479,29 @@ func _on_item_collapsed(item: TreeItem) -> void:
 		_collapsed.erase(id)
 
 
+## Details links: node:<id> selects in the tree; open:<project:id> opens the
+## record; copy:<text> copies; log:<session/job> shows the run's log;
+## artifact:<host path> opens the file.
 func _on_link_clicked(meta: Variant) -> void:
-	var id := str(meta)
+	var link := str(meta)
+	var scheme := link.get_slice(":", 0)
+	var value := link.substr(scheme.length() + 1)
+	match scheme:
+		"node":
+			_select(value)
+		"open":
+			_open_record(value)
+		"copy":
+			DisplayServer.clipboard_set(value)
+			_nav_message = "copied " + value
+			_show_status()
+		"log":
+			_open_log(value)
+		"artifact":
+			_open_artifact(value)
+
+
+func _select(id: String) -> void:
 	if not _items.has(id):
 		return
 	_selected_id = id
@@ -416,6 +513,95 @@ func _on_link_clicked(meta: Variant) -> void:
 	item.select(0)
 	_tree.scroll_to_item(item)
 	_show_details()
+	_resolve_runs(id)
+
+
+# ── Navigation ───────────────────────────────────────────────────────────────
+
+## A host tool through its capability channel: the tool's result, or
+## {error} when the host or the tool refused.
+func _host_tool(tool: String, args: Dictionary) -> Dictionary:
+	_totals["nav_calls"] = int(_totals["nav_calls"]) + 1
+	var reply := await _send("capability:mcp.proxy:" + tool, args, NAV_TIMEOUT_MS)
+	if not bool(reply.get("success", false)):
+		return {"error": str(reply.get("error_message", reply.get("error_code", "the host did not answer")))}
+	var body: Variant = reply.get("result")
+	if body is Dictionary and (body as Dictionary).get("content") is Array:
+		var content: Array = (body as Dictionary)["content"]
+		if content.size() == 1 and content[0] is Dictionary:
+			var parsed: Variant = JSON.parse_string(str((content[0] as Dictionary).get("text", "")))
+			if parsed is Dictionary:
+				body = parsed
+	if not body is Dictionary:
+		return {"error": "unreadable reply from " + tool}
+	var result: Dictionary = body
+	if result.get("ok", true) == false or result.has("error"):
+		return {"error": str(result.get("error", result.get("message", "refused")))}
+	return result
+
+
+## Open a record (project:id) in the host's Docket view.
+func _open_record(key: String) -> void:
+	var project := key.get_slice(":", 0)
+	var id := key.substr(project.length() + 1)
+	var result := await _host_tool("minerva_docket_gui_open", {"id": id, "project": project})
+	_nav_message = ("could not open %s: %s" % [key, result["error"]]) if result.has("error") else "opened " + key
+	_show_status()
+
+
+## Ask the host about each run of the node that has no final answer yet,
+## then redraw the details if the node is still selected.
+func _resolve_runs(id: String) -> void:
+	if not _nodes.has(id):
+		return
+	var refs: Variant = (_nodes[id] as Dictionary).get("refs")
+	if not refs is Dictionary:
+		return
+	for run: Variant in _as_array((refs as Dictionary).get("runs")):
+		if not run is Dictionary:
+			continue
+		var session := str((run as Dictionary).get("session", ""))
+		var job := str((run as Dictionary).get("job", ""))
+		var key := session + "/" + job
+		if session.is_empty() or job.is_empty() or _run_is_final(key):
+			continue
+		var status := await _host_tool("minerva_agent_session_job_status", {"name": session, "job": job})
+		if not is_inside_tree():
+			return
+		_runs[key] = status
+		if _selected_id == id:
+			_show_details()
+
+
+func _run_is_final(key: String) -> bool:
+	var known: Dictionary = _runs.get(key, {})
+	return bool(known.get("final", false)) and str(known.get("class", "")) in FINAL_RUN_CLASSES
+
+
+## Show the tail of a run's log (session/job) in the log dialog.
+func _open_log(key: String) -> void:
+	var session := key.get_slice("/", 0)
+	var job := key.get_slice("/", 1)
+	var result := await _host_tool("minerva_agent_session_job_log", {"name": session, "job": job, "tail": LOG_TAIL_BYTES})
+	if not is_inside_tree():
+		return
+	if result.has("error"):
+		_nav_message = "could not read the log of %s: %s" % [key, result["error"]]
+		_show_status()
+		return
+	var size := int(result.get("size", 0))
+	_log_dialog.title = "Log — run %s (%s, %s%s)" % [key, str(result.get("class", "?")), String.humanize_size(size),
+		", last %s shown" % String.humanize_size(LOG_TAIL_BYTES) if bool(result.get("truncated", false)) else ""]
+	_log_text.text = str(result.get("log", ""))
+	_log_dialog.popup_centered_ratio(0.7)
+	_nav_message = ""
+	_show_status()
+
+
+func _open_artifact(path: String) -> void:
+	var result := await _host_tool("minerva_os_open", {"path": path})
+	_nav_message = ("could not open %s: %s" % [path, result["error"]]) if result.has("error") else "opened " + path
+	_show_status()
 
 
 static func _as_array(value: Variant) -> Array:

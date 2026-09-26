@@ -25,7 +25,7 @@ const (
 )
 
 // Optional field groups; id, kind, flags and activity are always present.
-var fieldGroups = []string{"title", "revision", "stage", "owner", "links", "acceptance"}
+var fieldGroups = []string{"title", "revision", "stage", "owner", "links", "acceptance", "refs", "metrics"}
 
 // Query is the bounded request. It is parsed from tool arguments, which carry
 // no authority: identity arrives separately as a Caller.
@@ -292,6 +292,12 @@ func shallow(e flatEntry, fields map[string]bool) *Node {
 	}
 	if !fields["acceptance"] {
 		c.Remaining, c.RemainingTotal = nil, 0
+	}
+	if !fields["refs"] {
+		c.Refs = nil
+	}
+	if !fields["metrics"] {
+		c.Metrics = nil
 	}
 	return &c
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -29,7 +30,8 @@ func panelTreeSpec() map[string]any {
 		"description": "The Orchestration View panel's read channel; the panel calls it on each refresh and it is not " +
 			"meant to be called by hand. Returns one page of the W1 work tree (objectives, tasks, dispatch attempts, " +
 			"role instances, actors) as the owner sees it. Pass `since` (the last cursor) and `evidence_since` (the last " +
-			"evidence digest) to be told `unchanged` cheaply; pass `continuation` to read the next page.",
+			"evidence digest) to be told `unchanged` cheaply; pass `continuation` to read the next page. Each reply carries " +
+			"`overhead`: the host calls, bytes and backend time that answering it cost.",
 		"inputSchema": map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -100,6 +102,18 @@ type panelReply struct {
 	ObservedAt    string   `json:"observed_at"`
 	EvidenceError string   `json:"evidence_error,omitempty"`
 	Projects      []string `json:"projects"`
+	// Overhead is what answering this call cost the viewer's side.
+	Overhead overhead `json:"overhead"`
+}
+
+// overhead is one panel call's cost: the host capability calls it made, the
+// cache's refresh kind, the backend's wall time (host waits included), and
+// the size of this reply as JSON. It measures the viewer only.
+type overhead struct {
+	Host       hostMeter `json:"host"`
+	FullReload bool      `json:"full_reload"`
+	WorkerMS   float64   `json:"worker_ms"`
+	ReplyBytes int       `json:"reply_bytes"`
 }
 
 func (p *panelService) tree(parent context.Context, raw json.RawMessage) ([]byte, error) {
@@ -107,7 +121,9 @@ func (p *panelService) tree(parent context.Context, raw json.RawMessage) ([]byte
 	defer p.mu.Unlock()
 	ctx, cancel := context.WithTimeout(parent, callBudget)
 	defer cancel()
-	now := time.Now().UTC()
+	started := time.Now()
+	now := started.UTC()
+	p.host.meter = hostMeter{}
 
 	args := map[string]json.RawMessage{}
 	if len(raw) > 0 && string(raw) != "null" {
@@ -137,11 +153,23 @@ func (p *panelService) tree(parent context.Context, raw json.RawMessage) ([]byte
 		q.Since = ""
 	}
 	out.Reply = readmodel.Build(got.snap, readmodel.Owner, q, ignored)
+	out.Overhead = overhead{Host: p.host.meter, FullReload: stats.Full}
+	out.Overhead.Host.WaitMS = math.Round(out.Overhead.Host.WaitMS*1000) / 1000
+	body, err := json.Marshal(out)
+	if err != nil {
+		return nil, err
+	}
+	// The second encoding carries the first one's size and the time spent
+	// until then; the sizes differ only by the digits of these two numbers.
+	out.Overhead.ReplyBytes = len(body)
+	out.Overhead.WorkerMS = float64(time.Since(started).Microseconds()) / 1000
+	body, err = json.Marshal(out)
 
-	log.Printf("tree: full_reload=%v queries=%d gets=%d removed=%d records=%d sessions=%d unchanged=%v nodes=%d/%d continuation=%v",
+	log.Printf("tree: full_reload=%v queries=%d gets=%d removed=%d records=%d sessions=%d unchanged=%v nodes=%d/%d continuation=%v host_calls=%d host_bytes_read=%d host_wait_ms=%.1f worker_ms=%.1f reply_bytes=%d",
 		stats.Full, stats.Queries, stats.Gets, stats.Removed, stats.Records, len(sessions),
-		out.Unchanged, out.NodesReturned, out.NodesTotal, q.Continuation != "")
-	return json.Marshal(out)
+		out.Unchanged, out.NodesReturned, out.NodesTotal, q.Continuation != "",
+		out.Overhead.Host.Calls, out.Overhead.Host.BytesRead, out.Overhead.Host.WaitMS, out.Overhead.WorkerMS, len(body))
+	return body, err
 }
 
 func evidenceDigest(sessions []readmodel.SessionEvidence, failed bool) string {

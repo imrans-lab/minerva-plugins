@@ -2,7 +2,7 @@
   "id": "orchview",
   "name": "Orchestration View",
   "version": "0.1.0",
-  "description": "See the work your agents are doing as one tree: objectives, their tasks, each dispatch attempt, the roles in it and the agents holding them. Every row shows what the work records say (status, result, review, who owns it, what blocks it) apart from what Minerva last observed of the agent's session, and says unknown when there is no recent evidence. Each objective lists the acceptance criteria still open. It only reads: nothing in it changes work. It reads Docket work records tagged in the W1 convention.",
+  "description": "See the work your agents are doing as one tree: objectives, their tasks, each dispatch attempt, the roles in it and the agents holding them. Every row shows what the work records say (status, result, review, who owns it, what blocks it) apart from what Minerva last observed of the agent's session, and says unknown when there is no recent evidence. Each objective lists the acceptance criteria still open. A node opens its Docket record, and shows the commits, reviews and job runs recorded on it (a run opens its log; an artifact that is gone reads missing) and any token/time table the process recorded, with its unknowns; the footer shows what the viewer itself costs per refresh. It only reads: nothing in it changes work. It reads Docket work records tagged in the W1 convention.",
   "price": {"amount_minor": 0, "currency": "USD"},
   "host_api_version": "1",
   "release_targets": [
@@ -16,7 +16,7 @@
   "tools": [
     {
       "name": "minerva_orchview_panel_tree",
-      "description": "The Orchestration View panel's read channel; the panel calls it on each refresh and it is not meant to be called by hand. Returns one page of the W1 work tree (objectives, tasks, dispatch attempts, role instances, actors) as the owner sees it. Pass `since` (the last cursor) and `evidence_since` (the last evidence digest) to be told `unchanged` cheaply; pass `continuation` to read the next page.",
+      "description": "The Orchestration View panel's read channel; the panel calls it on each refresh and it is not meant to be called by hand. Returns one page of the W1 work tree (objectives, tasks, dispatch attempts, role instances, actors) as the owner sees it. Pass `since` (the last cursor) and `evidence_since` (the last evidence digest) to be told `unchanged` cheaply; pass `continuation` to read the next page. Each reply carries `overhead`: the host calls, bytes and backend time that answering it cost.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -29,7 +29,7 @@
     },
     {
       "name": "minerva_orchview_tree",
-      "description": "Read the orchestration work tree (objectives, their tasks, each dispatch attempt, the roles in it and the agents holding them) from the same read model the Orchestration View panel shows. Each node keeps what the work records say (stage, owner, links, remaining acceptance criteria) apart from what Minerva last observed of the agent's session (activity, unknown when there is no evidence, never idle). Read-only.\n\nBounds: `root` (a node id from an earlier reply; omit it for every objective) picks one subtree. `depth` (0-4, default 4) counts levels below it; a node at the limit reports `children_hidden`. `fields` picks optional groups from title, revision, stage, owner, links, acceptance (default all; id, kind, flags and activity always come). `max_nodes` (1-2000, default 200) caps one page, and every reply also stays under 64 KiB.\n\nCursor: a reply that stops early says `truncated` and carries `continuation`; pass it back as `continuation` for the next page. A continuation cut against records that have since changed restarts at the first node and says `continuation_reset`. Every reply's `cursor` digests the recorded state of the whole view; pass it to minerva_orchview_changes to learn what changed.\n\nIdentity: `identity` names whom the reply was evaluated for. Minerva passes no caller identity on plugin tool calls yet, so a call from the owner's host gets the owner's full view and says so (source host_default_owner). Through the agent-container gateway, the gateway stamps `caller` and `caller_role` with the session's registered identity and role, and the reply holds only records addressed to them, their descendants, and their ancestors as partial context (source caller_argument). A container cannot set `caller` itself, and a `caller` only ever narrows a view.",
+      "description": "Read the orchestration work tree (objectives, their tasks, each dispatch attempt, the roles in it and the agents holding them) from the same read model the Orchestration View panel shows. Each node keeps what the work records say (stage, owner, links, remaining acceptance criteria) apart from what Minerva last observed of the agent's session (activity, unknown when there is no evidence, never idle). Read-only.\n\nBounds: `root` (a node id from an earlier reply; omit it for every objective) picks one subtree. `depth` (0-4, default 4) counts levels below it; a node at the limit reports `children_hidden`. `fields` picks optional groups from title, revision, stage, owner, links, acceptance, refs, metrics (default all; id, kind, flags and activity always come). `refs` are the commits a record's base:/head:/requires:/integrated: tags name, a task's role:reviewer attempts, and the job runs its run:<session>/<job> tags name (read them with minerva_agent_session_job_status and _job_log). `metrics` is the MEASUREMENTS table the process recorded in the record's description, cell for cell; a record without one has no `metrics`, which means not measured. `max_nodes` (1-2000, default 200) caps one page, and every reply also stays under 64 KiB.\n\nCursor: a reply that stops early says `truncated` and carries `continuation`; pass it back as `continuation` for the next page. A continuation cut against records that have since changed restarts at the first node and says `continuation_reset`. Every reply's `cursor` digests the recorded state of the whole view; pass it to minerva_orchview_changes to learn what changed.\n\nIdentity: `identity` names whom the reply was evaluated for. Minerva passes no caller identity on plugin tool calls yet, so a call from the owner's host gets the owner's full view and says so (source host_default_owner). Through the agent-container gateway, the gateway stamps `caller` and `caller_role` with the session's registered identity and role, and the reply holds only records addressed to them, their descendants, and their ancestors as partial context (source caller_argument). A container cannot set `caller` itself, and a `caller` only ever narrows a view.",
       "input_schema": {
         "properties": {
           "continuation": {
@@ -51,7 +51,9 @@
                 "stage",
                 "owner",
                 "links",
-                "acceptance"
+                "acceptance",
+                "refs",
+                "metrics"
               ],
               "type": "string"
             },
@@ -73,7 +75,7 @@
     },
     {
       "name": "minerva_orchview_changes",
-      "description": "Report what changed in the orchestration work tree since an earlier reply, from the same read model as minerva_orchview_tree: each record node (objective, task, attempt) that was added, changed or removed, with its current stage, owner, links and activity. Only recorded changes count; observed activity alone does not. Read-only.\n\nBounds: at most 200 changes and 64 KiB per reply; `changes_total` counts them all and `truncated` says the list stops short, in which case read the tree again.\n\nCursor: pass the `cursor` of an earlier minerva_orchview_tree or minerva_orchview_changes reply. `unchanged` says nothing recorded moved. `reset` says the cursor is not one this backend remembers for this caller (too old, from before a restart, or cut for another view): read the tree again. Each reply's `cursor` is the next one to pass.\n\nIdentity: as for minerva_orchview_tree. The host path is answered for the owner and says so; through the agent-container gateway the reply is evaluated for the gateway-stamped `caller`, and a cursor is only compared with the view of the caller it was cut for.",
+      "description": "Report what changed in the orchestration work tree since an earlier reply, from the same read model as minerva_orchview_tree: each record node (objective, task, attempt) that was added, changed or removed, with its current stage, owner, links, refs, metrics and activity. Only recorded changes count; observed activity alone does not. Read-only.\n\nBounds: at most 200 changes and 64 KiB per reply; `changes_total` counts them all and `truncated` says the list stops short, in which case read the tree again.\n\nCursor: pass the `cursor` of an earlier minerva_orchview_tree or minerva_orchview_changes reply. `unchanged` says nothing recorded moved. `reset` says the cursor is not one this backend remembers for this caller (too old, from before a restart, or cut for another view): read the tree again. Each reply's `cursor` is the next one to pass.\n\nIdentity: as for minerva_orchview_tree. The host path is answered for the owner and says so; through the agent-container gateway the reply is evaluated for the gateway-stamped `caller`, and a cursor is only compared with the view of the caller it was cut for.",
       "input_schema": {
         "properties": {
           "cursor": {
@@ -90,7 +92,11 @@
   ],
   "ui": {
     "ipc_messages": [
-      "minerva_orchview_panel_tree"
+      "minerva_orchview_panel_tree",
+      "capability:mcp.proxy:minerva_docket_gui_open",
+      "capability:mcp.proxy:minerva_agent_session_job_status",
+      "capability:mcp.proxy:minerva_agent_session_job_log",
+      "capability:mcp.proxy:minerva_os_open"
     ],
     "panels": [
       {
@@ -102,7 +108,11 @@
           "ui/orchview_text.gd"
         ],
         "ipc_channels": [
-          "minerva_orchview_panel_tree"
+          "minerva_orchview_panel_tree",
+          "capability:mcp.proxy:minerva_docket_gui_open",
+          "capability:mcp.proxy:minerva_agent_session_job_status",
+          "capability:mcp.proxy:minerva_agent_session_job_log",
+          "capability:mcp.proxy:minerva_os_open"
         ],
         "save_mode": "none"
       }
@@ -121,7 +131,11 @@
       "mcp.proxy:minerva_docket_project_list",
       "mcp.proxy:minerva_docket_query",
       "mcp.proxy:minerva_docket_get",
-      "mcp.proxy:minerva_terminal_list"
+      "mcp.proxy:minerva_terminal_list",
+      "mcp.proxy:minerva_docket_gui_open",
+      "mcp.proxy:minerva_agent_session_job_status",
+      "mcp.proxy:minerva_agent_session_job_log",
+      "mcp.proxy:minerva_os_open"
     ],
     "network": {"mode": "none"},
     "filesystem": {"mode": "none", "paths": []}

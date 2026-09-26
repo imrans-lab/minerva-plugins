@@ -59,7 +59,7 @@ split_offset = 600
 unique_name_in_owner = true
 layout_mode = 2
 size_flags_horizontal = 3
-columns = 4
+columns = 5
 column_titles_visible = true
 hide_root = true
 select_mode = 1
@@ -72,11 +72,32 @@ bbcode_enabled = true
 selection_enabled = true
 context_menu_enabled = true
 
+[node name="Overhead" type="Label" parent="Layout"]
+unique_name_in_owner = true
+layout_mode = 2
+tooltip_text = "What this viewer cost on its last refresh and since it opened: its calls to the backend, the backend's calls to the host (Docket and the session list), bytes, and time. It measures the viewer only."
+autowrap_mode = 3
+
 [node name="Legend" type="Label" parent="Layout"]
 layout_mode = 2
 autowrap_mode = 3
-text = "Recorded stage comes from the work records. Observed activity comes from the host's session evidence and says unknown when there is none or it is stale. ● marks a node changed since the chosen read. Read-only: nothing here changes work."
+text = "Recorded stage comes from the work records. Observed activity comes from the host's session evidence and says unknown when there is none or it is stale. ● marks a node changed since the chosen read. Select a node for links to its Docket record, the commits its tags name, its reviews, and its job runs (open a run's log; an artifact that is gone reads missing). Tokens / time shows the MEASUREMENTS table the process recorded on a record, with its unknowns and coverage; \"not measured\" means it recorded none. The viewer cost line measures this viewer only: it never shows, and must not be read as, the efficiency of the work or of any process. Read-only: nothing here changes work."
 
 [node name="PollTimer" type="Timer" parent="."]
 unique_name_in_owner = true
 wait_time = 5.0
+
+[node name="LogDialog" type="AcceptDialog" parent="."]
+unique_name_in_owner = true
+title = "Log"
+size = Vector2i(900, 600)
+ok_button_text = "Close"
+
+[node name="LogText" type="TextEdit" parent="LogDialog"]
+unique_name_in_owner = true
+offset_left = 8.0
+offset_top = 8.0
+offset_right = 892.0
+offset_bottom = 551.0
+editable = false
+wrap_mode = 1

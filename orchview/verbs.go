@@ -23,7 +23,11 @@ const treeDescription = "Read the orchestration work tree (objectives, their tas
 	"agent's session (activity, unknown when there is no evidence, never idle). Read-only.\n\n" +
 	"Bounds: `root` (a node id from an earlier reply; omit it for every objective) picks one subtree. `depth` (0-4, " +
 	"default 4) counts levels below it; a node at the limit reports `children_hidden`. `fields` picks optional groups " +
-	"from title, revision, stage, owner, links, acceptance (default all; id, kind, flags and activity always come). " +
+	"from title, revision, stage, owner, links, acceptance, refs, metrics (default all; id, kind, flags and activity " +
+	"always come). `refs` are the commits a record's base:/head:/requires:/integrated: tags name, a task's " +
+	"role:reviewer attempts, and the job runs its run:<session>/<job> tags name (read them with " +
+	"minerva_agent_session_job_status and _job_log). `metrics` is the MEASUREMENTS table the process recorded in " +
+	"the record's description, cell for cell; a record without one has no `metrics`, which means not measured. " +
 	"`max_nodes` (1-2000, default 200) caps one page, and every reply also stays under 64 KiB.\n\n" +
 	"Cursor: a reply that stops early says `truncated` and carries `continuation`; pass it back as `continuation` " +
 	"for the next page. A continuation cut against records that have since changed restarts at the first node and " +
@@ -38,7 +42,7 @@ const treeDescription = "Read the orchestration work tree (objectives, their tas
 
 const changesDescription = "Report what changed in the orchestration work tree since an earlier reply, from the same " +
 	"read model as minerva_orchview_tree: each record node (objective, task, attempt) that was added, changed or " +
-	"removed, with its current stage, owner, links and activity. Only recorded changes count; observed activity " +
+	"removed, with its current stage, owner, links, refs, metrics and activity. Only recorded changes count; observed activity " +
 	"alone does not. Read-only.\n\n" +
 	"Bounds: at most 200 changes and 64 KiB per reply; `changes_total` counts them all and `truncated` says the " +
 	"list stops short, in which case read the tree again.\n\n" +
@@ -55,7 +59,7 @@ var treeSchema = map[string]any{
 	"properties": map[string]any{
 		"root":         map[string]any{"type": "string", "description": "Id of the node whose subtree to return; omit for every objective."},
 		"depth":        map[string]any{"type": "integer", "minimum": 0, "maximum": readmodel.MaxDepth, "description": "Levels below root to include."},
-		"fields":       map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"title", "revision", "stage", "owner", "links", "acceptance"}}, "description": "Optional field groups to include."},
+		"fields":       map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"title", "revision", "stage", "owner", "links", "acceptance", "refs", "metrics"}}, "description": "Optional field groups to include."},
 		"max_nodes":    map[string]any{"type": "integer", "minimum": 1, "maximum": readmodel.MaxMaxNodes, "description": "Most nodes on one page."},
 		"continuation": map[string]any{"type": "string", "description": "Continuation from a truncated reply."},
 	},
