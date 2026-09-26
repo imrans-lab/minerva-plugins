@@ -1,0 +1,4 @@
+# Build outputs: the manifest's artifact, and the binary `go build` names
+# after the directory. Built from source; never checked in.
+/orchview-plugin
+/orchview

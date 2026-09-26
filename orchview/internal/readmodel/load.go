@@ -48,13 +48,21 @@ func Load(ctx context.Context, f Fetcher, projects []string) ([]Record, error) {
 }
 
 func queryIDs(ctx context.Context, f Fetcher, project, tag string) ([]string, error) {
+	return queryIDsWhere(ctx, f, project, tag)
+}
+
+// queryIDsWhere lists the ids of one kind that also meet the extra
+// conditions (each a docket_query condition carrying its own "conj").
+func queryIDsWhere(ctx context.Context, f Fetcher, project, tag string, extra ...map[string]any) ([]string, error) {
+	conditions := []any{map[string]any{"field": "tags", "op": "eq", "value": tag}}
+	for _, c := range extra {
+		conditions = append(conditions, c)
+	}
 	args := map[string]any{
 		"project": project,
-		"filter": map[string]any{"conditions": []any{
-			map[string]any{"field": "tags", "op": "eq", "value": tag},
-		}},
-		"detail": "lean",
-		"limit":  queryLimit,
+		"filter":  map[string]any{"conditions": conditions},
+		"detail":  "lean",
+		"limit":   queryLimit,
 	}
 	raw, err := f.Call(ctx, "docket_query", args)
 	if err != nil {

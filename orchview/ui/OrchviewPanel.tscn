@@ -1,0 +1,82 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="orchview_panel.gd" id="1_orchview_panel"]
+
+[node name="OrchviewPanel" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_orchview_panel")
+
+[node name="Layout" type="VBoxContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 8.0
+offset_top = 8.0
+offset_right = -8.0
+offset_bottom = -8.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Header" type="HBoxContainer" parent="Layout"]
+layout_mode = 2
+
+[node name="Title" type="Label" parent="Layout/Header"]
+layout_mode = 2
+text = "Orchestration"
+
+[node name="SinceLabel" type="Label" parent="Layout/Header"]
+layout_mode = 2
+text = "   Changes since:"
+
+[node name="SincePicker" type="OptionButton" parent="Layout/Header"]
+unique_name_in_owner = true
+layout_mode = 2
+tooltip_text = "Mark the nodes whose recorded facts differ from an earlier read of the tree"
+
+[node name="RefreshButton" type="Button" parent="Layout/Header"]
+unique_name_in_owner = true
+layout_mode = 2
+tooltip_text = "Read the whole tree again now"
+text = "Refresh"
+
+[node name="Status" type="Label" parent="Layout"]
+unique_name_in_owner = true
+layout_mode = 2
+autowrap_mode = 3
+
+[node name="Split" type="HSplitContainer" parent="Layout"]
+layout_mode = 2
+size_flags_vertical = 3
+split_offset = 600
+
+[node name="Tree" type="Tree" parent="Layout/Split"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+columns = 4
+column_titles_visible = true
+hide_root = true
+select_mode = 1
+
+[node name="Details" type="RichTextLabel" parent="Layout/Split"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(320, 0)
+layout_mode = 2
+bbcode_enabled = true
+selection_enabled = true
+context_menu_enabled = true
+
+[node name="Legend" type="Label" parent="Layout"]
+layout_mode = 2
+autowrap_mode = 3
+text = "Recorded stage comes from the work records. Observed activity comes from the host's session evidence and says unknown when there is none or it is stale. ● marks a node changed since the chosen read. Read-only: nothing here changes work."
+
+[node name="PollTimer" type="Timer" parent="."]
+unique_name_in_owner = true
+wait_time = 5.0

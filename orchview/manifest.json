@@ -1,0 +1,79 @@
+{
+  "id": "orchview",
+  "name": "Orchestration View",
+  "version": "0.1.0",
+  "description": "See the work your agents are doing as one tree: objectives, their tasks, each dispatch attempt, the roles in it and the agents holding them. Every row shows what the work records say (status, result, review, who owns it, what blocks it) apart from what Minerva last observed of the agent's session, and says unknown when there is no recent evidence. Each objective lists the acceptance criteria still open. It only reads: nothing in it changes work. It reads Docket work records tagged in the W1 convention.",
+  "price": {"amount_minor": 0, "currency": "USD"},
+  "host_api_version": "1",
+  "release_targets": [
+    "linux-x86_64"
+  ],
+  "backend": {
+    "transport": "stdio",
+    "entrypoint": "./orchview-plugin",
+    "args": []
+  },
+  "tools": [
+    {
+      "name": "minerva_orchview_panel_tree",
+      "description": "The Orchestration View panel's read channel; the panel calls it on each refresh and it is not meant to be called by hand. Returns one page of the W1 work tree (objectives, tasks, dispatch attempts, role instances, actors) as the owner sees it. Pass `since` (the last cursor) and `evidence_since` (the last evidence digest) to be told `unchanged` cheaply; pass `continuation` to read the next page.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "since": {"type": "string", "description": "Cursor from the previous reply."},
+          "evidence_since": {"type": "string", "description": "Evidence digest from the previous reply."},
+          "continuation": {"type": "string", "description": "Continuation from a truncated reply."},
+          "max_nodes": {"type": "integer", "minimum": 1, "maximum": 2000}
+        }
+      }
+    }
+  ],
+  "ui": {
+    "ipc_messages": [
+      "minerva_orchview_panel_tree"
+    ],
+    "panels": [
+      {
+        "name": "orchview_panel",
+        "kind": "godot_scene",
+        "entry_scene": "ui/OrchviewPanel.tscn",
+        "scripts": [
+          "ui/orchview_panel.gd",
+          "ui/orchview_text.gd"
+        ],
+        "ipc_channels": [
+          "minerva_orchview_panel_tree"
+        ],
+        "save_mode": "none"
+      }
+    ]
+  },
+  "editor_items": [
+    {
+      "id": "open_orchview",
+      "name": "Orchestration View",
+      "panel": "orchview_panel",
+      "default_filename": "orchestration.orchview"
+    }
+  ],
+  "permissions": {
+    "host_capabilities": [
+      "mcp.proxy:minerva_docket_project_list",
+      "mcp.proxy:minerva_docket_query",
+      "mcp.proxy:minerva_docket_get",
+      "mcp.proxy:minerva_terminal_list"
+    ],
+    "network": {"mode": "none"},
+    "filesystem": {"mode": "none", "paths": []}
+  },
+  "autostart": false,
+  "auto_reload": true,
+  "setup": {
+    "requires": [
+      {"tool": "go", "min": "1.22"}
+    ],
+    "steps": [
+      {"type": "go_build", "package": "./", "output": "orchview-plugin"}
+    ]
+  }
+}
