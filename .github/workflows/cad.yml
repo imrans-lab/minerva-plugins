@@ -62,7 +62,7 @@ jobs:
           # cadquery-ocp aarch64 wheels from a private channel. Tracked as
           # follow-up; user said linux-arm64 is nice-to-have, not MUST.
           - target: macos-universal
-            runs-on: macos-14
+            runs-on: macos-15
             goos: darwin
             goarch: ""
             ext: ""

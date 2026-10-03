@@ -615,7 +615,7 @@ jobs:
             goarch: arm64
             ext: ""
           - target: macos-universal
-            runs-on: macos-14
+            runs-on: macos-15
             goos: darwin
             goarch: ""
             ext: ""

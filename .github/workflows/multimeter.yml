@@ -41,7 +41,7 @@ jobs:
             goarch: amd64
             cgo: "0"
           - target: macos-universal
-            runs-on: macos-14
+            runs-on: macos-15
             goos: darwin
             goarch: ""
             cgo: "1"
