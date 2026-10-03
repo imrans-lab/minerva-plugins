@@ -77,7 +77,7 @@ jobs:
         run: python3 ../scripts/smoke/mcp_smoke.py "$PWD/build/package-${{ matrix.target }}/oscilloscope-plugin"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: oscilloscope-${{ matrix.target }}
           path: oscilloscope/dist/oscilloscope-*-${{ matrix.target }}.tar.gz

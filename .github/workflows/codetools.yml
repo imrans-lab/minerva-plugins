@@ -202,7 +202,7 @@ jobs:
           ls -la "dist/codetools-${VERSION}-${PLATFORM}.tar.gz"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: codetools-${{ matrix.target }}
           path: codetools/dist/codetools-*-${{ matrix.target }}.tar.gz

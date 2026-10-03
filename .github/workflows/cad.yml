@@ -357,7 +357,7 @@ jobs:
           ls -la "dist/cad-${VERSION}-${PLATFORM}.tar.gz"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cad-${{ matrix.target }}
           path: cad/dist/cad-*-${{ matrix.target }}.tar.gz
