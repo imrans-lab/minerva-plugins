@@ -131,7 +131,7 @@ jobs:
           ls -la "dist/movie_gen-${VERSION}-${PLATFORM}.tar.gz"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: movie_gen-${{ matrix.target }}
           path: movie-gen/dist/movie_gen-*-${{ matrix.target }}.tar.gz
