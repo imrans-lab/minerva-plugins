@@ -666,7 +666,7 @@ jobs:
           zstd --version
 
       - name: Cache PBS downloads
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: pcb/runtime-build/cache/pbs
           key: pbs-${{ matrix.target }}-${{ hashFiles('pcb/scripts/runtime-bundle.lock') }}

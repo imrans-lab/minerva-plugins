@@ -94,7 +94,7 @@ jobs:
           zstd --version
 
       - name: Cache PBS downloads
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: codetools/runtime-build/cache/pbs
           key: pbs-${{ matrix.target }}-${{ hashFiles('codetools/scripts/runtime-bundle.lock') }}
