@@ -82,7 +82,8 @@ func start() -> bool:
 	check("host authority surfaces vault refusal", challenge.get("error_code", "") == "backend_error" and challenge.get("error_message", "") == "Vault request refused")
 	# rc20 uses this same refusal for invalid parameters and an absent vault.
 	var raw_challenge: Dictionary = await conn.request_method("docket/panel/vault_challenge", {"panel_secret": authority._secret, "path": host.master_path})
-	check("actual child vault refusal", raw_challenge.get("rpc_error", {}) == {"code": -32602, "message": "Vault request refused"})
+	var rpc_error: Dictionary = raw_challenge.get("rpc_error", {})
+	check("actual child vault refusal", rpc_error.size() == 2 and rpc_error.has_all(["code", "message"]) and rpc_error.code == -32602 and rpc_error.message == "Vault request refused")
 	check("vault challenge leaves master unchanged", FileAccess.get_sha256(host.master_path) == master_digest)
 	check("master vault remains uninitialized without password", vault_metadata_absent() and host._vault_session._password.is_empty())
 	print("REAL_CHILD_PID:", pid)
