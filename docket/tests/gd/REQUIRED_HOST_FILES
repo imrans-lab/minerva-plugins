@@ -1,2 +1,6 @@
 src/Scripts/Services/Plugins/PluginManager.gd
 src/Scripts/Services/Plugins/PluginToolRegistry.gd
+src/Scripts/Services/DocketHost/DocketHost.gd
+src/Scripts/Services/DocketHost/HostedVaultSession.gd
+src/Scripts/Services/Plugins/PluginPanelAuthority.gd
+src/Scripts/Services/MCP/MCPServerConnection.gd

@@ -4,6 +4,10 @@ var passed := 0
 var failed := 0
 var pm
 var registry
+var host
+var previous_secret := ""
+var master_digest := ""
+var lifecycle_complete := false
 var state: String
 var exec_gate
 var approvals := 0
@@ -48,7 +52,35 @@ func start() -> bool:
 	check("collision registered nothing", collision.get_plugin_tools("docket").is_empty())
 	for tool in mapped:
 		check("single Docket prefix", str(tool.name).begins_with("minerva_docket_") and not str(tool.name).begins_with("minerva_docket_docket_"))
-	return check("child GUI PID published", FileAccess.file_exists(state.get_base_dir().path_join("child.pid")))
+	if not check("child GUI PID published", FileAccess.file_exists(state.get_base_dir().path_join("child.pid"))):
+		return false
+	var deadline := Time.get_ticks_msec() + 120000
+	while host.state == "starting" and Time.get_ticks_msec() < deadline:
+		await process_frame
+	if not check("real DocketHost prepared", host.state in ["ready", "degraded"]):
+		return false
+	check("canonical master bootstrapped", host.master_path == ProjectSettings.globalize_path(host.MASTER_USER) and not host.master_project().is_empty())
+	check("bootstrap report identifies master", host.master_report.get("project", {}).get("path", "") == host.master_path)
+	var authority = pm.get_panel_authority("docket")
+	if not check("production per-child authority", authority != null and authority._secret.length() == 64):
+		return false
+	# Private fixtures inspect only fixed fields; never stringify requests/results.
+	var accepted: Dictionary = await authority.host_request("status", {})
+	var pid := int(FileAccess.get_file_as_string(state.get_base_dir().path_join("child.pid")))
+	check("private authority accepted by actual child", accepted.get("result", {}).get("protocol", "") == "docket_panel_v1" and accepted.get("result", {}).get("pid", 0) == pid)
+	var missing: Dictionary = await conn.request_method("docket/panel/status", {})
+	check("missing token refused", missing.get("rpc_error", {}).get("code", 0) == -32001)
+	if not previous_secret.is_empty():
+		check("restart rotates child token", authority._secret != previous_secret)
+		var stale: Dictionary = await conn.request_method("docket/panel/status", {"panel_secret": previous_secret})
+		check("previous child token refused", stale.get("rpc_error", {}).get("code", 0) == -32001)
+		check("canonical master survives restart", FileAccess.get_sha256(host.master_path) == master_digest)
+	previous_secret = authority._secret
+	master_digest = FileAccess.get_sha256(host.master_path)
+	var challenge: Dictionary = await authority.host_request("vault_challenge", {"path": host.master_path})
+	check("uninitialized master vault remains refused", challenge.has("error_code") and host._vault_session._password.is_empty())
+	print("REAL_CHILD_PID:", pid)
+	return true
 
 func stop() -> void:
 	var pid := int(FileAccess.get_file_as_string(state.get_base_dir().path_join("child.pid")))
@@ -90,6 +122,16 @@ func _run() -> void:
 	if not check("producer prepares manifest before bounded startup", OS.execute(binary, ["manifest", "lifecycle-manifest.json"], output, true) == 0):
 		finish()
 		return
+	# Release every embedded file handle before handing the same master to Docket.
+	var singleton = root.get_node("SingletonObject")
+	var embedded = singleton.docket_manager
+	if embedded != null:
+		check("embedded owner closed without save refusal", embedded.close_all().is_empty())
+		singleton.docket_manager = null
+		embedded.free()
+	check("embedded owner removed", singleton.docket_manager == null)
+	if singleton.docket_host != null:
+		singleton.docket_host.free()
 	var manager_script: Script = load("res://Scripts/Services/Plugins/PluginManager.gd")
 	pm = manager_script.new()
 	root.add_child(pm)
@@ -106,6 +148,17 @@ func _run() -> void:
 	if not check("real manifest install", installed.get("ok", false)):
 		finish()
 		return
+	var definition = pm.get_db().get_by_id("docket")
+	check("installed production authority declaration", definition.panel_authority == PluginDefinition.PANEL_AUTHORITY_V1)
+	check("host mode explicitly declared", definition.args == ["--host-authority"])
+	host = load("res://Scripts/Services/DocketHost/DocketHost.gd").new()
+	root.add_child(host)
+	singleton.docket_host = host
+	host.start(pm, false)
+	var pins = JSON.parse_string(FileAccess.get_file_as_string(plugin_dir.path_join("release.lock.json")))
+	var receipt = JSON.parse_string(FileAccess.get_file_as_string(state.get_base_dir().path_join("v0.3.0-rc.20-linux-amd64/acquisition.lock.json")))
+	check("actual signed payload receipt matches source pins", receipt is Dictionary and receipt == pins)
+	print("REAL_PAYLOAD:", pins.tag, " source=", pins.source, " asset_sha256=", pins.platforms["linux-amd64"].sha256)
 	var deadline := Time.get_ticks_msec() + 720000
 	while pm.get_plugin_status("docket").get("state_name", "") == "BUILDING" and Time.get_ticks_msec() < deadline:
 		await create_timer(0.1).timeout
@@ -133,9 +186,13 @@ func _run() -> void:
 			check("disable autostart persists", pm.get_db().set_autostart("docket", false))
 			await stop()
 			check("disabled in generic DB", not pm.get_db().get_by_id("docket").autostart)
+			lifecycle_complete = true
 	finish()
 
 func finish() -> void:
+	previous_secret = ""
+	if lifecycle_complete and failed == 0:
+		print("REAL_HOST_AUTHORITY_COMPLETE")
 	if pm != null:
 		pm.shutdown_all()
 	print("=== Results: %d passed, %d failed ===" % [passed, failed])

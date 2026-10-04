@@ -17,13 +17,21 @@ real `minerva_docket_*` names collide, so the host refuses plugin registration
 and PluginManager warns. The positive lifecycle uses an empty built-in registry;
 a separate case verifies the real-name refusal. No registry publication.
 
-Independent Linux executor, exact candidate and GS host as siblings, verified
+The production manifest declares `docket_panel_v1` and passes `--host-authority`.
+PluginManager supplies a fresh `DOCKET_PANEL_SECRET` for each child; the launcher
+forwards it only in the child environment. No token is stored or passed in argv.
+No-argument standalone stdio and acquisition/CLI modes remain available.
+The bridge oracle closes the isolated embedded owner before DocketHost declares
+Minerva schema and opens the canonical master; it checks private authentication,
+rotation and old-token refusal without creating or initializing a vault.
+
+Authorized writer or independent Linux executor, exact candidate and GS host as siblings, verified
 native extensions and Godot available, Go dependencies cached, Xvfb installed:
 
 ```bash
 export MINERVA_PLUGIN_DATA_DIR=/absolute/fresh/scratch/docket-data
 export MINERVA_DOCKET_PLUGIN_DIR=/absolute/scratch/minerva-plugins/docket
-# Executor builds this binary; source authors compile but never execute it.
+# Build and execute only in the approved isolated planned job.
 GOWORK=off go -C "$MINERVA_DOCKET_PLUGIN_DIR" build -o docket-plugin.exe .
 # Optional OFFLINE fixture preparation: retained official assets + signatures.
 DOCKET_RELEASE_FIXTURE=/absolute/official-rc20 DOCKET_STAGE_PLUGIN=1 \

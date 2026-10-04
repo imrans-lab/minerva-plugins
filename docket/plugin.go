@@ -117,7 +117,7 @@ func pluginCommand(ctx context.Context, r release, args []string) error {
 			return os.WriteFile(output, manifestJSON, 0600)
 		}
 		return nil
-	case len(args) == 0:
+	case len(args) == 0, len(args) == 1 && args[0] == "--host-authority":
 		p, ok := r.Platforms[target]
 		if !ok {
 			return fmt.Errorf("unsupported platform: %s", target)
@@ -138,9 +138,9 @@ func pluginCommand(ctx context.Context, r release, args []string) error {
 		if err := privateDir(state); err != nil {
 			return err
 		}
-		return launch(filepath.Join(dest, filepath.FromSlash(p.Entrypoint)), state)
+		return launch(filepath.Join(dest, filepath.FromSlash(p.Entrypoint)), state, args...)
 	}
-	return errors.New("usage: docket-plugin.exe [prepare | manifest filename | verify-pins | acquire /absolute/private/root]")
+	return errors.New("usage: docket-plugin.exe [--host-authority | prepare | manifest filename | verify-pins | acquire /absolute/private/root]")
 }
 
 func childEnvironment(state, platform string, inherited []string) ([]string, error) {
@@ -179,12 +179,14 @@ func childEnvironment(state, platform string, inherited []string) ([]string, err
 }
 
 // No protocol requests or namespace translation: the exported GUI owns its lease.
-func launch(executable, state string) error {
+func launch(executable, state string, mode ...string) error {
 	env, err := childEnvironment(filepath.Join(filepath.Dir(state), "child-env"), runtime.GOOS, os.Environ())
 	if err != nil {
 		return err
 	}
-	child := exec.Command(executable, "--quiet", "--", "--stdio", "--state-dir", state)
+	// Host mode is explicit; its per-child token stays in the inherited environment.
+	args := append([]string{"--quiet", "--", "--stdio", "--state-dir", state}, mode...)
+	child := exec.Command(executable, args...)
 	child.Env, child.Stderr = env, os.Stderr
 	// Own the pipes: Wait must reap independently of a blocked host writer.
 	stdin, input, err := os.Pipe()
