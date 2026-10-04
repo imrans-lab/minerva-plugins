@@ -191,7 +191,7 @@ func _run() -> void:
 	singleton.docket_host = host
 	host.start(pm, false)
 	var pins = JSON.parse_string(FileAccess.get_file_as_string(plugin_dir.path_join("release.lock.json")))
-	var receipt = JSON.parse_string(FileAccess.get_file_as_string(state.get_base_dir().path_join("v0.3.0-rc.20-linux-amd64/acquisition.lock.json")))
+	var receipt = JSON.parse_string(FileAccess.get_file_as_string(state.get_base_dir().path_join(pins.tag + "-linux-amd64/acquisition.lock.json")))
 	check("actual signed payload receipt matches source pins", receipt is Dictionary and receipt == acquisition_pins(pins))
 	print("REAL_PAYLOAD:", pins.tag, " source=", pins.source, " asset_sha256=", pins.platforms["linux-amd64"].sha256)
 	var deadline := Time.get_ticks_msec() + 720000
