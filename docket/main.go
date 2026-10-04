@@ -211,9 +211,6 @@ func acquire(ctx context.Context, r release, target, root string, fetch fetcher)
 	if !filepath.IsAbs(root) {
 		return "", errors.New("installation root must be absolute")
 	}
-	if err := verifyPins(ctx, r, fetch); err != nil {
-		return "", err
-	}
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return "", err
 	}
@@ -242,6 +239,9 @@ func acquire(ctx context.Context, r release, target, root string, fetch fetcher)
 	}
 	if _, err := os.Lstat(dest); !os.IsNotExist(err) {
 		return "", errors.New("existing installation receipt mismatch")
+	}
+	if err := verifyPins(ctx, r, fetch); err != nil {
+		return "", err
 	}
 	// Only expired staging is stale: active acquisitions have a ten-minute bound.
 	entries, err := os.ReadDir(root)
@@ -293,6 +293,9 @@ func acquire(ctx context.Context, r release, target, root string, fetch fetcher)
 	if err := os.WriteFile(filepath.Join(stage, "acquisition.lock.json"), receipt, 0600); err != nil {
 		return "", err
 	}
+	if err := syncReceipt(stage, receipt); err != nil {
+		return "", err
+	}
 	if err := os.Rename(stage, dest); err != nil {
 		if installed() {
 			return filepath.Join(dest, filepath.FromSlash(p.Entrypoint)), nil
@@ -325,7 +328,7 @@ func extract(file *os.File, asset, root string) (result error) {
 		}
 		for i, component := range strings.Split(name, "/") {
 			stem := strings.ToUpper(strings.SplitN(component, ".", 2)[0])
-			if strings.TrimRight(component, " .") != component || stem == "CON" || stem == "PRN" || stem == "AUX" || stem == "NUL" || strings.Contains("|COM¹|COM²|COM³|LPT¹|LPT²|LPT³|", "|"+stem+"|") || (len(stem) == 4 && (strings.HasPrefix(stem, "COM") || strings.HasPrefix(stem, "LPT")) && stem[3] >= '1' && stem[3] <= '9') {
+			if strings.TrimRight(component, " .") != component || stem == "CON" || stem == "CONIN$" || stem == "CONOUT$" || stem == "PRN" || stem == "AUX" || stem == "NUL" || strings.Contains("|COM¹|COM²|COM³|LPT¹|LPT²|LPT³|", "|"+stem+"|") || (len(stem) == 4 && (strings.HasPrefix(stem, "COM") || strings.HasPrefix(stem, "LPT")) && stem[3] >= '1' && stem[3] <= '9') {
 				return fmt.Errorf("unsafe portable path: %s", name)
 			}
 			prefix := strings.Join(strings.Split(name, "/")[:i+1], "/")
@@ -361,6 +364,9 @@ func extract(file *os.File, asset, root string) (result error) {
 			return err
 		}
 		err = copyBounded(file, reader, size)
+		if err == nil {
+			err = file.Sync()
+		}
 		closeErr := file.Close()
 		if err != nil {
 			return err
@@ -434,7 +440,7 @@ func main() {
 				fmt.Println(executable)
 			}
 		default:
-			err = errors.New("usage: acquire verify-pins | acquire acquire /absolute/private/root")
+			err = pluginCommand(ctx, r, os.Args[1:])
 		}
 	}
 	if err != nil {

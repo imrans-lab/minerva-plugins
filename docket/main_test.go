@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -41,6 +42,19 @@ func TestOfficialRelease(t *testing.T) {
 	if err := verifyPins(ctx, r, fetch); err != nil {
 		t.Fatal(err)
 	}
+	// Executor-only fixture staging uses the same signed acquisition oracle.
+	if os.Getenv("DOCKET_STAGE_PLUGIN") == "1" {
+		if os.Getenv("MINERVA_PLUGIN_DATA_DIR") == "" {
+			t.Fatal("fixture staging requires explicit scratch data override")
+		}
+		pluginRoot, err := pluginRoot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := acquire(ctx, r, runtime.GOOS+"-"+runtime.GOARCH, pluginRoot, fetch); err != nil {
+			t.Fatal(err)
+		}
+	}
 	var lastGood string
 	for target, p := range r.Platforms {
 		executable, err := acquire(ctx, r, target, root, fetch)
@@ -48,7 +62,10 @@ func TestOfficialRelease(t *testing.T) {
 			t.Fatalf("%s: %v", target, err)
 		}
 		lastGood = executable
-		again, err := acquire(ctx, r, target, root, fetch)
+		again, err := acquire(ctx, r, target, root, func(context.Context, string, io.Writer, int64) error {
+			t.Fatal("installed cache attempted network")
+			return nil
+		})
 		if err != nil || again != executable || filepath.Dir(again) == root {
 			t.Fatal("installation did not converge on its versioned cache")
 		}
@@ -155,7 +172,7 @@ func TestOfficialRelease(t *testing.T) {
 			}
 		})
 	}
-	for _, name := range []string{"../escape", "/absolute", "C:\\escape", "a/../escape", "CON", "COM¹", "COM².txt", "COM³", "LPT¹", "LPT².txt", "LPT³", "trailing.", "duplicate", "case", "symlink"} {
+	for _, name := range []string{"../escape", "/absolute", "C:\\escape", "a/../escape", "CON", "CONIN$", "CONOUT$", "COM¹", "COM².txt", "COM³", "LPT¹", "LPT².txt", "LPT³", "trailing.", "duplicate", "case", "symlink"} {
 		t.Run(name, func(t *testing.T) {
 			archive := filepath.Join(t.TempDir(), "unsafe.zip")
 			file, err := os.Create(archive)

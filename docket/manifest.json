@@ -1,0 +1,16 @@
+{
+  "id": "docket",
+  "name": "Docket",
+  "version": "0.3.0-rc.18",
+  "description": "Official signed Docket GUI with private state and stdio tools.",
+  "host_api_version": "1",
+  "backend": {"transport": "stdio", "entrypoint": "./docket-plugin.exe", "args": []},
+  "tools": [],
+  "setup": {
+    "requires": [{"tool": "go", "min": "1.23"}],
+    "steps": [
+      {"type": "go_build", "package": "./", "output": "docket-plugin.exe"},
+      {"type": "exec", "argv": ["./docket-plugin.exe", "prepare"], "timeout_s": 660}
+    ]
+  }
+}

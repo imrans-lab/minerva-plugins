@@ -9,10 +9,14 @@ permissions:
   contents: read
 jobs:
   signed-release:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-latest]
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: docket
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -32,3 +36,8 @@ jobs:
         env:
           DOCKET_RELEASE_FIXTURE: ${{ runner.temp }}/docket-release
         run: GOWORK=off go test -mod=readonly -count=1 ./...
+      - name: Acquire the official release for this runner (no GUI)
+        run: |
+          mkdir -p "$RUNNER_TEMP/docket-private"
+          chmod 700 "$RUNNER_TEMP/docket-private"
+          GOWORK=off go run -mod=readonly . acquire "$RUNNER_TEMP/docket-private"
