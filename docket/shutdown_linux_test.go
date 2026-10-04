@@ -96,13 +96,18 @@ func TestShutdownWithBlockedHostOutput(t *testing.T) {
 				t.Fatal("launcher blocked beyond host stop fallback")
 			}
 			if backpressure {
+				// The child must not outlive the launcher: it either sees EOF (marker) or
+				// dies on its broken stdout pipe (a Go child gets SIGPIPE writing fd 1).
 				deadline := time.Now().Add(3 * time.Second)
 				for {
 					if _, err := os.Stat(filepath.Join(root, "child-eof")); err == nil {
 						break
 					}
+					if syscall.Kill(pid, 0) == syscall.ESRCH {
+						break
+					}
 					if time.Now().After(deadline) {
-						t.Fatal("launcher death did not deliver child EOF")
+						t.Fatal("child outlived the killed launcher")
 					}
 					time.Sleep(10 * time.Millisecond)
 				}
