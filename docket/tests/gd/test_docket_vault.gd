@@ -10,6 +10,7 @@ var child_ids: Array[int] = []
 var held := false
 var reached := false
 var intercepted := 0
+var completed_sets := 0
 
 func install_fixture(manifest_path: String) -> Dictionary:
 	# The preceding registered lifecycle suite prepared this exact fixture.
@@ -41,7 +42,7 @@ func _run() -> void:
 		singleton.docket_manager.free()
 		singleton.docket_manager = null
 	password = Crypto.new().generate_random_bytes(24).hex_encode()
-	for i in 2:
+	for i in 3:
 		values.append(Crypto.new().generate_random_bytes(24).hex_encode())
 	var data := OS.get_environment("MINERVA_PLUGIN_DATA_DIR")
 	var producer_state := data.path_join("vault-producer")
@@ -98,6 +99,7 @@ func start() -> bool:
 			for op in ["get", "set", "delete"]:
 				pm.get_policy().grant_capability(plugin, "secrets:%s:entry" % op)
 		await scenarios()
+		authority = pm.get_panel_authority("docket")
 	else:
 		check("restart private token rotates", authority._secret != previous_secret)
 		var stale: Dictionary = await pm.get_connection("docket").request_method("docket/panel/vault_challenge", {"panel_secret": previous_secret, "path": host.master_path})
@@ -169,15 +171,21 @@ func scenarios() -> void:
 	# Cancel synchronously at the real backend completion signal: sent truth
 	# must survive the public lifetime envelope and never replay the write.
 	context = MCPExecutionContext.create("vault-fixture")
+	completed_sets = 0
 	var cancel_on_reply := func(id: String, tool: String):
 		if id == "docket" and tool == "docket_secret_set":
+			completed_sets += 1
 			context.cancel()
 	pm.backend_tool_called.connect(cancel_on_reply)
-	var unknown := await secret("fixture-a", "set", values[0], context)
+	var unknown := await secret("fixture-a", "set", values[2], context)
+	var persisted := await secret("fixture-a", "get")
+	check("cancelled attempt mutated once without replay", completed_sets == 1 and persisted.get("result", {}).get("value") == values[2])
 	pm.backend_tool_called.disconnect(cancel_on_reply)
-	check("sent cancellation unconfirmed and no replay", unknown.get("error_code", "") == "cancelled" and unknown.get("recovery", {}).get("outcome", "") == "unknown" and intercepted == 3)
+	check("sent cancellation remains unconfirmed", unknown.get("error_code", "") == "cancelled" and unknown.get("recovery", {}).get("outcome", "") == "unknown")
 	check("public sent cancellation flags preserved", unknown.get("recovery", {}).get("sent", false) == true and unknown.get("recovery", {}).get("unconfirmed", false) == true)
 	pm.set_backend_tool_guard("docket", host._guard)
+	var restored := await secret("fixture-a", "set", values[0])
+	check("restart value restored outside cancellation interval", restored.get("success", false))
 
 # Denial stays active until teardown, after all inherited lifecycle scenarios.
 func policy_scenarios() -> void:
@@ -232,12 +240,36 @@ func remember_children() -> void:
 			if not pid in child_ids:
 				child_ids.append(pid)
 				print("REAL_VAULT_PID:", pid)
-			for needle in [password] + values:
-				check("secret absent from child argv and environment", not cmd.contains(needle) and not proc_text("/proc/" + name + "/environ").contains(needle))
+	var pid_path := state.get_base_dir().path_join("child.pid")
+	if FileAccess.file_exists(pid_path):
+		var pid := int(FileAccess.get_file_as_string(pid_path))
+		check("published consumer PID measured", pid > 0)
+		if pid > 0 and not pid in child_ids:
+			child_ids.append(pid)
+	for pid in child_ids:
+		if not _alive(pid):
+			print("REAL_VAULT_PID_EXITED:", pid)
+			continue
+		var cmd := proc_text("/proc/%d/cmdline" % pid, true)
+		var env := proc_text("/proc/%d/environ" % pid, true)
+		for needle in [password] + values:
+			check("secret absent from child argv and environment", not cmd.contains(needle) and not env.contains(needle))
 
-func proc_text(path: String) -> String:
+func proc_text(path: String, required: bool = false) -> String:
 	var file := FileAccess.open(path, FileAccess.READ)
-	return file.get_buffer(65536).get_string_from_ascii() if file != null else ""
+	if file == null:
+		if required:
+			check("owned process evidence readable: " + path, false)
+		return ""
+	var bytes := PackedByteArray()
+	while true:
+		var chunk := file.get_buffer(4096)
+		bytes.append_array(chunk)
+		if chunk.is_empty():
+			break
+	if required:
+		check("owned process evidence complete: " + path, file.get_error() == ERR_FILE_EOF)
+	return bytes.get_string_from_ascii()
 
 func children_dead() -> bool:
 	return child_ids.all(func(pid: int): return not _alive(pid))
