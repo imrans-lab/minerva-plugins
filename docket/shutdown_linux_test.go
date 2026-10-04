@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -18,7 +19,16 @@ import (
 func TestMain(m *testing.M) {
 	if state := os.Getenv("DOCKET_SHUTDOWN_HELPER"); state != "" {
 		if len(os.Args) > 1 && os.Args[1] == "--quiet" {
-			_, _ = os.Stdout.Write(bytes.Repeat([]byte("x"), 4<<20))
+			if os.Getenv("DOCKET_BUSY_HELPER") == "1" {
+				time.Sleep(2 * time.Second) // Healthy child busy beyond the old watchdog.
+				_, _ = io.Copy(os.Stdout, os.Stdin)
+				os.Exit(0)
+			}
+			if _, err := os.Stdout.Write(bytes.Repeat([]byte("x"), 4<<20)); err != nil {
+				_, _ = io.Copy(io.Discard, os.Stdin)
+				_ = os.WriteFile(filepath.Join(filepath.Dir(state), "child-eof"), nil, 0600)
+				os.Exit(0)
+			}
 			for {
 				time.Sleep(time.Second)
 			} // Deliberately ignores EOF and input.
@@ -74,10 +84,29 @@ func TestShutdownWithBlockedHostOutput(t *testing.T) {
 			}
 			time.Sleep(200 * time.Millisecond)
 			_ = input.Close()
+			stopBound := 9 * time.Second
+			if backpressure {
+				stopBound = 12 * time.Second
+				// Match GS: EOF hidden by a blocked write falls back to host kill.
+				time.AfterFunc(10*time.Second, func() { _ = cmd.Process.Kill() })
+			}
 			select {
 			case <-done: // Forced shutdown may report an error; it must still reap.
-			case <-time.After(9 * time.Second):
-				t.Fatal("launcher blocked beyond shutdown bound")
+			case <-time.After(stopBound):
+				t.Fatal("launcher blocked beyond host stop fallback")
+			}
+			if backpressure {
+				deadline := time.Now().Add(3 * time.Second)
+				for {
+					if _, err := os.Stat(filepath.Join(root, "child-eof")); err == nil {
+						break
+					}
+					if time.Now().After(deadline) {
+						t.Fatal("launcher death did not deliver child EOF")
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				return // Forced launcher death cannot run its PID-file cleanup defer.
 			}
 			if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
 				t.Fatalf("child not reaped: %v", err)
@@ -86,5 +115,22 @@ func TestShutdownWithBlockedHostOutput(t *testing.T) {
 				t.Fatal("stale child PID")
 			}
 		})
+	}
+}
+
+func TestBusyChildInput(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 9*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0])
+	cmd.Env = append(os.Environ(), "DOCKET_SHUTDOWN_HELPER="+filepath.Join(t.TempDir(), "state"), "DOCKET_BUSY_HELPER=1")
+	payload := bytes.Repeat([]byte("healthy busy input\n"), 1<<18)
+	cmd.Stdin = bytes.NewReader(payload)
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(output.Bytes(), payload) {
+		t.Fatal("large request lost while child busy")
 	}
 }

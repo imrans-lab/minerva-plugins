@@ -34,11 +34,12 @@ xvfb-run -a bash /absolute/scratch/minerva-plugins/scripts/run-gd-tests.sh \
   --plugin docket /absolute/scratch/Minerva
 ```
 
-The executor must set both MINERVA_DOCKET_PLUGIN_DIR and MINERVA_PLUGIN_DATA_DIR
-as above, and isolate host user data with fresh absolute XDG directories
-before Godot starts; do not override HOME. Source checkout must be writable for
-setup output/generated lifecycle-manifest.json. Missing binaries, fixtures,
-natives or assertions fail. The oracle installs via the producer and real host
+Use the two scratch variables above and fresh absolute XDG directories before
+Godot starts; preserve HOME. Setup needs a writable checkout for its binary and
+lifecycle manifest. Missing prerequisites and assertions fail. The oracle installs via the producer and real host
 PluginManager, checks discovered names, mapped create/get calls, durable private
 project writes across stop/restart, disabled autostart and dead child PIDs.
 Docket's GUI maintains ownership; the launcher sends no heartbeat requests.
+
+Healthy busy input may block; observed EOF/write errors start an eight-second reap bound.
+If backpressure hides EOF, Minerva terminates the launcher after ten seconds, closing child pipes.

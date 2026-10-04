@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	plugruntime "github.com/imrans-lab/minerva-plugins/shared/runtime"
@@ -213,37 +212,20 @@ func launch(executable, state string) error {
 		return err
 	}
 	defer os.Remove(pidFile)
-	var draining atomic.Bool
 	shutdown := make(chan error, 2)
 	go func() {
-		buffer := make([]byte, 32768)
-		for {
-			n, err := os.Stdin.Read(buffer)
-			if n > 0 {
-				// Backpressure cannot hide host EOF indefinitely behind a child write.
-				written := make(chan error, 1)
-				go func() { _, err := input.Write(buffer[:n]); written <- err }()
-				select {
-				case err = <-written:
-				case <-time.After(500 * time.Millisecond):
-					err = errors.New("Docket stdin backpressure exceeded half a second")
-				}
-			}
-			if err != nil {
-				if err == io.EOF {
-					err = nil
-				}
-				shutdown <- err
-				return
-			}
-		}
+		// Healthy child backpressure may block forwarding. If that hides EOF,
+		// Minerva's stop deadline terminates this launcher and closes its pipes.
+		_, err := io.Copy(input, os.Stdin)
+		_ = input.Close()
+		shutdown <- err
 	}()
 	outputDone := make(chan error, 1)
 	go func() {
 		buffer := make([]byte, 32768)
 		for {
 			n, readErr := stdout.Read(buffer)
-			if n > 0 && !draining.Load() {
+			if n > 0 {
 				if _, err := os.Stdout.Write(buffer[:n]); err != nil {
 					shutdown <- err
 					outputDone <- err
@@ -269,13 +251,16 @@ func launch(executable, state string) error {
 			return err
 		}
 	case cause := <-shutdown:
-		draining.Store(true)
-		go input.Close() // Closing a Windows pipe may wait for an outstanding write.
+		go input.Close() // Windows close may wait for an outstanding write.
 		// Leave headroom inside the host's ten-second graceful stop window.
 		select {
 		case err := <-settled:
 			if err != nil {
 				return err
+			}
+			select {
+			case <-outputDone:
+			case <-time.After(500 * time.Millisecond):
 			}
 			return cause
 		case <-time.After(8 * time.Second):

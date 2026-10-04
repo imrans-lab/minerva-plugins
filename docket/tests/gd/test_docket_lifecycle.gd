@@ -5,6 +5,9 @@ var failed := 0
 var pm
 var registry
 var state: String
+var exec_gate
+var approvals := 0
+var busy_results: Array[Dictionary] = []
 
 func _initialize() -> void:
 	_run.call_deferred()
@@ -57,6 +60,20 @@ func stop() -> void:
 	check("no surviving GUI", not OS.is_process_running(pid))
 	check("launcher settled", not FileAccess.file_exists(state.get_base_dir().path_join("child.pid")))
 
+func create_large(project: String, title: String, article: String) -> void:
+	busy_results.append(await call_mapped("docket_create", {"project": project, "type": "chore", "title": title, "article": article}))
+
+func approve_prepare() -> void:
+	var request: Dictionary = exec_gate._current_request
+	var step: Dictionary = request.step
+	var expected: bool = request.step_index == 1 and step.get("argv", []) == ["./docket-plugin.exe", "prepare"]
+	if check("real dialog requests only declared prepare", expected):
+		approvals += 1
+		exec_gate.confirmed.emit()
+	else:
+		exec_gate.canceled.emit()
+	exec_gate.hide()
+
 func _run() -> void:
 	await process_frame
 	var plugin_dir := OS.get_environment("MINERVA_DOCKET_PLUGIN_DIR")
@@ -77,7 +94,13 @@ func _run() -> void:
 	pm = manager_script.new()
 	root.add_child(pm)
 	await process_frame
-	registry = load("res://Scripts/Services/Plugins/PluginToolRegistry.gd").new(pm)
+	# Match SingletonObject policy wiring and PluginManagerPanel's real dialog seam.
+	pm._policy_ref = load("res://Scripts/Services/Plugins/PluginPolicy.gd").new(pm.get_db())
+	exec_gate = load("res://Scripts/UI/Controls/PluginManagerPanel/PluginExecApprovalGate.gd").new()
+	root.add_child(exec_gate)
+	exec_gate.about_to_popup.connect(func(): approve_prepare.call_deferred())
+	pm.exec_approver = exec_gate.approve
+	registry = load("res://Scripts/Services/Plugins/PluginToolRegistry.gd").new(pm, pm.get_policy())
 	root.get_node("SingletonObject").plugin_tool_registry = registry
 	var installed: Dictionary = await pm.install_plugin(plugin_dir.path_join("lifecycle-manifest.json"), true)
 	if not check("real manifest install", installed.get("ok", false)):
@@ -86,12 +109,19 @@ func _run() -> void:
 	var deadline := Time.get_ticks_msec() + 720000
 	while pm.get_plugin_status("docket").get("state_name", "") == "BUILDING" and Time.get_ticks_msec() < deadline:
 		await create_timer(0.1).timeout
+	check("prepare explicitly approved once", approvals == 1)
 	if await start():
 		var path := state.path_join("lifecycle.dct")
 		var project := await call_mapped("docket_project_add", {"path": path, "create": true})
 		var name: String = str(project.get("name", ""))
 		var title := "lifecycle-" + str(Time.get_ticks_usec())
-		var created := await call_mapped("docket_create", {"project": name, "type": "chore", "title": title})
+		var article := "busy request\n".repeat(160000)
+		# Queue another large request while the child is processing the first write.
+		create_large(name, title + "-busy", article)
+		var created := await call_mapped("docket_create", {"project": name, "type": "chore", "title": title, "article": article})
+		while busy_results.is_empty():
+			await process_frame
+		check("concurrent large request succeeded", not str(busy_results[0].get("id", "")).is_empty())
 		var id: String = str(created.get("id", ""))
 		check("durable item identity", not id.is_empty())
 		await stop()
@@ -99,7 +129,7 @@ func _run() -> void:
 			# Restore is explicit; no change to the generic host autostart settings.
 			await call_mapped("docket_project_add", {"path": path})
 			var recovered := await call_mapped("docket_get", {"project": name, "id": id})
-			check("write survived graceful restart", recovered.get("title", "") == title)
+			check("large write survived graceful restart", recovered.get("title", "") == title and recovered.get("article", "") == article)
 			check("disable autostart persists", pm.get_db().set_autostart("docket", false))
 			await stop()
 			check("disabled in generic DB", not pm.get_db().get_by_id("docket").autostart)
