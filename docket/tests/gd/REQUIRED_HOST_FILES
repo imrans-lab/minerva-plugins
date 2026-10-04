@@ -4,3 +4,5 @@ src/Scripts/Services/DocketHost/DocketHost.gd
 src/Scripts/Services/DocketHost/HostedVaultSession.gd
 src/Scripts/Services/Plugins/PluginPanelAuthority.gd
 src/Scripts/Services/MCP/MCPServerConnection.gd
+src/Scripts/Services/Plugins/CapabilityBroker.gd
+src/Scripts/Services/Plugins/DocketCapabilityRoute.gd
