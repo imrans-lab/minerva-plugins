@@ -286,7 +286,7 @@ func acquire(ctx context.Context, r release, target, root string, fetch fetcher)
 	if err != nil {
 		return "", err
 	}
-	if !info.Mode().IsRegular() || (target[:strings.IndexByte(target, '-')] != "windows" && info.Mode().Perm()&0111 == 0) {
+	if !info.Mode().IsRegular() || (runtime.GOOS != "windows" && target[:strings.IndexByte(target, '-')] != "windows" && info.Mode().Perm()&0111 == 0) {
 		return "", errors.New("release entrypoint is not executable")
 	}
 	// Keep acquisition receipts beside the complete, unmodified exported payload.
