@@ -30,6 +30,9 @@ func TestOfficialRelease(t *testing.T) {
 	}
 	ctx := context.Background()
 	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := verifyPins(ctx, r, fetch); err != nil {
 		t.Fatal(err)
 	}
