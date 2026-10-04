@@ -1,0 +1,34 @@
+name: Docket signed release
+on:
+  pull_request:
+    paths: ['docket/**', '.github/workflows/docket.yml']
+  push:
+    paths: ['docket/**', '.github/workflows/docket.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  signed-release:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: docket
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache-dependency-path: docket/go.sum
+      - name: Verify all published pins with the acquisition verifier
+        run: GOWORK=off go run -mod=readonly . verify-pins
+      - name: Retain the real official fixture
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/docket-release"
+          tag=$(python3 -c 'import json; print(json.load(open("release.lock.json"))["tag"])')
+          gh release download "$tag" --repo imrans-lab/docket --dir "$RUNNER_TEMP/docket-release" --pattern SHA256SUMS --pattern SHA256SUMS.asc --pattern '*.zip' --pattern '*.tar.gz'
+      - name: Exercise official fixture and rejection cases independently
+        env:
+          DOCKET_RELEASE_FIXTURE: ${{ runner.temp }}/docket-release
+        run: GOWORK=off go test -mod=readonly -count=1 ./...
