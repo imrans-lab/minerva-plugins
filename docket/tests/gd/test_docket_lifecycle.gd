@@ -132,6 +132,15 @@ func approve_prepare() -> void:
 		exec_gate.canceled.emit()
 	exec_gate.hide()
 
+func install_fixture(manifest_path: String) -> Dictionary:
+	return await pm.install_plugin(manifest_path, true)
+
+func expected_prepare_approvals() -> int:
+	return 1
+
+func lifecycle_project_path() -> String:
+	return state.path_join("lifecycle.dct")
+
 func _run() -> void:
 	await process_frame
 	var plugin_dir := OS.get_environment("MINERVA_DOCKET_PLUGIN_DIR")
@@ -170,7 +179,7 @@ func _run() -> void:
 	pm.exec_approver = exec_gate.approve
 	registry = load("res://Scripts/Services/Plugins/PluginToolRegistry.gd").new(pm, pm.get_policy())
 	root.get_node("SingletonObject").plugin_tool_registry = registry
-	var installed: Dictionary = await pm.install_plugin(plugin_dir.path_join("lifecycle-manifest.json"), true)
+	var installed: Dictionary = await install_fixture(plugin_dir.path_join("lifecycle-manifest.json"))
 	if not check("real manifest install", installed.get("ok", false)):
 		finish()
 		return
@@ -188,9 +197,9 @@ func _run() -> void:
 	var deadline := Time.get_ticks_msec() + 720000
 	while pm.get_plugin_status("docket").get("state_name", "") == "BUILDING" and Time.get_ticks_msec() < deadline:
 		await create_timer(0.1).timeout
-	check("prepare explicitly approved once", approvals == 1)
+	check("prepare approval count matches fixture ownership", approvals == expected_prepare_approvals())
 	if await start():
-		var path := state.path_join("lifecycle.dct")
+		var path := lifecycle_project_path()
 		var project := await call_mapped("docket_project_add", {"path": path, "create": true})
 		var name: String = str(project.get("name", ""))
 		var title := "lifecycle-" + str(Time.get_ticks_usec())

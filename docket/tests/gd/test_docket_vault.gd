@@ -11,6 +11,28 @@ var held := false
 var reached := false
 var intercepted := 0
 
+func install_fixture(manifest_path: String) -> Dictionary:
+	# The preceding registered lifecycle suite prepared this exact fixture.
+	# Reuse its disabled entry through the normal manager, without re-preparing.
+	var installed = pm.get_db().get_by_id("docket")
+	var declared := PluginDefinition.from_manifest(manifest_path, PluginDefinition.LANE_MANIFEST)
+	if not check("preceding prepared fixture exists", installed != null and declared != null):
+		return {"ok": false}
+	declared.scan_class_names()
+	declared.autostart = false
+	if not check("prepared fixture stopped and disabled", not installed.autostart
+		and installed.state == PluginDefinition.State.INSTALLED and pm.get_connection("docket") == null):
+		return {"ok": false}
+	if not check("prepared fixture exactly matches declaration", installed.to_dict() == declared.to_dict()):
+		return {"ok": false}
+	return {"ok": true, "id": "docket"}
+
+func expected_prepare_approvals() -> int:
+	return 0
+
+func lifecycle_project_path() -> String:
+	return state.path_join("vault-lifecycle.dct")
+
 func _run() -> void:
 	await process_frame
 	var singleton = root.get_node("SingletonObject")
@@ -114,12 +136,18 @@ func scenarios() -> void:
 	pm.get_policy().grant_capability("fixture-a", "secrets:set:entry")
 	var policy: Dictionary = await server.call_tool("minerva_docket_create", {"project": host.master_project().name, "type": "policy", "status": "active", "title": "Fixture deny secret set",
 		"description": "---policy-rule---\n" + JSON.stringify({"effect": "block", "priority": 10, "tool_pattern": "^minerva_docket_secret_set$"}) + "\n---end-rule---"})
+	var keys := policy.keys()
+	keys.sort()
+	var result_keys: Array = policy.get("result", {}).keys() if policy.get("result", {}) is Dictionary else []
+	result_keys.sort()
+	print("VAULT_POLICY_SHAPE ", keys, " result_keys=", result_keys, " result_type=", typeof(policy.get("result")), " has_error_code=", policy.has("error_code"))
 	check("durable server policy created", not str(policy.get("id", "")).is_empty())
 	await flush_master()
 	before = FileAccess.get_sha256(host.master_path)
 	denied = await secret("fixture-a", "set", values[1])
 	check("normal server policy denies without mutation", not denied.get("success", false) and denied.get("error_message", "").contains("Blocked by policy") and FileAccess.get_sha256(host.master_path) == before)
 	var retired: Dictionary = await server.call_tool("minerva_docket_update", {"project": host.master_project().name, "id": policy.get("id", ""), "status": "draft"})
+	print("VAULT_POLICY_RETIRED_SHAPE ", retired.keys(), " has_error_code=", retired.has("error_code"))
 	check("fixture server policy retired", not retired.has("error"))
 	await flush_master()
 	before = FileAccess.get_sha256(host.master_path)
@@ -168,6 +196,7 @@ func scenarios() -> void:
 	var unknown := await secret("fixture-a", "set", values[0], context)
 	pm.backend_tool_called.disconnect(cancel_on_reply)
 	check("sent cancellation unconfirmed and no replay", unknown.get("error_code", "") == "cancelled" and unknown.get("recovery", {}).get("outcome", "") == "unknown" and intercepted == 3)
+	check("public sent cancellation flags preserved", unknown.get("recovery", {}).get("sent", false) == true and unknown.get("recovery", {}).get("unconfirmed", false) == true)
 	pm.set_backend_tool_guard("docket", host._guard)
 
 func guarded(tool: String, arguments: Dictionary, caller: String, binding: Dictionary = {}) -> String:
@@ -214,6 +243,8 @@ func scan_files(path: String) -> void:
 	for name in DirAccess.get_files_at(path):
 		var bytes := FileAccess.get_file_as_bytes(path.path_join(name))
 		for needle in [password] + values:
+			if bytes.get_string_from_ascii().contains(needle):
+				print("VAULT_LEAK_PATH ", path.path_join(name))
 			check("secret absent from retained consumer files", not bytes.get_string_from_ascii().contains(needle))
 	for name in DirAccess.get_directories_at(path):
 		scan_files(path.path_join(name))
