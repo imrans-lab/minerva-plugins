@@ -290,16 +290,16 @@ func acquire(ctx context.Context, r release, target, root string, fetch fetcher)
 		return "", errors.New("release entrypoint is not executable")
 	}
 	// Keep acquisition receipts beside the complete, unmodified exported payload.
-	if err := os.WriteFile(filepath.Join(stage, "acquisition.lock.json"), receipt, 0600); err != nil {
-		return "", err
-	}
 	if err := syncReceipt(stage, receipt); err != nil {
 		return "", err
 	}
-	if err := os.Rename(stage, dest); err != nil {
-		if installed() {
-			return filepath.Join(dest, filepath.FromSlash(p.Entrypoint)), nil
-		}
+	if err := syncDirectories(stage); err != nil {
+		return "", err
+	}
+	if err := os.Rename(stage, dest); err != nil && !installed() {
+		return "", err
+	}
+	if err := syncDirectory(root); err != nil {
 		return "", err
 	}
 	return filepath.Join(dest, filepath.FromSlash(p.Entrypoint)), nil

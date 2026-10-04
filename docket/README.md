@@ -6,11 +6,16 @@ The `.exe` build output is intentional on all platforms: Go `-o` preserves the
 specified filename and generic setup resolves its exec path absolutely.
 
 State and installs live under `shared/runtime.DataDir("docket")/official`, a
-0700 child of the shared plugin data directory. Child Linux XDG and Windows
-APPDATA/LOCALAPPDATA directories are private and absolute; HOME is preserved.
+0700 child of the shared plugin data directory. Dedicated Docket state is `official/state`; `child.pid` and `child-env` are
+siblings, outside that state. Child Linux XDG and Windows
+APPDATA/LOCALAPPDATA directories are private and absolute; HOME and inherited
+XDG_RUNTIME_DIR are preserved for Wayland, PipeWire and D-Bus.
 macOS bundle bytes remain signed and unchanged; Godot's engine cache/log paths
 can still be shared there. Windows/macOS GUI ownership and shutdown need HITL.
-No registry publication or change to host autostart/autoupdate defaults.
+Autostart must remain OFF until C1 removes the integrated Docket tools: their
+real `minerva_docket_*` names collide, so the host refuses plugin registration
+and PluginManager warns. The positive lifecycle uses an empty built-in registry;
+a separate case verifies the real-name refusal. No registry publication.
 
 Independent Linux executor, exact candidate and GS host as siblings, verified
 native extensions and Godot available, Go dependencies cached, Xvfb installed:
@@ -29,7 +34,8 @@ xvfb-run -a bash /absolute/scratch/minerva-plugins/scripts/run-gd-tests.sh \
   --plugin docket /absolute/scratch/Minerva
 ```
 
-The executor must isolate host user data with fresh absolute XDG directories
+The executor must set both MINERVA_DOCKET_PLUGIN_DIR and MINERVA_PLUGIN_DATA_DIR
+as above, and isolate host user data with fresh absolute XDG directories
 before Godot starts; do not override HOME. Source checkout must be writable for
 setup output/generated lifecycle-manifest.json. Missing binaries, fixtures,
 natives or assertions fail. The oracle installs via the producer and real host

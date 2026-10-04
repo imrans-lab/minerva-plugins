@@ -33,19 +33,29 @@ func start() -> bool:
 	check("exported tools/list", not tools.is_empty())
 	var mapped: Array = registry.get_plugin_tools("docket")
 	check("all discovered tools mapped", mapped.size() == tools.size())
+	# Separate negative oracle with the host's actual integrated Docket names.
+	var builtin_names: Array = []
+	var builtins = load("res://Scripts/Services/Docket/Tools/tool_registry.gd").new()
+	for name in builtins._build_tools():
+		builtin_names.append("minerva_" + str(name))
+	var collision = load("res://Scripts/Services/Plugins/PluginToolRegistry.gd").new(pm)
+	collision.set_builtin_tool_names(builtin_names)
+	var refused: Dictionary = collision.register_plugin_tools("docket", mapped)
+	check("built-in collision visibly refused: " + str(refused), not refused.get("ok", false) and str(refused.get("error", "")).contains("conflicts with a built-in Minerva tool"))
+	check("collision registered nothing", collision.get_plugin_tools("docket").is_empty())
 	for tool in mapped:
 		check("single Docket prefix", str(tool.name).begins_with("minerva_docket_") and not str(tool.name).begins_with("minerva_docket_docket_"))
-	return check("child GUI PID published", FileAccess.file_exists(state.path_join("child.pid")))
+	return check("child GUI PID published", FileAccess.file_exists(state.get_base_dir().path_join("child.pid")))
 
 func stop() -> void:
-	var pid := int(FileAccess.get_file_as_string(state.path_join("child.pid")))
+	var pid := int(FileAccess.get_file_as_string(state.get_base_dir().path_join("child.pid")))
 	check("child was alive", pid > 0 and OS.is_process_running(pid))
 	var before := Time.get_ticks_msec()
 	var result: Dictionary = await pm.stop_plugin("docket", true)
 	check("generic stop", result.get("ok", false))
 	check("settled within host grace", Time.get_ticks_msec() - before < 10000)
 	check("no surviving GUI", not OS.is_process_running(pid))
-	check("launcher settled", not FileAccess.file_exists(state.path_join("child.pid")))
+	check("launcher settled", not FileAccess.file_exists(state.get_base_dir().path_join("child.pid")))
 
 func _run() -> void:
 	await process_frame

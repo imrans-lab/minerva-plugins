@@ -10,7 +10,7 @@ import (
 func TestChildIsolation(t *testing.T) {
 	for _, platform := range []string{"linux", "windows", "darwin"} {
 		state := t.TempDir()
-		env, err := childEnvironment(state, platform, []string{"HOME=/unchanged", "APPDATA=/owner", "LOCALAPPDATA=/owner", "XDG_DATA_HOME=/owner", "PATH=/bin"})
+		env, err := childEnvironment(state, platform, []string{"HOME=/unchanged", "APPDATA=/owner", "LOCALAPPDATA=/owner", "XDG_DATA_HOME=/owner", "XDG_RUNTIME_DIR=/session", "PATH=/bin"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -19,12 +19,12 @@ func TestChildIsolation(t *testing.T) {
 			pair := strings.SplitN(entry, "=", 2)
 			values[pair[0]] = pair[1]
 		}
-		if values["HOME"] != "/unchanged" {
-			t.Fatal("HOME changed")
+		if values["HOME"] != "/unchanged" || values["XDG_RUNTIME_DIR"] != "/session" {
+			t.Fatal("inherited HOME or session runtime changed")
 		}
 		keys := []string{}
 		if platform == "linux" {
-			keys = []string{"XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR"}
+			keys = []string{"XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"}
 		}
 		if platform == "windows" {
 			keys = []string{"APPDATA", "LOCALAPPDATA"}

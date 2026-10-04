@@ -1,1 +1,5 @@
-# No known harness diagnostics accepted.
+# Godot --script first loads before host autoloads, then reloads successfully.
+# The Results floor still requires the suite to execute. Unknown roots fail.
+^SCRIPT ERROR: Compile Error: Identifier not found: SingletonObject @@ at: GDScript::reload \(res://Scripts/
+^SCRIPT ERROR: Compile Error: Failed to compile depended scripts\. @@ at: GDScript::reload \(
+^ERROR: Failed to load script ".*" with error "Compilation failed"\. @@ at: load \(modules/gdscript/gdscript\.cpp:

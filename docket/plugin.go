@@ -48,7 +48,7 @@ func pluginRoot() (string, error) {
 }
 
 func syncReceipt(stage string, receipt []byte) error {
-	file, err := os.OpenFile(filepath.Join(stage, "acquisition.lock.json"), os.O_WRONLY|os.O_TRUNC, 0600)
+	file, err := os.OpenFile(filepath.Join(stage, "acquisition.lock.json"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return err
 	}
@@ -56,11 +56,38 @@ func syncReceipt(stage string, receipt []byte) error {
 	if err == nil {
 		err = file.Sync()
 	}
-	closeErr := file.Close()
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	return err
+}
+
+// Windows does not support flushing directory handles via os.File.Sync.
+func syncDirectory(path string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	file, err := os.Open(path)
 	if err != nil {
 		return err
 	}
-	return closeErr
+	defer file.Close()
+	return file.Sync()
+}
+
+func syncDirectories(root string) error {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			if err := syncDirectories(filepath.Join(root, entry.Name())); err != nil {
+				return err
+			}
+		}
+	}
+	return syncDirectory(root)
 }
 
 // Preparation is a setup operation, never part of the manager's startup budget.
@@ -121,7 +148,7 @@ func childEnvironment(state, platform string, inherited []string) ([]string, err
 	overrides := map[string]string{}
 	switch platform {
 	case "linux":
-		for _, key := range []string{"XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR"} {
+		for _, key := range []string{"XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"} {
 			overrides[key] = filepath.Join(state, strings.ToLower(key))
 		}
 	case "windows":
@@ -154,24 +181,32 @@ func childEnvironment(state, platform string, inherited []string) ([]string, err
 
 // No protocol requests or namespace translation: the exported GUI owns its lease.
 func launch(executable, state string) error {
-	env, err := childEnvironment(state, runtime.GOOS, os.Environ())
+	env, err := childEnvironment(filepath.Join(filepath.Dir(state), "child-env"), runtime.GOOS, os.Environ())
 	if err != nil {
 		return err
 	}
 	child := exec.Command(executable, "--quiet", "--", "--stdio", "--state-dir", state)
 	child.Env, child.Stderr = env, os.Stderr
-	stdin, err := child.StdinPipe()
+	// Own the pipes: Wait must reap independently of a blocked host writer.
+	stdin, input, err := os.Pipe()
 	if err != nil {
 		return err
 	}
-	stdout, err := child.StdoutPipe()
+	defer stdin.Close()
+	defer input.Close()
+	stdout, output, err := os.Pipe()
 	if err != nil {
 		return err
 	}
+	defer stdout.Close()
+	defer output.Close()
+	child.Stdin, child.Stdout = stdin, output
 	if err := child.Start(); err != nil {
 		return err
 	}
-	pidFile := filepath.Join(state, "child.pid")
+	_ = stdin.Close()
+	_ = output.Close()
+	pidFile := filepath.Join(filepath.Dir(state), "child.pid")
 	if err := os.WriteFile(pidFile, []byte(fmt.Sprint(child.Process.Pid)), 0600); err != nil {
 		_ = child.Process.Kill()
 		_ = child.Wait()
@@ -179,54 +214,74 @@ func launch(executable, state string) error {
 	}
 	defer os.Remove(pidFile)
 	var draining atomic.Bool
-	eof := make(chan struct{})
+	shutdown := make(chan error, 2)
 	go func() {
-		_, _ = io.Copy(stdin, os.Stdin)
-		draining.Store(true)
-		_ = stdin.Close()
-		close(eof)
+		buffer := make([]byte, 32768)
+		for {
+			n, err := os.Stdin.Read(buffer)
+			if n > 0 {
+				// Backpressure cannot hide host EOF indefinitely behind a child write.
+				written := make(chan error, 1)
+				go func() { _, err := input.Write(buffer[:n]); written <- err }()
+				select {
+				case err = <-written:
+				case <-time.After(500 * time.Millisecond):
+					err = errors.New("Docket stdin backpressure exceeded half a second")
+				}
+			}
+			if err != nil {
+				if err == io.EOF {
+					err = nil
+				}
+				shutdown <- err
+				return
+			}
+		}
 	}()
 	outputDone := make(chan error, 1)
 	go func() {
 		buffer := make([]byte, 32768)
-		var writeErr error
 		for {
 			n, readErr := stdout.Read(buffer)
-			if n > 0 && !draining.Load() && writeErr == nil {
-				_, writeErr = os.Stdout.Write(buffer[:n])
-				if writeErr != nil {
-					draining.Store(true)
-					_ = stdin.Close()
+			if n > 0 && !draining.Load() {
+				if _, err := os.Stdout.Write(buffer[:n]); err != nil {
+					shutdown <- err
+					outputDone <- err
+					return
 				}
 			}
 			if readErr != nil {
-				outputDone <- writeErr
+				shutdown <- nil
+				outputDone <- nil
 				return
 			}
 		}
 	}()
 	settled := make(chan error, 1)
-	go func() {
-		outputErr := <-outputDone
-		waitErr := child.Wait()
-		if waitErr != nil {
-			settled <- waitErr
-		} else {
-			settled <- outputErr
-		}
-	}()
+	go func() { settled <- child.Wait() }()
 	select {
 	case err := <-settled:
-		return err
-	case <-eof:
+		// Flush normal final output, but never depend on the host reading it.
+		select {
+		case outputErr := <-outputDone:
+			return errors.Join(err, outputErr)
+		case <-time.After(500 * time.Millisecond):
+			return err
+		}
+	case cause := <-shutdown:
+		draining.Store(true)
+		go input.Close() // Closing a Windows pipe may wait for an outstanding write.
 		// Leave headroom inside the host's ten-second graceful stop window.
 		select {
 		case err := <-settled:
-			return err
+			if err != nil {
+				return err
+			}
+			return cause
 		case <-time.After(8 * time.Second):
 			_ = child.Process.Kill()
 			<-settled
-			return errors.New("Docket did not settle within eight seconds of stdin EOF")
+			return errors.New("Docket did not settle within eight seconds of shutdown")
 		}
 	}
 }
