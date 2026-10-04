@@ -131,26 +131,6 @@ func scenarios() -> void:
 	check("delete and missing envelope", deleted.get("success", false) and missing.get("result", {}).get("exists") == false)
 	await flush_master()
 	var before := FileAccess.get_sha256(host.master_path)
-	pm.get_policy().revoke_capability("fixture-a", "secrets:set:entry")
-	var denied := await secret("fixture-a", "set", values[1])
-	check("plugin policy denies without mutation", not denied.get("success", false) and FileAccess.get_sha256(host.master_path) == before)
-	pm.get_policy().grant_capability("fixture-a", "secrets:set:entry")
-	var policy: Dictionary = await server.call_tool("minerva_docket_create", {"project": host.master_project().name, "type": "policy", "title": "Fixture deny secret set",
-		"description": "---policy-rule---\n" + JSON.stringify({"effect": "block", "priority": 10, "tool_pattern": "^minerva_docket_secret_set$"}) + "\n---end-rule---"})
-	var policy_id := str(policy.get("id", ""))
-	check("durable server policy created", not policy.has("error") and not policy_id.is_empty() and policy.get("status") == "draft")
-	for target in ["proposed", "active"]:
-		var activated: Dictionary = await server.call_tool("minerva_docket_transition", {"project": host.master_project().name, "id": policy_id, "to": target})
-		check("fixture policy lifecycle advanced", not activated.has("error") and activated.get("id") == policy_id and activated.get("status") == target)
-	await flush_master()
-	before = FileAccess.get_sha256(host.master_path)
-	denied = await secret("fixture-a", "set", values[1])
-	check("normal server policy denies without mutation", not denied.get("success", false) and denied.get("error_message", "").contains("Blocked by policy") and FileAccess.get_sha256(host.master_path) == before)
-	approve_fixture_retirement()
-	var retired: Dictionary = await server.call_tool("minerva_docket_transition", {"project": host.master_project().name, "id": policy_id, "to": "archived"})
-	check("fixture server policy retired", not retired.has("error") and retired.get("id") == policy_id and retired.get("status") == "archived")
-	await flush_master()
-	before = FileAccess.get_sha256(host.master_path)
 	var context := MCPExecutionContext.create("vault-fixture")
 	context.cancel()
 	var stopped := await secret("fixture-a", "set", values[1], context)
@@ -199,17 +179,28 @@ func scenarios() -> void:
 	check("public sent cancellation flags preserved", unknown.get("recovery", {}).get("sent", false) == true and unknown.get("recovery", {}).get("unconfirmed", false) == true)
 	pm.set_backend_tool_guard("docket", host._guard)
 
-# Exercise the actual approval dialog for this disposable fixture policy only.
-func approve_fixture_retirement() -> void:
-	var deadline := Time.get_ticks_msec() + 10000
-	while Time.get_ticks_msec() < deadline:
-		await process_frame
-		for node in root.get_children():
-			if node is ConfirmationDialog and node.title == "Policy Modification — Human Approval Required" and node.dialog_text.contains("Fixture deny secret set") and node.dialog_text.contains("'archived'"):
-				check("fixture retirement uses real approval", node.visible)
-				node.confirmed.emit()
-				return
-	check("fixture retirement approval reached", false)
+# Denial stays active until teardown, after all inherited lifecycle scenarios.
+func policy_scenarios() -> void:
+	await flush_master()
+	var before := FileAccess.get_sha256(host.master_path)
+	pm.get_policy().revoke_capability("fixture-a", "secrets:set:entry")
+	var denied := await secret("fixture-a", "set", values[1])
+	check("plugin policy denies without mutation", not denied.get("success", false) and FileAccess.get_sha256(host.master_path) == before)
+	pm.get_policy().grant_capability("fixture-a", "secrets:set:entry")
+	var policy: Dictionary = await server.call_tool("minerva_docket_create", {"project": host.master_project().name, "type": "policy", "title": "Fixture deny secret set",
+		"description": "---policy-rule---\n" + JSON.stringify({"effect": "block", "priority": 10, "tool_pattern": "^minerva_docket_secret_set$"}) + "\n---end-rule---"})
+	var policy_id := str(policy.get("id", ""))
+	check("durable server policy created", not policy.has("error") and not policy_id.is_empty() and policy.get("status") == "draft")
+	for target in ["proposed", "active"]:
+		var activated: Dictionary = await server.call_tool("minerva_docket_transition", {"project": host.master_project().name, "id": policy_id, "to": target})
+		check("fixture policy lifecycle advanced", not activated.has("error") and activated.get("id") == policy_id and activated.get("status") == target)
+	await flush_master()
+	before = FileAccess.get_sha256(host.master_path)
+	denied = await secret("fixture-a", "set", values[1])
+	check("normal server policy denies without mutation", not denied.get("success", false) and denied.get("error_message", "").contains("Blocked by policy") and FileAccess.get_sha256(host.master_path) == before)
+	var retired: Dictionary = await server.call_tool("minerva_docket_transition", {"project": host.master_project().name, "id": policy_id, "to": "archived"})
+	check("headless policy retirement refused without mutation", DisplayServer.get_name() == "headless" and retired.has("error")
+		and str(retired.error).contains("human approval required") and FileAccess.get_sha256(host.master_path) == before)
 
 func guarded(tool: String, arguments: Dictionary, caller: String, binding: Dictionary = {}) -> String:
 	if tool == "docket_secret_set":
@@ -262,6 +253,10 @@ func scan_files(path: String) -> void:
 		scan_files(path.path_join(name))
 
 func finish() -> void:
+	if lifecycle_complete and vault_complete and failed == 0:
+		if await start():
+			await policy_scenarios()
+		await stop()
 	if host != null:
 		var session = host._vault_session
 		host.free()
