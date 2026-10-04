@@ -1,7 +1,7 @@
 {
   "id": "docket",
   "name": "Docket",
-  "version": "0.3.0-rc.18",
+  "version": "0.3.0-rc.20",
   "description": "Official signed Docket GUI with private state and stdio tools.",
   "host_api_version": "1",
   "backend": {"transport": "stdio", "entrypoint": "./docket-plugin.exe", "args": []},
