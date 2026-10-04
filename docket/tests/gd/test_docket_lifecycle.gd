@@ -57,7 +57,7 @@ func start() -> bool:
 	var deadline := Time.get_ticks_msec() + 120000
 	while host.state == "starting" and Time.get_ticks_msec() < deadline:
 		await process_frame
-	if not check("real DocketHost prepared", host.state in ["ready", "degraded"]):
+	if not check("real DocketHost prepared", host.state == "ready"):
 		return false
 	check("canonical master bootstrapped", host.master_path == ProjectSettings.globalize_path(host.MASTER_USER) and not host.master_project().is_empty())
 	check("bootstrap report identifies master", host.master_report.get("project", {}).get("path", "") == host.master_path)
@@ -77,9 +77,34 @@ func start() -> bool:
 		check("canonical master survives restart", FileAccess.get_sha256(host.master_path) == master_digest)
 	previous_secret = authority._secret
 	master_digest = FileAccess.get_sha256(host.master_path)
+	check("master vault metadata absent before challenge", vault_metadata_absent())
 	var challenge: Dictionary = await authority.host_request("vault_challenge", {"path": host.master_path})
-	check("uninitialized master vault remains refused", challenge.has("error_code") and host._vault_session._password.is_empty())
+	check("host authority surfaces vault refusal", challenge.get("error_code", "") == "backend_error" and challenge.get("error_message", "") == "Vault request refused")
+	# rc20 uses this same refusal for invalid parameters and an absent vault.
+	var raw_challenge: Dictionary = await conn.request_method("docket/panel/vault_challenge", {"panel_secret": authority._secret, "path": host.master_path})
+	check("actual child vault refusal", raw_challenge.get("rpc_error", {}) == {"code": -32602, "message": "Vault request refused"})
+	check("vault challenge leaves master unchanged", FileAccess.get_sha256(host.master_path) == master_digest)
+	check("master vault remains uninitialized without password", vault_metadata_absent() and host._vault_session._password.is_empty())
 	print("REAL_CHILD_PID:", pid)
+	return true
+
+func acquisition_pins(pins: Dictionary) -> Dictionary:
+	# Go marshals exported names, apart from the explicitly tagged key digest.
+	var expected := {"key_sha256": pins.key_sha256, "Platforms": {}}
+	for fields in [["tag", "Tag"], ["source", "Source"], ["url", "URL"], ["primary", "Primary"], ["signing", "Signing"]]:
+		expected[fields[1]] = pins[fields[0]]
+	for platform in pins.platforms:
+		var pin: Dictionary = pins.platforms[platform]
+		expected.Platforms[platform] = {"Asset": pin.asset, "SHA256": pin.sha256, "Entrypoint": pin.entrypoint}
+	return expected
+
+func vault_metadata_absent() -> bool:
+	var meta = JSON.parse_string(FileAccess.get_file_as_string(host.master_path).get_slice("\n", 0))
+	if not meta is Dictionary or meta.get("_type", "") != "meta":
+		return false
+	for key in meta:
+		if str(key).begins_with("vault_"):
+			return false
 	return true
 
 func stop() -> void:
@@ -157,7 +182,7 @@ func _run() -> void:
 	host.start(pm, false)
 	var pins = JSON.parse_string(FileAccess.get_file_as_string(plugin_dir.path_join("release.lock.json")))
 	var receipt = JSON.parse_string(FileAccess.get_file_as_string(state.get_base_dir().path_join("v0.3.0-rc.20-linux-amd64/acquisition.lock.json")))
-	check("actual signed payload receipt matches source pins", receipt is Dictionary and receipt == pins)
+	check("actual signed payload receipt matches source pins", receipt is Dictionary and receipt == acquisition_pins(pins))
 	print("REAL_PAYLOAD:", pins.tag, " source=", pins.source, " asset_sha256=", pins.platforms["linux-amd64"].sha256)
 	var deadline := Time.get_ticks_msec() + 720000
 	while pm.get_plugin_status("docket").get("state_name", "") == "BUILDING" and Time.get_ticks_msec() < deadline:
@@ -179,8 +204,13 @@ func _run() -> void:
 		check("durable item identity", not id.is_empty())
 		await stop()
 		if await start():
-			# Restore is explicit; no change to the generic host autostart settings.
-			await call_mapped("docket_project_add", {"path": path})
+			# DocketHost restores the prior session before becoming ready.
+			var listed := await call_mapped("docket_project_list", {})
+			var restored := false
+			for entry in listed.get("projects", []):
+				if entry.get("name", "") == name and str(entry.get("path", "")).simplify_path() == path.simplify_path():
+					restored = true
+			check("expected lifecycle project restored", restored)
 			var recovered := await call_mapped("docket_get", {"project": name, "id": id})
 			check("large write survived graceful restart", recovered.get("title", "") == title and recovered.get("article", "") == article)
 			check("disable autostart persists", pm.get_db().set_autostart("docket", false))
