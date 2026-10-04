@@ -2,12 +2,17 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ProtonMail/go-crypto/openpgp/armor"
+	"time"
 )
 
 // DOCKET_RELEASE_FIXTURE is a retained official release directory, not mocks.
@@ -43,6 +48,10 @@ func TestOfficialRelease(t *testing.T) {
 			t.Fatalf("%s: %v", target, err)
 		}
 		lastGood = executable
+		again, err := acquire(ctx, r, target, root, fetch)
+		if err != nil || again != executable || filepath.Dir(again) == root {
+			t.Fatal("installation did not converge on its versioned cache")
+		}
 		sidecar := "libgdsqlite.linux.template_release.x86_64.so"
 		if strings.HasPrefix(target, "windows") {
 			sidecar = "libgdsqlite.windows.template_release.x86_64.dll"
@@ -57,16 +66,44 @@ func TestOfficialRelease(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	stagingRoot := privateTestRoot(t)
+	for _, name := range []string{".acquire-stale", ".archive-stale", ".acquire-live"} {
+		file := filepath.Join(stagingRoot, name)
+		if err := os.WriteFile(file, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasSuffix(name, "live") {
+			old := time.Now().Add(-48 * time.Hour)
+			if err := os.Chtimes(file, old, old); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if _, err := acquire(ctx, r, "linux-amd64", stagingRoot, fetch); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{".acquire-stale", ".archive-stale", ".acquire-live"} {
+		_, err := os.Stat(filepath.Join(stagingRoot, name))
+		if strings.HasSuffix(name, "live") && err != nil || !strings.HasSuffix(name, "live") && !os.IsNotExist(err) {
+			t.Fatalf("incorrect staging cleanup: %s: %v", name, err)
+		}
+	}
 	before, err := os.ReadFile(lastGood)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, failure := range []string{"signature", "artifact", "pin", "unsupported", "missing"} {
+	for _, failure := range []string{"signature", "artifact", "pin", "unsupported", "missing", "signer", "keyhash", "multiple-signatures"} {
 		t.Run(failure, func(t *testing.T) {
 			altered := r
 			altered.Platforms = map[string]platform{}
 			for k, v := range r.Platforms {
 				altered.Platforms[k] = v
+			}
+			if failure == "signer" {
+				altered.Signing = altered.Primary
+			}
+			if failure == "keyhash" {
+				altered.KeySHA256 = strings.Repeat("0", 64)
 			}
 			target := "linux-amd64"
 			if failure == "unsupported" {
@@ -85,9 +122,31 @@ func TestOfficialRelease(t *testing.T) {
 				if failure == "missing" && name == "SHA256SUMS" {
 					return os.ErrNotExist
 				}
+				if failure == "multiple-signatures" && name == "SHA256SUMS.asc" {
+					var original bytes.Buffer
+					if err := fetch(ctx, name, &original, limit); err != nil {
+						return err
+					}
+					body, err := armor.Decode(&original)
+					if err != nil {
+						return err
+					}
+					data, err := io.ReadAll(body.Body)
+					if err != nil {
+						return err
+					}
+					encoded, err := armor.Encode(dst, body.Type, nil)
+					if err != nil {
+						return err
+					}
+					if _, err := encoded.Write(append(data, data...)); err != nil {
+						return err
+					}
+					return encoded.Close()
+				}
 				return fetch(ctx, name, dst, limit)
 			}
-			if _, err := acquire(ctx, altered, target, root, broken); err == nil {
+			if _, err := acquire(ctx, altered, target, privateTestRoot(t), broken); err == nil {
 				t.Fatal("accepted invalid acquisition")
 			}
 			after, err := os.ReadFile(lastGood)
@@ -96,7 +155,7 @@ func TestOfficialRelease(t *testing.T) {
 			}
 		})
 	}
-	for _, name := range []string{"../escape", "/absolute", "C:\\escape", "a/../escape", "CON", "trailing.", "duplicate", "case", "symlink"} {
+	for _, name := range []string{"../escape", "/absolute", "C:\\escape", "a/../escape", "CON", "COM¹", "COM².txt", "COM³", "LPT¹", "LPT².txt", "LPT³", "trailing.", "duplicate", "case", "symlink"} {
 		t.Run(name, func(t *testing.T) {
 			archive := filepath.Join(t.TempDir(), "unsafe.zip")
 			file, err := os.Create(archive)
@@ -130,7 +189,12 @@ func TestOfficialRelease(t *testing.T) {
 			if err := file.Close(); err != nil {
 				t.Fatal(err)
 			}
-			if err := extract(archive, "unsafe.zip", t.TempDir()); err == nil {
+			input, err := os.Open(archive)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer input.Close()
+			if err := extract(input, "unsafe.zip", t.TempDir()); err == nil {
 				t.Fatal("accepted unsafe archive")
 			}
 			after, err := os.ReadFile(lastGood)
@@ -138,5 +202,27 @@ func TestOfficialRelease(t *testing.T) {
 				t.Fatal("previous installation changed")
 			}
 		})
+	}
+}
+
+func privateTestRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func TestReleaseURLPolicy(t *testing.T) {
+	for _, raw := range []string{"https://github.com/a", "https://objects.githubusercontent.com/a", "https://release-assets.githubusercontent.com/a", "http://github.com/a", "https://evil.example/a", "https://github.com.evil.example/a", "https://user@github.com/a", "https://github.com:443/a"} {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		allowed := raw == "https://github.com/a" || raw == "https://objects.githubusercontent.com/a" || raw == "https://release-assets.githubusercontent.com/a"
+		if (officialURL(u) == nil) != allowed {
+			t.Fatalf("incorrect initial/redirect URL policy: %s", raw)
+		}
 	}
 }

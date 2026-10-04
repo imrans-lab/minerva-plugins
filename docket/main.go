@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -23,6 +24,8 @@ import (
 	"time"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
+	"github.com/ProtonMail/go-crypto/openpgp/armor"
+	"github.com/ProtonMail/go-crypto/openpgp/packet"
 )
 
 //go:embed release.lock.json
@@ -34,6 +37,7 @@ var signingKey string
 type platform struct{ Asset, SHA256, Entrypoint string }
 type release struct {
 	Tag, Source, URL, Primary, Signing string
+	KeySHA256                          string `json:"key_sha256"`
 	Platforms                          map[string]platform
 }
 type fetcher func(context.Context, string, io.Writer, int64) error
@@ -48,12 +52,31 @@ func pins() (release, error) {
 	return r, err
 }
 
-// fetchOfficial shares a single timeout across metadata and artifact acquisition.
+func officialURL(u *url.URL) error {
+	if u.Scheme != "https" || u.User != nil || u.Port() != "" {
+		return errors.New("release URL must use HTTPS without credentials or custom port")
+	}
+	switch u.Hostname() {
+	case "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com":
+		return nil
+	}
+	return errors.New("unapproved release host")
+}
+
+// fetchOfficial bounds each request; the caller context bounds the whole acquisition.
 func fetchOfficial(r release) fetcher {
-	client := &http.Client{Timeout: 5 * time.Minute}
+	client := &http.Client{Timeout: 5 * time.Minute, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return errors.New("too many release redirects")
+		}
+		return officialURL(req.URL)
+	}}
 	return func(ctx context.Context, name string, dst io.Writer, limit int64) error {
 		req, err := http.NewRequestWithContext(ctx, "GET", r.URL+name, nil)
 		if err != nil {
+			return err
+		}
+		if err := officialURL(req.URL); err != nil {
 			return err
 		}
 		res, err := client.Do(req)
@@ -79,6 +102,22 @@ func copyBounded(dst io.Writer, src io.Reader, limit int64) error {
 	return nil
 }
 
+// Restrict verification candidates to the actual pinned signing key.
+type signingRing struct {
+	openpgp.EntityList
+	fingerprint string
+}
+
+func (r signingRing) KeysByIdUsage(id uint64, usage byte) []openpgp.Key {
+	var pinned []openpgp.Key
+	for _, key := range r.EntityList.KeysByIdUsage(id, usage) {
+		if strings.EqualFold(hex.EncodeToString(key.PublicKey.Fingerprint), r.fingerprint) {
+			pinned = append(pinned, key)
+		}
+	}
+	return pinned
+}
+
 // verifyPins is the sole signature/checksum oracle for CLI, acquisition and CI.
 func verifyPins(ctx context.Context, r release, fetch fetcher) error {
 	var sums, sig bytes.Buffer
@@ -88,6 +127,10 @@ func verifyPins(ctx context.Context, r release, fetch fetcher) error {
 	if err := fetch(ctx, "SHA256SUMS.asc", &sig, metadataLimit); err != nil {
 		return err
 	}
+	keyHash := sha256.Sum256([]byte(signingKey))
+	if hex.EncodeToString(keyHash[:]) != r.KeySHA256 {
+		return errors.New("publisher key checksum mismatch")
+	}
 	keys, err := openpgp.ReadArmoredKeyRing(strings.NewReader(signingKey))
 	if err != nil {
 		return err
@@ -95,7 +138,32 @@ func verifyPins(ctx context.Context, r release, fetch fetcher) error {
 	if len(keys) != 1 || !strings.EqualFold(hex.EncodeToString(keys[0].PrimaryKey.Fingerprint), r.Primary) {
 		return errors.New("release primary key fingerprint mismatch")
 	}
-	signer, err := openpgp.CheckArmoredDetachedSignature(keys, bytes.NewReader(sums.Bytes()), bytes.NewReader(sig.Bytes()), nil)
+	body, err := armor.Decode(bytes.NewReader(sig.Bytes()))
+	if err != nil {
+		return err
+	}
+	if body.Type != openpgp.SignatureType {
+		return errors.New("invalid signature armor")
+	}
+	data, err := io.ReadAll(body.Body)
+	if err != nil {
+		return err
+	}
+	packets := bytes.NewReader(data)
+	decoded, err := packet.Read(packets)
+	if err != nil {
+		return err
+	}
+	signature, ok := decoded.(*packet.Signature)
+	if !ok {
+		return errors.New("expected signature packet")
+	}
+	if _, err := packet.Read(packets); err != io.EOF {
+		return errors.New("expected exactly one signature packet")
+	}
+	// CreationTime is trusted only after cryptographic verification succeeds.
+	config := &packet.Config{Time: func() time.Time { return signature.CreationTime }}
+	signer, err := openpgp.CheckDetachedSignature(signingRing{keys, r.Signing}, bytes.NewReader(sums.Bytes()), bytes.NewReader(data), config)
 	if err != nil {
 		return fmt.Errorf("release signature: %w", err)
 	}
@@ -131,9 +199,11 @@ func verifyPins(ctx context.Context, r release, fetch fetcher) error {
 	return nil
 }
 
-// acquire returns a new private, absolute executable path. Publication is a
-// rename within the root; failures remove staging and never alter older installs.
+// acquire converges on a fixed private path. A mismatched existing installation
+// fails closed; it is never removed to make room for a replacement.
 func acquire(ctx context.Context, r release, target, root string, fetch fetcher) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
 	p, ok := r.Platforms[target]
 	if !ok {
 		return "", fmt.Errorf("unsupported platform: %s", target)
@@ -154,6 +224,39 @@ func acquire(ctx context.Context, r release, target, root string, fetch fetcher)
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || (runtime.GOOS != "windows" && info.Mode().Perm()&0077 != 0) {
 		return "", errors.New("installation root must be a private directory")
 	}
+	receipt, err := json.Marshal(r)
+	if err != nil {
+		return "", err
+	}
+	dest := filepath.Join(root, r.Tag+"-"+target)
+	installed := func() bool {
+		info, err := os.Lstat(dest)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return false
+		}
+		saved, err := os.ReadFile(filepath.Join(dest, "acquisition.lock.json"))
+		return err == nil && bytes.Equal(saved, receipt)
+	}
+	if installed() {
+		return filepath.Join(dest, filepath.FromSlash(p.Entrypoint)), nil
+	}
+	if _, err := os.Lstat(dest); !os.IsNotExist(err) {
+		return "", errors.New("existing installation receipt mismatch")
+	}
+	// Only expired staging is stale: active acquisitions have a ten-minute bound.
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return "", err
+	}
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), ".acquire-") && !strings.HasPrefix(entry.Name(), ".archive-") {
+			continue
+		}
+		info, err := entry.Info()
+		if err == nil && time.Since(info.ModTime()) > 24*time.Hour {
+			_ = os.RemoveAll(filepath.Join(root, entry.Name()))
+		}
+	}
 	stage, err := os.MkdirTemp(root, ".acquire-")
 	if err != nil {
 		return "", err
@@ -172,10 +275,10 @@ func acquire(ctx context.Context, r release, target, root string, fetch fetcher)
 	if hex.EncodeToString(hash.Sum(nil)) != p.SHA256 {
 		return "", errors.New("artifact checksum mismatch")
 	}
-	if err := artifact.Close(); err != nil {
+	if _, err := artifact.Seek(0, io.SeekStart); err != nil {
 		return "", err
 	}
-	if err := extract(artifact.Name(), p.Asset, stage); err != nil {
+	if err := extract(artifact, p.Asset, stage); err != nil {
 		return "", err
 	}
 	entry := filepath.Join(stage, filepath.FromSlash(p.Entrypoint))
@@ -187,17 +290,19 @@ func acquire(ctx context.Context, r release, target, root string, fetch fetcher)
 		return "", errors.New("release entrypoint is not executable")
 	}
 	// Keep acquisition receipts beside the complete, unmodified exported payload.
-	if err := os.WriteFile(filepath.Join(stage, "acquisition.lock.json"), lockJSON, 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(stage, "acquisition.lock.json"), receipt, 0600); err != nil {
 		return "", err
 	}
-	dest := filepath.Join(root, r.Tag+"-"+target+"-"+strings.TrimPrefix(filepath.Base(stage), ".acquire-"))
 	if err := os.Rename(stage, dest); err != nil {
+		if installed() {
+			return filepath.Join(dest, filepath.FromSlash(p.Entrypoint)), nil
+		}
 		return "", err
 	}
 	return filepath.Join(dest, filepath.FromSlash(p.Entrypoint)), nil
 }
 
-func extract(filename, asset, root string) (result error) {
+func extract(file *os.File, asset, root string) (result error) {
 	seen := map[string]bool{}
 	spellings := map[string]string{}
 	var total int64
@@ -220,7 +325,7 @@ func extract(filename, asset, root string) (result error) {
 		}
 		for i, component := range strings.Split(name, "/") {
 			stem := strings.ToUpper(strings.SplitN(component, ".", 2)[0])
-			if strings.TrimRight(component, " .") != component || stem == "CON" || stem == "PRN" || stem == "AUX" || stem == "NUL" || (len(stem) == 4 && (strings.HasPrefix(stem, "COM") || strings.HasPrefix(stem, "LPT")) && stem[3] >= '1' && stem[3] <= '9') {
+			if strings.TrimRight(component, " .") != component || stem == "CON" || stem == "PRN" || stem == "AUX" || stem == "NUL" || strings.Contains("|COM¹|COM²|COM³|LPT¹|LPT²|LPT³|", "|"+stem+"|") || (len(stem) == 4 && (strings.HasPrefix(stem, "COM") || strings.HasPrefix(stem, "LPT")) && stem[3] >= '1' && stem[3] <= '9') {
 				return fmt.Errorf("unsafe portable path: %s", name)
 			}
 			prefix := strings.Join(strings.Split(name, "/")[:i+1], "/")
@@ -266,11 +371,14 @@ func extract(filename, asset, root string) (result error) {
 		return os.Chmod(dest, mode.Perm())
 	}
 	if strings.HasSuffix(asset, ".zip") {
-		archive, err := zip.OpenReader(filename)
+		info, err := file.Stat()
 		if err != nil {
 			return err
 		}
-		defer archive.Close()
+		archive, err := zip.NewReader(file, info.Size())
+		if err != nil {
+			return err
+		}
 		for _, file := range archive.File {
 			if file.UncompressedSize64 > uint64(expandedLimit) {
 				return errors.New("expanded archive limit exceeded")
@@ -287,11 +395,6 @@ func extract(filename, asset, root string) (result error) {
 		}
 		return nil
 	}
-	file, err := os.Open(filename)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
 	gz, err := gzip.NewReader(file)
 	if err != nil {
 		return err
