@@ -20,7 +20,7 @@ import (
 func TestOfficialRelease(t *testing.T) {
 	fixture := os.Getenv("DOCKET_RELEASE_FIXTURE")
 	if fixture == "" {
-		t.Fatal("set DOCKET_RELEASE_FIXTURE to all official rc.20 release assets and signed checksums")
+		t.Fatal("set DOCKET_RELEASE_FIXTURE to all official rc.21 release assets and signed checksums")
 	}
 	fetch := func(_ context.Context, name string, dst io.Writer, limit int64) error {
 		file, err := os.Open(filepath.Join(fixture, name))
