@@ -52,12 +52,12 @@ func start() -> bool:
 
 func stop() -> void:
 	var pid := int(FileAccess.get_file_as_string(state.get_base_dir().path_join("child.pid")))
-	check("child was alive", pid > 0 and OS.is_process_running(pid))
+	check("child was alive", pid > 0 and _alive(pid))
 	var before := Time.get_ticks_msec()
 	var result: Dictionary = await pm.stop_plugin("docket", true)
 	check("generic stop", result.get("ok", false))
 	check("settled within host grace", Time.get_ticks_msec() - before < 10000)
-	check("no surviving GUI", not OS.is_process_running(pid))
+	check("no surviving GUI", not _alive(pid))
 	check("launcher settled", not FileAccess.file_exists(state.get_base_dir().path_join("child.pid")))
 
 func create_large(project: String, title: String, article: String) -> void:
@@ -140,3 +140,9 @@ func finish() -> void:
 		pm.shutdown_all()
 	print("=== Results: %d passed, %d failed ===" % [passed, failed])
 	quit(0 if failed == 0 else 1)
+
+
+## OS.is_process_running only reports this process's own children; the GUI is the
+## launcher's child, so ask the kernel directly (the oracle runs on Linux).
+func _alive(pid: int) -> bool:
+	return DirAccess.dir_exists_absolute("/proc/%d" % pid)
