@@ -61,7 +61,7 @@ func stop() -> void:
 	check("launcher settled", not FileAccess.file_exists(state.get_base_dir().path_join("child.pid")))
 
 func create_large(project: String, title: String, article: String) -> void:
-	busy_results.append(await call_mapped("docket_create", {"project": project, "type": "chore", "title": title, "article": article}))
+	busy_results.append(await call_mapped("docket_create", {"project": project, "type": "kb", "title": title, "article": article}))
 
 func approve_prepare() -> void:
 	var request: Dictionary = exec_gate._current_request
@@ -118,7 +118,7 @@ func _run() -> void:
 		var article := "busy request\n".repeat(160000)
 		# Queue another large request while the child is processing the first write.
 		create_large(name, title + "-busy", article)
-		var created := await call_mapped("docket_create", {"project": name, "type": "chore", "title": title, "article": article})
+		var created := await call_mapped("docket_create", {"project": name, "type": "kb", "title": title, "article": article})
 		while busy_results.is_empty():
 			await process_frame
 		check("concurrent large request succeeded", not str(busy_results[0].get("id", "")).is_empty())
