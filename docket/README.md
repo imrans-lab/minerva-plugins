@@ -1,5 +1,5 @@
 The manifest installs a source-built launcher, then prepares the pinned official
-signed rc.21 payload before PluginManager can start it. Go and network access to
+signed rc.22 payload before PluginManager can start it. Go and network access to
 GitHub's official release hosts are needed on first setup. Installed receipt
 matches are checked before network access; launcher startup never downloads.
 The `.exe` build output is intentional on all platforms: Go `-o` preserves the
