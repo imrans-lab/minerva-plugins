@@ -34,7 +34,7 @@ export MINERVA_DOCKET_PLUGIN_DIR=/absolute/scratch/minerva-plugins/docket
 # Build and execute only in the approved isolated planned job.
 GOWORK=off go -C "$MINERVA_DOCKET_PLUGIN_DIR" build -o docket-plugin.exe .
 # Optional OFFLINE fixture preparation: retained official assets + signatures.
-DOCKET_RELEASE_FIXTURE=/absolute/official-rc21 DOCKET_STAGE_PLUGIN=1 \
+DOCKET_RELEASE_FIXTURE=/absolute/official-rc22 DOCKET_STAGE_PLUGIN=1 \
   GOWORK=off go -C "$MINERVA_DOCKET_PLUGIN_DIR" test -run '^TestOfficialRelease$' -count=1 .
 # Run after disabling network to prove installed offline restart.
 # Without fixture staging, producer/setup need the official network on first use.
