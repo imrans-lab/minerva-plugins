@@ -1,5 +1,5 @@
 The manifest installs a source-built launcher, then prepares the pinned official
-signed rc.23 payload before PluginManager can start it. Go and network access to
+signed rc.24 payload before PluginManager can start it. Go and network access to
 GitHub's official release hosts are needed on first setup. Installed receipt
 matches are checked before network access; launcher startup never downloads.
 The `.exe` build output is intentional on all platforms: Go `-o` preserves the
@@ -10,8 +10,8 @@ State and installs live under `shared/runtime.DataDir("docket")/official`, a
 siblings, outside that state. Child Linux XDG and Windows
 APPDATA/LOCALAPPDATA directories are private and absolute; HOME and inherited
 XDG_RUNTIME_DIR are preserved for Wayland, PipeWire and D-Bus.
-macOS bundle bytes remain signed and unchanged; Godot's engine cache/log paths
-can still be shared there. Windows/macOS GUI ownership and shutdown need HITL.
+macOS bundle bytes remain signed and unchanged. Windows/macOS GUI ownership
+and shutdown need HITL.
 Hosted Minerva leaves the `minerva_docket_*` names to this plugin and receives
 its `item_changed` events through the generic broker. The registry still refuses
 collisions with any remaining built-in names; the lifecycle oracle checks that
@@ -34,7 +34,7 @@ export MINERVA_DOCKET_PLUGIN_DIR=/absolute/scratch/minerva-plugins/docket
 # Build and execute only in the approved isolated planned job.
 GOWORK=off go -C "$MINERVA_DOCKET_PLUGIN_DIR" build -o docket-plugin.exe .
 # Optional OFFLINE fixture preparation: retained official assets + signatures.
-DOCKET_RELEASE_FIXTURE=/absolute/official-rc23 DOCKET_STAGE_PLUGIN=1 \
+DOCKET_RELEASE_FIXTURE=/absolute/official-rc24 DOCKET_STAGE_PLUGIN=1 \
   GOWORK=off go -C "$MINERVA_DOCKET_PLUGIN_DIR" test -run '^TestOfficialRelease$' -count=1 .
 # Run after disabling network to prove installed offline restart.
 # Without fixture staging, producer/setup need the official network on first use.

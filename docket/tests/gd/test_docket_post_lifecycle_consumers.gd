@@ -85,6 +85,48 @@ func exercise_consumers(project: String) -> void:
 	check("actual item_changed reaches the trigger consumer", trigger_manager.delivered.size() == 1 and str(trigger_manager.delivered[0].get("text", "")).contains(created.id))
 	check("event stream remains reliable", trigger_manager.docket_feed.status(trigger.id).get("problem", "").is_empty())
 	trigger_manager.remove_trigger(trigger.id)
+	await canonical_save_retry(project)
+
+## Ported from Minerva's skill-seeding suite: the actual child's cache may
+## already hold a change, but an empty retry is not done until the file does.
+func canonical_save_retry(project: String) -> void:
+	var definition = load("res://Scripts/Services/Plugins/PluginDefinition.gd").new("notes_demo")
+	for opened in host.projects:
+		if opened.name == project:
+			definition.knowledge_project = opened.display_name
+	definition.knowledge.assign([
+		{"key": "minerva_notes_demo_wiring", "type": "kb", "title": "Wiring", "article": "Red to red.", "tags": ["wiring", "bench"]},
+		{"key": "minerva_notes_demo_baud", "type": "hint", "title": "Baud", "value": "9600"}])
+	var knowledge = load("res://Scripts/Services/Plugins/PluginKnowledgeSeeder.gd")
+	var docket = PluginSeedingDocket.new(host, true)
+	var seeded: Dictionary = await knowledge.apply(await knowledge.plan(definition, docket), {}, docket)
+	if not check("canonical retry fixture seeds and settles both records", seeded.seeded == 2 and seeded.failed == 0):
+		return
+	var path := lifecycle_project_path()
+	var pid := int(FileAccess.get_file_as_string(state.get_base_dir().path_join("child.pid")))
+	var blocked_temp := path + ".tmp.%d" % pid
+	if not check("blocks the actual child's atomic temp path", DirAccess.make_dir_absolute(blocked_temp) == OK):
+		return
+	definition.knowledge.clear()
+	docket = PluginSeedingDocket.new(host, true)
+	var failed_save: Dictionary = await knowledge.apply(await knowledge.plan(definition, docket), {}, docket)
+	docket = PluginSeedingDocket.new(host, true)
+	var retry_plan: Dictionary = await knowledge.plan(definition, docket)
+	var retried: Dictionary = await knowledge.apply(retry_plan, {}, docket)
+	check("atomic save blocker is removed", DirAccess.remove_absolute(blocked_temp) == OK)
+	docket = PluginSeedingDocket.new(host, true)
+	var saved: Dictionary = await knowledge.apply(await knowledge.plan(definition, docket), {}, docket)
+	var stored_deprecated := 0
+	for line in FileAccess.get_file_as_string(path).split("\n", false):
+		var stored = JSON.parse_string(line)
+		if stored is Dictionary and stored.get("deprecated", 0) != 0:
+			stored_deprecated += 1
+	print("CANONICAL_RETRY_COUNTS:", JSON.stringify({"failed": failed_save.failed, "retry_actions": retry_plan.actions.size(),
+		"retry_deprecations": retry_plan.deprecate_record_ids.size(), "retried_failed": retried.failed,
+		"saved_failed": saved.failed, "stored_deprecated": stored_deprecated}))
+	check("empty retry fails until the canonical file holds both deprecations",
+		failed_save.failed > 0 and retry_plan.actions.is_empty() and retry_plan.deprecate_record_ids.is_empty()
+		and retried.failed > 0 and saved.failed == 0 and stored_deprecated == 2)
 
 func stop() -> void:
 	await super.stop()

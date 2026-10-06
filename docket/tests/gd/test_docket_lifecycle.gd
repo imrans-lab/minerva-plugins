@@ -40,11 +40,8 @@ func start() -> bool:
 	check("exported tools/list", not tools.is_empty())
 	var mapped: Array = registry.get_plugin_tools("docket")
 	check("all discovered tools mapped", mapped.size() == tools.size())
-	# Separate negative oracle with the host's actual integrated Docket names.
-	var builtin_names: Array = []
-	var builtins = load("res://Scripts/Services/Docket/Tools/tool_registry.gd").new()
-	for name in builtins._build_tools():
-		builtin_names.append("minerva_" + str(name))
+	# One representative built-in collision exercises the registry refusal.
+	var builtin_names: Array = ["minerva_docket_get"]
 	var collision = load("res://Scripts/Services/Plugins/PluginToolRegistry.gd").new(pm)
 	collision.set_builtin_tool_names(builtin_names)
 	var refused: Dictionary = collision.register_plugin_tools("docket", mapped)

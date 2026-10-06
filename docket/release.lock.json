@@ -1,14 +1,14 @@
 {
-  "tag": "v0.3.0-rc.23",
-  "source": "e743f00a3c405d61b91413c75ab214e1a1cf49e7",
-  "url": "https://github.com/imrans-lab/docket/releases/download/v0.3.0-rc.23/",
+  "tag": "v0.3.0-rc.24",
+  "source": "22a4681e18d390b8fd44dfa759dc2557ef2f2e4e",
+  "url": "https://github.com/imrans-lab/docket/releases/download/v0.3.0-rc.24/",
   "primary": "178DFC3E42D55743B01865265BC259EB7ED2C464",
   "signing": "A52DE21E0A5A1CA48F429CE7623C6CAEBA657B8F",
   "key_sha256": "a16924c6bea2d241bd47569ef45cf0c3b8a43d17dbe428fd4b3f78cc4b41c7dd",
   "platforms": {
-    "linux-amd64": {"asset": "docket-v0.3.0-rc.23-linux-x86_64.tar.gz", "sha256": "296a3382344b9231adb0ca19c7cd0639845b6635147c28c9fcb42d4da9f7cb20", "entrypoint": "docket.x86_64"},
-    "windows-amd64": {"asset": "docket-v0.3.0-rc.23-windows-x86_64.zip", "sha256": "ef994a485084cf0f6329681c9ea6abb9ebb2ce942ce3bce280b572c4ca0e3513", "entrypoint": "Docket.exe"},
-    "darwin-amd64": {"asset": "docket-v0.3.0-rc.23-macos-universal.zip", "sha256": "4e61f0b962174c8b802c9beefd615c8f78bfa2aba6529a2559dd029a28d8bc8a", "entrypoint": "Docket.app/Contents/MacOS/Docket"},
-    "darwin-arm64": {"asset": "docket-v0.3.0-rc.23-macos-universal.zip", "sha256": "4e61f0b962174c8b802c9beefd615c8f78bfa2aba6529a2559dd029a28d8bc8a", "entrypoint": "Docket.app/Contents/MacOS/Docket"}
+    "linux-amd64": {"asset": "docket-v0.3.0-rc.24-linux-x86_64.tar.gz", "sha256": "3c968c026c7ce5b8690913b1c0bd2b2a4f60dab02768a1ee84b0bd85329b7251", "entrypoint": "docket.x86_64"},
+    "windows-amd64": {"asset": "docket-v0.3.0-rc.24-windows-x86_64.zip", "sha256": "bfeac80e7546374a77152c859a05fca92e7e25d9522b4547735d22233d868c22", "entrypoint": "Docket.exe"},
+    "darwin-amd64": {"asset": "docket-v0.3.0-rc.24-macos-universal.zip", "sha256": "6c281d76df7dfb3581ff0e7a344da085b5d4a88652323b8d63ad1bb5c348d3db", "entrypoint": "Docket.app/Contents/MacOS/Docket"},
+    "darwin-arm64": {"asset": "docket-v0.3.0-rc.24-macos-universal.zip", "sha256": "6c281d76df7dfb3581ff0e7a344da085b5d4a88652323b8d63ad1bb5c348d3db", "entrypoint": "Docket.app/Contents/MacOS/Docket"}
   }
 }
