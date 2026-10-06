@@ -117,7 +117,7 @@ func pluginCommand(ctx context.Context, r release, args []string) error {
 			return os.WriteFile(output, manifestJSON, 0600)
 		}
 		return nil
-	case len(args) == 0, len(args) == 1 && args[0] == "--host-authority":
+	case len(args) == 0, len(args) == 1 && args[0] == "--host-authority", len(args) == 2 && args[0] == "--host-authority" && args[1] == "--headless":
 		p, ok := r.Platforms[target]
 		if !ok {
 			return fmt.Errorf("unsupported platform: %s", target)
@@ -161,6 +161,8 @@ func childEnvironment(state, platform string, inherited []string) ([]string, err
 	case "windows":
 		overrides["APPDATA"] = filepath.Join(state, "appdata")
 		overrides["LOCALAPPDATA"] = filepath.Join(state, "localappdata")
+	case "darwin":
+		overrides["HOME"] = filepath.Join(state, "home")
 	}
 	for _, dir := range overrides {
 		if err := privateDir(dir); err != nil {
@@ -193,7 +195,12 @@ func launch(executable, state string, mode ...string) error {
 		return err
 	}
 	// Host mode is explicit; its per-child token stays in the inherited environment.
-	args := append([]string{"--quiet", "--", "--stdio", "--state-dir", state}, mode...)
+	engineArgs := []string{"--quiet"}
+	if len(mode) == 2 && mode[1] == "--headless" {
+		engineArgs = append(engineArgs, "--headless")
+		mode = mode[:1]
+	}
+	args := append(append(engineArgs, "--", "--stdio", "--state-dir", state), mode...)
 	child := exec.Command(executable, args...)
 	child.Env, child.Stderr = env, os.Stderr
 	// Own the pipes: Wait must reap independently of a blocked host writer.

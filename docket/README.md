@@ -58,3 +58,8 @@ then publish a new immutable `docket-v<manifest version>` tag on Minerva.
 The marketplace archives contain the source-built launcher and verified official
 payload, so installation needs neither Go nor a second download. Fresh Docket
 installs enable Auto-start and Auto-update; later repairs retain user choices.
+
+Wrapper-only revisions append `.plugin.N` to a candidate version (for example
+`0.3.0-rc.23.plugin.1`); the signed upstream tag stays `v0.3.0-rc.23`.
+On macOS the child has a private HOME outside its signed bundle. Release probes
+use `--host-authority --headless`; normal plugin startup retains its GUI.

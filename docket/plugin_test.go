@@ -19,7 +19,7 @@ func TestChildIsolation(t *testing.T) {
 			pair := strings.SplitN(entry, "=", 2)
 			values[pair[0]] = pair[1]
 		}
-		if values["HOME"] != "/unchanged" || values["XDG_RUNTIME_DIR"] != "/session" {
+		if (platform != "darwin" && values["HOME"] != "/unchanged") || values["XDG_RUNTIME_DIR"] != "/session" {
 			t.Fatal("inherited HOME or session runtime changed")
 		}
 		keys := []string{}
@@ -28,6 +28,9 @@ func TestChildIsolation(t *testing.T) {
 		}
 		if platform == "windows" {
 			keys = []string{"APPDATA", "LOCALAPPDATA"}
+		}
+		if platform == "darwin" {
+			keys = []string{"HOME"}
 		}
 		for _, key := range keys {
 			dir := values[key]
