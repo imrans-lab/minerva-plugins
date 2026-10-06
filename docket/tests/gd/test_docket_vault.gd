@@ -293,6 +293,15 @@ func finish() -> void:
 		var log_text := log.get_as_text() if log != null else ""
 		for needle in [password] + values:
 			check("secret absent from retained runtime log", not log_text.contains(needle))
+		# The runner scans all suites again after Godot and tee exit. Persist
+		# only digests of these random hex fixtures, never their plaintext.
+		var hash_file := FileAccess.open(OS.get_environment("MINERVA_TEST_SECRET_HASHES_PATH"), FileAccess.WRITE)
+		if check("post-exit privacy guard writable", hash_file != null):
+			var hashes: Array[String] = []
+			for needle in [password] + values:
+				hashes.append(needle.sha256_text())
+			hash_file.store_string(JSON.stringify(hashes))
+			hash_file.close()
 		if broker != null:
 			var audit := JSON.stringify(broker.audit_log.get_entries())
 			for needle in [password] + values:

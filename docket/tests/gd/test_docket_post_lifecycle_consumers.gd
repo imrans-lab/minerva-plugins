@@ -37,7 +37,7 @@ func _answer_policy(dialog: ConfirmationDialog) -> void:
 
 func exercise_consumers(project: String) -> void:
 	var singleton = root.get_node("SingletonObject")
-	check("C1 focuses the actual upstream child", (await singleton.open_docket_panel(lifecycle_project_path())).get("ok", false))
+	check("focuses the actual upstream child", (await singleton.open_docket_panel(lifecycle_project_path())).get("ok", false))
 	var master: String = str(host.master_project().name)
 	var rule := {"effect": "block", "priority": 10, "tool_pattern": "^minerva_tool_search$"}
 	var policy := await call_mapped("docket_create", {"project": master, "type": "policy", "title": "Fixture search policy",
@@ -80,6 +80,8 @@ func exercise_consumers(project: String) -> void:
 	var deadline := Time.get_ticks_msec() + 10000
 	while trigger_manager.delivered.is_empty() and Time.get_ticks_msec() < deadline:
 		await process_frame
+	# Observe beyond the first callback so duplicate delivery cannot pass.
+	await create_timer(0.25).timeout
 	check("actual item_changed reaches the trigger consumer", trigger_manager.delivered.size() == 1 and str(trigger_manager.delivered[0].get("text", "")).contains(created.id))
 	check("event stream remains reliable", trigger_manager.docket_feed.status(trigger.id).get("problem", "").is_empty())
 	trigger_manager.remove_trigger(trigger.id)

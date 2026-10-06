@@ -442,7 +442,9 @@ total_suites_ok=0
 # Results line can be parsed after the process exits. Reused across
 # iterations; cleaned up on any exit path.
 RESULTS_TMP="$(mktemp)"
-trap 'rm -f "${RESULTS_TMP}" "${ALLOWLIST_CLEAN}"' EXIT
+FULL_LOG_TMP="$(mktemp)"
+SECRET_HASHES_TMP="$(mktemp)"
+trap 'rm -f "${RESULTS_TMP}" "${FULL_LOG_TMP}" "${SECRET_HASHES_TMP}" "${ALLOWLIST_CLEAN}"' EXIT
 
 # Import the host project before running anything. Godot resolves `class_name`
 # globals through .godot/global_script_class_cache.cfg, which is generated on
@@ -479,7 +481,7 @@ for test_path in "${tests[@]}"; do
   # Tee so the run stays human-watchable live (nothing regresses for a
   # person reading the terminal), while also capturing the output to parse
   # the Results line. PIPESTATUS[0] is godot's own exit code, not tee's.
-  MINERVA_TEST_LOG_PATH="${RESULTS_TMP}" godot "${display_mode[@]}" --path "${MINERVA_DIR}/src" --script "${res_script}" 2>&1 | tee "${RESULTS_TMP}"
+  MINERVA_TEST_LOG_PATH="${FULL_LOG_TMP}" MINERVA_TEST_SECRET_HASHES_PATH="${SECRET_HASHES_TMP}" godot "${display_mode[@]}" --path "${MINERVA_DIR}/src" --script "${res_script}" 2>&1 | tee "${RESULTS_TMP}" | tee -a "${FULL_LOG_TMP}"
   rc="${PIPESTATUS[0]}"
   echo "--- ${name} exited ${rc} ---"
   echo
@@ -570,6 +572,24 @@ for test_path in "${tests[@]}"; do
       echo "    If (and only if) a diagnostic is provably the harness's and not" >&2
       echo "    the suite's, allowlist it in ${ALLOWLIST} with a dated comment." >&2
     fi
+  fi
+
+  # Both tees have exited: inspect every suite's retained output, including
+  # final shutdown messages, against the vault fixture's plaintext digests.
+  if [ -s "${SECRET_HASHES_TMP}" ] && ! python3 - "${FULL_LOG_TMP}" "${SECRET_HASHES_TMP}" <<'PY'
+from pathlib import Path
+import hashlib, json, re, sys
+hashes = json.loads(Path(sys.argv[2]).read_text())
+assert isinstance(hashes, list) and hashes and all(isinstance(h, str) and re.fullmatch(r"[a-f0-9]{64}", h) for h in hashes)
+text = Path(sys.argv[1]).read_text(errors="replace")
+# Fixtures are random 24-byte values encoded as 48 lowercase hex characters.
+leaked = any(hashlib.sha256(m.group(1).encode()).hexdigest() in hashes for m in re.finditer(r"(?=([a-f0-9]{48}))", text))
+print("RETAINED_RUNTIME_PRIVACY_FAIL" if leaked else "RETAINED_RUNTIME_PRIVACY_PASS")
+sys.exit(1 if leaked else 0)
+PY
+  then
+    suite_ok=0
+    fail_reason="retained runtime log privacy check failed after output flushed"
   fi
 
   if [ "${suite_ok}" -eq 1 ]; then
