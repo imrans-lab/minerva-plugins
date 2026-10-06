@@ -3,17 +3,56 @@
   "name": "Docket",
   "version": "0.3.0-rc.23",
   "description": "Source-built launcher for the official signed Docket GUI, with private state and stdio tools. Requires Go 1.23 or newer and network access to official GitHub release hosts on first setup; launcher startup never downloads.",
-  "price": {"amount_minor": 0, "currency": "USD"},
+  "price": {
+    "amount_minor": 0,
+    "currency": "USD"
+  },
   "host_api_version": "1",
-  "backend": {"transport": "stdio", "entrypoint": "./docket-plugin.exe", "args": ["--host-authority"]},
-  "panel_authority": {"protocol": "docket_panel_v1", "method_prefix": "docket/panel/", "secret_env": "DOCKET_PANEL_SECRET"},
-  "tools": [],
-  "events": [{"name": "item_changed"}],
-  "setup": {
-    "requires": [{"tool": "go", "min": "1.23"}],
-    "steps": [
-      {"type": "go_build", "package": "./", "output": "docket-plugin.exe"},
-      {"type": "exec", "argv": ["./docket-plugin.exe", "prepare"], "timeout_s": 660}
+  "backend": {
+    "transport": "stdio",
+    "entrypoint": "./docket-plugin.exe",
+    "args": [
+      "--host-authority"
     ]
-  }
+  },
+  "panel_authority": {
+    "protocol": "docket_panel_v1",
+    "method_prefix": "docket/panel/",
+    "secret_env": "DOCKET_PANEL_SECRET"
+  },
+  "tools": [],
+  "events": [
+    {
+      "name": "item_changed"
+    }
+  ],
+  "setup": {
+    "requires": [
+      {
+        "tool": "go",
+        "min": "1.23"
+      }
+    ],
+    "steps": [
+      {
+        "type": "go_build",
+        "package": "./",
+        "output": "docket-plugin.exe"
+      },
+      {
+        "type": "exec",
+        "argv": [
+          "./docket-plugin.exe",
+          "prepare"
+        ],
+        "timeout_s": 660
+      }
+    ]
+  },
+  "release_targets": [
+    "linux-x86_64",
+    "windows-x86_64",
+    "macos-amd64",
+    "macos-arm64"
+  ]
 }

@@ -123,6 +123,14 @@ func pluginCommand(ctx context.Context, r release, args []string) error {
 			return fmt.Errorf("unsupported platform: %s", target)
 		}
 		dest := filepath.Join(root, r.Tag+"-"+target)
+		// Marketplace archives carry the already verified official payload.
+		// State still lives in the host's data directory across upgrades.
+		if executable, err := os.Executable(); err == nil {
+			bundled := filepath.Join(filepath.Dir(executable), "official", r.Tag+"-"+target)
+			if _, err := os.Stat(bundled); err == nil {
+				dest = bundled
+			}
+		}
 		receipt, err := os.ReadFile(filepath.Join(dest, "acquisition.lock.json"))
 		if err != nil {
 			return fmt.Errorf("run plugin setup first: %w", err)
