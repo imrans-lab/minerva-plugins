@@ -301,6 +301,7 @@ func finish() -> void:
 			for needle in [password] + values:
 				hashes.append(needle.sha256_text())
 			hash_file.store_string(JSON.stringify(hashes))
+			check("post-exit privacy guard fully written", hash_file.get_error() == OK)
 			hash_file.close()
 		if broker != null:
 			var audit := JSON.stringify(broker.audit_log.get_entries())

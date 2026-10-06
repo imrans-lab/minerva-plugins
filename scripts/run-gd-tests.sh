@@ -482,7 +482,8 @@ for test_path in "${tests[@]}"; do
   # person reading the terminal), while also capturing the output to parse
   # the Results line. PIPESTATUS[0] is godot's own exit code, not tee's.
   MINERVA_TEST_LOG_PATH="${FULL_LOG_TMP}" MINERVA_TEST_SECRET_HASHES_PATH="${SECRET_HASHES_TMP}" godot "${display_mode[@]}" --path "${MINERVA_DIR}/src" --script "${res_script}" 2>&1 | tee "${RESULTS_TMP}" | tee -a "${FULL_LOG_TMP}"
-  rc="${PIPESTATUS[0]}"
+  capture_status=("${PIPESTATUS[@]}")
+  rc="${capture_status[0]}"
   echo "--- ${name} exited ${rc} ---"
   echo
 
@@ -500,6 +501,10 @@ for test_path in "${tests[@]}"; do
   # assertions, or zero passed, even when the process exit code was 0.
   suite_ok=1
   fail_reason=""
+  if [ "${capture_status[1]}" -ne 0 ] || [ "${capture_status[2]}" -ne 0 ]; then
+    suite_ok=0
+    fail_reason="runtime output capture failed; privacy evidence may be incomplete"
+  fi
   if [ "${rc}" -ne 0 ]; then
     suite_ok=0
     if [ -n "${n_pass}" ]; then
