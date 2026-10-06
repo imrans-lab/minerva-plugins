@@ -13,20 +13,7 @@ var intercepted := 0
 var completed_sets := 0
 
 func install_fixture(manifest_path: String) -> Dictionary:
-	# The preceding registered lifecycle suite prepared this exact fixture.
-	# Reuse its disabled entry through the normal manager, without re-preparing.
-	var installed = pm.get_db().get_by_id("docket")
-	var declared := PluginDefinition.from_manifest(manifest_path, PluginDefinition.LANE_MANIFEST)
-	if not check("preceding prepared fixture exists", installed != null and declared != null):
-		return {"ok": false}
-	declared.scan_class_names()
-	declared.autostart = false
-	if not check("prepared fixture stopped and disabled", not installed.autostart
-		and installed.state == PluginDefinition.State.INSTALLED and pm.get_connection("docket") == null):
-		return {"ok": false}
-	if not check("prepared fixture exactly matches declaration", installed.to_dict() == declared.to_dict()):
-		return {"ok": false}
-	return {"ok": true, "id": "docket"}
+	return reuse_fixture(manifest_path)
 
 func expected_prepare_approvals() -> int:
 	return 0
@@ -298,7 +285,10 @@ func finish() -> void:
 	if not password.is_empty():
 		scan_files(OS.get_user_data_dir())
 		scan_files(OS.get_environment("MINERVA_PLUGIN_DATA_DIR"))
-		var log := FileAccess.open("/tmp/job/Minerva/vault-process-evidence/real-lifecycle.log", FileAccess.READ)
+		var log_path := OS.get_environment("MINERVA_TEST_LOG_PATH")
+		if log_path.is_empty():
+			log_path = "/tmp/job/Minerva/vault-process-evidence/real-lifecycle.log"
+		var log := FileAccess.open(log_path, FileAccess.READ)
 		check("actual retained runtime log readable", log != null)
 		var log_text := log.get_as_text() if log != null else ""
 		for needle in [password] + values:

@@ -1,2 +1,3 @@
 test_docket_lifecycle.gd
+test_docket_post_lifecycle_consumers.gd
 test_docket_vault.gd

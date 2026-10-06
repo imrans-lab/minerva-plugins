@@ -465,6 +465,8 @@ echo
 
 for test_path in "${tests[@]}"; do
   name="$(basename "${test_path}")"
+  display_mode=(--headless)
+  [[ "${MINERVA_TEST_DISPLAY:-}" == 1 || "${MINERVA_TEST_DISPLAY:-}" == "${name}" ]] && display_mode=()
   # res:// path derived from where the suite file actually is, relative to
   # the host's res:// root — ONE derivation for the default dir (yields the
   # exact "res://../../minerva-plugins/..." string the suites' own preloads
@@ -477,7 +479,7 @@ for test_path in "${tests[@]}"; do
   # Tee so the run stays human-watchable live (nothing regresses for a
   # person reading the terminal), while also capturing the output to parse
   # the Results line. PIPESTATUS[0] is godot's own exit code, not tee's.
-  godot --headless --path "${MINERVA_DIR}/src" --script "${res_script}" 2>&1 | tee "${RESULTS_TMP}"
+  MINERVA_TEST_LOG_PATH="${RESULTS_TMP}" godot "${display_mode[@]}" --path "${MINERVA_DIR}/src" --script "${res_script}" 2>&1 | tee "${RESULTS_TMP}"
   rc="${PIPESTATUS[0]}"
   echo "--- ${name} exited ${rc} ---"
   echo

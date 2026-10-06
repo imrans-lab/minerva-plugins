@@ -38,7 +38,7 @@ DOCKET_RELEASE_FIXTURE=/absolute/official-rc23 DOCKET_STAGE_PLUGIN=1 \
   GOWORK=off go -C "$MINERVA_DOCKET_PLUGIN_DIR" test -run '^TestOfficialRelease$' -count=1 .
 # Run after disabling network to prove installed offline restart.
 # Without fixture staging, producer/setup need the official network on first use.
-xvfb-run -a bash /absolute/scratch/minerva-plugins/scripts/run-gd-tests.sh \
+MINERVA_TEST_DISPLAY=test_docket_post_lifecycle_consumers.gd xvfb-run -a bash /absolute/scratch/minerva-plugins/scripts/run-gd-tests.sh \
   --plugin docket /absolute/scratch/Minerva
 ```
 

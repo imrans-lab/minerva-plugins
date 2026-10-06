@@ -74,7 +74,7 @@ func start() -> bool:
 		check("restart rotates child token", authority._secret != previous_secret)
 		var stale: Dictionary = await conn.request_method("docket/panel/status", {"panel_secret": previous_secret})
 		check("previous child token refused", stale.get("rpc_error", {}).get("code", 0) == -32001)
-		check("canonical master survives restart", FileAccess.get_sha256(host.master_path) == master_digest)
+		check("canonical master survives restart", master_survives_restart())
 	previous_secret = authority._secret
 	master_digest = FileAccess.get_sha256(host.master_path)
 	check("master vault metadata absent before challenge", vault_metadata_absent())
@@ -88,6 +88,9 @@ func start() -> bool:
 	check("master vault remains uninitialized without password", vault_metadata_absent() and host._vault_session._password.is_empty())
 	print("REAL_CHILD_PID:", pid)
 	return true
+
+func master_survives_restart() -> bool:
+	return FileAccess.get_sha256(host.master_path) == master_digest
 
 func acquisition_pins(pins: Dictionary) -> Dictionary:
 	# Go marshals exported names, apart from the explicitly tagged key digest.
@@ -135,11 +138,31 @@ func approve_prepare() -> void:
 func install_fixture(manifest_path: String) -> Dictionary:
 	return await pm.install_plugin(manifest_path, true)
 
+func reuse_fixture(manifest_path: String) -> Dictionary:
+	var installed = pm.get_db().get_by_id("docket")
+	var declared := PluginDefinition.from_manifest(manifest_path, PluginDefinition.LANE_MANIFEST)
+	if not check("preceding prepared fixture exists", installed != null and declared != null):
+		return {"ok": false}
+	declared.scan_class_names()
+	declared.autostart = false
+	if not check("prepared fixture stopped and disabled", not installed.autostart
+		and installed.state == PluginDefinition.State.INSTALLED and pm.get_connection("docket") == null):
+		return {"ok": false}
+	if not check("prepared fixture exactly matches declaration", installed.to_dict() == declared.to_dict()):
+		return {"ok": false}
+	return {"ok": true, "id": "docket"}
+
 func expected_prepare_approvals() -> int:
 	return 1
 
 func lifecycle_project_path() -> String:
 	return state.path_join("lifecycle.dct")
+
+func exercise_consumers(_project: String) -> void:
+	pass
+
+func check_restored_consumers(_project: String) -> void:
+	pass
 
 func _run() -> void:
 	await process_frame
@@ -202,6 +225,7 @@ func _run() -> void:
 		var path := lifecycle_project_path()
 		var project := await call_mapped("docket_project_add", {"path": path, "create": true})
 		var name: String = str(project.get("name", ""))
+		await exercise_consumers(name)
 		var title := "lifecycle-" + str(Time.get_ticks_usec())
 		var article := "busy request\n".repeat(160000)
 		# Queue another large request while the child is processing the first write.
@@ -221,6 +245,7 @@ func _run() -> void:
 				if entry.get("name", "") == name and str(entry.get("path", "")).simplify_path() == path.simplify_path():
 					restored = true
 			check("expected lifecycle project restored", restored)
+			await check_restored_consumers(name)
 			var recovered := await call_mapped("docket_get", {"project": name, "id": id})
 			check("large write survived graceful restart", recovered.get("title", "") == title and recovered.get("article", "") == article)
 			check("disable autostart persists", pm.get_db().set_autostart("docket", false))
