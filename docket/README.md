@@ -51,3 +51,10 @@ Docket's GUI maintains ownership; the launcher sends no heartbeat requests.
 
 Healthy busy input may block; observed EOF/write errors start an eight-second reap bound.
 If backpressure hides EOF, Minerva terminates the launcher after ten seconds, closing child pipes.
+
+Required-plugin releases use Minerva's existing `plugin-release.yml` lane:
+update this signed upstream pin, update that workflow's plugin-source commit,
+then publish a new immutable `docket-v<manifest version>` tag on Minerva.
+The marketplace archives contain the source-built launcher and verified official
+payload, so installation needs neither Go nor a second download. Fresh Docket
+installs enable Auto-start and Auto-update; later repairs retain user choices.
