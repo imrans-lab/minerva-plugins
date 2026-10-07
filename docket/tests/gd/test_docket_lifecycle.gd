@@ -203,7 +203,8 @@ func _run() -> void:
 	host = load("res://Scripts/Services/DocketHost/DocketHost.gd").new()
 	root.add_child(host)
 	singleton.docket_host = host
-	host.start(pm)
+	var start_method: Dictionary = host.get_method_list().filter(func(method: Dictionary) -> bool: return method.name == "start")[0]
+	host.callv("start", [pm, false] if start_method.args.size() == 2 else [pm])
 	var pins = JSON.parse_string(FileAccess.get_file_as_string(plugin_dir.path_join("release.lock.json")))
 	var receipt = JSON.parse_string(FileAccess.get_file_as_string(state.get_base_dir().path_join(pins.tag + "-linux-amd64/acquisition.lock.json")))
 	check("actual signed payload receipt matches source pins", receipt is Dictionary and receipt == acquisition_pins(pins))
