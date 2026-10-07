@@ -178,6 +178,10 @@ func _run() -> void:
 		finish()
 		return
 	var singleton = root.get_node("SingletonObject")
+	for frame in 30:
+		if singleton.docket_host != null:
+			break
+		await process_frame
 	check("Minerva uses the hosted Docket adapter", singleton.docket_host != null)
 	if singleton.docket_host != null:
 		singleton.docket_host.free()
