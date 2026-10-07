@@ -23,6 +23,7 @@ func lifecycle_project_path() -> String:
 
 func _run() -> void:
 	await process_frame
+	var singleton = root.get_node("SingletonObject")
 	password = Crypto.new().generate_random_bytes(24).hex_encode()
 	for i in 3:
 		values.append(Crypto.new().generate_random_bytes(24).hex_encode())

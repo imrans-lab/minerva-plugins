@@ -98,7 +98,7 @@ func canonical_save_retry(project: String) -> void:
 		{"key": "minerva_notes_demo_wiring", "type": "kb", "title": "Wiring", "article": "Red to red.", "tags": ["wiring", "bench"]},
 		{"key": "minerva_notes_demo_baud", "type": "hint", "title": "Baud", "value": "9600"}])
 	var knowledge = load("res://Scripts/Services/Plugins/PluginKnowledgeSeeder.gd")
-	var docket = PluginSeedingDocket.new(host, true)
+	var docket = _seeding_docket()
 	var seeded: Dictionary = await knowledge.apply(await knowledge.plan(definition, docket), {}, docket)
 	if not check("canonical retry fixture seeds and settles both records", seeded.seeded == 2 and seeded.failed == 0):
 		return
@@ -108,13 +108,13 @@ func canonical_save_retry(project: String) -> void:
 	if not check("blocks the actual child's atomic temp path", DirAccess.make_dir_absolute(blocked_temp) == OK):
 		return
 	definition.knowledge.clear()
-	docket = PluginSeedingDocket.new(host, true)
+	docket = _seeding_docket()
 	var failed_save: Dictionary = await knowledge.apply(await knowledge.plan(definition, docket), {}, docket)
-	docket = PluginSeedingDocket.new(host, true)
+	docket = _seeding_docket()
 	var retry_plan: Dictionary = await knowledge.plan(definition, docket)
 	var retried: Dictionary = await knowledge.apply(retry_plan, {}, docket)
 	check("atomic save blocker is removed", DirAccess.remove_absolute(blocked_temp) == OK)
-	docket = PluginSeedingDocket.new(host, true)
+	docket = _seeding_docket()
 	var saved: Dictionary = await knowledge.apply(await knowledge.plan(definition, docket), {}, docket)
 	var stored_deprecated := 0
 	for line in FileAccess.get_file_as_string(path).split("\n", false):
@@ -152,3 +152,9 @@ func check_restored_consumers(_project: String) -> void:
 	var skill := await call_mapped("docket_get", {"project": str(host.master_project().name), "id": skill_id})
 	check("seeded skill survives real child restart", skill.get("source", "") == "plugin:consumer-oracle" and skill.get("steps", "") == "fixture-step")
 	print("REAL_DOCKET_CONSUMERS_COMPLETE")
+
+
+func _seeding_docket() -> PluginSeedingDocket:
+	var script := load("res://Scripts/Services/Plugins/PluginSeedingDocket.gd") as GDScript
+	var init_method: Dictionary = script.get_script_method_list().filter(func(method: Dictionary) -> bool: return method.name == "_init")[0]
+	return Callable(script, "new").callv([host, true] if init_method.args.size() == 2 else [host])
