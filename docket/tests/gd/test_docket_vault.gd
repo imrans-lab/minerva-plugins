@@ -1,5 +1,5 @@
 extends "res://../../minerva-plugins/docket/tests/gd/test_docket_lifecycle.gd"
-## Initialized signed child oracle; inherited lifecycle still exercises real restart/write.
+## Master creation via the real scene and signed child; no plaintext producer preferences.
 var password := ""
 var values: Array[String] = []
 var broker
@@ -27,31 +27,6 @@ func _run() -> void:
 	password = Crypto.new().generate_random_bytes(24).hex_encode()
 	for i in 3:
 		values.append(Crypto.new().generate_random_bytes(24).hex_encode())
-	var data := OS.get_environment("MINERVA_PLUGIN_DATA_DIR")
-	var producer_state := data.path_join("vault-producer")
-	DirAccess.make_dir_recursive_absolute(producer_state)
-	var prefs := producer_state.path_join("docket_prefs.json")
-	var file := FileAccess.open(prefs, FileAccess.WRITE)
-	file.store_string(JSON.stringify({"vault_password": password}))
-	file.close()
-	var producer = load("res://Scripts/Services/MCP/MCPServerConnection.gd").new()
-	var release: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(OS.get_environment("MINERVA_DOCKET_PLUGIN_DIR").path_join("release.lock.json")))
-	var binary := data.path_join("official/%s-linux-amd64/docket.x86_64" % release.tag)
-	producer.configure_stdio(binary, ["--quiet", "--", "--stdio", "--state-dir", producer_state,
-		"--file", ProjectSettings.globalize_path("user://master.dct")])
-	var connected: int = await producer.connect_to_server()
-	check("signed standalone producer connected", connected == OK)
-	if connected == OK:
-		var created: Dictionary = await producer.call_tool("docket_secret_set", {"handle": "producer-entry", "value": values[0]}, 120.0)
-		check("ordinary producer initialized vault", not created.has("error") and created.get("success", true))
-		remember_children()
-		check("producer PID measured", not child_ids.is_empty())
-	producer.disconnect_from_server()
-	check("producer prefs removed before consumer", DirAccess.remove_absolute(prefs) == OK and not FileAccess.file_exists(prefs))
-	check("producer stopped before consumer", children_dead())
-	if failed > 0:
-		finish()
-		return
 	server = singleton.mcp_manager.minerva_server
 	await super._run()
 
@@ -71,12 +46,48 @@ func start() -> bool:
 		and descriptor.get("result", {}).get("open_generation", "") == host.master_project().get("open_generation", ""))
 	remember_children()
 	if starts == 1:
-		var before := FileAccess.get_sha256(host.master_path)
-		await host.unlock_vault(values[1])
-		check("wrong password refused without retention", host._vault_session._password.is_empty()
-			and host._vault_session._unlocked.is_empty() and FileAccess.get_sha256(host.master_path) == before)
-		await host.unlock_vault(password)
-		check("correct password retained privately", host._vault_session._password == password and not host._vault_session._unlocked.is_empty())
+		check("fresh master has no vault", descriptor.get("result", {}).get("initialized") == false)
+		var panel = load("res://Scenes/windows/HostedVaultPanel.tscn").instantiate()
+		var vault_window := Window.new()
+		vault_window.size = Vector2i(550, 320)
+		root.add_child(vault_window)
+		vault_window.add_child(panel)
+		vault_window.close_requested.connect(vault_window.hide)
+		panel.bind_host(host)
+		panel.refresh()
+		var ui_deadline := Time.get_ticks_msec() + 120000
+		while panel._mode != "create" and Time.get_ticks_msec() < ui_deadline: await process_frame
+		check("actual scene selects Create with masked password and confirmation", panel._mode == "create" and panel._password.secret and panel._confirm.secret and panel._confirm.get_parent().visible)
+		panel._password.text = password
+		panel._confirm.text = values[2]
+		panel._button.pressed.emit()
+		check("actual Create mismatch refuses and clears fields", panel._message.text == "Passwords do not match." and panel._password.text.is_empty() and panel._confirm.text.is_empty() and host._vault_session._password.is_empty())
+		panel._password.text = password
+		panel._confirm.text = password
+		panel._hint.text = "00123"
+		panel._button.pressed.emit()
+		check("actual Create clears fields before awaiting private child", panel._password.text.is_empty() and panel._confirm.text.is_empty() and panel._hint.text.is_empty())
+		while panel._busy and Time.get_ticks_msec() < ui_deadline: await process_frame
+		while panel._mode != "unlock" and Time.get_ticks_msec() < ui_deadline: await process_frame
+		check("actual Create completes and retains only a bound session credential", panel._mode == "unlock" and host._vault_session._password == password and not host._vault_session._unlocked.is_empty() and host._vault_session._credential.path == host.master_path)
+		var created: Dictionary = await authority.host_request("vault_challenge", {"path":host.master_path})
+		check("signed child confirms created vault and string hint", created.get("result", {}).get("initialized") == true and created.get("result", {}).get("hint") == "00123" and host._vault_session._credential.fingerprint == created.get("result", {}).get("fingerprint"))
+		panel._password.text = password
+		panel._confirm.text = password
+		panel._hint.text = "unused"
+		vault_window.close_requested.emit()
+		check("closing clears every scene input", panel._password.text.is_empty() and panel._confirm.text.is_empty() and panel._hint.text.is_empty())
+		vault_window.show()
+		panel._password.text = values[1]
+		panel._button.pressed.emit()
+		while panel._busy and Time.get_ticks_msec() < ui_deadline: await process_frame
+		check("actual Unlock refuses a wrong password without replacing the retained credential", host._vault_session._password == password and host._vault_session._unlocked.is_empty() and panel._password.text.is_empty())
+		panel._password.text = password
+		panel._button.pressed.emit()
+		while panel._busy and Time.get_ticks_msec() < ui_deadline: await process_frame
+		check("actual Unlock succeeds for the created master", not host._vault_session._unlocked.is_empty())
+		# Keep the real panel attached through restart: its status reads must not
+		# discard the retained password during temporary master preparation.
 		broker = load("res://Scripts/Services/Plugins/CapabilityBroker.gd").new(pm.get_policy(), load("res://Scripts/Services/Plugins/PluginAuditLog.gd").new())
 		for plugin in ["fixture-a", "fixture-b"]:
 			for op in ["get", "set", "delete"]:
@@ -277,7 +288,7 @@ func finish() -> void:
 		host.free()
 		host = null
 		check("exit clears private password and unlock references", session._password.is_empty() and session._unlocked.is_empty())
-	check("all producer GUI and launcher PIDs dead", children_dead())
+	check("all owned GUI and launcher PIDs dead", children_dead())
 	if not password.is_empty():
 		scan_files(OS.get_user_data_dir())
 		scan_files(OS.get_environment("MINERVA_PLUGIN_DATA_DIR"))
