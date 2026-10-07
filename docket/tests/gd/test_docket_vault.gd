@@ -23,11 +23,6 @@ func lifecycle_project_path() -> String:
 
 func _run() -> void:
 	await process_frame
-	var singleton = root.get_node("SingletonObject")
-	if singleton.docket_manager != null:
-		check("producer embedded handles closed", singleton.docket_manager.close_all().is_empty())
-		singleton.docket_manager.free()
-		singleton.docket_manager = null
 	password = Crypto.new().generate_random_bytes(24).hex_encode()
 	for i in 3:
 		values.append(Crypto.new().generate_random_bytes(24).hex_encode())

@@ -177,14 +177,8 @@ func _run() -> void:
 	if not check("producer prepares manifest before bounded startup", OS.execute(binary, ["manifest", "lifecycle-manifest.json"], output, true) == 0):
 		finish()
 		return
-	# Release every embedded file handle before handing the same master to Docket.
 	var singleton = root.get_node("SingletonObject")
-	var embedded = singleton.docket_manager
-	if embedded != null:
-		check("embedded owner closed without save refusal", embedded.close_all().is_empty())
-		singleton.docket_manager = null
-		embedded.free()
-	check("embedded owner removed", singleton.docket_manager == null)
+	check("Minerva uses the hosted Docket adapter", singleton.docket_host != null)
 	if singleton.docket_host != null:
 		singleton.docket_host.free()
 	var manager_script: Script = load("res://Scripts/Services/Plugins/PluginManager.gd")
@@ -209,7 +203,7 @@ func _run() -> void:
 	host = load("res://Scripts/Services/DocketHost/DocketHost.gd").new()
 	root.add_child(host)
 	singleton.docket_host = host
-	host.start(pm, false)
+	host.start(pm)
 	var pins = JSON.parse_string(FileAccess.get_file_as_string(plugin_dir.path_join("release.lock.json")))
 	var receipt = JSON.parse_string(FileAccess.get_file_as_string(state.get_base_dir().path_join(pins.tag + "-linux-amd64/acquisition.lock.json")))
 	check("actual signed payload receipt matches source pins", receipt is Dictionary and receipt == acquisition_pins(pins))
