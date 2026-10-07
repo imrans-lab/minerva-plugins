@@ -82,6 +82,10 @@ func start() -> bool:
 		panel._button.pressed.emit()
 		while panel._busy and Time.get_ticks_msec() < ui_deadline: await process_frame
 		check("actual Unlock refuses a wrong password without replacing the retained credential", host._vault_session._password == password and host._vault_session._unlocked.is_empty() and panel._password.text.is_empty())
+		# Submission finishes before the asynchronous status refresh enables input.
+		ui_deadline = Time.get_ticks_msec() + 120000
+		while (panel._mode != "unlock" or panel._button.disabled or panel._busy) and Time.get_ticks_msec() < ui_deadline: await process_frame
+		if not check("actual Unlock ready after refusal", panel._mode == "unlock" and not panel._button.disabled and not panel._busy): return false
 		panel._password.text = password
 		panel._button.pressed.emit()
 		while panel._busy and Time.get_ticks_msec() < ui_deadline: await process_frame

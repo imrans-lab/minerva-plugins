@@ -75,10 +75,13 @@ func start() -> bool:
 	previous_secret = authority._secret
 	master_digest = FileAccess.get_sha256(host.master_path)
 	check("master vault metadata absent before challenge", vault_metadata_absent())
-	var challenge: Dictionary = await authority.host_request("vault_challenge", {"path": host.master_path})
+	var fresh: Dictionary = await authority.host_request("vault_challenge", {"path": host.master_path})
+	var descriptor: Dictionary = fresh.get("result", {})
+	check("fresh challenge identifies uninitialized master", descriptor.get("initialized") == false and descriptor.get("path") == host.master_path and descriptor.get("open_generation") == host.master_project().get("open_generation") and descriptor.get("fingerprint") is String and not descriptor.get("fingerprint", "").is_empty() and descriptor.get("unlocked") == false)
+	# An absent vault is now discoverable; malformed requests still fail closed.
+	var challenge: Dictionary = await authority.host_request("vault_challenge", {"path": host.master_path, "unexpected":""})
 	check("host authority surfaces vault refusal", challenge.get("error_code", "") == "backend_error" and challenge.get("error_message", "") == "Vault request refused")
-	# rc20 uses this same refusal for invalid parameters and an absent vault.
-	var raw_challenge: Dictionary = await conn.request_method("docket/panel/vault_challenge", {"panel_secret": authority._secret, "path": host.master_path})
+	var raw_challenge: Dictionary = await conn.request_method("docket/panel/vault_challenge", {"panel_secret": authority._secret, "path": host.master_path, "unexpected":""})
 	var rpc_error: Dictionary = raw_challenge.get("rpc_error", {})
 	check("actual child vault refusal", rpc_error.size() == 2 and rpc_error.has_all(["code", "message"]) and rpc_error.code == -32602 and rpc_error.message == "Vault request refused")
 	check("vault challenge leaves master unchanged", FileAccess.get_sha256(host.master_path) == master_digest)
