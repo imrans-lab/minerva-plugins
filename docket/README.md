@@ -1,5 +1,5 @@
 The manifest installs a source-built launcher, then prepares the pinned official
-signed rc.25 payload before PluginManager can start it. Go and network access to
+signed rc.26 payload before PluginManager can start it. Go and network access to
 GitHub's official release hosts are needed on first setup. Installed receipt
 matches are checked before network access; launcher startup never downloads.
 The `.exe` build output is intentional on all platforms: Go `-o` preserves the
@@ -34,7 +34,7 @@ export MINERVA_DOCKET_PLUGIN_DIR=/absolute/scratch/minerva-plugins/docket
 # Build and execute only in the approved isolated planned job.
 GOWORK=off go -C "$MINERVA_DOCKET_PLUGIN_DIR" build -o docket-plugin.exe .
 # Optional OFFLINE fixture preparation: retained official assets + signatures.
-DOCKET_RELEASE_FIXTURE=/absolute/official-rc25 DOCKET_STAGE_PLUGIN=1 \
+DOCKET_RELEASE_FIXTURE=/absolute/official-rc26 DOCKET_STAGE_PLUGIN=1 \
   GOWORK=off go -C "$MINERVA_DOCKET_PLUGIN_DIR" test -run '^TestOfficialRelease$' -count=1 .
 # Run after disabling network to prove installed offline restart.
 # Without fixture staging, producer/setup need the official network on first use.
