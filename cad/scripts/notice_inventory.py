@@ -366,11 +366,11 @@ RUNTIME_COMPONENTS: tuple = (
     RuntimeComponent(
         distribution='executing',
         component='executing',
-        version='2.2.1',
+        version='2.3.0',
         license='MIT',
         copyright='Copyright (c) 2019 Alex Hall',
         source_url='https://github.com/alexmojaki/executing',
-        license_files=('executing-2.2.1.LICENSE.txt',),
+        license_files=('executing-2.3.0.LICENSE.txt',),
         note='stack-data dependency.',
     ),
     RuntimeComponent(

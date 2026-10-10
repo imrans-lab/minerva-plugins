@@ -171,13 +171,13 @@ matplotlib's contour engine.
 
 matplotlib dependency.
 
-## executing 2.2.1
+## executing 2.3.0
 
 - Licence: MIT
 - Copyright (c) 2019 Alex Hall
 - Source: https://github.com/alexmojaki/executing
 - Arrives via: `executing` wheel
-- Licence text: `cad/licenses/runtime/executing-2.2.1.LICENSE.txt` (sha256 a476a2cb0ef4c41450340a577a28b91ac4c7f669136b2ee148047fabd5fc4181)
+- Licence text: `cad/licenses/runtime/executing-2.3.0.LICENSE.txt` (sha256 a476a2cb0ef4c41450340a577a28b91ac4c7f669136b2ee148047fabd5fc4181)
 
 stack-data dependency.
 
