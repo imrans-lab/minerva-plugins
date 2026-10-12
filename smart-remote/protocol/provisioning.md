@@ -57,7 +57,10 @@ Response (device → plugin):
 ```
 
 - `device_id` is the lowercase WiFi MAC, the same value later sent in `hello.device_id`.
-- On `ok:true` the config is **staged in RAM, not committed**. It stays staged for the rest of the setup session, across WiFi retries, until it is committed or the session ends. Sending `minerva-config` again in the same session replaces it.
+- On `ok:true` the config is **staged in RAM, not committed**. It stays staged for the rest of the setup session, across WiFi retries, until it is committed or the session ends.
+- Sending `minerva-config` again replaces it only before WiFi is first applied or after a failed WiFi attempt.
+- While an attempt is in progress or after one succeeded, it is frozen and a resend gets `bad_request`, so a tested network is never paired with a host or token swapped in mid-attempt.
+- The same NUL ban and depth limit as `protocol.md` apply.
 - Error values: `bad_request` (malformed or out of range) and `version` (unsupported `v`).
 
 ## Order of operations (plugin)

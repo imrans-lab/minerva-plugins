@@ -8,6 +8,8 @@ Message fields are defined only in `schema/`; this document defines behaviour. `
 - WebSocket (RFC 6455), plain `ws://` on the local network. Path `/remote/v1`.
 - The plugin advertises mDNS service `_minerva-remote._tcp` with TXT `proto=1`. The device connects to the address stored at BLE provisioning first and falls back to mDNS.
 - **Text frames** carry exactly one JSON control message (UTF-8 object with a `type` field). Device→plugin text frames are at most 4 KiB; plugin→device at most 8 KiB.
+- No JSON string or property name may contain U+0000, raw or escaped as `\u0000`. Embedded C parsers cannot represent it and the OLED cannot render it, so the plugin removes it from any text it sends (draft, reply, chat names, choices) and a receiver rejects a message containing it as `bad_message`.
+- JSON nesting depth is at most 8.
 - **Binary frames** carry audio (below). Nothing else is sent as binary.
 - Keepalive: the plugin sends a WebSocket ping every 15 s. Either side treats 45 s without any frame as a dead link and closes.
 

@@ -18,6 +18,23 @@ SCHEMA = ROOT / "schema"
 DIRS = {"d2p": "device", "p2d": "plugin"}
 KIND_DIR = {1: "d2p", 2: "p2d"}
 MAX_AUDIO = 4096
+MAX_DEPTH = 8
+
+
+def contract_violations(value, depth=1):
+    """protocol.md rules JSON Schema cannot state: no U+0000 anywhere, depth <= 8."""
+    if depth > MAX_DEPTH:
+        return [f"nesting deeper than {MAX_DEPTH}"]
+    if isinstance(value, str):
+        return ["U+0000 in a string"] if "\x00" in value else []
+    if isinstance(value, dict):
+        found = ["U+0000 in a property name" for k in value if "\x00" in k]
+        for v in value.values():
+            found += contract_violations(v, depth + 1)
+        return found
+    if isinstance(value, list):
+        return [e for v in value for e in contract_violations(v, depth + 1)]
+    return []
 
 
 def load_validators():
@@ -67,6 +84,7 @@ def check_file(path, validators):
                 errors.append(f"{where}: no {DIRS[d]} schema for type {t!r}")
                 continue
             errors += [f"{where}: {t}: {e.message}" for e in v.iter_errors(msg)]
+            errors += [f"{where}: {t}: {e}" for e in contract_violations(msg)]
             first.setdefault(d, t)
             if t == "ptt_down":
                 announced[1] = msg["stream"]
