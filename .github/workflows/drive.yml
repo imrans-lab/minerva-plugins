@@ -4,19 +4,29 @@ name: drive
 # is `drive-plugin`, release tarballs are `drive-<version>-<target>.tar.gz`,
 # and the release tag is `drive-v<version>` (regen_registry.py keys off id).
 on:
+  workflow_call:
+    inputs:
+      publish:
+        type: boolean
+        default: false
+        required: false
   push:
     branches: [main, "dcr/**"]
     paths:
       - "drive/**"
       - ".github/workflows/drive.yml"
       - "scripts/**"
-    tags: ["drive-v*"]
   pull_request:
     paths:
       - "drive/**"
       - ".github/workflows/drive.yml"
       - "scripts/**"
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish a release after the on-demand gates
+        type: boolean
+        default: false
   schedule:
     # Nightly compatibility check against Minerva development HEAD (see the
     # panel job): resolves the branch once to a full SHA and records it.
@@ -27,6 +37,7 @@ permissions:
 
 jobs:
   build:
+    timeout-minutes: 10
     name: drive (${{ matrix.target }})
     strategy:
       fail-fast: false
@@ -85,10 +96,11 @@ jobs:
           lipo -info target/release/drive-plugin
 
       - name: Cargo test (linux-x86_64 only — Linux is the source of truth)
-        if: matrix.target == 'linux-x86_64'
+        if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag') && (matrix.target == 'linux-x86_64')
         run: cargo test --release --locked
 
       - name: Smoke
+        if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag')
         run: python3 ../scripts/smoke/mcp_smoke.py target/release/drive-plugin${{ matrix.ext }}
 
       - name: Pack release tarball
@@ -141,6 +153,7 @@ jobs:
           retention-days: 14
 
   panel:
+    timeout-minutes: 10
     name: drive panel (GD suite-registry compatibility ONLY — nothing executes)
     # ============================================================
     # THIS JOB IS NOT A BUILD CHECK AND NOT A TEST. READ THIS BEFORE
@@ -242,9 +255,10 @@ jobs:
       contents: read
 
   release:
+    timeout-minutes: 60
     name: Publish release
     needs: [build, secret-scan]
-    if: github.event_name == 'push'
+    if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag') && always() && ((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.publish)) && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     permissions:
       contents: write

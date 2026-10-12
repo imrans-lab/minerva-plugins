@@ -1,0 +1,11 @@
+name: registry-check tagged release
+'on':
+  push:
+    tags:
+    - '*-v*'
+permissions:
+  contents: write
+  actions: read
+jobs:
+  release:
+    uses: ./.github/workflows/registry-check.yml

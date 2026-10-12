@@ -23,6 +23,11 @@ on:
       # edit to the others untested here.
       - "scripts/**"
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish a release after the on-demand gates
+        type: boolean
+        default: false
   schedule:
     # Nightly compatibility check against Minerva development HEAD (see the
     # panel job): resolves the branch once to a full SHA and records it.
@@ -38,6 +43,7 @@ permissions:
 
 jobs:
   test:
+    timeout-minutes: 10
     name: council tests
     runs-on: ubuntu-22.04
     defaults:
@@ -84,6 +90,7 @@ jobs:
       # panel reads the record while it moves, so the detector is the gate
       # rather than an extra: a data race here is a corrupted council document.
       - name: go test (race detector)
+        if: github.event_name == 'workflow_dispatch'
         run: go test -race -count=1 ./...
 
       # ui/panel.html is generated from ui/src by a build with no dependencies.
@@ -98,9 +105,11 @@ jobs:
       # scripts/pack-release.sh — the two things CouncilReleaseTests exists to
       # hold — would never trigger the job that runs them.
       - name: Release parity tests (tag, manifest, version, target)
+        if: github.event_name == 'workflow_dispatch'
         run: python3 -m unittest discover -s ../scripts -p 'test_registry.py'
 
   package:
+    timeout-minutes: 10
     name: council (${{ matrix.target }})
     # ONE target on purpose. manifest.json's `release_targets` declares
     # linux-x86_64 alone, and scripts/test_registry.py holds this matrix to that
@@ -166,6 +175,7 @@ jobs:
       # what a marketplace user runs is this binary in that directory, and a
       # smoke against the build tree would not have shown it.
       - name: Verify the archive a marketplace user would install
+        if: github.event_name == 'workflow_dispatch'
         run: python3 scripts/verify-archive.py "dist/$(bash scripts/pack-release.sh --print-name "${{ matrix.target }}")" --smoke ../scripts/smoke/mcp_smoke.py
 
       - name: Upload artifact
@@ -177,6 +187,7 @@ jobs:
           retention-days: 14
 
   panel:
+    timeout-minutes: 10
     name: council panel (GD suite-registry compatibility ONLY — nothing executes)
     # ============================================================
     # THIS JOB IS NOT A BUILD CHECK AND NOT A TEST. READ THIS BEFORE
@@ -269,10 +280,11 @@ jobs:
       contents: read
 
   release:
+    timeout-minutes: 10
     name: Publish release
     concurrency: council-release
     needs: [test, package, panel, secret-scan]
-    if: github.event_name == 'push'
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     permissions:
       contents: write

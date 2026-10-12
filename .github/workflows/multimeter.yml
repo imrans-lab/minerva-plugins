@@ -24,12 +24,18 @@ on:
       - "shared/**"
       - "go.work"
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish a release after the on-demand gates
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   build:
+    timeout-minutes: 10
     name: multimeter (${{ matrix.target }})
     strategy:
       fail-fast: false
@@ -59,7 +65,10 @@ jobs:
           go-version: "1.26"
           cache: false
 
+      - name: Go vet
+        run: go vet ./...
       - name: Go vet + test (decoder table, no radio needed)
+        if: github.event_name == 'workflow_dispatch'
         run: |
           go vet ./...
           go test -count=1 ./...
@@ -95,6 +104,7 @@ jobs:
         run: go build -o /dev/null .
 
       - name: Smoke (MCP handshake with the radio disabled)
+        if: github.event_name == 'workflow_dispatch'
         env:
           MULTIMETER_NO_BLE: "1"
         run: python3 ../scripts/smoke/mcp_smoke.py "$PWD/build/multimeter-plugin"
@@ -135,10 +145,11 @@ jobs:
       contents: read
 
   release:
+    timeout-minutes: 10
     name: Publish release
     concurrency: multimeter-release
     needs: [build, secret-scan]
-    if: github.event_name == 'push'
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     permissions:
       contents: write

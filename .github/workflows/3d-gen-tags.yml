@@ -1,0 +1,11 @@
+name: 3d-gen tagged release
+'on':
+  push:
+    tags:
+    - gen3d-v*
+permissions:
+  contents: write
+  actions: read
+jobs:
+  release:
+    uses: ./.github/workflows/3d-gen.yml

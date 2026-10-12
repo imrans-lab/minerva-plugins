@@ -1,0 +1,11 @@
+name: pcb tagged release
+'on':
+  push:
+    tags:
+    - pcb-v*
+permissions:
+  contents: write
+  actions: read
+jobs:
+  release:
+    uses: ./.github/workflows/pcb.yml

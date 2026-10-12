@@ -1,0 +1,11 @@
+name: scansort tagged release
+'on':
+  push:
+    tags:
+    - scansort-v*
+permissions:
+  contents: write
+  actions: read
+jobs:
+  release:
+    uses: ./.github/workflows/scansort.yml

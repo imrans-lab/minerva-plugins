@@ -73,3 +73,38 @@ upstream-update process.
 ## License
 
 See [LICENSE.md](LICENSE.md).
+
+## CI lanes
+
+Branch pushes run build/import/link checks and a redacted outgoing-range secret
+scan. Each concrete job has an explicit positive deadline. Ten minutes is the
+branch timing optimization target, measured against actual runs.
+`scripts/ci/check_push_lanes.py` checks every push workflow and local reusable
+callee; functional suites and packaged-product probes are dispatch-only.
+
+After review and outgoing-range scans, dispatch retained functional workflows
+on the exact candidate alongside integration. Record results and fix failures
+forward. Plain dispatches do not publish: release inputs default to false. For
+example:
+
+```sh
+gh workflow run WORKFLOW.yml --ref CANDIDATE_BRANCH
+```
+
+Manual scans use a commit range (default `HEAD^..HEAD`, with explicit
+`SECRET_SCAN_BASE`/`SECRET_SCAN_HEAD` available to the CI scan wrapper); they
+never scan all history. Push scans use the event's before/after commits. New
+branch scans start at the merge base with the target branch.
+
+Dispatch each plugin workflow for its retained functional/package gates.
+Runtime-producing packaging jobs stay on demand; their push source-build jobs
+compile/link without executing the packaged worker. Compile-only bundle
+placeholders are used where the module's existing developer recipe requires
+them; real bundle construction and its probes remain mandatory on demand.
+
+Tag-only release wrappers do not use the branch timing target and call the
+same reusable build/package lane. Existing tag publication remains available;
+branch pushes never execute those functional or publishing jobs. The lint also
+checks local composite actions and warns when declared branch dependency
+budgets exceed ten minutes. These timing warnings do not block release; FCIB,
+functional-lane separation and secret scans remain enforced.

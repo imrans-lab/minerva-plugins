@@ -11,6 +11,7 @@ on:
 
 jobs:
   no-product-boards:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,3 +34,6 @@ jobs:
             echo "::error::the smart-remote board definition is banned from this public repo (see pcb/worker/tests/testdata/POLICY.md)"
             exit 1
           fi
+
+  secret-scan:
+    uses: ./.github/workflows/secret-scan.yml

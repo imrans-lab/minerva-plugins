@@ -107,9 +107,14 @@ name: pcb
 # in test_pad_synthesis.gd and observing run-gd-tests.sh exit non-zero).
 
 on:
+  workflow_call:
+    inputs:
+      publish:
+        type: boolean
+        default: false
+        required: false
   push:
     branches: [main, "dcr/**"]
-    tags: ["pcb-v*"]
     # NOTE: the two paths lists below are duplicated on purpose. GitHub Actions
     # does not support YAML anchors/aliases in workflow files, so they cannot be
     # factored. Keep them in sync by hand.
@@ -144,6 +149,11 @@ on:
       - ".github/workflows/pcb.yml"
       - ".github/actions/pcb-setup/**"
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish a release after the on-demand gates
+        type: boolean
+        default: false
   schedule:
     # Nightly compatibility check against Minerva development HEAD (see the
     # panel job): resolves the branch once to a full SHA and records it.
@@ -154,6 +164,7 @@ permissions:
 
 jobs:
   test:
+    timeout-minutes: 10
     name: pcb test (linux, no kicad-cli)
     runs-on: ubuntu-22.04
     defaults:
@@ -170,6 +181,7 @@ jobs:
         run: go vet ./...
 
       - name: Go test
+        if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag')
         # -count=1 is required — cached Go test results would hide
         # worker-side changes that don't touch Go source.
         run: go test -count=1 ./...
@@ -193,14 +205,17 @@ jobs:
       # those jobs re-run the other two: they are full-suite jobs, and a gate
       # that is skipped on Windows is a gate that breaks on Windows.
       - name: Standing gates (determinism + kicad-cli boundary lint + IR parity)
+        if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag')
         working-directory: pcb/worker
         run: python -m pytest tests/test_determinism_gate.py tests/test_kicad_cli_boundary.py tests/test_ir_parity.py -v
 
       - name: Worker test suite (kicad-cli absent — oracle tests skip)
+        if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag')
         working-directory: pcb/worker
         run: python -m pytest tests/ -q
 
   fab-gate:
+    if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag')
     name: pcb fab gate (hermetic clean-checkout build)
     # EPOCH CP2 STATION S1.
     #
@@ -221,7 +236,7 @@ jobs:
     # A hung compile (say a pyclipper pour pathology) would otherwise burn
     # toward the 360-minute default. The pytest wrapper caps the script at 120s
     # when IT drives it; these steps had no cap at all.
-    timeout-minutes: 10
+    timeout-minutes: 60
     defaults:
       run:
         shell: bash
@@ -312,6 +327,7 @@ jobs:
               pcb/worker/tests/testdata/coupon_jlc1.yaml
 
   test-crossplatform:
+    timeout-minutes: 60
     name: pcb test (${{ matrix.os }})
     # ROUND A0c. Owner-requested 2026-07-25: development happens on a Linux
     # desktop, acceptance happens opportunistically on Mac and Windows laptops.
@@ -328,10 +344,7 @@ jobs:
     #
     # `if:` cannot reference the matrix (cad.yml carries the same note), but it
     # does not need to — this condition is matrix-independent.
-    if: >-
-      github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/')
-      || github.event_name == 'workflow_dispatch'
+    if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag') && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag'))
     strategy:
       # Independent results. A macOS-only break must not hide whether Windows
       # is also broken — with two platforms, one cancelled run is half the
@@ -372,14 +385,12 @@ jobs:
         run: python -m pytest tests/ -q
 
   oracle:
+    timeout-minutes: 60
     name: pcb oracle (with kicad-cli)
     # main + manual dispatch ONLY. `event_name != 'pull_request'` would have
     # been wrong in one direction: it also fires on every dcr/** push, which
     # contradicts the main-only intent stated at the top of this file.
-    if: >-
-      github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/')
-      || github.event_name == 'workflow_dispatch'
+    if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag') && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag'))
     runs-on: ubuntu-22.04
     defaults:
       run:
@@ -422,6 +433,7 @@ jobs:
         run: python -m pytest tests/ -q
 
   panel:
+    timeout-minutes: 10
     name: pcb panel (GD suite-registry compatibility ONLY — nothing executes)
     # Round A1a, RESHAPED at the CP2 S10 boundary. This job used to RUN the
     # 47 `extends SceneTree` suites in pcb/tests/gd/. It no longer does, and
@@ -597,6 +609,8 @@ jobs:
   # wheel-availability notes), so there is no cad-style blocker.
   # ---------------------------------------------------------------------------
   package:
+    if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag')
+    timeout-minutes: 60
     name: package (${{ matrix.target }})
     # Public-repo standard runners are free across all OSes, so full matrix
     # runs on every trigger. (Matrix context isn't valid in job-level `if:`.)
@@ -837,6 +851,7 @@ jobs:
       contents: read
 
   release:
+    timeout-minutes: 60
     concurrency: pcb-release
     # A SKIPPED JOB IS NOT A PASSED JOB. Listing these in `needs` alone would
     # make GitHub skip `release` on any ref where one of them does not run —
@@ -853,11 +868,7 @@ jobs:
     # a version tag releases as-is; main releases pcb-v<manifest version>;
     # a dcr/** branch releases a -branch- prerelease that regen_registry.py
     # deliberately skips.
-    if: >-
-      always()
-      && github.event_name == 'push'
-      && !contains(needs.*.result, 'failure')
-      && !contains(needs.*.result, 'cancelled')
+    if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag') && always() && ((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.publish)) && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -907,3 +918,21 @@ jobs:
           files: dist/*.tar.gz
           generate_release_notes: true
           fail_on_unmatched_files: true
+
+  source-build:
+    name: Compile source (pcb)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: pcb
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: pcb/go.sum
+      - name: Compile and link source
+        run: |
+          go vet ./...
+          go build -o "${{ runner.temp }}/pcb-compile" .

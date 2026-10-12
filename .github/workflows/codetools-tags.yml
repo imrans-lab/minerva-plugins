@@ -1,0 +1,11 @@
+name: codetools tagged release
+'on':
+  push:
+    tags:
+    - codetools-v*
+permissions:
+  contents: write
+  actions: read
+jobs:
+  release:
+    uses: ./.github/workflows/codetools.yml

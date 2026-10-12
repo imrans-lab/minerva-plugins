@@ -6,12 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"time"
 
 	plugruntime "github.com/imrans-lab/minerva-plugins/shared/runtime"
@@ -91,6 +90,19 @@ func syncDirectories(root string) error {
 
 // Preparation is a setup operation, never part of the manager's startup budget.
 func pluginCommand(ctx context.Context, r release, args []string) error {
+	// A running standalone instance wins before any installation or platform
+	// checks. Attachment must not acquire, replace, or even require a payload.
+	var profile string
+	if len(args) == 0 {
+		var err error
+		profile, err = standaloneProfile()
+		if err != nil {
+			return err
+		}
+		if status, err := discover(ctx, profile); err == nil {
+			return json.NewEncoder(os.Stdout).Encode(status)
+		}
+	}
 	root, err := pluginRoot()
 	if err != nil {
 		return err
@@ -117,14 +129,14 @@ func pluginCommand(ctx context.Context, r release, args []string) error {
 			return os.WriteFile(output, manifestJSON, 0600)
 		}
 		return nil
-	case len(args) == 0, len(args) == 1 && args[0] == "--host-authority", len(args) == 2 && args[0] == "--host-authority" && args[1] == "--headless":
+	case len(args) == 0:
 		p, ok := r.Platforms[target]
 		if !ok {
 			return fmt.Errorf("unsupported platform: %s", target)
 		}
 		dest := filepath.Join(root, r.Tag+"-"+target)
 		// Marketplace archives carry the already verified official payload.
-		// State still lives in the host's data directory across upgrades.
+		// The payload receipt remains the setup verification boundary.
 		if executable, err := os.Executable(); err == nil {
 			bundled := filepath.Join(filepath.Dir(executable), "official", r.Tag+"-"+target)
 			if _, err := os.Stat(bundled); err == nil {
@@ -142,148 +154,129 @@ func pluginCommand(ctx context.Context, r release, args []string) error {
 		if string(receipt) != string(expected) {
 			return errors.New("installation receipt mismatch")
 		}
-		state := filepath.Join(root, "state")
-		if err := privateDir(state); err != nil {
+
+		status, err := launch(ctx, filepath.Join(dest, filepath.FromSlash(p.Entrypoint)), profile)
+		if err != nil {
 			return err
 		}
-		return launch(filepath.Join(dest, filepath.FromSlash(p.Entrypoint)), state, args...)
+		return json.NewEncoder(os.Stdout).Encode(status)
 	}
-	return errors.New("usage: docket-plugin.exe [--host-authority | prepare | manifest filename | verify-pins | acquire /absolute/private/root]")
+	return errors.New("usage: docket-plugin.exe [prepare | manifest filename | verify-pins | acquire /absolute/private/root]")
 }
 
-func childEnvironment(state, platform string, inherited []string) ([]string, error) {
-	overrides := map[string]string{}
-	switch platform {
-	case "linux":
-		for _, key := range []string{"XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"} {
-			overrides[key] = filepath.Join(state, strings.ToLower(key))
-		}
+// Docket owns this standalone profile, its registration, and its lifetime.
+func standaloneProfile() (string, error) {
+	var base string
+	switch runtime.GOOS {
 	case "windows":
-		overrides["APPDATA"] = filepath.Join(state, "appdata")
-		overrides["LOCALAPPDATA"] = filepath.Join(state, "localappdata")
+		base = os.Getenv("APPDATA")
 	case "darwin":
-		overrides["HOME"] = filepath.Join(state, "home")
-	}
-	for _, dir := range overrides {
-		if err := privateDir(dir); err != nil {
-			return nil, err
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
 		}
-	}
-	env := make([]string, 0, len(inherited)+len(overrides))
-	for _, entry := range inherited {
-		key := strings.SplitN(entry, "=", 2)[0]
-		replaced := false
-		for override := range overrides {
-			if strings.EqualFold(key, override) {
-				replaced = true
+		base = filepath.Join(home, "Library", "Application Support")
+	case "linux":
+		base = os.Getenv("XDG_DATA_HOME")
+		if !filepath.IsAbs(base) {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return "", err
 			}
+			base = filepath.Join(home, ".local", "share")
 		}
-		if !replaced {
-			env = append(env, entry)
-		}
+	default:
+		return "", fmt.Errorf("unsupported platform: %s", runtime.GOOS)
 	}
-	for key, value := range overrides {
-		env = append(env, key+"="+value)
+	if !filepath.IsAbs(base) {
+		return "", errors.New("Docket user-data base must be absolute")
 	}
-	return env, nil
+	godot := "Godot"
+	if runtime.GOOS == "linux" {
+		godot = "godot"
+	}
+	return filepath.Join(base, godot, "app_userdata", "Docket"), nil
 }
 
-// No protocol requests or namespace translation: the exported GUI owns its lease.
-func launch(executable, state string, mode ...string) error {
-	env, err := childEnvironment(filepath.Join(filepath.Dir(state), "child-env"), runtime.GOOS, os.Environ())
+type launchStatus struct {
+	Status   string `json:"status"`
+	PID      int    `json:"pid,omitempty"`
+	Endpoint string `json:"endpoint,omitempty"`
+	Version  string `json:"version,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+func discover(ctx context.Context, profile string) (launchStatus, error) {
+	data, err := os.ReadFile(filepath.Join(profile, "instance.json"))
 	if err != nil {
-		return err
+		return launchStatus{}, err
 	}
-	// Host mode is explicit; its per-child token stays in the inherited environment.
-	engineArgs := []string{"--quiet"}
-	if len(mode) == 2 && mode[1] == "--headless" {
-		engineArgs = append(engineArgs, "--headless")
-		mode = mode[:1]
+	var record struct {
+		PID      int `json:"pid"`
+		Endpoint struct {
+			Host string `json:"host"`
+			Port int    `json:"port"`
+		} `json:"endpoint"`
+		Version string `json:"version"`
 	}
-	args := append(append(engineArgs, "--", "--stdio", "--state-dir", state), mode...)
-	child := exec.Command(executable, args...)
-	child.Env, child.Stderr = env, os.Stderr
-	// Own the pipes: Wait must reap independently of a blocked host writer.
-	stdin, input, err := os.Pipe()
+	if err := json.Unmarshal(data, &record); err != nil {
+		return launchStatus{}, err
+	}
+	if record.PID <= 0 || record.Endpoint.Host != "127.0.0.1" || record.Endpoint.Port < 1 || record.Endpoint.Port > 65535 {
+		return launchStatus{}, errors.New("invalid Docket registration")
+	}
+	if !processAlive(record.PID) {
+		return launchStatus{}, errors.New("stale Docket registration")
+	}
+	endpoint := fmt.Sprintf("127.0.0.1:%d", record.Endpoint.Port)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+endpoint+"/", nil)
 	if err != nil {
-		return err
+		return launchStatus{}, err
 	}
-	defer stdin.Close()
-	defer input.Close()
-	stdout, output, err := os.Pipe()
+	client := &http.Client{Timeout: 500 * time.Millisecond, Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
+	response, err := client.Do(req)
 	if err != nil {
-		return err
+		return launchStatus{}, err
 	}
-	defer stdout.Close()
-	defer output.Close()
-	child.Stdin, child.Stdout = stdin, output
+	if err := response.Body.Close(); err != nil {
+		return launchStatus{}, err
+	}
+	return launchStatus{Status: "attached", PID: record.PID, Endpoint: endpoint, Version: record.Version}, nil
+}
+
+// No pipes or parent-owned lease: the registered GUI survives launcher exit.
+func launch(ctx context.Context, executable, profile string) (launchStatus, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	child := exec.Command(executable, "--quiet")
+	configureDetached(child)
 	if err := child.Start(); err != nil {
-		return err
+		return launchStatus{}, fmt.Errorf("start Docket: %w", err)
 	}
-	_ = stdin.Close()
-	_ = output.Close()
-	pidFile := filepath.Join(filepath.Dir(state), "child.pid")
-	if err := os.WriteFile(pidFile, []byte(fmt.Sprint(child.Process.Pid)), 0600); err != nil {
-		_ = child.Process.Kill()
-		_ = child.Wait()
-		return err
-	}
-	defer os.Remove(pidFile)
-	shutdown := make(chan error, 2)
-	go func() {
-		// Healthy child backpressure may block forwarding. If that hides EOF,
-		// Minerva's stop deadline terminates this launcher and closes its pipes.
-		_, err := io.Copy(input, os.Stdin)
-		_ = input.Close()
-		shutdown <- err
-	}()
-	outputDone := make(chan error, 1)
-	go func() {
-		buffer := make([]byte, 32768)
-		for {
-			n, readErr := stdout.Read(buffer)
-			if n > 0 {
-				if _, err := os.Stdout.Write(buffer[:n]); err != nil {
-					shutdown <- err
-					outputDone <- err
-					return
-				}
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if status, err := discover(ctx, profile); err == nil {
+			status.Status = "spawned"
+			if err := child.Process.Release(); err != nil {
+				return launchStatus{}, fmt.Errorf("release Docket: %w", err)
 			}
-			if readErr != nil {
-				shutdown <- nil
-				outputDone <- nil
-				return
-			}
+			return status, nil
 		}
-	}()
-	settled := make(chan error, 1)
-	go func() { settled <- child.Wait() }()
-	select {
-	case err := <-settled:
-		// Flush normal final output, but never depend on the host reading it.
 		select {
-		case outputErr := <-outputDone:
-			return errors.Join(err, outputErr)
-		case <-time.After(500 * time.Millisecond):
-			return err
-		}
-	case cause := <-shutdown:
-		go input.Close() // Windows close may wait for an outstanding write.
-		// Leave headroom inside the host's ten-second graceful stop window.
-		select {
-		case err := <-settled:
-			if err != nil {
-				return err
+		case <-ctx.Done():
+			killErr := child.Process.Kill()
+			if errors.Is(killErr, os.ErrProcessDone) {
+				killErr = nil
 			}
-			select {
-			case <-outputDone:
-			case <-time.After(500 * time.Millisecond):
-			}
-			return cause
-		case <-time.After(8 * time.Second):
-			_ = child.Process.Kill()
-			<-settled
-			return errors.New("Docket did not settle within eight seconds of shutdown")
+			waitErr := child.Wait()
+			var exitErr *exec.ExitError
+			if errors.As(waitErr, &exitErr) {
+				waitErr = nil
+			} // Expected after owned-child termination.
+			return launchStatus{}, errors.Join(fmt.Errorf("Docket registration failed: %w", ctx.Err()), killErr, waitErr)
+		case <-ticker.C:
 		}
 	}
 }
