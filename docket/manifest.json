@@ -7,7 +7,7 @@
   "host_api_version": "1",
   "backend": {"transport": "stdio", "entrypoint": "./docket-plugin.exe", "args": []},
   "tools": [],
-  "events": [{"name": "item_changed"}],
+  "events": [],
   "setup": {
     "requires": [{"tool": "go", "min": "1.23"}],
     "steps": [

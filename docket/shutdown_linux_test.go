@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"syscall"
 	"testing"
@@ -73,8 +74,9 @@ func fixtureLauncher(t *testing.T) (string, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dest := filepath.Join(install, r.Tag+"-linux-amd64")
-	entry := filepath.Join(dest, r.Platforms["linux-amd64"].Entrypoint)
+	target := runtime.GOOS + "-" + runtime.GOARCH
+	dest := filepath.Join(install, r.Tag+"-"+target)
+	entry := filepath.Join(dest, r.Platforms[target].Entrypoint)
 	if err := os.MkdirAll(filepath.Dir(entry), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -170,6 +172,26 @@ func TestLauncherTimeout(t *testing.T) {
 			}
 		}
 	}()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// A stale endpoint can name a live, unrelated process. Cleanup must target
+	// the child we spawned, never the PID read from the registration.
+	record, err := json.Marshal(map[string]any{"pid": other.Process.Pid, "endpoint": map[string]any{"host": "127.0.0.1", "port": port}, "version": "unrelated"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(profile, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(profile, "instance.json"), record, 0600); err != nil {
+		t.Fatal(err)
+	}
 	status, code := runLauncher(t)
 	if code != 2 || status.Status != "failed" || status.Reason == "" {
 		t.Fatalf("timeout: %+v exit %d", status, code)

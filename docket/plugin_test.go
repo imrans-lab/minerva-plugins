@@ -54,6 +54,10 @@ func TestDiscover(t *testing.T) {
 	if err != nil || status.Status != "attached" || status.PID != os.Getpid() || status.Version != "live-version" {
 		t.Fatalf("discover = %+v, %v", status, err)
 	}
+	server.Close()
+	if _, err := discover(context.Background(), profile); err == nil {
+		t.Fatal("accepted live PID with a closed HTTP port")
+	}
 	record["pid"] = -1
 	write()
 	if _, err := discover(context.Background(), profile); err == nil {
