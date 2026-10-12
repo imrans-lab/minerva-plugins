@@ -1,0 +1,11 @@
+name: cad tagged release
+'on':
+  push:
+    tags:
+    - cad-v*
+permissions:
+  contents: write
+  actions: read
+jobs:
+  release:
+    uses: ./.github/workflows/cad.yml

@@ -1,0 +1,11 @@
+name: drive tagged release
+'on':
+  push:
+    tags:
+    - drive-v*
+permissions:
+  contents: write
+  actions: read
+jobs:
+  release:
+    uses: ./.github/workflows/drive.yml

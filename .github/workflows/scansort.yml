@@ -3,13 +3,18 @@ name: scansort
 # retrigger 2026-05-26: validate that imrans-lab org now supports the
 # specialty runner labels (ubuntu-22.04-arm, macos-15, windows-2022).
 on:
+  workflow_call:
+    inputs:
+      publish:
+        type: boolean
+        default: false
+        required: false
   push:
     branches: [main, "dcr/**"]
     paths:
       - "scansort/**"
       - ".github/workflows/scansort.yml"
       - "scripts/smoke/**"
-    tags: ["scansort-v*"]
   pull_request:
     paths:
       - "scansort/**"
@@ -94,11 +99,11 @@ jobs:
           lipo -info target/release/scansort-plugin
 
       - name: Cargo test (linux-x86_64 only — Linux is the source of truth)
-        if: github.event_name == 'workflow_dispatch' && (matrix.target == 'linux-x86_64')
+        if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag') && (matrix.target == 'linux-x86_64')
         run: cargo test --release --locked
 
       - name: Smoke
-        if: github.event_name == 'workflow_dispatch'
+        if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag')
         run: python3 ../scripts/smoke/mcp_smoke.py target/release/scansort-plugin${{ matrix.ext }}
 
       - name: Pack release tarball
@@ -164,12 +169,12 @@ jobs:
       contents: read
 
   release:
-    timeout-minutes: 10
+    timeout-minutes: 60
     name: Publish release
     needs: [build, secret-scan]
     # Auto-tag releases on every push (branch or explicit tag). Skip
     # PRs — fork tokens are read-only and cannot publish releases.
-    if: github.event_name == 'workflow_dispatch' && inputs.publish && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag') && always() && ((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.publish)) && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     permissions:
       contents: write

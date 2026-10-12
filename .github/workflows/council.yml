@@ -1,6 +1,12 @@
 name: council
 
 on:
+  workflow_call:
+    inputs:
+      publish:
+        type: boolean
+        default: false
+        required: false
   push:
     branches: [main, "dcr/**"]
     paths:
@@ -90,7 +96,7 @@ jobs:
       # panel reads the record while it moves, so the detector is the gate
       # rather than an extra: a data race here is a corrupted council document.
       - name: go test (race detector)
-        if: github.event_name == 'workflow_dispatch'
+        if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag')
         run: go test -race -count=1 ./...
 
       # ui/panel.html is generated from ui/src by a build with no dependencies.
@@ -105,7 +111,7 @@ jobs:
       # scripts/pack-release.sh — the two things CouncilReleaseTests exists to
       # hold — would never trigger the job that runs them.
       - name: Release parity tests (tag, manifest, version, target)
-        if: github.event_name == 'workflow_dispatch'
+        if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag')
         run: python3 -m unittest discover -s ../scripts -p 'test_registry.py'
 
   package:
@@ -175,7 +181,7 @@ jobs:
       # what a marketplace user runs is this binary in that directory, and a
       # smoke against the build tree would not have shown it.
       - name: Verify the archive a marketplace user would install
-        if: github.event_name == 'workflow_dispatch'
+        if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag')
         run: python3 scripts/verify-archive.py "dist/$(bash scripts/pack-release.sh --print-name "${{ matrix.target }}")" --smoke ../scripts/smoke/mcp_smoke.py
 
       - name: Upload artifact
@@ -284,7 +290,7 @@ jobs:
     name: Publish release
     concurrency: council-release
     needs: [test, package, panel, secret-scan]
-    if: github.event_name == 'workflow_dispatch' && inputs.publish && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag') && always() && ((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.publish)) && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     permissions:
       contents: write

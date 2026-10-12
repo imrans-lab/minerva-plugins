@@ -3,6 +3,12 @@ name: registry-check
 # Validate committed release selections, independent of newer tags or manifests.
 
 on:
+  workflow_call:
+    inputs:
+      publish:
+        type: boolean
+        default: false
+        required: false
   push:
     branches: [main, "dcr/**"]
     paths:
@@ -11,7 +17,6 @@ on:
       - "scripts/release-publish-guard.sh"
       - "*/manifest.json"
       - ".github/workflows/registry-check.yml"
-    tags: ["*-v*"]
   pull_request:
     paths:
       - "registry.json"
@@ -42,13 +47,13 @@ jobs:
           python-version: "3.11"
 
       - name: Registry regression tests
-        if: github.event_name == 'workflow_dispatch'
+        if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag')
         run: python3 -m unittest discover -s scripts -p 'test_registry.py'
 
       - name: Validate committed release selections
         run: python3 scripts/regen_registry.py --check
       - name: Validate selected releases and published assets
-        if: github.event_name == 'workflow_dispatch'
+        if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag')
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/regen_registry.py --check --published

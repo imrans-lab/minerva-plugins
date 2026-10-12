@@ -99,3 +99,9 @@ Runtime-producing packaging jobs stay on demand; their push source-build jobs
 compile/link without executing the packaged worker. Compile-only bundle
 placeholders are used where the module's existing developer recipe requires
 them; real bundle construction and its probes remain mandatory on demand.
+
+Tag-only release wrappers are exempt from the branch deadline and call the
+same reusable build/package lane. Existing tag publication remains available;
+branch pushes never execute those functional or publishing jobs. The lint also
+checks local composite actions and rejects dependency chains whose declared
+branch-job deadlines sum to more than ten minutes.

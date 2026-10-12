@@ -1,0 +1,11 @@
+name: presentation tagged release
+'on':
+  push:
+    tags:
+    - presentation-v*
+permissions:
+  contents: write
+  actions: read
+jobs:
+  release:
+    uses: ./.github/workflows/presentation.yml

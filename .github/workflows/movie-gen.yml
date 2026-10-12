@@ -4,6 +4,12 @@ name: movie-gen
 # is `movie_gen-plugin`, release tarballs are `movie_gen-<version>-<target>.tar.gz`,
 # and the release tag is `movie_gen-v<version>` (regen_registry.py keys off id).
 on:
+  workflow_call:
+    inputs:
+      publish:
+        type: boolean
+        default: false
+        required: false
   push:
     branches: [main, "dcr/**"]
     paths:
@@ -11,7 +17,6 @@ on:
       - ".github/workflows/movie-gen.yml"
       - "shared/rust/**"
       - "scripts/smoke/**"
-    tags: ["movie_gen-v*"]
   pull_request:
     paths:
       - "movie-gen/**"
@@ -89,11 +94,11 @@ jobs:
           lipo -info target/release/movie_gen-plugin
 
       - name: Cargo test (linux-x86_64 only — Linux is the source of truth)
-        if: github.event_name == 'workflow_dispatch' && (matrix.target == 'linux-x86_64')
+        if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag') && (matrix.target == 'linux-x86_64')
         run: cargo test --release --locked
 
       - name: Smoke
-        if: github.event_name == 'workflow_dispatch'
+        if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag')
         run: python3 ../scripts/smoke/mcp_smoke.py target/release/movie_gen-plugin${{ matrix.ext }}
 
       - name: Pack release tarball
@@ -153,10 +158,10 @@ jobs:
       contents: read
 
   release:
-    timeout-minutes: 10
+    timeout-minutes: 60
     name: Publish release
     needs: [build, secret-scan]
-    if: github.event_name == 'workflow_dispatch' && inputs.publish && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag') && always() && ((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.publish)) && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     permissions:
       contents: write

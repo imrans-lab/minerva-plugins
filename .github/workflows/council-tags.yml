@@ -1,0 +1,11 @@
+name: council tagged release
+'on':
+  push:
+    tags:
+    - council-v*
+permissions:
+  contents: write
+  actions: read
+jobs:
+  release:
+    uses: ./.github/workflows/council.yml
