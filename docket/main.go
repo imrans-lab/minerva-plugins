@@ -444,6 +444,12 @@ func main() {
 		}
 	}
 	if err != nil {
+		if len(os.Args) == 1 {
+			if encodeErr := json.NewEncoder(os.Stdout).Encode(launchStatus{Status: "failed", Reason: err.Error()}); encodeErr != nil {
+				fmt.Fprintln(os.Stderr, encodeErr)
+			}
+			os.Exit(2)
+		}
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
