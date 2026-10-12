@@ -57,7 +57,7 @@ Response (device → plugin):
 ```
 
 - `device_id` is the lowercase WiFi MAC, the same value later sent in `hello.device_id`.
-- On `ok:true` the config is **staged in RAM, not committed**.
+- On `ok:true` the config is **staged in RAM, not committed**. It stays staged for the rest of the setup session, across WiFi retries, until it is committed or the session ends. Sending `minerva-config` again in the same session replaces it.
 - Error values: `bad_request` (malformed or out of range) and `version` (unsupported `v`).
 
 ## Order of operations (plugin)
@@ -68,20 +68,27 @@ Response (device → plugin):
 4. `minerva-config` with a freshly generated token. Keep the returned `device_id`.
 5. `prov-scan`; the user chooses a network and types its password.
 6. `prov-config` set, then apply. Poll status until it reports connected or failed.
-   - **Connected:** the device commits WiFi credentials and the staged Minerva config to NVS together, then reboots.
-   - **Failed:** the device discards the staged config and reports the failure reason. The plugin offers to retry from step 5.
-7. Pairing is complete only when the remote connects over the LAN protocol and sends `hello` with that `device_id` and the new token, within 60 s of the connected status. Otherwise the plugin reports the pairing as unconfirmed.
+   - **Connected:** the device commits (see Device storage) and reboots. The plugin then stores the device record as *unconfirmed*.
+   - **Failed:** the device keeps the staged Minerva config and the setup session, and reports the failure reason. The plugin offers to retry from step 5; it does not resend step 4.
+7. The first LAN `hello` with that `device_id` and the new token confirms the record. If none arrives within 60 s of the connected status, the plugin reports the pairing as unconfirmed. The unconfirmed record stays valid, so a later `hello` still confirms it.
 
 ## Plugin storage
 
-- Per `device_id`: the SHA-256 of the token, the advertised name and the pairing time. The plaintext token is not kept after step 4.
+- Per `device_id`: the SHA-256 of the token, the advertised name, the pairing time and confirmed/unconfirmed.
+- The plaintext token exists only in plugin memory for the duration of the setup session and is never written to disk.
 - Re-pairing a `device_id` replaces its record, so the old token stops working.
 - Removing a device in the plugin panel deletes its record. The remote's next `hello` is refused with `error{code:"auth"}`.
 
 ## Device storage
 
-- WiFi credentials are kept by the WiFi stack.
-- `host`, `port` and `token` live in NVS namespace `minerva`.
+The firmware, not the WiFi stack, owns the committed configuration, so one write makes it durable:
+
+- Everything the remote needs is one NVS blob, `minerva/cfg_v1`: SSID, WiFi password, `host`, `port` and `token`. A commit is a single `nvs_set_blob` followed by `nvs_commit`.
+- The old blob stays in force until the new one is written. A failure before the commit leaves the previous configuration untouched.
+- At every boot the firmware loads `cfg_v1` and passes the credentials to the WiFi stack itself (`esp_wifi_set_config`). Whatever the WiFi stack or `wifi_provisioning` stores in its own namespace is never read.
+  - It may be cleared or ignored.
+  - Firmware should run the stack with `WIFI_STORAGE_RAM` where `wifi_provisioning` allows it. The exact IDF calls are for firmware review.
+- During setup, the WiFi credentials from `prov-config` are held in RAM with the staged Minerva config and enter the blob only at commit.
 - The device never erases NVS to recover from an error.
 
 ## Open
