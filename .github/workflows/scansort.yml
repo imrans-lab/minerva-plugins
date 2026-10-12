@@ -16,12 +16,18 @@ on:
       - ".github/workflows/scansort.yml"
       - "scripts/smoke/**"
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish a release after the on-demand gates
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   build:
+    timeout-minutes: 10
     name: scansort (${{ matrix.target }})
     # Public-repo standard runners are free across all OSes, so the full
     # matrix runs on every trigger including PRs. (Earlier `if:` filter
@@ -88,10 +94,11 @@ jobs:
           lipo -info target/release/scansort-plugin
 
       - name: Cargo test (linux-x86_64 only — Linux is the source of truth)
-        if: matrix.target == 'linux-x86_64'
+        if: github.event_name == 'workflow_dispatch' && (matrix.target == 'linux-x86_64')
         run: cargo test --release --locked
 
       - name: Smoke
+        if: github.event_name == 'workflow_dispatch'
         run: python3 ../scripts/smoke/mcp_smoke.py target/release/scansort-plugin${{ matrix.ext }}
 
       - name: Pack release tarball
@@ -157,11 +164,12 @@ jobs:
       contents: read
 
   release:
+    timeout-minutes: 10
     name: Publish release
     needs: [build, secret-scan]
     # Auto-tag releases on every push (branch or explicit tag). Skip
     # PRs — fork tokens are read-only and cannot publish releases.
-    if: github.event_name == 'push'
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     permissions:
       contents: write

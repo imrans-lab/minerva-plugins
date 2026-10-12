@@ -26,6 +26,7 @@ permissions:
 
 jobs:
   drift-check:
+    timeout-minutes: 10
     name: Registry release and asset check
     runs-on: ubuntu-latest
     steps:
@@ -41,9 +42,16 @@ jobs:
           python-version: "3.11"
 
       - name: Registry regression tests
+        if: github.event_name == 'workflow_dispatch'
         run: python3 -m unittest discover -s scripts -p 'test_registry.py'
 
+      - name: Validate committed release selections
+        run: python3 scripts/regen_registry.py --check
       - name: Validate selected releases and published assets
+        if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/regen_registry.py --check --published
+
+  secret-scan:
+    uses: ./.github/workflows/secret-scan.yml

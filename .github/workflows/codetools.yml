@@ -14,12 +14,19 @@ on:
       - ".github/workflows/codetools.yml"
       - "scripts/**"
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish a release after the on-demand gates
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   build:
+    if: github.event_name == 'workflow_dispatch'
+    timeout-minutes: 60
     name: codetools (${{ matrix.target }})
     strategy:
       fail-fast: false
@@ -217,10 +224,11 @@ jobs:
       contents: read
 
   release:
+    timeout-minutes: 10
     concurrency: codetools-release
     name: Publish release
     needs: [build, secret-scan]
-    if: github.event_name == 'push'
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -271,3 +279,22 @@ jobs:
           files: artifacts/codetools-*.tar.gz
           generate_release_notes: true
           fail_on_unmatched_files: true
+
+  source-build:
+    name: Compile source (codetools)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: codetools
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: codetools/go.sum
+      - name: Compile and link source
+        run: |
+          bash scripts/dev-make-placeholder-bundle.sh
+          go vet ./...
+          go build -o "${{ runner.temp }}/codetools-compile" .

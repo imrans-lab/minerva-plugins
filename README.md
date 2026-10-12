@@ -73,3 +73,29 @@ upstream-update process.
 ## License
 
 See [LICENSE.md](LICENSE.md).
+
+## CI lanes
+
+Branch pushes run build/import/link checks and a redacted outgoing-range secret
+scan. Each concrete push job has a deadline of at most ten minutes.
+`scripts/ci/check_push_lanes.py` checks every push workflow and local reusable
+callee; functional suites and packaged-product probes are dispatch-only.
+
+Before integrating a candidate, dispatch the existing workflows on a branch
+pinned to its exact SHA and wait for every required suite. Plain dispatches do
+not publish: release inputs default to false. For example:
+
+```sh
+gh workflow run WORKFLOW.yml --ref CANDIDATE_BRANCH
+```
+
+Manual scans use a commit range (default `HEAD^..HEAD`, with explicit
+`SECRET_SCAN_BASE`/`SECRET_SCAN_HEAD` available to the CI scan wrapper); they
+never scan all history. Push scans use the event's before/after commits. New
+branch scans start at the merge base with the target branch.
+
+Dispatch each plugin workflow for its retained functional/package gates.
+Runtime-producing packaging jobs stay on demand; their push source-build jobs
+compile/link without executing the packaged worker. Compile-only bundle
+placeholders are used where the module's existing developer recipe requires
+them; real bundle construction and its probes remain mandatory on demand.

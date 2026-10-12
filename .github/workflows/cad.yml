@@ -16,6 +16,11 @@ on:
       - "scripts/**"
       - "shared/**"
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish a release after the on-demand gates
+        type: boolean
+        default: false
   schedule:
     # Nightly compatibility check against Minerva development HEAD (see the
     # panel job): resolves the branch once to a full SHA and records it.
@@ -26,6 +31,8 @@ permissions:
 
 jobs:
   worker-lifetime:
+    if: github.event_name == 'workflow_dispatch'
+    timeout-minutes: 10
     name: Worker lifetime (race detector)
     runs-on: ubuntu-latest
     steps:
@@ -38,10 +45,13 @@ jobs:
         with:
           python-version: "3.12"
       - name: Cancellation and reopen under cold startup
+        if: github.event_name == 'workflow_dispatch'
         working-directory: cad
         run: go test -race -run '^TestReopenAfterInflightEvalIsNotCrashed$' -count=5 .
 
   build:
+    if: github.event_name == 'workflow_dispatch'
+    timeout-minutes: 60
     name: cad (${{ matrix.target }})
     # Public-repo standard runners are free across all OSes, so full matrix
     # runs on every trigger. (Matrix context isn't valid in job-level `if:`.)
@@ -365,6 +375,7 @@ jobs:
           retention-days: 14
 
   panel:
+    timeout-minutes: 10
     name: cad panel (GD suite-registry compatibility ONLY — nothing executes)
     # ============================================================
     # THIS JOB IS NOT A BUILD CHECK AND NOT A TEST. READ THIS BEFORE
@@ -458,6 +469,7 @@ jobs:
         run: bash cad/scripts/run-gd-tests.sh --preflight-only ../Minerva
 
   notice:
+    timeout-minutes: 10
     name: cad NOTICE gate (runtime licence inventory)
     # Platform-independent and needs no toolchain: it reads the lock file, the
     # inventory in gen_notice.py and the licence texts on disk. Its own job so
@@ -498,9 +510,11 @@ jobs:
       # bundle), and the blob, cache, merge and pin-guard tests need only
       # numpy or nothing at all.
       - name: Install pytest
+        if: github.event_name == 'workflow_dispatch'
         run: python3 -m pip install --disable-pip-version-check pytest numpy
 
       - name: Runtime dependency + NOTICE suites
+        if: github.event_name == 'workflow_dispatch'
         run: python3 -m pytest cad/worker/tests/test_notice.py cad/worker/tests/test_runtime_bundle_contract.py cad/worker/tests/test_clearance.py cad/worker/tests/test_features.py -q
 
   secret-scan:
@@ -511,12 +525,13 @@ jobs:
       contents: read
 
   release:
+    timeout-minutes: 10
     name: Publish release
     concurrency: cad-release
     # The licence inventory is a release gate: a tarball never ships while
     # NOTICE.md and the shipped licence texts disagree.
     needs: [build, notice, panel, worker-lifetime, secret-scan]
-    if: github.event_name == 'push'
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -564,3 +579,21 @@ jobs:
           files: artifacts/cad-*.tar.gz
           generate_release_notes: true
           fail_on_unmatched_files: true
+
+  source-build:
+    name: Compile source (cad)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: cad
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: cad/go.sum
+      - name: Compile and link source
+        run: |
+          go vet ./...
+          go build -o "${{ runner.temp }}/cad-compile" .

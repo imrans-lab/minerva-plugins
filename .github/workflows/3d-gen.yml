@@ -19,12 +19,18 @@ on:
       - "shared/rust/**"
       - "scripts/smoke/**"
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish a release after the on-demand gates
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   build:
+    timeout-minutes: 10
     name: gen3d (${{ matrix.target }})
     strategy:
       fail-fast: false
@@ -83,10 +89,11 @@ jobs:
           lipo -info target/release/gen3d-plugin
 
       - name: Cargo test (linux-x86_64 only — Linux is the source of truth)
-        if: matrix.target == 'linux-x86_64'
+        if: github.event_name == 'workflow_dispatch' && (matrix.target == 'linux-x86_64')
         run: cargo test --release --locked
 
       - name: Smoke
+        if: github.event_name == 'workflow_dispatch'
         run: python3 ../scripts/smoke/mcp_smoke.py target/release/gen3d-plugin${{ matrix.ext }}
 
       - name: Pack release tarball
@@ -147,9 +154,10 @@ jobs:
       contents: read
 
   release:
+    timeout-minutes: 10
     name: Publish release
     needs: [build, secret-scan]
-    if: github.event_name == 'push'
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     permissions:
       contents: write
