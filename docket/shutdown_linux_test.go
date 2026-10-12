@@ -161,15 +161,25 @@ func TestLauncherTimeout(t *testing.T) {
 	if err := other.Start(); err != nil {
 		t.Fatal(err)
 	}
+	otherDone := make(chan struct{})
+	var otherWaitErr error
+	go func() {
+		otherWaitErr = other.Wait()
+		close(otherDone)
+	}()
 	defer func() {
-		if err := other.Process.Kill(); err != nil {
+		select {
+		case <-otherDone:
+			return // The survival assertion reports an unexpected early exit.
+		default:
+		}
+		if err := other.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 			t.Error(err)
 		}
-		if err := other.Wait(); err != nil {
-			var exit *exec.ExitError
-			if !errors.As(err, &exit) {
-				t.Error(err)
-			}
+		<-otherDone
+		var exit *exec.ExitError
+		if otherWaitErr != nil && !errors.As(otherWaitErr, &exit) {
+			t.Error(otherWaitErr)
 		}
 	}()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -207,8 +217,11 @@ func TestLauncherTimeout(t *testing.T) {
 	if processAlive(pid) {
 		t.Fatalf("owned child %d remains after timeout", pid)
 	}
-	if !processAlive(other.Process.Pid) {
-		t.Fatal("unrelated process was killed")
+	// Wait reaps promptly: kill(pid, 0) alone also accepts a killed zombie.
+	select {
+	case <-otherDone:
+		t.Fatalf("unrelated registered process exited: %v", otherWaitErr)
+	case <-time.After(100 * time.Millisecond):
 	}
 	fmt.Println("timeout killed only the spawned PID")
 }
