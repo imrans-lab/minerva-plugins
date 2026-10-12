@@ -134,8 +134,15 @@ func TestLauncherDetachedLifecycle(t *testing.T) {
 	if errno != 0 || int(sid) != status.PID {
 		t.Fatalf("child not session leader: %d %v", sid, errno)
 	}
+	// Attachment must succeed even when creating the plugin installation root
+	// would fail: the running instance owns the version, not the pinned payload.
+	blocked := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocked, []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MINERVA_PLUGIN_DATA_DIR", blocked)
 	again, code := runLauncher(t)
-	if code != 0 || again.Status != "attached" || again.PID != status.PID {
+	if code != 0 || again.Status != "attached" || again.PID != status.PID || again.Version != "fixture-live-version" {
 		t.Fatalf("reattach: %+v exit %d", again, code)
 	}
 	data, err := os.ReadFile(filepath.Join(profile, "fixture.pid"))

@@ -16,8 +16,11 @@ PID and exits 2 with `status: failed` and `reason`. Minerva connects over HTTP;
 closing Minerva does not stop Docket.
 
 Verified payloads remain under `shared/runtime.DataDir("docket")/official` or
-beside the launcher in marketplace archives. The setup `prepare` operation and
-signed acquisition checks are unchanged. Windows/macOS lifetime behavior needs
+beside the launcher in marketplace archives. A live registered instance is selected before installation-root, platform or
+receipt checks, and its live version is reported. Only spawning requires the
+installed verified payload. The setup `prepare` operation and signed acquisition
+checks are unchanged; setup-time gating while Docket runs is outside this launch
+contract. Windows/macOS lifetime behavior needs
 native acceptance checks.
 
 Required-plugin releases use Minerva's existing `plugin-release.yml` lane.

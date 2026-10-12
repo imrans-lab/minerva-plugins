@@ -90,6 +90,19 @@ func syncDirectories(root string) error {
 
 // Preparation is a setup operation, never part of the manager's startup budget.
 func pluginCommand(ctx context.Context, r release, args []string) error {
+	// A running standalone instance wins before any installation or platform
+	// checks. Attachment must not acquire, replace, or even require a payload.
+	var profile string
+	if len(args) == 0 {
+		var err error
+		profile, err = standaloneProfile()
+		if err != nil {
+			return err
+		}
+		if status, err := discover(ctx, profile); err == nil {
+			return json.NewEncoder(os.Stdout).Encode(status)
+		}
+	}
 	root, err := pluginRoot()
 	if err != nil {
 		return err
@@ -141,13 +154,7 @@ func pluginCommand(ctx context.Context, r release, args []string) error {
 		if string(receipt) != string(expected) {
 			return errors.New("installation receipt mismatch")
 		}
-		profile, err := standaloneProfile()
-		if err != nil {
-			return err
-		}
-		if status, err := discover(ctx, profile); err == nil {
-			return json.NewEncoder(os.Stdout).Encode(status)
-		}
+
 		status, err := launch(ctx, filepath.Join(dest, filepath.FromSlash(p.Entrypoint)), profile)
 		if err != nil {
 			return err
