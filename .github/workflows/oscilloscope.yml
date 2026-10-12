@@ -3,12 +3,6 @@ name: oscilloscope
 # Build pinned libusb and open firmware, then package the shared UI/MCP backend.
 
 on:
-  workflow_call:
-    inputs:
-      publish:
-        type: boolean
-        default: false
-        required: false
   push:
     branches: [main, "dcr/**"]
     paths:
@@ -36,7 +30,7 @@ permissions:
 
 jobs:
   build:
-    if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag')
+    if: github.event_name == 'workflow_dispatch'
     timeout-minutes: 60
     name: oscilloscope (${{ matrix.target }})
     strategy:
@@ -107,7 +101,7 @@ jobs:
     name: Publish release
     concurrency: oscilloscope-release
     needs: [build, secret-scan]
-    if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag') && always() && ((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.publish)) && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     permissions:
       contents: write

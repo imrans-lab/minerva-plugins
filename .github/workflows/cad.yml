@@ -1,12 +1,6 @@
 name: cad
 
 on:
-  workflow_call:
-    inputs:
-      publish:
-        type: boolean
-        default: false
-        required: false
   push:
     branches: [main, "dcr/**"]
     paths:
@@ -37,7 +31,7 @@ permissions:
 
 jobs:
   worker-lifetime:
-    if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag')
+    if: github.event_name == 'workflow_dispatch'
     timeout-minutes: 10
     name: Worker lifetime (race detector)
     runs-on: ubuntu-latest
@@ -51,12 +45,12 @@ jobs:
         with:
           python-version: "3.12"
       - name: Cancellation and reopen under cold startup
-        if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag')
+        if: github.event_name == 'workflow_dispatch'
         working-directory: cad
         run: go test -race -run '^TestReopenAfterInflightEvalIsNotCrashed$' -count=5 .
 
   build:
-    if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag')
+    if: github.event_name == 'workflow_dispatch'
     timeout-minutes: 60
     name: cad (${{ matrix.target }})
     # Public-repo standard runners are free across all OSes, so full matrix
@@ -516,11 +510,11 @@ jobs:
       # bundle), and the blob, cache, merge and pin-guard tests need only
       # numpy or nothing at all.
       - name: Install pytest
-        if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag')
+        if: github.event_name == 'workflow_dispatch'
         run: python3 -m pip install --disable-pip-version-check pytest numpy
 
       - name: Runtime dependency + NOTICE suites
-        if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag')
+        if: github.event_name == 'workflow_dispatch'
         run: python3 -m pytest cad/worker/tests/test_notice.py cad/worker/tests/test_runtime_bundle_contract.py cad/worker/tests/test_clearance.py cad/worker/tests/test_features.py -q
 
   secret-scan:
@@ -537,7 +531,7 @@ jobs:
     # The licence inventory is a release gate: a tarball never ships while
     # NOTICE.md and the shipped licence texts disagree.
     needs: [build, notice, panel, worker-lifetime, secret-scan]
-    if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag') && always() && ((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.publish)) && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     permissions:
       contents: write

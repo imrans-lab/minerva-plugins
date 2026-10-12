@@ -8,12 +8,6 @@ name: multimeter
 # compiled below only so a break there is visible early.
 
 on:
-  workflow_call:
-    inputs:
-      publish:
-        type: boolean
-        default: false
-        required: false
   push:
     branches: [main, "dcr/**"]
     paths:
@@ -74,7 +68,7 @@ jobs:
       - name: Go vet
         run: go vet ./...
       - name: Go vet + test (decoder table, no radio needed)
-        if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag')
+        if: github.event_name == 'workflow_dispatch'
         run: |
           go vet ./...
           go test -count=1 ./...
@@ -110,7 +104,7 @@ jobs:
         run: go build -o /dev/null .
 
       - name: Smoke (MCP handshake with the radio disabled)
-        if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag')
+        if: github.event_name == 'workflow_dispatch'
         env:
           MULTIMETER_NO_BLE: "1"
         run: python3 ../scripts/smoke/mcp_smoke.py "$PWD/build/multimeter-plugin"
@@ -155,7 +149,7 @@ jobs:
     name: Publish release
     concurrency: multimeter-release
     needs: [build, secret-scan]
-    if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag') && always() && ((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.publish)) && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     permissions:
       contents: write
