@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smart-remote.local/protocol/v1/device/picker_list.json",
+  "title": "picker_list",
+  "description": "Request the chats in one group, most recent first.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "const": "picker_list"
+    },
+    "group_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    }
+  },
+  "required": [
+    "type",
+    "group_id"
+  ],
+  "additionalProperties": false
+}

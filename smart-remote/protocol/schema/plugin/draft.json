@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smart-remote.local/protocol/v1/plugin/draft.json",
+  "title": "draft",
+  "description": "The whole current draft.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "const": "draft"
+    },
+    "text": {
+      "$ref": "../common.json#/$defs/long_text"
+    }
+  },
+  "required": [
+    "type",
+    "text"
+  ],
+  "additionalProperties": false
+}

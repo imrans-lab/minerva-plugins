@@ -1,0 +1,6 @@
+{"dir":"d2p","msg":{"type":"hello","proto":1,"token":"3f9a1c0e7b2d4a6f","device_id":"a4cf12b03e5d","fw":"0.1.0"}}
+{"dir":"p2d","msg":{"type":"welcome","proto":1,"plugin":"smart-remote 0.1.0"}}
+{"dir":"p2d","msg":{"type":"target","chat_id":"chat-17","name":"Firmware notes","group":"Smart remote","group_id":"grp-3"}}
+{"dir":"p2d","msg":{"type":"choices","choice_id":"q-91","prompt":"Which board revision?","items":["rev 4","rev 5","neither"]}}
+{"dir":"d2p","msg":{"type":"choice_pick","choice_id":"q-91","index":1}}
+{"dir":"p2d","msg":{"type":"choices_closed","choice_id":"q-91","reason":"picked"}}

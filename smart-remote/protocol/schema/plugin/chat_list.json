@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smart-remote.local/protocol/v1/plugin/chat_list.json",
+  "title": "chat_list",
+  "description": "Picker list: groups, or chats in one group.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "const": "chat_list"
+    },
+    "level": {
+      "enum": [
+        "groups",
+        "chats"
+      ]
+    },
+    "group_id": {
+      "type": "string",
+      "maxLength": 128
+    },
+    "items": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 120
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "truncated": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "type",
+    "level",
+    "items",
+    "truncated"
+  ],
+  "additionalProperties": false,
+  "if": {
+    "properties": {
+      "level": {
+        "const": "chats"
+      }
+    }
+  },
+  "then": {
+    "required": [
+      "group_id"
+    ]
+  },
+  "else": {
+    "not": {
+      "required": [
+        "group_id"
+      ]
+    }
+  }
+}

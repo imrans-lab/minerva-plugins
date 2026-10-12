@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smart-remote.local/protocol/v1/plugin/target.json",
+  "title": "target",
+  "description": "Current target chat; chat_id null when none.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "const": "target"
+    },
+    "chat_id": {
+      "oneOf": [
+        {
+          "$ref": "../common.json#/$defs/chat_id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "name": {
+      "type": "string",
+      "maxLength": 120
+    },
+    "group": {
+      "type": "string",
+      "maxLength": 120
+    },
+    "group_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 128
+    }
+  },
+  "required": [
+    "type",
+    "chat_id",
+    "name",
+    "group",
+    "group_id"
+  ],
+  "additionalProperties": false
+}

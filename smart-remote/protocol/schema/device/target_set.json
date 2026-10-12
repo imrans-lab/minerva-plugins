@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smart-remote.local/protocol/v1/device/target_set.json",
+  "title": "target_set",
+  "description": "Choose the target chat from the picker.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "const": "target_set"
+    },
+    "chat_id": {
+      "$ref": "../common.json#/$defs/chat_id"
+    }
+  },
+  "required": [
+    "type",
+    "chat_id"
+  ],
+  "additionalProperties": false
+}

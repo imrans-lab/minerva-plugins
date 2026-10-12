@@ -1,0 +1,9 @@
+{"dir":"d2p","msg":{"type":"hello","proto":1,"token":"3f9a1c0e7b2d4a6f","device_id":"a4cf12b03e5d","fw":"0.1.0"}}
+{"dir":"p2d","msg":{"type":"welcome","proto":1,"plugin":"smart-remote 0.1.0"}}
+{"dir":"p2d","msg":{"type":"target","chat_id":"chat-17","name":"Firmware notes","group":"Smart remote","group_id":"grp-3"}}
+{"dir":"d2p","msg":{"type":"picker_open"}}
+{"dir":"p2d","msg":{"type":"chat_list","level":"groups","items":[{"id":"grp-3","name":"Smart remote"},{"id":"grp-1","name":"General"}],"truncated":false}}
+{"dir":"d2p","msg":{"type":"picker_list","group_id":"grp-1"}}
+{"dir":"p2d","msg":{"type":"chat_list","level":"chats","group_id":"grp-1","items":[{"id":"chat-22","name":"Groceries"},{"id":"chat-4","name":"Trip plan"}],"truncated":false}}
+{"dir":"d2p","msg":{"type":"target_set","chat_id":"chat-22"}}
+{"dir":"p2d","msg":{"type":"target","chat_id":"chat-22","name":"Groceries","group":"General","group_id":"grp-1"}}

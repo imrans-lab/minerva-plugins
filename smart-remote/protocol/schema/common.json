@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smart-remote.local/protocol/v1/common.json",
+  "$defs": {
+    "chat_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "stream": {"type": "integer", "minimum": 0, "maximum": 255},
+    "short_text": {"type": "string", "maxLength": 200},
+    "long_text": {"type": "string", "maxLength": 6000}
+  }
+}

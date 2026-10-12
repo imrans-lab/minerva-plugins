@@ -1,0 +1,11 @@
+{"dir":"d2p","msg":{"type":"hello","proto":1,"token":"3f9a1c0e7b2d4a6f","device_id":"a4cf12b03e5d","fw":"0.1.0"}}
+{"dir":"p2d","msg":{"type":"welcome","proto":1,"plugin":"smart-remote 0.1.0"}}
+{"dir":"p2d","msg":{"type":"target","chat_id":"chat-17","name":"Firmware notes","group":"Smart remote","group_id":"grp-3"}}
+{"dir":"p2d","msg":{"type":"speak","stream":3,"chat_id":"chat-17"}}
+{"dir":"p2d","audio":"02030000","bytes":4096}
+{"dir":"d2p","msg":{"type":"ptt_down","stream":8}}
+{"dir":"p2d","audio":"82030100","bytes":0}
+{"dir":"p2d","msg":{"type":"mic_state","state":"recording"}}
+{"dir":"d2p","audio":"81080000","bytes":640}
+{"dir":"d2p","msg":{"type":"ptt_up","stream":8}}
+{"dir":"p2d","msg":{"type":"mic_state","state":"error","detail":"nothing heard"}}
