@@ -69,7 +69,7 @@ Response (device → plugin):
 5. `prov-scan`; the user chooses a network and types its password.
 6. `prov-config` set, then apply. Poll status until it reports connected or failed.
    - **Connected:** the device commits (see Device storage) and reboots. The plugin then stores the device record as *unconfirmed*.
-   - **Failed:** the device keeps the staged Minerva config and the setup session, and reports the failure reason. The plugin offers to retry from step 5; it does not resend step 4.
+   - **Failed:** the device keeps the staged Minerva config and the setup session, and reports the failure reason. Before retrying, the plugin sends the standard `prov-ctrl` reset (WiFi state reset). The manager refuses a second credential set without it. The plugin then retries from step 5; it does not resend step 4.
 7. The first LAN `hello` with that `device_id` and the new token confirms the record. If none arrives within 60 s of the connected status, the plugin reports the pairing as unconfirmed. The unconfirmed record stays valid, so a later `hello` still confirms it.
 
 ## Plugin storage
@@ -87,7 +87,7 @@ The firmware, not the WiFi stack, owns the committed configuration, so one write
 - The old blob stays in force until the new one is written. A failure before the commit leaves the previous configuration untouched.
 - At every boot the firmware loads `cfg_v1` and passes the credentials to the WiFi stack itself (`esp_wifi_set_config`). Whatever the WiFi stack or `wifi_provisioning` stores in its own namespace is never read.
   - It may be cleared or ignored.
-  - Firmware should run the stack with `WIFI_STORAGE_RAM` where `wifi_provisioning` allows it. The exact IDF calls are for firmware review.
+  - IDF 5.5's manager forces `WIFI_STORAGE_FLASH` while applying credentials (verified by Astra). That copy is never read: at boot the firmware switches to `WIFI_STORAGE_RAM` and applies `cfg_v1`.
 - During setup, the WiFi credentials from `prov-config` are held in RAM with the staged Minerva config and enter the blob only at commit.
 - The device never erases NVS to recover from an error.
 
