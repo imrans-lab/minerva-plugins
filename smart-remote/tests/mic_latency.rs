@@ -115,6 +115,7 @@ async fn slow_host(latency: u64, data_eos: bool) {
     }
     let mut delivered = Vec::new();
     let mut chunks = 0_u64;
+    let mut ended = false;
     tokio::time::timeout(std::time::Duration::from_secs(4), async {
         while let Some(msg) = seen.recv().await {
             let args = &msg["params"]["args"];
@@ -127,6 +128,7 @@ async fn slow_host(latency: u64, data_eos: bool) {
             }
             if args["op"] == "input_end" {
                 assert_eq!(args["sequence"], chunks);
+                ended = true;
                 break;
             }
             assert_ne!(
@@ -137,6 +139,7 @@ async fn slow_host(latency: u64, data_eos: bool) {
     })
     .await
     .expect("ordered EOS reaches the host despite its reply latency");
+    assert!(ended, "channel closure cannot substitute for input_end");
     assert_eq!(delivered, expected);
     assert!(chunks < 120, "queued PCM must coalesce");
     assert_eq!(device.recv_msg().await["state"], "transcribing");
