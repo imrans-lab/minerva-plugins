@@ -217,8 +217,7 @@ async fn serve(
             }
             _ = tick.tick() => {
                 if let Some(b) = &mut bridge {
-                    let replies = b.tick();
-                    replies
+                    b.tick()
                 } else { vec![] }
             },
             msg = ws.next() => {
