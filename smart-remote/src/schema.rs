@@ -13,7 +13,7 @@ use include_dir::{include_dir, Dir, File};
 use jsonschema::{Draft, Registry, Validator};
 use serde_json::Value;
 
-static SCHEMA_DIR: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../protocol/schema");
+static SCHEMA_DIR: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/protocol/schema");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Direction {

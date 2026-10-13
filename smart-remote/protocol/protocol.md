@@ -3,6 +3,12 @@
 Design: Docket `smart-remote:01a12de97992`; tracking item `smart-remote:01a1322ec02a`.
 Message fields are defined only in `schema/`; this document defines behaviour. `examples/` are checked against the schemas by `tools/check_examples.py`.
 
+## Voice ownership
+
+Minerva owns STT and TTS through its normal voice-service pipeline. The plugin is a Minerva-internal PCM microphone/speaker endpoint, with no OS audio driver. The plugin owns remote pairing and PTT sessions, audio framing, playback pacing and conversion/resampling of host audio (including Kokoro 24 kHz output) to the protocol's 16 kHz mono s16le format.
+
+Minerva sends transcription results to the plugin as events for the OLED draft. Speech is routed to the remote only for replies to remote-originated turns, even when the remote is selected as speaker; keyboard-originated turns retain their existing output behavior. This ownership ruling supersedes the former plugin-owned STT/TTS path (Docket `smart-remote:01a12de97992` comment 122).
+
 ## Transport
 
 - WebSocket (RFC 6455), plain `ws://` on the local network. Path `/remote/v1`.
@@ -43,9 +49,9 @@ Every binary frame is a 4-byte header followed by PCM:
 ## Push-to-talk (Stream Deck semantics)
 
 1. Device sends `ptt_down{stream}`, starts the mic, and streams mic frames on that stream id.
-2. Plugin locks the current target for this turn and its reply, opens speech-to-text, and sends `mic_state{state:"recording"}`.
+2. Plugin locks the current target for this turn and its reply, forwards external mic PCM to Minerva's normal speech-to-text pipeline, and sends `mic_state{state:"recording"}`.
 3. On release the device sends the final mic frame with EOS, then `ptt_up{stream}`. The plugin finalises on EOS; if `ptt_up` arrives first, it treats it as EOS.
-4. Plugin sends `mic_state{state:"transcribing"}`, then appends the transcript to the draft, sends `draft{text}` with the whole draft, and `mic_state{state:"idle"}`. On failure: `mic_state{state:"error", detail}`, draft unchanged.
+4. Plugin sends `mic_state{state:"transcribing"}`, then receives Minerva's transcription-result event, appends the transcript to the draft, sends `draft{text}` with the whole draft, and `mic_state{state:"idle"}`. On failure: `mic_state{state:"error", detail}`, draft unchanged.
 5. Each PTT appends; `clear` empties the draft (`draft{text:""}` echoes it); `send` submits the draft to the target chat.
    - `send` with an empty draft is refused with `error{code:"empty_draft"}`.
    - If the target changed since the turn locked it, the plugin refuses with `error{code:"target_changed"}` and keeps the draft, rather than posting to the wrong chat.
@@ -56,6 +62,7 @@ Every binary frame is a 4-byte header followed by PCM:
 ## Replies and speech
 
 - When the assistant finishes a turn the remote sent, the plugin sends `reply{chat_id, text, outcome}`, then `speak{stream, chat_id}` followed by speaker frames ending in EOS. Replies to turns the remote did not send are never spoken.
+- Minerva synthesizes each admitted remote-origin reply once and supplies its PCM to the plugin endpoint. The plugin converts/resamples that audio to 16 kHz mono s16le, then frames it for the remote.
 - The plugin paces speaker frames at real time with at most 1 s lead, so the device needs no flow control beyond its playback buffer.
 - **Half duplex:** the device mutes the mic while playing. `ptt_down` during playback stops playback immediately on the device. On `ptt_down` the plugin ends the current speaker stream with an empty EOS frame and never resumes it.
 

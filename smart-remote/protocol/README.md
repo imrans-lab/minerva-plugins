@@ -1,5 +1,7 @@
 # Device <-> plugin protocol
 
+Owned here in minerva-plugins at `smart-remote/protocol/`. The ccsandbox copy is a retained migration snapshot, not a second protocol owner. Run `../scripts/check-protocol-sync.sh /path/to/ccsandbox/smart-remote-v2/protocol` after changes; synchronize the snapshot before firmware integration. The check compares every contract file, ignores only this repository ownership README and generated Python caches, and explicitly verifies the exact pinned owner-approved STT/TTS wording amendment in `../scripts/protocol-owner-amendment.json`.
+
 The single authoritative definition of the messages between the remote firmware and the Minerva plugin: JSON control frames plus binary audio frames with a 4-byte header. Both the firmware and plugin tests validate against what lives here.
 
 - `protocol.md` — behaviour: transport, session, audio framing, push-to-talk, replies, picker, choices, error and close codes.

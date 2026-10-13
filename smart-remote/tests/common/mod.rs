@@ -296,7 +296,7 @@ pub enum Frame {
 }
 
 pub fn examples_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../protocol/examples")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("protocol/examples")
 }
 
 pub fn read_example(path: &std::path::Path) -> Vec<Frame> {
