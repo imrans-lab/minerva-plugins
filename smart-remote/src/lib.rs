@@ -11,6 +11,7 @@ pub mod data_dir;
 pub mod host;
 pub mod mdns;
 pub mod message;
+pub mod resample;
 pub mod schema;
 pub mod server;
 mod session;

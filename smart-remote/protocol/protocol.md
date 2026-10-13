@@ -61,9 +61,14 @@ Every binary frame is a 4-byte header followed by PCM:
 
 ## Replies and speech
 
-- When the assistant finishes a turn the remote sent, the plugin sends `reply{chat_id, text, outcome}`, then `speak{stream, chat_id}` followed by speaker frames ending in EOS. Replies to turns the remote did not send are never spoken.
+- When the assistant finishes a turn the remote sent, the plugin sends `reply{chat_id, text, outcome}`, then `speak{stream, origin:"turn", chat_id}` followed by speaker frames ending in EOS. Replies to turns the remote did not send are never spoken.
 - Minerva synthesizes each admitted remote-origin reply once and supplies its PCM to the plugin endpoint. The plugin converts/resamples that audio to 16 kHz mono s16le, then frames it for the remote.
 - The plugin paces speaker frames at real time with at most 1 s lead, so the device needs no flow control beyond its playback buffer.
+- Explicit speech when this remote is selected uses `speak{stream, origin:"explicit"}` without `chat_id`; no turn origin is inferred from focus or event order.
+- Device sends `speak_done{stream_id,ok:true,last_seq}` only after receiving speaker EOS, emptying its playback queue and physically draining DMA. `last_seq` is the exact EOS sequence. Missing acknowledgement is completion unknown and must never be reported to Minerva as successful playback.
+- Failure terminates playback with `speak_done{stream_id,ok:false,last_seq,error}`; error is `speaker_start`, `speaker_write` or `cancelled`. `last_seq` is the last accepted speaker-frame sequence, or null only when no frame was accepted. Connection, active stream and sequence are checked; stale/duplicate completions never finish another stream.
+- Plugin abort is `error{code:"speak_aborted",stream_id,reason:"tts_failed"|"host_cancel"|"plugin_stopping"}`. The current device speaker stream flushes immediately and mutes; it returns failed `speak_done` with error `cancelled` and shows the reason. Capture is unaffected. Other errors keep their existing meanings; only `busy` cancels a new capture.
+- These are additive version-1 contract extensions. Physical-drain success and origin-aware playback require the F2 firmware pin; old firmware without completion ACK cannot establish success.
 - **Half duplex:** the device mutes the mic while playing. `ptt_down` during playback stops playback immediately on the device. On `ptt_down` the plugin ends the current speaker stream with an empty EOS frame and never resumes it.
 
 ## Target and chat picker

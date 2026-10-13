@@ -2,37 +2,69 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://smart-remote.local/protocol/v1/plugin/error.json",
   "title": "error",
-  "description": "Refusal or failure; see protocol.md for codes.",
-  "type": "object",
-  "properties": {
-    "type": {
-      "const": "error"
+  "oneOf": [
+    {
+      "description": "Refusal or failure; see protocol.md for codes.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "error"
+        },
+        "code": {
+          "enum": [
+            "auth",
+            "proto_version",
+            "bad_message",
+            "busy",
+            "empty_draft",
+            "no_target",
+            "target_changed",
+            "unknown_chat",
+            "stt_failed",
+            "tts_failed",
+            "send_failed",
+            "audio_gap",
+            "internal"
+          ]
+        },
+        "message": {
+          "$ref": "../common.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "type",
+        "code",
+        "message"
+      ],
+      "additionalProperties": false
     },
-    "code": {
-      "enum": [
-        "auth",
-        "proto_version",
-        "bad_message",
-        "busy",
-        "empty_draft",
-        "no_target",
-        "target_changed",
-        "unknown_chat",
-        "stt_failed",
-        "tts_failed",
-        "send_failed",
-        "audio_gap",
-        "internal"
-      ]
-    },
-    "message": {
-      "$ref": "../common.json#/$defs/short_text"
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "error"
+        },
+        "code": {
+          "const": "speak_aborted"
+        },
+        "stream_id": {
+          "$ref": "../common.json#/$defs/stream"
+        },
+        "reason": {
+          "enum": [
+            "tts_failed",
+            "host_cancel",
+            "plugin_stopping"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "code",
+        "stream_id",
+        "reason"
+      ],
+      "additionalProperties": false
     }
-  },
-  "required": [
-    "type",
-    "code",
-    "message"
-  ],
-  "additionalProperties": false
+  ]
 }

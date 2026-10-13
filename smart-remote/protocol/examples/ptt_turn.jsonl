@@ -14,6 +14,7 @@
 {"dir":"p2d","msg":{"type":"draft","text":""}}
 {"dir":"p2d","msg":{"type":"status","text":"Sent"}}
 {"dir":"p2d","msg":{"type":"reply","chat_id":"chat-17","text":"About 5.1 volts on the last reading.","outcome":"ok"}}
-{"dir":"p2d","msg":{"type":"speak","stream":2,"chat_id":"chat-17"}}
+{"dir":"p2d","msg":{"type":"speak","stream":2,"chat_id":"chat-17","origin":"turn"}}
 {"dir":"p2d","audio":"02020000","bytes":4096}
 {"dir":"p2d","audio":"82020100","bytes":0}
+{"dir":"d2p","msg":{"type":"speak_done","stream_id":2,"ok":true,"last_seq":1}}

@@ -13,12 +13,41 @@
     },
     "chat_id": {
       "$ref": "../common.json#/$defs/chat_id"
+    },
+    "origin": {
+      "enum": [
+        "turn",
+        "explicit"
+      ]
     }
   },
   "required": [
     "type",
     "stream",
-    "chat_id"
+    "origin"
   ],
-  "additionalProperties": false
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "origin": {
+            "const": "turn"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "chat_id"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "chat_id"
+          ]
+        }
+      }
+    }
+  ]
 }

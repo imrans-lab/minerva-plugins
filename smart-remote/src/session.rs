@@ -205,7 +205,7 @@ async fn serve(
             event = receive_event(&mut events) => {
                 match event {
                     Ok(event) => bridge.as_mut().map_or_else(Vec::new, |b| b.event(event)),
-                    Err(_) => { if let Some(b) = &mut bridge { b.cancel_mic();  } vec![PluginMsg::error(ErrorCode::Internal, "Host event queue overflow"), PluginMsg::MicState {state:"error".into(), detail:Some("Host event queue overflow".into())}] },
+                    Err(_) => { if let Some(b) = &mut bridge { b.cancel_mic(); b.cancel_output("Host event queue overflow"); } vec![PluginMsg::error(ErrorCode::Internal, "Host event queue overflow"), PluginMsg::MicState {state:"error".into(), detail:Some("Host event queue overflow".into())}] },
                 }
             }
             update = receive_update(&mut updates) => {
@@ -217,7 +217,11 @@ async fn serve(
             }
             _ = tick.tick() => {
                 if let Some(b) = &mut bridge {
-                    b.tick()
+                    let replies = b.tick();
+                    if let Some(frame) = b.speaker_frame() {
+                        if ws.send(Message::Binary(frame.into())).await.is_err() { break End::Gone; }
+                    }
+                    replies
                 } else { vec![] }
             },
             msg = ws.next() => {
@@ -285,6 +289,10 @@ async fn serve(
         }
     };
     if let Some(b) = &mut bridge {
+        b.cancel_output("Plugin stopping");
+        for control in b.take_controls() {
+            let _ = send(ws, &control, shared).await;
+        }
         b.close(shared.is_current(device_id, conn)).await;
     }
     end
@@ -333,7 +341,8 @@ fn on_text(text: &str, mic: &mut MicStream, shared: &Shared) -> Result<Option<Pl
         | DeviceMsg::PickerOpen
         | DeviceMsg::PickerList { .. }
         | DeviceMsg::TargetSet { .. }
-        | DeviceMsg::ChoicePick { .. } => Ok(Some(not_implemented())),
+        | DeviceMsg::ChoicePick { .. }
+        | DeviceMsg::SpeakDone { .. } => Ok(Some(not_implemented())),
     }
 }
 

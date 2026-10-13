@@ -55,7 +55,12 @@ pub enum DeviceMsg {
     PttUp {
         stream: u8,
     },
-
+    SpeakDone {
+        stream_id: u8,
+        ok: bool,
+        last_seq: Option<u16>,
+        error: Option<String>,
+    },
     Clear,
     Send,
     Mode {
@@ -103,7 +108,18 @@ pub enum PluginMsg {
         group: String,
         group_id: Option<String>,
     },
-
+    #[serde(rename = "error")]
+    SpeakAborted {
+        code: String,
+        stream_id: u8,
+        reason: String,
+    },
+    Speak {
+        stream: u8,
+        origin: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        chat_id: Option<String>,
+    },
     Draft {
         text: String,
     },
@@ -333,6 +349,7 @@ mod tests {
     fn every_device_type_has_a_variant() {
         let s = schemas();
         let samples = [
+            json!({"type":"speak_done","stream_id":1,"ok":true,"last_seq":2}),
             json!({"type":"ptt_down","stream":1}),
             json!({"type":"ptt_up","stream":1}),
             json!({"type":"clear"}),

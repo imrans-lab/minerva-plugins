@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smart-remote.local/protocol/v1/device/speak_done.json",
+  "title": "speak_done",
+  "description": "Actual speaker completion after EOS and physical drain, or a terminal playback failure.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "const": "speak_done"
+    },
+    "stream_id": {
+      "$ref": "../common.json#/$defs/stream"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "last_seq": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 65535
+    },
+    "error": {
+      "enum": [
+        "speaker_start",
+        "speaker_write",
+        "cancelled"
+      ]
+    }
+  },
+  "required": [
+    "type",
+    "stream_id",
+    "ok",
+    "last_seq"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "ok": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "last_seq": {
+            "type": "integer"
+          }
+        },
+        "not": {
+          "required": [
+            "error"
+          ]
+        }
+      },
+      "else": {
+        "required": [
+          "error"
+        ]
+      }
+    }
+  ]
+}

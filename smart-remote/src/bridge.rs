@@ -1,6 +1,8 @@
 //! Per-authenticated-connection host endpoint. Minerva owns transcription and turns.
+use crate::audio::{FrameHeader, Kind};
 use crate::host::{HostError, HostEvent, HostLink};
 use crate::message::{clip, DeviceMsg, ErrorCode, PluginMsg};
+use crate::resample::PcmConverter;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
@@ -43,6 +45,8 @@ pub(crate) struct Bridge {
     pub sends: HashMap<u64, (String, bool)>,
     pending_send: bool,
     pending_clear: bool,
+    speaker: Option<Speaker>,
+    next_speaker: u8,
     aborts: VecDeque<PluginMsg>,
     early: VecDeque<HostEvent>,
 }
@@ -76,6 +80,8 @@ impl Bridge {
             sends: HashMap::new(),
             pending_send: false,
             pending_clear: false,
+            speaker: None,
+            next_speaker: 0,
             aborts: VecDeque::new(),
             early: VecDeque::new(),
         };
@@ -177,6 +183,46 @@ impl Bridge {
     }
     pub fn on_text(&mut self, msg: DeviceMsg) -> Vec<PluginMsg> {
         match msg {
+            DeviceMsg::SpeakDone {
+                stream_id,
+                ok,
+                last_seq,
+                error: reason,
+            } => {
+                let Some(s) = &self.speaker else {
+                    return vec![];
+                };
+                if s.wire != stream_id {
+                    return vec![];
+                }
+                let valid = if ok {
+                    s.eos.is_some() && last_seq == s.eos
+                } else {
+                    last_seq.is_none()
+                        || last_seq.zip(s.last).is_some_and(|(got, sent)| got <= sent)
+                };
+                if !valid {
+                    return vec![error(
+                        ErrorCode::TtsFailed,
+                        "Invalid speaker completion sequence",
+                    )];
+                }
+                let host_stream = s.host;
+                self.speaker = None;
+                self.complete(
+                    host_stream,
+                    ok,
+                    reason.as_deref().unwrap_or("Speaker playback failed"),
+                );
+                if ok {
+                    vec![]
+                } else {
+                    vec![error(
+                        ErrorCode::TtsFailed,
+                        reason.as_deref().unwrap_or("Speaker playback failed"),
+                    )]
+                }
+            }
             DeviceMsg::PttDown { stream } => {
                 if !self.ready {
                     return vec![error(
@@ -197,6 +243,7 @@ impl Bridge {
                 else {
                     return vec![error(ErrorCode::NoTarget, "No target chat")];
                 };
+                self.cancel_output("Interrupted by microphone");
                 self.generation += 1;
                 let generation = self.generation;
                 let (pcm, rx) = mpsc::channel(32);
@@ -309,6 +356,9 @@ impl Bridge {
     pub fn event(&mut self, event: HostEvent) -> Vec<PluginMsg> {
         let p = &event.payload;
         match event.name.as_str() {
+            "voice.audio" if p["device_id"].as_str() == Some(self.device.as_str()) => {
+                self.audio_event(event)
+            }
             "chat.active_changed" => {
                 if self
                     .mic
@@ -401,6 +451,14 @@ impl Bridge {
         self.early.drain(..).collect()
     }
     pub fn tick(&mut self) -> Vec<PluginMsg> {
+        if self
+            .speaker
+            .as_ref()
+            .is_some_and(|s| s.expires.is_some_and(|d| Instant::now() >= d))
+        {
+            self.cancel_output("Speaker completion unknown: no drain acknowledgement");
+            return vec![error(ErrorCode::TtsFailed, "Speaker completion unknown")];
+        }
         while let Some(r) = self.tasks.try_join_next() {
             if let Err(e) = r {
                 log::error!("Host task failed: {e}");
@@ -440,6 +498,7 @@ impl Bridge {
             self.remember();
         }
         self.cancel_mic();
+        self.cancel_output("Remote disconnected");
         if let Some(startup) = self.startup.take() {
             let _ = startup.await;
         }
@@ -465,8 +524,213 @@ impl Bridge {
             }
         }
     }
+    fn complete(&mut self, stream: u64, success: bool, message: &str) {
+        let (host, device, message) = (
+            self.host.clone(),
+            self.device.clone(),
+            clip(message.into(), 200),
+        );
+        self.tasks.spawn(async move {
+            if let Err(e) = host.call_capability("host.audio", json!({"op":"output_complete","device_id":device,"stream_id":stream,"success":success,"error_message":message})).await {
+                log::warn!("Speaker completion refused: {e}");
+            }
+        });
+    }
+    pub fn cancel_output(&mut self, message: &str) {
+        if let Some(s) = self.speaker.take() {
+            let reason = match message {
+                "Remote disconnected" | "Plugin stopping" => "plugin_stopping",
+                "Minerva cancelled speech"
+                | "Replaced by newer speech"
+                | "Interrupted by microphone" => "host_cancel",
+                _ => "tts_failed",
+            };
+            self.aborts.push_back(PluginMsg::SpeakAborted {
+                code: "speak_aborted".into(),
+                stream_id: s.wire,
+                reason: reason.into(),
+            });
+            self.complete(s.host, false, message);
+        }
+    }
     pub fn take_controls(&mut self) -> Vec<PluginMsg> {
         self.aborts.drain(..).collect()
+    }
+    fn audio_event(&mut self, event: HostEvent) -> Vec<PluginMsg> {
+        let p = &event.payload;
+        let Some(stream) = integer(&p["stream_id"]).filter(|n| *n > 0) else {
+            return vec![error(ErrorCode::TtsFailed, "Invalid host audio stream ID")];
+        };
+        if p["op"] == "begin" {
+            let origin = &p["origin"];
+            let kind = origin["kind"].as_str().unwrap_or("");
+            let chat = if kind == "turn" {
+                let Some(send) = integer(&origin["send_id"]) else {
+                    self.complete(stream, false, "Missing turn origin");
+                    return vec![];
+                };
+                let owned = self
+                    .sends
+                    .get(&send)
+                    .filter(|(chat, _)| origin["chat_id"].as_str() == Some(chat.as_str()));
+                let Some((chat, _)) = owned else {
+                    if self.pending_send && self.early.len() < 64 {
+                        self.early.push_back(event);
+                    } else {
+                        self.complete(stream, false, "Audio turn was not sent by this remote");
+                    }
+                    return vec![];
+                };
+                Some(chat.clone())
+            } else if kind == "explicit" {
+                None
+            } else {
+                self.complete(stream, false, "Unknown audio origin");
+                return vec![];
+            };
+            self.cancel_output("Replaced by newer speech");
+            let rate = integer(&p["sample_rate"]).and_then(|r| u32::try_from(r).ok());
+            if p["format"] != "pcm_s16le" || p["channels"] != 1 || !self.ready {
+                self.complete(
+                    stream,
+                    false,
+                    "Unsupported PCM format or unavailable endpoint",
+                );
+                return vec![error(ErrorCode::TtsFailed, "Unsupported PCM format")];
+            }
+            let converter = match rate
+                .and_then(|r| PcmConverter::new(r, p["volume"].as_f64().unwrap_or(1.0)).ok())
+            {
+                Some(c) => c,
+                None => {
+                    self.complete(stream, false, "Unsupported PCM rate or volume");
+                    return vec![error(
+                        ErrorCode::TtsFailed,
+                        "Unsupported PCM rate or volume",
+                    )];
+                }
+            };
+            self.next_speaker = self.next_speaker.wrapping_add(1);
+            self.speaker = Some(Speaker {
+                host: stream,
+                wire: self.next_speaker,
+                converter,
+                queue: VecDeque::new(),
+                sequence: 0,
+                host_sequence: 0,
+                input_bytes: 0,
+                converted_bytes: 0,
+                ended: false,
+                eos: None,
+                last: None,
+                due: Instant::now(),
+                expires: None,
+            });
+            return vec![PluginMsg::Speak {
+                stream: self.next_speaker,
+                origin: kind.into(),
+                chat_id: chat,
+            }];
+        }
+        // Audio belonging to an early begin is held until submit returns its exact send ID.
+        if self.speaker.as_ref().map(|s| s.host) != Some(stream) {
+            if self.pending_send
+                && self.early.iter().any(|e| {
+                    e.name == "voice.audio" && integer(&e.payload["stream_id"]) == Some(stream)
+                })
+                && self.early.len() < 64
+            {
+                self.early.push_back(event);
+            }
+            return vec![];
+        }
+        if p["op"] == "cancel" || p["op"] == "error" {
+            self.cancel_output("Minerva cancelled speech");
+            return vec![error(ErrorCode::TtsFailed, "Speech cancelled")];
+        }
+        let Some(s) = self.speaker.as_mut() else {
+            return vec![];
+        };
+        let end = p["op"] == "end";
+        let result = (|| -> Result<(), String> {
+            if s.ended || integer(&p["sequence"]) != Some(s.host_sequence) {
+                return Err("Host PCM sequence/EOS mismatch".into());
+            }
+            let bytes = if end {
+                Vec::new()
+            } else if p["op"] == "chunk" {
+                let encoded = p["pcm"].as_str().ok_or("Missing PCM payload")?;
+                if encoded.len() > 8536 {
+                    return Err("PCM chunk exceeds host limit".into());
+                }
+                let bytes = STANDARD
+                    .decode(encoded)
+                    .map_err(|_| "Malformed PCM base64")?;
+                if bytes.len() > 6400 {
+                    return Err("PCM chunk exceeds host limit".into());
+                }
+                bytes
+            } else {
+                return Err("Unknown host audio operation".into());
+            };
+            s.input_bytes += bytes.len();
+            if s.input_bytes > 20 * 1024 * 1024 {
+                return Err("Host speech exceeds PCM limit".into());
+            }
+            let output = s.converter.push(&bytes, end).map_err(|e| e.to_string())?;
+            s.converted_bytes += output.len();
+            if s.converted_bytes > 20 * 1024 * 1024 {
+                return Err("Remote speech exceeds PCM limit".into());
+            }
+            s.queue.extend(output);
+            s.ended = end;
+            if !end {
+                s.host_sequence += 1;
+            }
+            Ok(())
+        })();
+        if let Err(message) = result {
+            self.cancel_output(&message);
+            vec![error(ErrorCode::TtsFailed, &message)]
+        } else {
+            vec![]
+        }
+    }
+    pub fn speaker_frame(&mut self) -> Option<Vec<u8>> {
+        let s = self.speaker.as_mut()?;
+        if s.expires.is_some_and(|deadline| Instant::now() >= deadline) {
+            return None;
+        }
+        if s.eos.is_some() || Instant::now() < s.due {
+            return None;
+        }
+        if s.queue.len() < 640 && !s.ended {
+            return None;
+        }
+        let count = s.queue.len().min(640);
+        let eos = s.ended && count == s.queue.len();
+        if count == 0 && !eos {
+            return None;
+        }
+        let seq = s.sequence;
+        let mut frame = FrameHeader {
+            kind: Kind::Speaker,
+            eos,
+            stream: s.wire,
+            seq,
+        }
+        .encode()
+        .to_vec();
+        frame.extend(s.queue.drain(..count));
+        s.last = Some(seq);
+        s.sequence = s.sequence.wrapping_add(1);
+        // Reset to the actual send time: scheduling delays never produce catch-up bursts.
+        s.due = Instant::now() + Duration::from_secs_f64(count as f64 / 32000.0);
+        if eos {
+            s.eos = Some(seq);
+            s.expires = Some(Instant::now() + Duration::from_secs(300));
+        }
+        Some(frame)
     }
     fn target_message(&self) -> PluginMsg {
         PluginMsg::Target {
@@ -563,6 +827,22 @@ pub(crate) fn mic_state(state: &str, detail: Option<&str>) -> PluginMsg {
         state: state.into(),
         detail: detail.map(|s| clip(s.into(), 200)),
     }
+}
+
+struct Speaker {
+    host: u64,
+    wire: u8,
+    converter: PcmConverter,
+    queue: VecDeque<u8>,
+    sequence: u16,
+    host_sequence: u64,
+    input_bytes: usize,
+    converted_bytes: usize,
+    ended: bool,
+    eos: Option<u16>,
+    last: Option<u16>,
+    due: Instant,
+    expires: Option<Instant>,
 }
 
 fn permission_failure(message: &str) -> bool {

@@ -1,0 +1,4 @@
+{"dir":"d2p","msg":{"type":"hello","proto":1,"token":"3f9a1c0e7b2d4a6f","device_id":"a4cf12b03e5d","fw":"0.1.0"}}
+{"dir":"p2d","msg":{"type":"welcome","proto":1,"plugin":"smart-remote 0.1.0"}}
+{"dir":"p2d","msg":{"type":"speak","stream":9,"origin":"explicit"}}
+{"dir":"d2p","msg":{"type":"speak_done","stream_id":9,"ok":false,"last_seq":null,"error":"speaker_start"}}

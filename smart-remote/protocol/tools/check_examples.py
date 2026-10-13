@@ -66,6 +66,8 @@ def check_file(path, validators):
     errors = []
     first = {}
     announced = {}  # kind -> stream id announced by ptt_down / speak
+    speaker_last = {}
+    speaker_eos = {}
     next_seq = {}  # (kind, stream) -> expected seq; deleted at EOS
     for n, line in enumerate(path.read_text().splitlines(), 1):
         if not line.strip():
@@ -90,6 +92,16 @@ def check_file(path, validators):
                 announced[1] = msg["stream"]
             elif t == "speak":
                 announced[2] = msg["stream"]
+                speaker_last.pop(msg["stream"], None)
+                speaker_eos.pop(msg["stream"], None)
+            elif t == "speak_done":
+                stream = msg["stream_id"]
+                if announced.get(2) != stream:
+                    errors.append(f"{where}: completion of stale speaker stream")
+                if msg["ok"] and speaker_eos.get(stream) != msg["last_seq"]:
+                    errors.append(f"{where}: success before matching speaker EOS")
+                if not msg["ok"] and speaker_last.get(stream) != msg["last_seq"]:
+                    errors.append(f"{where}: failure does not name last accepted frame")
             elif t == "ptt_up" and (1, msg["stream"]) in next_seq:
                 errors.append(f"{where}: ptt_up before the EOS mic frame")
             continue
@@ -108,6 +120,10 @@ def check_file(path, validators):
         want = next_seq.get((kind, stream), 0)
         if seq != want:
             errors.append(f"{where}: seq {seq}, want {want}")
+        if kind == 2:
+            speaker_last[stream] = seq
+            if eos:
+                speaker_eos[stream] = seq
         if eos:
             next_seq.pop((kind, stream), None)
         else:

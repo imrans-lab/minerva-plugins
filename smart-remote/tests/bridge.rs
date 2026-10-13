@@ -151,6 +151,71 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
     .await;
     event(&input,"chat.turn_completed",json!({"plugin_id":"smart_remote","send_id":71,"chat_id":"c1","text":"Reply","outcome":"ok"})).await;
     assert_eq!(device.recv_msg().await["text"], "Reply");
+    // Real 24k PCM becomes paced 16k speaker frames; LAN delivery is not a drain ACK.
+    event(&input, "voice.audio", json!({"op":"begin","device_id":endpoint,"stream_id":91,"format":"pcm_s16le","sample_rate":24000,"channels":1,"volume":1.0,"origin":{"kind":"turn","chat_id":"c1","send_id":71}})).await;
+    let speak = device.recv_msg().await;
+    assert_eq!(speak["origin"], "turn");
+    assert_eq!(speak["chat_id"], "c1");
+    let stream = speak["stream"].as_u64().unwrap();
+    device
+        .send_json(&json!({"type":"speak_done","stream_id":stream,"ok":true,"last_seq":0}))
+        .await;
+    assert_eq!(device.recv_msg().await["code"], "tts_failed");
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let source: Vec<u8> = (0..2400)
+        .flat_map(|n| ((n % 100) as i16).to_le_bytes())
+        .collect();
+    event(&input,"voice.audio",json!({"op":"chunk","device_id":endpoint,"stream_id":91,"sequence":0,"pcm":STANDARD.encode(&source)})).await;
+    event(
+        &input,
+        "voice.audio",
+        json!({"op":"end","device_id":endpoint,"stream_id":91,"sequence":1}),
+    )
+    .await;
+    let started = tokio::time::Instant::now();
+    let (mut count, mut seq) = (0, 0);
+    loop {
+        let common::Event::Binary(frame) = device.recv().await else {
+            panic!("expected speaker PCM")
+        };
+        let header = smart_remote_plugin::audio::parse_frame(&frame).unwrap().0;
+        assert_eq!(header.stream as u64, stream);
+        assert_eq!(header.seq, seq);
+        assert!(frame.len() <= 644);
+        count += frame.len() - 4;
+        if header.eos {
+            break;
+        }
+        seq += 1;
+    }
+    assert_eq!(count, 3200);
+    assert!(started.elapsed() >= std::time::Duration::from_millis(60));
+    assert!(seen.try_recv().is_err(), "no guessed successful completion");
+    device
+        .send_json(&json!({"type":"speak_done","stream_id":stream,"ok":true,"last_seq":seq}))
+        .await;
+    let ack = next_request(&mut seen, "output_complete").await;
+    assert_eq!(ack["params"]["args"]["stream_id"], 91);
+    assert_eq!(ack["params"]["args"]["success"], true);
+    // Explicit output has no invented chat origin; a host cancel flushes that stream.
+    event(&input,"voice.audio",json!({"op":"begin","device_id":endpoint,"stream_id":92,"format":"pcm_s16le","sample_rate":16000,"channels":1,"volume":1.0,"origin":{"kind":"explicit"}})).await;
+    let explicit = device.recv_msg().await;
+    assert_eq!(explicit["origin"], "explicit");
+    assert!(explicit.get("chat_id").is_none());
+    event(
+        &input,
+        "voice.audio",
+        json!({"op":"cancel","device_id":endpoint,"stream_id":92}),
+    )
+    .await;
+    assert_eq!(device.recv_msg().await["code"], "tts_failed");
+    let abort = device.recv_msg().await;
+    assert_eq!(abort["code"], "speak_aborted");
+    assert_eq!(abort["reason"], "host_cancel");
+    assert_eq!(
+        next_request(&mut seen, "output_complete").await["params"]["args"]["success"],
+        false
+    );
     // Focus change cancels the actual host session; delayed transcription stays out of the OLED draft.
     device
         .send_json(&json!({"type":"ptt_down","stream":8}))
