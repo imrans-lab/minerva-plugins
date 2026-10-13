@@ -5,6 +5,7 @@
 
 pub mod audio;
 pub mod contract;
+pub mod host;
 pub mod mdns;
 pub mod message;
 pub mod schema;

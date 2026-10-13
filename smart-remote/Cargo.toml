@@ -8,6 +8,10 @@ publish = false
 name = "smart_remote_plugin"
 path = "src/lib.rs"
 
+[[bin]]
+name = "smart-remote-plugin"
+path = "src/main.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-std", "io-util", "sync", "time", "signal"] }
 tokio-tungstenite = "0.28"
