@@ -18,6 +18,7 @@ pub(crate) enum Update {
     Submitted(String, Result<Value, HostError>),
     Cleared(Result<Value, HostError>),
     Failed(u64, String),
+    OutputFailed(String),
 }
 struct Mic {
     generation: u64,
@@ -98,6 +99,12 @@ impl Bridge {
     }
     pub fn update(&mut self, update: Update) -> Vec<PluginMsg> {
         match update {
+            Update::OutputFailed(message) => {
+                if permission_failure(&message) {
+                    self.stopped = true;
+                }
+                vec![error(ErrorCode::TtsFailed, &message)]
+            }
             Update::Ready(Ok(target)) => {
                 self.ready = true;
                 if self.target["chat_id"] != target["chat_id"] {
@@ -459,8 +466,10 @@ impl Bridge {
             self.cancel_output("Speaker completion unknown: no drain acknowledgement");
             return vec![error(ErrorCode::TtsFailed, "Speaker completion unknown")];
         }
+        let mut failures = Vec::new();
         while let Some(r) = self.tasks.try_join_next() {
             if let Err(e) = r {
+                failures.push(error(ErrorCode::Internal, "Host task failed"));
                 log::error!("Host task failed: {e}");
             }
         }
@@ -468,10 +477,9 @@ impl Bridge {
             m.started.elapsed() >= Duration::from_secs(if m.ended { 125 } else { 300 })
         }) {
             self.cancel_mic();
-            vec![mic_state("error", Some("too_long"))]
-        } else {
-            vec![]
+            failures.push(mic_state("error", Some("too_long")));
         }
+        failures
     }
     pub fn cancel_mic(&mut self) {
         if let Some(m) = self.mic.take() {
@@ -530,8 +538,10 @@ impl Bridge {
             self.device.clone(),
             clip(message.into(), 200),
         );
+        let updates = self.updates.clone();
         self.tasks.spawn(async move {
             if let Err(e) = host.call_capability("host.audio", json!({"op":"output_complete","device_id":device,"stream_id":stream,"success":success,"error_message":message})).await {
+                let _ = updates.send(Update::OutputFailed(e.to_string())).await;
                 log::warn!("Speaker completion refused: {e}");
             }
         });
