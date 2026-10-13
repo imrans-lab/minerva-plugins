@@ -184,7 +184,7 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
     // Real 24k PCM becomes paced 16k speaker frames; LAN delivery is not a drain ACK.
     event(&input, "voice.audio", json!({"op":"begin","device_id":endpoint,"stream_id":91,"format":"pcm_s16le","sample_rate":24000,"channels":1,"volume":1.0,"origin":{"kind":"turn","chat_id":"c1","send_id":71}})).await;
     let speak = device.recv_msg().await;
-    assert_eq!(speak["origin"], "turn");
+    assert_eq!(speak, json!({"type":"speak","stream":1,"chat_id":"c1"}));
     assert_eq!(speak["chat_id"], "c1");
     let stream = speak["stream"].as_u64().unwrap();
     device

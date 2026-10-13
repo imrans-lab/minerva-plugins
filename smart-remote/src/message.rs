@@ -117,6 +117,7 @@ pub enum PluginMsg {
     },
     Speak {
         stream: u8,
+        #[serde(skip_serializing_if = "is_turn")]
         origin: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         chat_id: Option<String>,
@@ -249,6 +250,10 @@ pub fn encode_plugin_value(value: &Value, schemas: &Schemas) -> Result<String, E
         return Err(EncodeError::TooLarge(text.len()));
     }
     Ok(text)
+}
+
+fn is_turn(origin: &str) -> bool {
+    origin == "turn"
 }
 
 /// Shortens `text` to at most `max` bytes on a character boundary.
