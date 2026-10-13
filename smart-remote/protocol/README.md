@@ -5,7 +5,7 @@ The single authoritative definition of the messages between the remote firmware 
 - `protocol.md` — behaviour: transport, session, audio framing, push-to-talk, replies, picker, choices, error and close codes.
 - `provisioning.md` — Bluetooth setup: WiFi credentials, Minerva address and pairing token over Espressif Security 2.
 - `schema/` — one JSON Schema (draft 2020-12) per message; `device/` is device→plugin, `plugin/` is plugin→device. Message fields are defined only here.
-- `examples/` — JSONL frame sequences. `examples/invalid/` each break one rule and must be rejected.
+- `examples/` — JSONL frame sequences. `examples/invalid/` each break one rule that a conforming **sender** never breaks; `tools/check_examples.py` must reject every one. A receiver still follows `protocol.md`, which is tolerant in places (an early `ptt_up` counts as EOS; an unannounced audio stream is dropped).
 
 Check after any change:
 

@@ -23,7 +23,7 @@ Message fields are defined only in `schema/`; this document defines behaviour. `
 4. Switching to Mouse mode: device sends `mode{mode:"mouse"}` and closes with 1000. The plugin cancels any in-flight transcription and drops pending speech; replies stay in Minerva.
 5. After deep sleep the device reconnects and repeats `hello`. The plugin keeps the last target and draft for that `device_id`, so the device needs no local copy beyond the OLED.
 
-Any message that fails its schema closes with 4002 after `error{code:"bad_message"}`. Unknown `type` values are protocol violations, not ignorable.
+The plugin checks `hello.proto` before schema validation, so an unsupported version always gets `proto_version` and close 4003, never `bad_message`. Any other message that fails its schema closes with 4002 after `error{code:"bad_message"}`. Unknown `type` values are protocol violations, not ignorable.
 
 ## Audio frames (owner ruling: 4-byte header)
 
