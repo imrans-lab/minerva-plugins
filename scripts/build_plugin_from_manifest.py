@@ -114,6 +114,21 @@ def check_requires(manifest: dict) -> dict:
     return resolved
 
 
+def artifact_path(path: str, executables: set[str]) -> str:
+    """Canonical Windows executable spelling; manifests stay platform-neutral."""
+    if os.name == "nt" and path in executables and not os.path.splitext(path)[1]:
+        return path + ".exe"
+    return path
+
+
+def executable_paths(steps: list[dict]) -> set[str]:
+    paths = {str(s.get("artifact", "")) for s in steps if s.get("type") == "cargo_build"}
+    for step in steps:
+        if step.get("type") == "copy" and str(step.get("from", "")) in paths:
+            paths.add(str(step.get("to", "")))
+    return paths - {""}
+
+
 def phases_for(step: dict, plugin_dir: str, tools: dict) -> list[dict]:
     """One phase per subprocess a step spawns (python_venv has two).
 
@@ -121,6 +136,7 @@ def phases_for(step: dict, plugin_dir: str, tools: dict) -> list[dict]:
     (plugin-relative expected artifact, "" = nothing to check)}.
     """
     kind = str(step.get("type", ""))
+    executables = tools.get("executables", set())
 
     if kind == "go_build":
         output = str(step.get("output", ""))
@@ -141,7 +157,7 @@ def phases_for(step: dict, plugin_dir: str, tools: dict) -> list[dict]:
         elif profile != "debug":
             argv += ["--profile", profile]
         return [{"label": "cargo build", "argv": argv,
-                 "artifact": str(step.get("artifact", ""))}]
+                 "artifact": artifact_path(str(step.get("artifact", "")), executables)}]
 
     if kind == "python_venv":
         dir_field = str(step.get("dir", ""))
@@ -167,8 +183,9 @@ def phases_for(step: dict, plugin_dir: str, tools: dict) -> list[dict]:
 
     if kind == "copy":
         return [{"label": "copy", "argv": [],
-                 "copy": (str(step.get("from", "")), str(step.get("to", ""))),
-                 "artifact": str(step.get("to", ""))}]
+                 "copy": (artifact_path(str(step.get("from", "")), executables),
+                          artifact_path(str(step.get("to", "")), executables)),
+                 "artifact": artifact_path(str(step.get("to", "")), executables)}]
 
     if kind == "exec":
         argv = []
@@ -177,10 +194,10 @@ def phases_for(step: dict, plugin_dir: str, tools: dict) -> list[dict]:
             # Only argv[0] gets the "./" resolution; everything after is
             # passed verbatim -- no path rewriting, no expansion of any kind.
             if i == 0 and arg.startswith("./"):
-                arg = os.path.join(plugin_dir, arg[2:])
+                arg = os.path.join(plugin_dir, artifact_path(arg[2:], executables))
             argv.append(arg)
         return [{"label": "exec", "argv": argv,
-                 "artifact": str(step.get("artifact", ""))}]
+                 "artifact": artifact_path(str(step.get("artifact", "")), executables)}]
 
     fail(f"unknown setup step type '{kind}' -- refusing to guess a build")
     return []
@@ -210,7 +227,8 @@ def main() -> int:
              "documented producer to run, so the binary under test cannot be "
              "proven to come from this revision")
 
-    report = {"plugin_dir": plugin_dir, "tools": tools, "steps": []}
+    report = {"plugin_dir": plugin_dir, "tools": dict(tools), "steps": []}
+    tools["executables"] = executable_paths(steps)
     for step in steps:
         budget = timeout_of(step)
         for phase in phases_for(step, plugin_dir, tools):
