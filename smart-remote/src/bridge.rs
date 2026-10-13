@@ -835,14 +835,39 @@ async fn input(
     let _ = updates.send(Update::Started(epoch, session)).await;
     let mut sequence = 0_u64;
     let mut total = 0_usize;
+    let mut pending = None;
     let failure = loop {
         if *cancel.borrow() {
             break None;
         }
-        let frame = tokio::select! { biased; _ = cancel.changed() => break None, frame = pcm.recv() => frame };
-        let Some((bytes, eos)) = frame else {
+        let frame = match pending.take() {
+            Some(frame) => Some(frame),
+            None => {
+                tokio::select! { biased; _ = cancel.changed() => break None, frame = pcm.recv() => frame }
+            }
+        };
+        let Some((mut bytes, mut eos)) = frame else {
             break None;
         };
+        // Drain only already queued media: no extra latency for a live frame.
+        // Host calls are serial, so batching absorbs their round-trip overhead.
+        if bytes.len() > 6400 {
+            pending = Some((bytes.split_off(6400), eos));
+            eos = false;
+        }
+        while !eos && bytes.len() < 6400 && pending.is_none() {
+            let Ok((mut next, terminal)) = pcm.try_recv() else {
+                break;
+            };
+            let available = 6400 - bytes.len();
+            if next.len() > available {
+                pending = Some((next.split_off(available), terminal));
+                bytes.extend(next);
+            } else {
+                bytes.extend(next);
+                eos = terminal;
+            }
+        }
         total += bytes.len();
         if total > 9_600_000 {
             break Some("Microphone recording exceeds 300 seconds".to_owned());
