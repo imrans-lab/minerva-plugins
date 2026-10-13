@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smart-remote.local/protocol/v1/plugin/mic_state.json",
+  "title": "mic_state",
+  "description": "PTT session state, Stream Deck parity.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "const": "mic_state"
+    },
+    "state": {
+      "enum": [
+        "idle",
+        "recording",
+        "transcribing",
+        "error"
+      ]
+    },
+    "detail": {
+      "$ref": "../common.json#/$defs/short_text"
+    }
+  },
+  "required": [
+    "type",
+    "state"
+  ],
+  "additionalProperties": false
+}

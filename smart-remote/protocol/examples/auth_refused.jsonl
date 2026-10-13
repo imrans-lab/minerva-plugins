@@ -1,0 +1,2 @@
+{"dir":"d2p","msg":{"type":"hello","proto":1,"token":"0000000000000000","device_id":"a4cf12b03e5d","fw":"0.1.0"}}
+{"dir":"p2d","msg":{"type":"error","code":"auth","message":"Unknown pairing token. Re-pair over Bluetooth."}}

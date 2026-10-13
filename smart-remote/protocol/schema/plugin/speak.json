@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smart-remote.local/protocol/v1/plugin/speak.json",
+  "title": "speak",
+  "description": "Speaker frames on this stream follow, ending with EOS.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "const": "speak"
+    },
+    "stream": {
+      "$ref": "../common.json#/$defs/stream"
+    },
+    "chat_id": {
+      "$ref": "../common.json#/$defs/chat_id"
+    }
+  },
+  "required": [
+    "type",
+    "stream",
+    "chat_id"
+  ],
+  "additionalProperties": false
+}

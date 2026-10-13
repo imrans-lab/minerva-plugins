@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smart-remote.local/protocol/v1/device/choice_pick.json",
+  "title": "choice_pick",
+  "description": "Answer to an open choices list.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "const": "choice_pick"
+    },
+    "choice_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "index": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 49
+    }
+  },
+  "required": [
+    "type",
+    "choice_id",
+    "index"
+  ],
+  "additionalProperties": false
+}
