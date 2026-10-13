@@ -23,7 +23,7 @@ Message fields are defined only in `schema/`; this document defines behaviour. `
 4. Switching to Mouse mode: device sends `mode{mode:"mouse"}` and closes with 1000. The plugin cancels any in-flight transcription and drops pending speech; replies stay in Minerva.
 5. After deep sleep the device reconnects and repeats `hello`. The plugin keeps the last target and draft for that `device_id`, so the device needs no local copy beyond the OLED.
 
-The plugin checks `hello.proto` before schema validation, so an unsupported version always gets `proto_version` and close 4003, never `bad_message`. Any other message that fails its schema closes with 4002 after `error{code:"bad_message"}`. Unknown `type` values are protocol violations, not ignorable.
+The plugin checks `hello.proto` before schema validation, so an unsupported integer version always gets `proto_version` and close 4003, never `bad_message`. A `proto` that is not a JSON integer (`"2"`, `2.0`) is `bad_message`. Any other message that fails its schema closes with 4002 after `error{code:"bad_message"}`. Unknown `type` values are protocol violations, not ignorable.
 
 ## Audio frames (owner ruling: 4-byte header)
 
@@ -38,7 +38,7 @@ Every binary frame is a 4-byte header followed by PCM:
 - Payload: signed 16-bit little-endian mono PCM at 16 000 Hz. Length is even and at most 4096 bytes (128 ms). 20–100 ms per frame is recommended.
 - The last frame of every stream has EOS set; its payload may be empty.
 - A receiver drops frames whose stream id is not the current stream for that kind. A sequence gap is reported as `error{code:"audio_gap"}` (device→plugin direction only) and the stream continues; WebSocket is reliable, so a gap means a sender bug.
-- A frame with a reserved bit set or an unknown kind is a protocol violation (close 4002).
+- A frame with a reserved bit set, an unknown kind, or a kind sent in the wrong direction (a speaker frame from the device, a mic frame from the plugin) is a protocol violation (close 4002).
 
 ## Push-to-talk (Stream Deck semantics)
 
@@ -89,6 +89,7 @@ Every binary frame is a 4-byte header followed by PCM:
 | Code | Meaning |
 |---|---|
 | 1000 | normal (Mouse mode, sleep) |
+| 1001 | going away (the plugin is shutting down; the device reconnects later) |
 | 4001 | authentication failed |
 | 4002 | protocol violation |
 | 4003 | unsupported protocol version |
