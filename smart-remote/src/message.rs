@@ -62,6 +62,7 @@ pub enum DeviceMsg {
         error: Option<String>,
     },
     LogPage {
+        #[serde(deserialize_with = "crate::speech_log::deserialize_number")]
         offset: u64,
         limit: u8,
     },

@@ -4,7 +4,7 @@ use common::{Device, DEVICE, TOKEN, WAIT};
 use serde_json::{json, Value};
 use smart_remote_plugin::{schema::Schemas, store::TokenStore};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -13,6 +13,12 @@ use tokio::sync::{mpsc, Mutex};
 #[tokio::test]
 async fn authoritative_log_controls_cross_real_stdio_and_lan() {
     let dir = tempfile::tempdir().unwrap();
+    // Host-restored JSON carries integral FLOAT tokens (the Godot restart wire shape).
+    let record_path = dir.path().join("restored-host-record.json");
+    std::fs::write(&record_path,r#"{"log_id":"speech_7","created_at":1780000000.0,"summary":"漢字é漢字é漢字é漢字é漢字é漢字é漢字é余分","heard":false,"superseded":false,"origin_kind":"explicit"}"#).unwrap();
+    let restored: Value =
+        serde_json::from_str(&std::fs::read_to_string(record_path).unwrap()).unwrap();
+    assert!(restored["created_at"].is_f64());
     TokenStore::open(dir.path())
         .unwrap()
         .pair(DEVICE, TOKEN, "Fixture", 0)
@@ -56,6 +62,10 @@ async fn authoritative_log_controls_cross_real_stdio_and_lan() {
     let drain = tokio::spawn(async move { while let Ok(Some(_)) = logs.next_line().await {} });
     let mut output = BufReader::new(child.stdout.take().unwrap()).lines();
     let (requests, mut seen) = mpsc::channel(64);
+    let play_mode = Arc::new(AtomicU8::new(0));
+    let play = play_mode.clone();
+    let fail_refresh = Arc::new(AtomicBool::new(false));
+    let refresh = fail_refresh.clone();
     let deleted = Arc::new(AtomicBool::new(false));
     let denied = Arc::new(AtomicBool::new(false));
     let deny = denied.clone();
@@ -90,17 +100,33 @@ async fn authoritative_log_controls_cross_real_stdio_and_lan() {
                 requests.send(msg).await.unwrap();
                 continue;
             }
+            if msg["params"]["capability"] == "host.speech_log"
+                && args["op"] == "play"
+                && play.load(Ordering::SeqCst) == 3
+            {
+                requests.send(msg).await.unwrap();
+                continue;
+            }
+            if msg["params"]["capability"] == "host.speech_log"
+                && args["op"] == "play"
+                && play.load(Ordering::SeqCst) == 6
+            {
+                writer.lock().await.write_all(format!("{}\n",json!({"jsonrpc":"2.0","id":msg["id"],"result":{"success":false,"error_code":"speech_not_found","error_message":"Speech not found"}})).as_bytes()).await.unwrap();
+                requests.send(msg).await.unwrap();
+                continue;
+            }
             let result = match msg["params"]["capability"].as_str().unwrap() {
                 "host.chat.active" => {
                     json!({"chat_id":"c1","name":"Chat","group":"","group_id":""})
                 }
                 "host.audio" if args["op"] == "input_begin" => json!({"session_id":31}),
                 "host.speech_log" => match args["op"].as_str().unwrap() {
+                    "list" if refresh.swap(false, Ordering::SeqCst) => json!({"success":false}),
                     "list" => {
-                        json!({"success":true,"items":if state.load(Ordering::SeqCst){json!([])}else{json!([{"log_id":"speech_7","created_at":0,"summary":"ABCDEFGHIJKLMNOPQRSTUVW","heard":false,"superseded":false,"origin_kind":"explicit"}])},"unheard":if bad.load(Ordering::SeqCst){json!(1.5)}else{json!(if state.load(Ordering::SeqCst){0}else{1})},"total":if state.load(Ordering::SeqCst){0}else{1},"errors":[]})
+                        json!({"success":true,"items":if state.load(Ordering::SeqCst){json!([])}else{json!([restored.clone()])},"unheard":if bad.load(Ordering::SeqCst){json!(1.5)}else{json!(if state.load(Ordering::SeqCst){0.0}else{1.0})},"total":if state.load(Ordering::SeqCst){0.0}else{1.0},"errors":[]})
                     }
                     "play" => {
-                        json!({"success":true,"delivery":"playing","device":args["device_id"],"log_id":args["log_id"],"unheard_count":1})
+                        json!({"success":true,"delivery":match play.load(Ordering::SeqCst){1=>"queued",2=>"played_live",_=>"playing"},"device":if play.load(Ordering::SeqCst)==4{json!("plugin:other:wrong")}else{args["device_id"].clone()},"log_id":if play.load(Ordering::SeqCst)==5{json!("speech_other")}else{args["log_id"].clone()},"unheard_count":1})
                     }
                     "delete" | "delete_all" => {
                         state.store(true, Ordering::SeqCst);
@@ -126,7 +152,7 @@ async fn authoritative_log_controls_cross_real_stdio_and_lan() {
     );
     next_request(&mut seen, "list").await;
     device
-        .send_json(&json!({"type":"log_page","offset":0,"limit":2}))
+        .send_text(r#"{"type":"log_page","offset":0.0,"limit":2}"#)
         .await;
     assert_eq!(device.recv_msg().await["unheard"], 1);
     let page = device.recv_msg().await;
@@ -134,13 +160,17 @@ async fn authoritative_log_controls_cross_real_stdio_and_lan() {
     assert_eq!(page["offset"], 0);
     assert_eq!(page["total"], 1);
     assert_eq!(page["items"][0]["log_id"], "speech_7");
-    assert_eq!(page["items"][0]["summary"], "ABCDEFGHIJKLMNOPQRSTU");
+    assert_eq!(
+        page["items"][0]["summary"],
+        "漢字é漢字é漢字é漢字é漢字é漢字é漢字é"
+    );
     assert_eq!(page["items"][0]["heard"], false);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    assert!((now - 1..=now).contains(&page["items"][0]["age_s"].as_u64().unwrap()));
+    assert!((now - 1780000001..=now - 1780000000)
+        .contains(&page["items"][0]["age_s"].as_u64().unwrap()));
     let request = next_request(&mut seen, "list").await;
     assert_eq!(
         request["params"]["args"],
@@ -157,6 +187,40 @@ async fn authoritative_log_controls_cross_real_stdio_and_lan() {
         next_request(&mut seen, "play").await["params"]["args"],
         json!({"op":"play","log_id":"speech_7","device_id":format!("plugin:smart_remote:remote_{DEVICE}")})
     );
+    for (mode, expected) in [
+        (1, "Queued"),
+        (2, "Played"),
+        (4, "internal"),
+        (5, "internal"),
+        (6, "internal"),
+    ] {
+        play_mode.store(mode, Ordering::SeqCst);
+        device
+            .send_json(&json!({"type":"log_play","log_id":"speech_7"}))
+            .await;
+        let receipt = device.recv_msg().await;
+        assert_eq!(
+            if mode < 3 {
+                &receipt["text"]
+            } else {
+                &receipt["code"]
+            },
+            expected
+        );
+        next_request(&mut seen, "play").await;
+    }
+    play_mode.store(3, Ordering::SeqCst);
+    device
+        .send_json(&json!({"type":"log_play","log_id":"speech_7"}))
+        .await;
+    next_request(&mut seen, "play").await;
+    let Some(common::Event::Msg(play_timeout)) =
+        device.next_event(std::time::Duration::from_secs(6)).await
+    else {
+        panic!("missing play timeout")
+    };
+    assert_eq!(play_timeout["code"], "internal");
+    play_mode.store(0, Ordering::SeqCst);
     device.send_json(&json!({"type":"replay_last"})).await;
     assert_eq!(device.recv_msg().await["unheard"], 1);
     assert_eq!(device.recv_msg().await["text"], "Playing");
@@ -173,6 +237,15 @@ async fn authoritative_log_controls_cross_real_stdio_and_lan() {
         device.recv_msg().await,
         json!({"type":"missed","unheard":0})
     );
+    for invalid in [json!(-1.0), json!(1.5), json!(9007199254740992.0)] {
+        event(
+            &input,
+            "speech_log.changed",
+            json!({"unheard":invalid,"total":9007199254740991.0}),
+        )
+        .await;
+        assert_eq!(device.recv_msg().await["code"], "internal");
+    }
     malformed.store(true, Ordering::SeqCst);
     device
         .send_json(&json!({"type":"log_page","offset":0,"limit":2}))
@@ -259,6 +332,14 @@ async fn authoritative_log_controls_cross_real_stdio_and_lan() {
         seen.try_recv().is_err(),
         "no delete/play retry or mark call"
     );
+    fail_refresh.store(true, Ordering::SeqCst);
+    device
+        .send_json(&json!({"type":"log_delete","log_id":"speech_7"}))
+        .await;
+    assert_eq!(device.recv_msg().await["text"], "Deleted");
+    assert_eq!(device.recv_msg().await["code"], "internal");
+    next_request(&mut seen, "delete").await;
+    next_request(&mut seen, "list").await;
     hold_delete.store(true, Ordering::SeqCst);
     device
         .send_json(&json!({"type":"log_delete","log_id":"speech_7"}))
@@ -267,12 +348,15 @@ async fn authoritative_log_controls_cross_real_stdio_and_lan() {
     let Some(common::Event::Msg(timeout)) =
         device.next_event(std::time::Duration::from_secs(6)).await
     else {
-        panic!("missing mutation timeout")
+        panic!("missing mutation outcome")
     };
-    assert_eq!(timeout["code"], "internal");
+    assert_eq!(timeout["text"], "Deletion outcome unknown");
+    assert_eq!(device.recv_msg().await["unheard"], 0);
+    assert_eq!(device.recv_msg().await["items"], json!([]));
+    next_request(&mut seen, "list").await;
     assert!(
         seen.try_recv().is_err(),
-        "unknown mutation must not be retried/refreshed"
+        "unknown mutation must not be retried"
     );
     // Cancellation/replacement also suppresses a late destructive receipt.
     device
@@ -313,12 +397,20 @@ async fn authoritative_log_controls_cross_real_stdio_and_lan() {
     revoked
         .send_json(&json!({"type":"log_page","offset":0,"limit":1}))
         .await;
-    assert_eq!(revoked.recv_msg().await["code"], "internal");
-    assert!(matches!(
-        revoked.recv().await,
-        common::Event::Closed(_) | common::Event::Ended
-    ));
-    next_request(&mut seen, "unregister").await;
+    assert_eq!(revoked.recv_msg().await["text"], "Missed list unavailable");
+    next_request(&mut seen, "list").await;
+    revoked
+        .send_json(&json!({"type":"ptt_down","stream":32}))
+        .await;
+    assert_eq!(revoked.recv_msg().await["state"], "recording");
+    revoked
+        .send_json(&json!({"type":"log_play","log_id":"speech_7"}))
+        .await;
+    assert_eq!(revoked.recv_msg().await["text"], "Missed list unavailable");
+    revoked.send_json(&json!({"type":"clear"})).await;
+    assert_eq!(revoked.recv_msg().await["state"], "idle");
+    assert_eq!(revoked.recv_msg().await["text"], "");
+    next_request(&mut seen, "clear").await;
     denied.store(false, Ordering::SeqCst);
     let mut mutation_revoke = Device::connect(
         ([127, 0, 0, 1], port).into(),
@@ -332,12 +424,19 @@ async fn authoritative_log_controls_cross_real_stdio_and_lan() {
     mutation_revoke
         .send_json(&json!({"type":"log_delete","log_id":"speech_7"}))
         .await;
-    assert_eq!(mutation_revoke.recv_msg().await["code"], "internal");
-    assert!(matches!(
-        mutation_revoke.recv().await,
-        common::Event::Closed(_) | common::Event::Ended
-    ));
-    next_request(&mut seen, "unregister").await;
+    assert_eq!(
+        mutation_revoke.recv_msg().await["text"],
+        "Missed list unavailable"
+    );
+    next_request(&mut seen, "delete").await;
+    mutation_revoke
+        .send_json(&json!({"type":"ptt_down","stream":33}))
+        .await;
+    assert_eq!(mutation_revoke.recv_msg().await["state"], "recording");
+    mutation_revoke.send_json(&json!({"type":"clear"})).await;
+    assert_eq!(mutation_revoke.recv_msg().await["state"], "idle");
+    assert_eq!(mutation_revoke.recv_msg().await["text"], "");
+    next_request(&mut seen, "clear").await;
     denied.store(false, Ordering::SeqCst);
     let mut at_eof = Device::connect(
         ([127, 0, 0, 1], port).into(),

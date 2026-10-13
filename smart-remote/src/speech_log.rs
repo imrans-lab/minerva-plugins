@@ -1,6 +1,6 @@
 //! Request-local projection of Minerva's authoritative speech log.
 use crate::host::{HostError, HostLink};
-use crate::message::{clip, PluginMsg};
+use crate::message::PluginMsg;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -24,6 +24,7 @@ pub(crate) enum Action {
 pub(crate) struct Reply {
     pub messages: Vec<PluginMsg>,
     pub page: Option<(u64, u8)>,
+    pub failure: Option<HostError>,
 }
 fn bad() -> HostError {
     HostError::Denied("Malformed speech log response".into())
@@ -37,9 +38,16 @@ pub(crate) fn counts(value: &Value) -> Result<(u64, u64), HostError> {
 }
 fn number(value: &Value) -> Result<u64, HostError> {
     value
-        .as_u64()
-        .filter(|n| *n <= 9_007_199_254_740_991)
+        .as_f64()
+        .filter(|n| n.is_finite() && *n >= 0.0 && *n <= 9_007_199_254_740_991.0 && n.fract() == 0.0)
+        .map(|n| n as u64)
         .ok_or_else(bad)
+}
+pub(crate) fn deserialize_number<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<u64, D::Error> {
+    let value = <Value as serde::Deserialize>::deserialize(deserializer)?;
+    number(&value).map_err(serde::de::Error::custom)
 }
 fn id(value: &Value) -> Result<String, HostError> {
     value
@@ -76,7 +84,7 @@ async fn page(host: &HostLink, offset: u64, limit: u8) -> Result<Reply, HostErro
             Ok(LogItem {
                 log_id: id(&row["log_id"])?,
                 age_s: now.saturating_sub(number(&row["created_at"])?),
-                summary: clip(summary.into(), 21),
+                summary: summary.chars().take(21).collect(),
                 heard: row["heard"].as_bool().ok_or_else(bad)?,
             })
         })
@@ -103,6 +111,7 @@ async fn page(host: &HostLink, offset: u64, limit: u8) -> Result<Reply, HostErro
     Ok(Reply {
         messages,
         page: Some((offset, limit)),
+        failure: None,
     })
 }
 pub(crate) async fn request(
@@ -121,26 +130,24 @@ pub(crate) async fn request(
         }
         Action::Page(offset, limit) => page(&host, offset, limit).await,
         Action::Delete(log_id, offset, limit) => {
-            call(&host, json!({"op":"delete","log_id":log_id})).await?;
-            let mut reply = page(&host, offset, limit).await?;
-            reply.messages.insert(
-                0,
-                PluginMsg::Status {
-                    text: "Deleted".into(),
-                },
-            );
-            Ok(reply)
+            delete(
+                &host,
+                json!({"op":"delete","log_id":log_id}),
+                offset,
+                limit,
+                "Deleted",
+            )
+            .await
         }
         Action::DeleteAll(offset, limit) => {
-            call(&host, json!({"op":"delete_all","confirmed":true})).await?;
-            let mut reply = page(&host, offset, limit).await?;
-            reply.messages.insert(
-                0,
-                PluginMsg::Status {
-                    text: "Deleted all".into(),
-                },
-            );
-            Ok(reply)
+            delete(
+                &host,
+                json!({"op":"delete_all","confirmed":true}),
+                offset,
+                limit,
+                "Deleted all",
+            )
+            .await
         }
         Action::Play(log_id) => play(&host, &device, &log_id).await,
         Action::ReplayLast => {
@@ -198,5 +205,32 @@ async fn play(host: &HostLink, device: &str, log_id: &str) -> Result<Reply, Host
     Ok(Reply {
         messages: vec![PluginMsg::Status { text: text.into() }],
         page: None,
+        failure: None,
     })
+}
+
+async fn delete(
+    host: &HostLink,
+    args: Value,
+    offset: u64,
+    limit: u8,
+    success: &str,
+) -> Result<Reply, HostError> {
+    let text = match call(host, args).await {
+        Ok(_) => success,
+        Err(HostError::Timeout) => "Deletion outcome unknown",
+        Err(e) => return Err(e),
+    };
+    let mut reply = match page(host, offset, limit).await {
+        Ok(reply) => reply,
+        Err(e) => Reply {
+            messages: vec![],
+            page: None,
+            failure: Some(e),
+        },
+    };
+    reply
+        .messages
+        .insert(0, PluginMsg::Status { text: text.into() });
+    Ok(reply)
 }

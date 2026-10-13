@@ -52,6 +52,7 @@ pub(crate) struct Bridge {
     pending_send: bool,
     pending_clear: bool,
     log_pending: bool,
+    log_available: bool,
     log_page: (u64, u8),
     log_cancel: watch::Sender<bool>,
     speaker: Option<Speaker>,
@@ -93,6 +94,7 @@ impl Bridge {
             pending_send: false,
             pending_clear: false,
             log_pending: false,
+            log_available: true,
             log_page: (0, 10),
             log_cancel: watch::channel(false).0,
             speaker: None,
@@ -117,18 +119,16 @@ impl Bridge {
             Update::Log(result) => {
                 self.log_pending = false;
                 match result {
-                    Ok(reply) => {
+                    Ok(mut reply) => {
                         if let Some(page) = reply.page {
                             self.log_page = page;
                         }
+                        if let Some(e) = reply.failure {
+                            reply.messages.extend(self.log_failure(e));
+                        }
                         reply.messages
                     }
-                    Err(e) => {
-                        if permission_failure(&e.to_string()) {
-                            self.stopped = true;
-                        }
-                        vec![error(ErrorCode::Internal, &e.to_string())]
-                    }
+                    Err(e) => self.log_failure(e),
                 }
             }
             Update::OutputFailed(message) => {
@@ -430,7 +430,7 @@ impl Bridge {
     pub fn event(&mut self, event: HostEvent) -> Vec<PluginMsg> {
         let p = &event.payload;
         match event.name.as_str() {
-            "speech_log.changed" => match crate::speech_log::counts(p) {
+            "speech_log.changed" if self.log_available => match crate::speech_log::counts(p) {
                 Ok((unheard, _)) => {
                     vec![PluginMsg::Missed { unheard }]
                 }
@@ -558,9 +558,21 @@ impl Bridge {
         }
         failures
     }
+    fn log_failure(&mut self, e: HostError) -> Vec<PluginMsg> {
+        if permission_failure(&e.to_string()) {
+            self.log_available = false;
+            vec![PluginMsg::Status {
+                text: "Missed list unavailable".into(),
+            }]
+        } else {
+            vec![error(ErrorCode::Internal, &e.to_string())]
+        }
+    }
     fn start_log(&mut self, action: crate::speech_log::Action) -> Vec<PluginMsg> {
-        if !self.ready {
-            return vec![error(ErrorCode::Internal, "Speech log unavailable")];
+        if !self.ready || !self.log_available {
+            return vec![PluginMsg::Status {
+                text: "Missed list unavailable".into(),
+            }];
         }
         if self.log_pending {
             return vec![PluginMsg::Status {

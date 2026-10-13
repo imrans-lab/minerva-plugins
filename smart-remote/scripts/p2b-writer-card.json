@@ -24,7 +24,9 @@
     "smart-remote/protocol/schema/device/log_delete_all.json",
     "smart-remote/protocol/schema/device/replay_last.json",
     "smart-remote/protocol/schema/plugin/missed.json",
-    "smart-remote/protocol/schema/plugin/log_items.json"
+    "smart-remote/protocol/schema/plugin/log_items.json",
+    "smart-remote/tests/log_exits.rs",
+    "smart-remote/tests/log_numbers.rs"
   ],
   "production_prefixes": [
     "smart-remote/src/",
@@ -36,7 +38,7 @@
     "Err\\(",
     "PluginMsg::error"
   ],
-  "failure_disposition": "All new log failures become visible Internal OLED errors; permission failures close/unregister endpoint. A closed transport cancels request-local waits; no destructive retry or synthetic success. HostLink owns bounded RPC errors. Some records unavailable is surfaced without private path details. Mutation refresh failure never proves mutation outcome.",
+  "failure_disposition": "New log failures surface to device; denied speech-log grant disables only log, preserving PCM/PTT. Mutation timeout refreshes list once and reports unknown, never retries mutation. Successful deletion is visible even if refresh fails. Closed transport cancels local waits; no replay or synthetic success. Malformed category L7 is separately filed.",
   "persisted_setting_owners": {
     "pairing_settings": "smart-remote/src/store.rs::TokenStore (unchanged sole persisted owner)",
     "speech_log": "Minerva SpeechLog; relay holds only the current request page and counts",
@@ -44,36 +46,96 @@
   },
   "exit_table": "smart-remote/scripts/p2b-exits.md",
   "exit_tests": {
-    "Log wait/Cancel": [
-      "smart-remote/tests/speech_log.rs::authoritative_log_controls_cross_real_stdio_and_lan"
+    "hello/count/Cancel": [
+      "smart-remote/tests/log_exits.rs::six_log_states_five_exit_cases_cross_real_binary"
     ],
-    "Log wait/Timeout": [
-      "smart-remote/tests/speech_log.rs::authoritative_log_controls_cross_real_stdio_and_lan"
+    "hello/count/Timeout": [
+      "smart-remote/tests/log_exits.rs::six_log_states_five_exit_cases_cross_real_binary"
     ],
-    "Log wait/Disconnect/reconnect": [
-      "smart-remote/tests/speech_log.rs::authoritative_log_controls_cross_real_stdio_and_lan"
+    "hello/count/Disconnect/reconnect": [
+      "smart-remote/tests/log_exits.rs::six_log_states_five_exit_cases_cross_real_binary"
     ],
-    "Log wait/Revoke": [
-      "smart-remote/tests/speech_log.rs::authoritative_log_controls_cross_real_stdio_and_lan"
+    "hello/count/Revoke": [
+      "smart-remote/tests/log_exits.rs::six_log_states_five_exit_cases_cross_real_binary"
     ],
-    "Log wait/Host EOF": [
-      "smart-remote/tests/speech_log.rs::authoritative_log_controls_cross_real_stdio_and_lan"
+    "hello/count/Host EOF": [
+      "smart-remote/tests/log_exits.rs::six_log_states_five_exit_cases_cross_real_binary"
     ],
-    "Mutation/Cancel": [
-      "smart-remote/tests/speech_log.rs::authoritative_log_controls_cross_real_stdio_and_lan"
+    "page/Cancel": [
+      "smart-remote/tests/log_exits.rs::six_log_states_five_exit_cases_cross_real_binary"
     ],
-    "Mutation/Timeout": [
-      "smart-remote/tests/speech_log.rs::authoritative_log_controls_cross_real_stdio_and_lan"
+    "page/Timeout": [
+      "smart-remote/tests/log_exits.rs::six_log_states_five_exit_cases_cross_real_binary"
     ],
-    "Mutation/Disconnect/reconnect": [
-      "smart-remote/tests/speech_log.rs::authoritative_log_controls_cross_real_stdio_and_lan"
+    "page/Disconnect/reconnect": [
+      "smart-remote/tests/log_exits.rs::six_log_states_five_exit_cases_cross_real_binary"
     ],
-    "Mutation/Revoke": [
-      "smart-remote/tests/speech_log.rs::authoritative_log_controls_cross_real_stdio_and_lan"
+    "page/Revoke": [
+      "smart-remote/tests/log_exits.rs::six_log_states_five_exit_cases_cross_real_binary"
     ],
-    "Mutation/Host EOF": [
-      "smart-remote/tests/speech_log.rs::authoritative_log_controls_cross_real_stdio_and_lan"
+    "page/Host EOF": [
+      "smart-remote/tests/log_exits.rs::six_log_states_five_exit_cases_cross_real_binary"
+    ],
+    "play/replay/Cancel": [
+      "smart-remote/tests/log_exits.rs::six_log_states_five_exit_cases_cross_real_binary"
+    ],
+    "play/replay/Timeout": [
+      "smart-remote/tests/log_exits.rs::six_log_states_five_exit_cases_cross_real_binary"
+    ],
+    "play/replay/Disconnect/reconnect": [
+      "smart-remote/tests/log_exits.rs::six_log_states_five_exit_cases_cross_real_binary"
+    ],
+    "play/replay/Revoke": [
+      "smart-remote/tests/log_exits.rs::six_log_states_five_exit_cases_cross_real_binary"
+    ],
+    "play/replay/Host EOF": [
+      "smart-remote/tests/log_exits.rs::six_log_states_five_exit_cases_cross_real_binary"
+    ],
+    "confirmed delete/Cancel": [
+      "smart-remote/tests/log_exits.rs::six_log_states_five_exit_cases_cross_real_binary"
+    ],
+    "confirmed delete/Timeout": [
+      "smart-remote/tests/log_exits.rs::six_log_states_five_exit_cases_cross_real_binary"
+    ],
+    "confirmed delete/Disconnect/reconnect": [
+      "smart-remote/tests/log_exits.rs::six_log_states_five_exit_cases_cross_real_binary"
+    ],
+    "confirmed delete/Revoke": [
+      "smart-remote/tests/log_exits.rs::six_log_states_five_exit_cases_cross_real_binary"
+    ],
+    "confirmed delete/Host EOF": [
+      "smart-remote/tests/log_exits.rs::six_log_states_five_exit_cases_cross_real_binary"
+    ],
+    "count changed/Cancel": [
+      "smart-remote/tests/log_exits.rs::six_log_states_five_exit_cases_cross_real_binary"
+    ],
+    "count changed/Timeout": [
+      "smart-remote/tests/log_exits.rs::six_log_states_five_exit_cases_cross_real_binary"
+    ],
+    "count changed/Disconnect/reconnect": [
+      "smart-remote/tests/log_exits.rs::six_log_states_five_exit_cases_cross_real_binary"
+    ],
+    "count changed/Revoke": [
+      "smart-remote/tests/log_exits.rs::six_log_states_five_exit_cases_cross_real_binary"
+    ],
+    "count changed/Host EOF": [
+      "smart-remote/tests/log_exits.rs::six_log_states_five_exit_cases_cross_real_binary"
+    ],
+    "idle/PTT/Cancel": [
+      "smart-remote/tests/log_exits.rs::six_log_states_five_exit_cases_cross_real_binary"
+    ],
+    "idle/PTT/Timeout": [
+      "smart-remote/tests/log_exits.rs::six_log_states_five_exit_cases_cross_real_binary"
+    ],
+    "idle/PTT/Disconnect/reconnect": [
+      "smart-remote/tests/log_exits.rs::six_log_states_five_exit_cases_cross_real_binary"
+    ],
+    "idle/PTT/Revoke": [
+      "smart-remote/tests/log_exits.rs::six_log_states_five_exit_cases_cross_real_binary"
+    ],
+    "idle/PTT/Host EOF": [
+      "smart-remote/tests/log_exits.rs::six_log_states_five_exit_cases_cross_real_binary"
     ]
   },
-  "exit_test_limits": "Named fixture uses actual plugin binary/stdin/LAN with scripted host. Page and mutation cancel/revoke/timeout are independently exercised; pending mutation EOF stops the real binary. Physical gesture/store/playback and actual service remain Minerva/F2/I gates."
+  "exit_test_limits": "All30 named CASEs execute real binary/stdio/LAN. Event/PTT timeout cells are explicitly no-RPC/no-timer assertions. Direct play receipt oracles and restored numeric/Unicode wire checks are speech_log and log_numbers fixtures; physical gestures/store/playback remain Minerva/F2/I gates."
 }
