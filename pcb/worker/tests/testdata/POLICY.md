@@ -14,6 +14,9 @@ Enforced by `.github/workflows/corpus-policy.yml`, which fails the build on:
 - any tracked file whose path matches the banned product-name patterns;
 - any YAML carrying a banned board identity (`name: smart-remote`, …).
 
+The Minerva plugin source/protocol under `smart-remote/` and its CI workflow
+are public per owner ruling 2026-10-13. Product board designs remain banned.
+
 If a test needs geometry a synthetic fixture doesn't cover, **extend a
 synthetic fixture** (see the how-and-why header in `parity_corners.yaml`) —
 never import a product board. Library footprints of public origin (e.g. the
