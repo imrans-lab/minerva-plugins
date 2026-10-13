@@ -113,7 +113,12 @@ impl HostLink {
         })) {
             return Err(HostError::Overloaded);
         }
-        let result = tokio::time::timeout(Duration::from_secs(5), rx)
+        let seconds = match (capability, args["op"].as_str()) {
+            ("host.audio", Some("input_end")) => 125,
+            ("host.chat.input", Some("submit")) => 35,
+            _ => 5,
+        };
+        let result = tokio::time::timeout(Duration::from_secs(seconds), rx)
             .await
             .map_err(|_| HostError::Timeout)?
             .unwrap_or(Err(HostError::Closed));

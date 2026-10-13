@@ -82,6 +82,7 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
     .await;
     device.handshake().await;
     assert_eq!(device.recv_msg().await["chat_id"], "c1");
+    assert_eq!(device.recv_msg().await["type"], "draft");
     let registered = next_request(&mut seen, "register").await;
     let endpoint = registered["params"]["args"]["device_id"].clone();
     assert_eq!(endpoint, format!("remote_{DEVICE}"));
@@ -123,6 +124,19 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
     device
         .expect_silence(std::time::Duration::from_millis(60))
         .await;
+    // Replacement while the old socket is still live serializes endpoint lifecycle.
+    let mut replacement = Device::connect(
+        ([127, 0, 0, 1], port).into(),
+        Arc::new(Schemas::load().unwrap()),
+    )
+    .await;
+    replacement.handshake().await;
+    assert_eq!(replacement.recv_msg().await["chat_id"], "c1");
+    assert_eq!(replacement.recv_msg().await["text"], "Hello");
+    next_request(&mut seen, "register").await;
+    let available = next_request(&mut seen, "availability").await;
+    assert_eq!(available["params"]["args"]["available"], true);
+    device = replacement;
     device.send_json(&json!({"type":"send"})).await;
     assert_eq!(
         next_request(&mut seen, "submit").await["params"]["args"]["expected_chat_id"],
@@ -150,6 +164,7 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
     )
     .await;
     assert_eq!(device.recv_msg().await["chat_id"], "c2");
+    assert_eq!(device.recv_msg().await["state"], "error");
     next_request(&mut seen, "input_cancel").await;
     event(
         &input,
@@ -160,6 +175,23 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
     device
         .expect_silence(std::time::Duration::from_millis(60))
         .await;
+    device
+        .send_json(&json!({"type":"mode","mode":"mouse"}))
+        .await;
+    assert_eq!(
+        next_request(&mut seen, "availability").await["params"]["args"]["available"],
+        false
+    );
+    next_request(&mut seen, "unregister").await;
+    let mut reconnect = Device::connect(
+        ([127, 0, 0, 1], port).into(),
+        Arc::new(Schemas::load().unwrap()),
+    )
+    .await;
+    reconnect.handshake().await;
+    assert_eq!(reconnect.recv_msg().await["chat_id"], "c1");
+    assert_eq!(reconnect.recv_msg().await["type"], "draft");
+    next_request(&mut seen, "register").await;
     host.abort(); // Releases its writer clone; the real host EOF shuts down the plugin.
     let _ = host.await;
     drop(input);

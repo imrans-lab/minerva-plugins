@@ -168,9 +168,14 @@ async fn serve(
     device_id: &str,
     conn: u64,
 ) -> End {
+    let lifecycle = shared.endpoint_lock(device_id);
+    let _lifecycle = lifecycle.lock().await;
+    if !shared.is_current(device_id, conn) {
+        return End::Gone;
+    }
     let (mut bridge, mut events, mut updates) = match &shared.host {
         Some(host) => {
-            let (b, e, u) = Bridge::new(host.clone(), device_id);
+            let (b, e, u) = Bridge::new(host.clone(), device_id, shared.memory.clone());
             (Some(b), Some(e), Some(u))
         }
         None => (None, None, None),
@@ -184,7 +189,7 @@ async fn serve(
     let mut ping = interval_at(Instant::now() + timers.ping_every, timers.ping_every);
     ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let end = loop {
-        let replies = tokio::select! {
+        let mut replies = tokio::select! {
             _ = &mut *replaced => break End::Close { code: CLOSE_REPLACED, error: None },
             () = until_shutdown(&mut shutdown) => break going_away(),
             () = sleep_until(last_rx + timers.dead_after) => {
@@ -200,7 +205,7 @@ async fn serve(
             event = receive_event(&mut events) => {
                 match event {
                     Ok(event) => bridge.as_mut().map_or_else(Vec::new, |b| b.event(event)),
-                    Err(_) => { if let Some(b) = &mut bridge { b.cancel_mic(); } vec![PluginMsg::error(ErrorCode::Internal, "Host event queue overflow")] },
+                    Err(_) => { if let Some(b) = &mut bridge { b.cancel_mic();  } vec![PluginMsg::error(ErrorCode::Internal, "Host event queue overflow"), PluginMsg::MicState {state:"error".into(), detail:Some("Host event queue overflow".into())}] },
                 }
             }
             update = receive_update(&mut updates) => {
@@ -210,7 +215,12 @@ async fn serve(
                     replies
                 } else { vec![] }
             }
-            _ = tick.tick() => bridge.as_mut().map_or_else(Vec::new, Bridge::tick),
+            _ = tick.tick() => {
+                if let Some(b) = &mut bridge {
+                    let replies = b.tick();
+                    replies
+                } else { vec![] }
+            },
             msg = ws.next() => {
                 last_rx = Instant::now();
                 match msg {
@@ -255,12 +265,21 @@ async fn serve(
                 }
             }
         };
+        if let Some(b) = &mut bridge {
+            replies.extend(b.take_controls());
+        }
         let mut failed = false;
         for reply in replies {
             if !send(ws, &reply, shared).await {
                 failed = true;
                 break;
             }
+        }
+        if let Some(b) = &bridge {
+            if b.stopped {
+                break End::Gone;
+            }
+            b.remember();
         }
         if failed {
             break End::Gone;

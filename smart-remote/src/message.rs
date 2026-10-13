@@ -55,6 +55,7 @@ pub enum DeviceMsg {
     PttUp {
         stream: u8,
     },
+
     Clear,
     Send,
     Mode {
@@ -83,6 +84,8 @@ pub enum ErrorCode {
     Busy,
     NoTarget,
     SendFailed,
+    EmptyDraft,
+    TargetChanged,
     TtsFailed,
     Internal,
 }
@@ -100,6 +103,7 @@ pub enum PluginMsg {
         group: String,
         group_id: Option<String>,
     },
+
     Draft {
         text: String,
     },

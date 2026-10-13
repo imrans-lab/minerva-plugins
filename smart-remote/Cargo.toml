@@ -28,7 +28,6 @@ log = "0.4"
 env_logger = "0.11"
 gethostname = "1"
 base64 = "0.22"
-rubato = { version = "0.16.2", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

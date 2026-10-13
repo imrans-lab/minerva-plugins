@@ -90,6 +90,8 @@ impl std::error::Error for ServerError {
 
 /// State every session shares.
 pub(crate) struct Shared {
+    endpoint_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    pub memory: Arc<Mutex<HashMap<String, (serde_json::Value, String)>>>,
     pub config: ServerConfig,
     pub store: Arc<TokenStore>,
     pub schemas: Arc<Schemas>,
@@ -99,6 +101,14 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
+    pub fn endpoint_lock(&self, id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.endpoint_locks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(id.into())
+            .or_default()
+            .clone()
+    }
     /// Makes `conn` the live connection for `device_id` and tells the
     /// previous one, if any, to close with 4004. The receiver fires when a
     /// newer connection replaces this one.
@@ -174,6 +184,8 @@ impl Server {
     /// live session with 1001 and returns once they have finished.
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
         let shared = Arc::new(Shared {
+            endpoint_locks: Mutex::new(HashMap::new()),
+            memory: Arc::new(Mutex::new(HashMap::new())),
             config: self.config,
             store: self.store,
             schemas: self.schemas,

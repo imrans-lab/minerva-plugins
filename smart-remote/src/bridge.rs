@@ -4,7 +4,7 @@ use crate::message::{clip, DeviceMsg, ErrorCode, PluginMsg};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinSet;
@@ -32,7 +32,10 @@ pub(crate) struct Bridge {
     pub device: String,
     updates: mpsc::Sender<Update>,
     tasks: JoinSet<()>,
+    startup: Option<tokio::task::JoinHandle<()>>,
     ready: bool,
+    pub stopped: bool,
+    memory: Arc<Mutex<HashMap<String, (Value, String)>>>,
     generation: u64,
     mic: Option<Mic>,
     target: Value,
@@ -40,49 +43,72 @@ pub(crate) struct Bridge {
     pub sends: HashMap<u64, (String, bool)>,
     pending_send: bool,
     pending_clear: bool,
+    aborts: VecDeque<PluginMsg>,
     early: VecDeque<HostEvent>,
 }
 impl Bridge {
     pub fn new(
         host: Arc<HostLink>,
         id: &str,
+        memory: Arc<Mutex<HashMap<String, (Value, String)>>>,
     ) -> (Self, broadcast::Receiver<HostEvent>, mpsc::Receiver<Update>) {
         let events = host.subscribe();
         let (updates, rx) = mpsc::channel(32);
+        let remembered = memory
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .cloned()
+            .unwrap_or((Value::Null, String::new()));
         let mut b = Self {
             host,
             device: format!("remote_{id}"),
             updates,
             tasks: JoinSet::new(),
+            startup: None,
             ready: false,
+            stopped: false,
+            memory,
             generation: 0,
             mic: None,
-            target: Value::Null,
-            draft: String::new(),
+            target: remembered.0,
+            draft: remembered.1,
             sends: HashMap::new(),
             pending_send: false,
             pending_clear: false,
+            aborts: VecDeque::new(),
             early: VecDeque::new(),
         };
         let (host, device, tx) = (b.host.clone(), b.device.clone(), b.updates.clone());
-        b.tasks.spawn(async move {
+        b.startup = Some(tokio::spawn(async move {
             let result = async {
                 host.call_capability("host.audio", json!({"op":"register","device_id":device,"label":"Smart Remote","input":true,"output":true})).await?;
                 host.call_capability("host.audio", json!({"op":"availability","device_id":device,"available":true})).await?;
                 host.call_capability("host.chat.active", json!({})).await
             }.await;
             let _ = tx.send(Update::Ready(result)).await;
-        });
+        }));
         (b, events, rx)
     }
     pub fn update(&mut self, update: Update) -> Vec<PluginMsg> {
         match update {
             Update::Ready(Ok(target)) => {
                 self.ready = true;
+                if self.target["chat_id"] != target["chat_id"] {
+                    self.draft.clear();
+                }
                 self.target = target;
-                vec![self.target_message()]
+                vec![
+                    self.target_message(),
+                    PluginMsg::Draft {
+                        text: self.draft.clone(),
+                    },
+                ]
             }
-            Update::Ready(Err(e)) => vec![error(ErrorCode::Internal, &e.to_string())],
+            Update::Ready(Err(e)) => {
+                self.stopped = true;
+                vec![error(ErrorCode::Internal, &e.to_string())]
+            }
             Update::Started(epoch, session) => {
                 if let Some(m) = &mut self.mic {
                     if m.generation == epoch {
@@ -94,6 +120,9 @@ impl Bridge {
             Update::Failed(epoch, message) => {
                 if self.mic.as_ref().is_some_and(|m| m.generation == epoch) {
                     self.cancel_mic();
+                    if permission_failure(&message) {
+                        self.stopped = true;
+                    }
                     vec![mic_state("error", Some(&message))]
                 } else {
                     vec![]
@@ -115,7 +144,19 @@ impl Bridge {
                             "Host did not return a send ID",
                         )],
                     },
-                    Err(e) => vec![error(ErrorCode::SendFailed, &e.to_string())],
+                    Err(e) => {
+                        if permission_failure(&e.to_string()) {
+                            self.stopped = true;
+                        }
+                        vec![error(
+                            if e.to_string().contains("target_changed") {
+                                ErrorCode::TargetChanged
+                            } else {
+                                ErrorCode::SendFailed
+                            },
+                            &e.to_string(),
+                        )]
+                    }
                 }
             }
             Update::Cleared(Ok(_)) => {
@@ -127,6 +168,9 @@ impl Bridge {
             }
             Update::Cleared(Err(e)) => {
                 self.pending_clear = false;
+                if permission_failure(&e.to_string()) {
+                    self.stopped = true;
+                }
                 vec![error(ErrorCode::Internal, &e.to_string())]
             }
         }
@@ -183,6 +227,7 @@ impl Bridge {
                 if self.pending_send || self.pending_clear {
                     return vec![error(ErrorCode::Busy, "Input operation is still pending")];
                 }
+                self.cancel_mic();
                 self.pending_clear = true;
                 let (host, tx) = (self.host.clone(), self.updates.clone());
                 self.tasks.spawn(async move {
@@ -205,7 +250,24 @@ impl Bridge {
                     return vec![error(ErrorCode::NoTarget, "No target chat")];
                 };
                 if self.sends.len() >= 128 {
+                    if let Some(id) = self
+                        .sends
+                        .iter()
+                        .filter(|(_, (_, completed))| *completed)
+                        .map(|(id, _)| *id)
+                        .min()
+                    {
+                        self.sends.remove(&id);
+                    }
+                }
+                if self.sends.len() >= 128 {
                     return vec![error(ErrorCode::Busy, "Too many outstanding remote turns")];
+                }
+                if self.draft.is_empty() {
+                    return vec![error(ErrorCode::EmptyDraft, "Draft is empty")];
+                }
+                if chat.len() > 128 {
+                    return vec![error(ErrorCode::NoTarget, "Invalid target chat")];
                 }
                 self.pending_send = true;
                 let (host, tx) = (self.host.clone(), self.updates.clone());
@@ -236,6 +298,9 @@ impl Bridge {
         }
         m.ended = eos;
         if eos {
+            m.started = Instant::now();
+        }
+        if eos {
             vec![mic_state("transcribing", None)]
         } else {
             vec![]
@@ -251,6 +316,17 @@ impl Bridge {
                     .is_some_and(|m| p["chat_id"].as_str() != Some(m.chat.as_str()))
                 {
                     self.cancel_mic();
+                    self.aborts
+                        .push_back(mic_state("error", Some("target_changed")));
+                }
+                if p["chat_id"]
+                    .as_str()
+                    .is_some_and(|s| s.len() > 128 || s.is_empty())
+                {
+                    return vec![error(ErrorCode::NoTarget, "Invalid target chat")];
+                }
+                if self.target["chat_id"] != p["chat_id"] {
+                    self.draft.clear();
                 }
                 self.target = p.clone();
                 vec![self.target_message()]
@@ -310,7 +386,12 @@ impl Bridge {
                 vec![PluginMsg::Reply {
                     chat_id: chat.clone(),
                     text: clip(p["text"].as_str().unwrap_or("").into(), 6000),
-                    outcome: p["outcome"].as_str().unwrap_or("error").into(),
+                    outcome: match p["outcome"].as_str() {
+                        Some("ok") => "ok",
+                        Some("cancelled") => "cancelled",
+                        _ => "error",
+                    }
+                    .into(),
                 }]
             }
             _ => vec![],
@@ -325,11 +406,9 @@ impl Bridge {
                 log::error!("Host task failed: {e}");
             }
         }
-        if self
-            .mic
-            .as_ref()
-            .is_some_and(|m| !m.ended && m.started.elapsed() >= Duration::from_secs(300))
-        {
+        if self.mic.as_ref().is_some_and(|m| {
+            m.started.elapsed() >= Duration::from_secs(if m.ended { 125 } else { 300 })
+        }) {
             self.cancel_mic();
             vec![mic_state("error", Some("too_long"))]
         } else {
@@ -339,10 +418,31 @@ impl Bridge {
     pub fn cancel_mic(&mut self) {
         if let Some(m) = self.mic.take() {
             let _ = m.cancel.send(true);
+            if m.ended {
+                if let Some(session) = m.session {
+                    let (host, device) = (self.host.clone(), self.device.clone());
+                    self.tasks.spawn(async move { let _ = host.call_capability("host.audio", json!({"op":"input_cancel","device_id":device,"session_id":session})).await; });
+                }
+            }
         }
     }
+    pub fn remember(&self) {
+        self.memory
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                self.device.trim_start_matches("remote_").into(),
+                (self.target.clone(), self.draft.clone()),
+            );
+    }
     pub async fn close(&mut self, current: bool) {
+        if current {
+            self.remember();
+        }
         self.cancel_mic();
+        if let Some(startup) = self.startup.take() {
+            let _ = startup.await;
+        }
         if current {
             let _ = self
                 .host
@@ -364,6 +464,9 @@ impl Bridge {
                 log::error!("Host task shutdown failed: {e}");
             }
         }
+    }
+    pub fn take_controls(&mut self) -> Vec<PluginMsg> {
+        self.aborts.drain(..).collect()
     }
     fn target_message(&self) -> PluginMsg {
         PluginMsg::Target {
@@ -421,7 +524,8 @@ async fn input(
             sequence += 1;
         }
         if eos {
-            let result = host.call_capability("host.audio", json!({"op":"input_end","device_id":device,"session_id":session,"sequence":sequence})).await;
+            let call = host.call_capability("host.audio", json!({"op":"input_end","device_id":device,"session_id":session,"sequence":sequence}));
+            let result = tokio::select! { biased; _ = cancel.changed() => break None, result = call => result };
             match result {
                 Ok(_) => return,
                 Err(e) => break Some(e.to_string()),
@@ -459,4 +563,9 @@ pub(crate) fn mic_state(state: &str, detail: Option<&str>) -> PluginMsg {
         state: state.into(),
         detail: detail.map(|s| clip(s.into(), 200)),
     }
+}
+
+fn permission_failure(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("not granted") || m.contains("permission_denied") || m.contains("revoked")
 }
