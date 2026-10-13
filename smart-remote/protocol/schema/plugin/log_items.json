@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smart-remote.local/protocol/v1/plugin/log_items.json",
+  "title": "log_items",
+  "type": "object",
+  "properties": {
+    "type": {
+      "const": "log_items"
+    },
+    "offset": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "total": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "unheard": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "items": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "properties": {
+          "log_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "age_s": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "summary": {
+            "type": "string",
+            "maxLength": 21
+          },
+          "heard": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "log_id",
+          "age_s",
+          "summary",
+          "heard"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "type",
+    "offset",
+    "total",
+    "unheard",
+    "items"
+  ],
+  "additionalProperties": false
+}

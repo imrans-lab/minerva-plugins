@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smart-remote.local/protocol/v1/device/log_delete_all.json",
+  "title": "log_delete_all",
+  "type": "object",
+  "properties": {
+    "type": {
+      "const": "log_delete_all"
+    }
+  },
+  "required": [
+    "type"
+  ],
+  "additionalProperties": false
+}
