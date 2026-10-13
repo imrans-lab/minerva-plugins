@@ -2,7 +2,14 @@
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
-pub type PcmError = String;
+#[derive(Debug)]
+pub struct PcmError(pub String);
+impl std::fmt::Display for PcmError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for PcmError {}
 pub struct PcmConverter {
     rate: u32,
     volume: f64,
@@ -16,7 +23,7 @@ pub struct PcmConverter {
 impl PcmConverter {
     pub fn new(rate: u32, volume: f64) -> Result<Self, PcmError> {
         if rate == 0 || rate > 192_000 || !volume.is_finite() || !(0.0..=1.0).contains(&volume) {
-            return Err("Unsupported PCM rate or volume".into());
+            return Err(PcmError("Unsupported PCM rate or volume".into()));
         }
         let block = (rate as usize / 50).clamp(16, 3840);
         let filter = if rate == 16_000 {
@@ -36,7 +43,7 @@ impl PcmConverter {
                     block,
                     1,
                 )
-                .map_err(|e| e.to_string())?,
+                .map_err(|e| PcmError(e.to_string()))?,
             )
         };
         Ok(Self {
@@ -75,9 +82,9 @@ impl PcmConverter {
                 let output = self
                     .filter
                     .as_mut()
-                    .ok_or_else(|| "Missing PCM filter".to_owned())?
+                    .ok_or_else(|| PcmError("Missing PCM filter".into()))?
                     .process(&[samples], None)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| PcmError(e.to_string()))?;
                 self.encode(&output[0], &mut result, u64::MAX);
             }
             if end {
@@ -86,7 +93,7 @@ impl PcmConverter {
                 let output = self
                     .filter
                     .as_mut()
-                    .ok_or_else(|| "Missing PCM filter".to_owned())?
+                    .ok_or_else(|| PcmError("Missing PCM filter".into()))?
                     .process_partial(
                         if remaining[0].is_empty() {
                             None
@@ -95,22 +102,22 @@ impl PcmConverter {
                         },
                         None,
                     )
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| PcmError(e.to_string()))?;
                 self.encode(&output[0], &mut result, expected);
                 // Flush the library's delayed filter tail, trimming padding to the exact duration.
                 while self.emitted < expected {
                     let output = self
                         .filter
                         .as_mut()
-                        .ok_or_else(|| "Missing PCM filter".to_owned())?
+                        .ok_or_else(|| PcmError("Missing PCM filter".into()))?
                         .process_partial::<Vec<f64>>(None, None)
-                        .map_err(|e| e.to_string())?;
+                        .map_err(|e| PcmError(e.to_string()))?;
                     self.encode(&output[0], &mut result, expected);
                 }
             }
         }
         if end && self.partial.is_some() {
-            return Err("PCM ended with an incomplete sample".into());
+            return Err(PcmError("PCM ended with an incomplete sample".into()));
         }
         Ok(result)
     }
@@ -153,6 +160,24 @@ mod tests {
             let want = (n as f64 * std::f64::consts::TAU * 1000.0 / 16000.0).sin() * 12000.0;
             assert!((got - want).abs() < 2000.0, "sample{n}: {got} vs{want}");
         }
+        // Nonperiodic impulse and final-edge coverage catches offsets and lost tails.
+        let mut impulse = vec![0_u8; 4800];
+        impulse[600..602].copy_from_slice(&12000_i16.to_le_bytes());
+        for sample in impulse[4600..].chunks_exact_mut(2) {
+            sample.copy_from_slice(&4000_i16.to_le_bytes());
+        }
+        let mut probe = PcmConverter::new(24000, 1.0).unwrap();
+        let converted = probe.push(&impulse, true).unwrap();
+        let peak = converted[..2800]
+            .chunks_exact(2)
+            .enumerate()
+            .max_by_key(|(_, s)| i16::from_le_bytes([s[0], s[1]]).abs())
+            .unwrap()
+            .0;
+        assert!((199..=201).contains(&peak));
+        assert!(converted[converted.len() - 20..]
+            .chunks_exact(2)
+            .any(|s| i16::from_le_bytes([s[0], s[1]]) > 1000));
         let mut identity = PcmConverter::new(16000, 1.0).unwrap();
         assert_eq!(identity.push(&source, true).unwrap(), source);
     }

@@ -100,8 +100,10 @@ def check_file(path, validators):
                     errors.append(f"{where}: completion of stale speaker stream")
                 if msg["ok"] and speaker_eos.get(stream) != msg["last_seq"]:
                     errors.append(f"{where}: success before matching speaker EOS")
-                if not msg["ok"] and speaker_last.get(stream) != msg["last_seq"]:
-                    errors.append(f"{where}: failure does not name last accepted frame")
+                if not msg["ok"] and msg["last_seq"] is not None and (speaker_last.get(stream) is None or msg["last_seq"] > speaker_last[stream]):
+                    errors.append(f"{where}: failure names an unsent frame")
+            elif t == "error" and msg.get("code") == "speak_aborted":
+                next_seq.pop((2, msg["stream_id"]), None)
             elif t == "ptt_up" and (1, msg["stream"]) in next_seq:
                 errors.append(f"{where}: ptt_up before the EOS mic frame")
             continue

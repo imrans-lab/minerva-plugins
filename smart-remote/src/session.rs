@@ -119,7 +119,7 @@ pub(crate) async fn run(
         plugin: shared.config.plugin_name.clone(),
     };
     let end = if send(&mut ws, &welcome, &shared).await
-        && send(&mut ws, &PluginMsg::no_target(), &shared).await
+        && (shared.host.is_some() || send(&mut ws, &PluginMsg::no_target(), &shared).await)
     {
         serve(&mut ws, &mut replaced, &shared, &device_id, conn).await
     } else {
@@ -269,6 +269,11 @@ async fn serve(
             }
         };
         if let Some(b) = &mut bridge {
+            if let Some(frame) = b.take_barge_frame() {
+                if ws.send(Message::Binary(Bytes::from(frame))).await.is_err() {
+                    break End::Gone;
+                }
+            }
             replies.extend(b.take_controls());
         }
         let mut failed = false;

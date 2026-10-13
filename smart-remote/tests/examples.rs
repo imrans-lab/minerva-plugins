@@ -20,6 +20,10 @@ const QUIET: Duration = Duration::from_millis(300);
 const VALID: &[(&str, usize)] = &[
     ("auth_refused.jsonl", 2),
     ("choice.jsonl", 2),
+    ("explicit_speech.jsonl", 2),
+    ("host_aborts_speech.jsonl", 2),
+    ("legacy_turn_speech.jsonl", 2),
+    ("speaker_start_failed.jsonl", 2),
     ("picker.jsonl", 2),
     ("ptt_interrupts_speech.jsonl", 2),
     ("ptt_turn.jsonl", 2),
@@ -37,6 +41,14 @@ enum Invalid {
 
 const INVALID: &[(&str, Invalid)] = &[
     ("chats_without_group.jsonl", Invalid::PluginSide),
+    (
+        "speaker_early_ack.jsonl",
+        Invalid::DeviceSide(&["error:internal"]),
+    ),
+    (
+        "speaker_null_success.jsonl",
+        Invalid::DeviceSide(&["error:bad_message", "close:4002"]),
+    ),
     (
         "extra_field.jsonl",
         Invalid::DeviceSide(&["error:bad_message", "close:4002"]),

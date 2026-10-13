@@ -18,13 +18,13 @@
       "enum": [
         "turn",
         "explicit"
-      ]
+      ],
+      "default": "turn"
     }
   },
   "required": [
     "type",
-    "stream",
-    "origin"
+    "stream"
   ],
   "additionalProperties": false,
   "allOf": [

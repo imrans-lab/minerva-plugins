@@ -5,6 +5,7 @@
 {"dir":"p2d","audio":"02030000","bytes":4096}
 {"dir":"d2p","msg":{"type":"ptt_down","stream":8}}
 {"dir":"p2d","audio":"82030100","bytes":0}
+{"dir":"d2p","msg":{"type":"speak_done","stream_id":3,"ok":false,"last_seq":0,"error":"cancelled"}}
 {"dir":"p2d","msg":{"type":"mic_state","state":"recording"}}
 {"dir":"d2p","audio":"81080000","bytes":640}
 {"dir":"d2p","msg":{"type":"ptt_up","stream":8}}

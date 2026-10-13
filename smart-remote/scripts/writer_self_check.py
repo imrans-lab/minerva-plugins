@@ -7,6 +7,14 @@ import subprocess
 import sys
 
 
+EXIT_TABLE = """state | cancel | timeout | disconnect/reconnect | revoke | host crash
+recording | input_cancel + terminal mic_state |300s too_long|cancel old session, serialize endpoint, re-send draft|visible permission failure/close|EOF closes caller; host removes endpoint
+transcribing |known session input_cancel + idle/error|125s transcribe_timeout|late transcript ignored; old outstanding call cancelled|visible refusal/close|EOF cannot issue unregister on closed RPC
+sending |host owns admitted turn|35s submit failure|exact send/chat origin; bound draft retained|target_changed or permission failure|no reply invented
+speaking |device PTT empty EOS; host abort flush/mute|300s unknown drain fails|negative completion, stale ACK ignored|failure visible, unavailable endpoint|no synthetic playback success
+idle/draft |Clear echoes empty draft|5s control refusal|per-device bound draft restored; focus mismatch refuses Send|registration failure closes visibly|restart requires a fresh known draft
+Transport fixtures assert actual PCM bytes, cancellation states, outstanding-call bounds, reconnect and pacing. Physical DMA/live service are separate gates."""
+
 def inventory(base: str, pin: str) -> int:
     repo = Path(__file__).resolve().parents[2]
     def git(*args: str) -> str:
@@ -34,7 +42,7 @@ def inventory(base: str, pin: str) -> int:
     # TokenStore is the sole persisted pairing-setting writer; process-memory draft is transient.
     setting_files = git("ls-tree", "-r", "--name-only", pin, "--", "smart-remote/src").splitlines()
     setting_owners = [path for path in setting_files if "fn persist(" in git("show", pin + ":" + path).split("#[cfg(test)]")[0]]
-    report = {"base": git("rev-parse", base).strip(), "pin": git("rev-parse", pin).strip(), "card_touch_set_diff": names, "unexpected_paths": unexpected, "deleted_or_renamed_tests": removed, "logged_failure_candidates": candidates, "changed_setting_writers": owners, "persisted_setting_owners": setting_owners}
+    report = {"exit_path_table": EXIT_TABLE, "base": git("rev-parse", base).strip(), "pin": git("rev-parse", pin).strip(), "card_touch_set_diff": names, "unexpected_paths": unexpected, "deleted_or_renamed_tests": removed, "logged_failure_candidates": candidates, "changed_setting_writers": owners, "persisted_setting_owners": setting_owners}
     print(json.dumps(report, indent=2))
     return int(bool(unexpected or removed or setting_owners != ["smart-remote/src/store.rs"]))
 
@@ -45,18 +53,17 @@ def main() -> int:
     if len(sys.argv) != 1:
         raise SystemExit("usage: writer_self_check.py [--inventory BASE PIN]")
     root = Path(__file__).resolve().parents[1]
+    print(EXIT_TABLE, flush=True)
     commands = [
         ["cargo", "fmt", "--check"],
         ["cargo", "clippy", "--locked", "--all-targets", "--", "-D", "warnings"],
-        ["cargo", "test", "--locked", "--test", "bridge", "--", "--nocapture"],
+        ["cargo", "test", "--locked", "--", "--nocapture"],
         [sys.executable, "protocol/tools/check_examples.py"],
     ]
-    if (root / "src/resample.rs").exists():
-        commands.insert(2, ["cargo", "test", "--locked", "--lib", "resample::tests", "--", "--nocapture"])
     for command in commands:
         print("CHECK", " ".join(command), flush=True)
         subprocess.run(command, cwd=root, check=True, timeout=300)
-    print("Focused writer checks PASS; full qualification and physical playback remain separate.")
+    print("Writer checks PASS including full cargo test; native Windows/live-service/physical playback remain separate.")
     return 0
 
 

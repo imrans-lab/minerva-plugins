@@ -56,13 +56,18 @@
             "host_cancel",
             "plugin_stopping"
           ]
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 200
         }
       },
       "required": [
         "type",
         "code",
         "stream_id",
-        "reason"
+        "reason",
+        "message"
       ],
       "additionalProperties": false
     }

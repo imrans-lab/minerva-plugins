@@ -113,6 +113,7 @@ pub enum PluginMsg {
         code: String,
         stream_id: u8,
         reason: String,
+        message: String,
     },
     Speak {
         stream: u8,

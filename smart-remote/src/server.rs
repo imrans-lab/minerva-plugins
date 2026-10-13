@@ -91,7 +91,7 @@ impl std::error::Error for ServerError {
 /// State every session shares.
 pub(crate) struct Shared {
     endpoint_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    pub memory: Arc<Mutex<HashMap<String, (serde_json::Value, String)>>>,
+    pub memory: crate::bridge::RemoteMemory,
     pub config: ServerConfig,
     pub store: Arc<TokenStore>,
     pub schemas: Arc<Schemas>,

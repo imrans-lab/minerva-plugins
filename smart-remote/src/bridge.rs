@@ -12,6 +12,8 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
+pub(crate) type RemoteMemory = Arc<Mutex<HashMap<String, (Value, String, Option<String>)>>>;
+
 pub(crate) enum Update {
     Ready(Result<Value, HostError>),
     Started(u64, u64),
@@ -38,24 +40,27 @@ pub(crate) struct Bridge {
     startup: Option<tokio::task::JoinHandle<()>>,
     ready: bool,
     pub stopped: bool,
-    memory: Arc<Mutex<HashMap<String, (Value, String)>>>,
+    memory: RemoteMemory,
     generation: u64,
     mic: Option<Mic>,
     target: Value,
     draft: String,
-    pub sends: HashMap<u64, (String, bool)>,
+    draft_chat: Option<String>,
+    audio_origins: HashMap<u64, String>,
+    pub sends: HashMap<u64, String>,
     pending_send: bool,
     pending_clear: bool,
     speaker: Option<Speaker>,
     next_speaker: u8,
     aborts: VecDeque<PluginMsg>,
+    barge_frame: Option<Vec<u8>>,
     early: VecDeque<HostEvent>,
 }
 impl Bridge {
     pub fn new(
         host: Arc<HostLink>,
         id: &str,
-        memory: Arc<Mutex<HashMap<String, (Value, String)>>>,
+        memory: RemoteMemory,
     ) -> (Self, broadcast::Receiver<HostEvent>, mpsc::Receiver<Update>) {
         let events = host.subscribe();
         let (updates, rx) = mpsc::channel(32);
@@ -64,7 +69,7 @@ impl Bridge {
             .unwrap_or_else(|e| e.into_inner())
             .get(id)
             .cloned()
-            .unwrap_or((Value::Null, String::new()));
+            .unwrap_or((Value::Null, String::new(), None));
         let mut b = Self {
             host,
             device: format!("remote_{id}"),
@@ -78,12 +83,15 @@ impl Bridge {
             mic: None,
             target: remembered.0,
             draft: remembered.1,
+            draft_chat: remembered.2,
+            audio_origins: HashMap::new(),
             sends: HashMap::new(),
             pending_send: false,
             pending_clear: false,
             speaker: None,
             next_speaker: 0,
             aborts: VecDeque::new(),
+            barge_frame: None,
             early: VecDeque::new(),
         };
         let (host, device, tx) = (b.host.clone(), b.device.clone(), b.updates.clone());
@@ -107,8 +115,12 @@ impl Bridge {
             }
             Update::Ready(Ok(target)) => {
                 self.ready = true;
-                if self.target["chat_id"] != target["chat_id"] {
-                    self.draft.clear();
+                if target["chat_id"]
+                    .as_str()
+                    .is_some_and(|s| s.is_empty() || s.len() > 128)
+                {
+                    self.stopped = true;
+                    return vec![error(ErrorCode::NoTarget, "Invalid target chat")];
                 }
                 self.target = target;
                 vec![
@@ -146,8 +158,15 @@ impl Bridge {
                 match result {
                     Ok(v) => match integer(&v["send_id"]) {
                         Some(id) => {
-                            self.sends.insert(id, (chat, false));
+                            self.audio_origins.insert(id, chat.clone());
+                            if self.audio_origins.len() > 128 {
+                                if let Some(old) = self.audio_origins.keys().copied().min() {
+                                    self.audio_origins.remove(&old);
+                                }
+                            }
+                            self.sends.insert(id, chat);
                             self.draft.clear();
+                            self.draft_chat = None;
                             vec![PluginMsg::Draft {
                                 text: String::new(),
                             }]
@@ -175,6 +194,7 @@ impl Bridge {
             Update::Cleared(Ok(_)) => {
                 self.pending_clear = false;
                 self.draft.clear();
+                self.draft_chat = None;
                 vec![PluginMsg::Draft {
                     text: String::new(),
                 }]
@@ -231,6 +251,7 @@ impl Bridge {
                 }
             }
             DeviceMsg::PttDown { stream } => {
+                self.barge_in();
                 if !self.ready {
                     return vec![error(
                         ErrorCode::Internal,
@@ -250,7 +271,12 @@ impl Bridge {
                 else {
                     return vec![error(ErrorCode::NoTarget, "No target chat")];
                 };
-                self.cancel_output("Interrupted by microphone");
+                if !self.draft.is_empty() && self.draft_chat.as_deref() != Some(chat.as_str()) {
+                    return vec![error(
+                        ErrorCode::TargetChanged,
+                        "Target changed; draft retained",
+                    )];
+                }
                 self.generation += 1;
                 let generation = self.generation;
                 let (pcm, rx) = mpsc::channel(32);
@@ -281,6 +307,7 @@ impl Bridge {
                 if self.pending_send || self.pending_clear {
                     return vec![error(ErrorCode::Busy, "Input operation is still pending")];
                 }
+                let cancelled = self.mic.is_some();
                 self.cancel_mic();
                 self.pending_clear = true;
                 let (host, tx) = (self.host.clone(), self.updates.clone());
@@ -290,7 +317,11 @@ impl Bridge {
                         .await;
                     let _ = tx.send(Update::Cleared(r)).await;
                 });
-                vec![]
+                if cancelled {
+                    vec![mic_state("idle", None)]
+                } else {
+                    vec![]
+                }
             }
             DeviceMsg::Send => {
                 if self.pending_send || self.pending_clear || self.mic.is_some() {
@@ -303,16 +334,11 @@ impl Bridge {
                 else {
                     return vec![error(ErrorCode::NoTarget, "No target chat")];
                 };
-                if self.sends.len() >= 128 {
-                    if let Some(id) = self
-                        .sends
-                        .iter()
-                        .filter(|(_, (_, completed))| *completed)
-                        .map(|(id, _)| *id)
-                        .min()
-                    {
-                        self.sends.remove(&id);
-                    }
+                if !self.draft.is_empty() && self.draft_chat.as_deref() != Some(chat.as_str()) {
+                    return vec![error(
+                        ErrorCode::TargetChanged,
+                        "Target changed; draft retained",
+                    )];
                 }
                 if self.sends.len() >= 128 {
                     return vec![error(ErrorCode::Busy, "Too many outstanding remote turns")];
@@ -382,9 +408,6 @@ impl Bridge {
                 {
                     return vec![error(ErrorCode::NoTarget, "Invalid target chat")];
                 }
-                if self.target["chat_id"] != p["chat_id"] {
-                    self.draft.clear();
-                }
                 self.target = p.clone();
                 vec![self.target_message()]
             }
@@ -406,6 +429,7 @@ impl Bridge {
                 }
                 match p["state"].as_str() {
                     Some("idle") => {
+                        self.draft_chat = Some(m.chat.clone());
                         self.draft.push_str(p["text"].as_str().unwrap_or(""));
                         self.draft = clip(self.draft.clone(), 6000);
                         self.mic = None;
@@ -430,16 +454,17 @@ impl Bridge {
                 let Some(id) = integer(&p["send_id"]) else {
                     return vec![];
                 };
-                let Some((chat, seen)) = self.sends.get_mut(&id) else {
+                let Some(chat) = self.sends.get(&id) else {
                     if self.pending_send && self.early.len() < 64 {
                         self.early.push_back(event);
                     }
                     return vec![];
                 };
-                if *seen || p["chat_id"].as_str() != Some(chat.as_str()) {
+                if p["chat_id"].as_str() != Some(chat.as_str()) {
                     return vec![];
                 }
-                *seen = true;
+                let chat = chat.clone();
+                self.sends.remove(&id);
                 vec![PluginMsg::Reply {
                     chat_id: chat.clone(),
                     text: clip(p["text"].as_str().unwrap_or("").into(), 6000),
@@ -476,8 +501,13 @@ impl Bridge {
         if self.mic.as_ref().is_some_and(|m| {
             m.started.elapsed() >= Duration::from_secs(if m.ended { 125 } else { 300 })
         }) {
+            let detail = if self.mic.as_ref().is_some_and(|m| m.ended) {
+                "transcribe_timeout"
+            } else {
+                "too_long"
+            };
             self.cancel_mic();
-            failures.push(mic_state("error", Some("too_long")));
+            failures.push(mic_state("error", Some(detail)));
         }
         failures
     }
@@ -498,7 +528,11 @@ impl Bridge {
             .unwrap_or_else(|e| e.into_inner())
             .insert(
                 self.device.trim_start_matches("remote_").into(),
-                (self.target.clone(), self.draft.clone()),
+                (
+                    self.target.clone(),
+                    self.draft.clone(),
+                    self.draft_chat.clone(),
+                ),
             );
     }
     pub async fn close(&mut self, current: bool) {
@@ -546,6 +580,22 @@ impl Bridge {
             }
         });
     }
+    pub fn barge_in(&mut self) {
+        if let Some(s) = self.speaker.take() {
+            let frame = FrameHeader {
+                kind: Kind::Speaker,
+                eos: true,
+                stream: s.wire,
+                seq: s.sequence,
+            }
+            .encode()
+            .to_vec();
+            if s.eos.is_none() {
+                self.barge_frame = Some(frame);
+            }
+            self.complete(s.host, false, "Interrupted by microphone");
+        }
+    }
     pub fn cancel_output(&mut self, message: &str) {
         if let Some(s) = self.speaker.take() {
             let reason = match message {
@@ -559,6 +609,7 @@ impl Bridge {
                 code: "speak_aborted".into(),
                 stream_id: s.wire,
                 reason: reason.into(),
+                message: clip(message.into(), 200),
             });
             self.complete(s.host, false, message);
         }
@@ -580,10 +631,10 @@ impl Bridge {
                     return vec![];
                 };
                 let owned = self
-                    .sends
+                    .audio_origins
                     .get(&send)
-                    .filter(|(chat, _)| origin["chat_id"].as_str() == Some(chat.as_str()));
-                let Some((chat, _)) = owned else {
+                    .filter(|chat| origin["chat_id"].as_str() == Some(chat.as_str()));
+                let Some(chat) = owned else {
                     if self.pending_send && self.early.len() < 64 {
                         self.early.push_back(event);
                     } else {
@@ -598,7 +649,6 @@ impl Bridge {
                 self.complete(stream, false, "Unknown audio origin");
                 return vec![];
             };
-            self.cancel_output("Replaced by newer speech");
             let rate = integer(&p["sample_rate"]).and_then(|r| u32::try_from(r).ok());
             if p["format"] != "pcm_s16le" || p["channels"] != 1 || !self.ready {
                 self.complete(
@@ -620,6 +670,7 @@ impl Bridge {
                     )];
                 }
             };
+            self.cancel_output("Replaced by newer speech");
             self.next_speaker = self.next_speaker.wrapping_add(1);
             self.speaker = Some(Speaker {
                 host: stream,
@@ -655,7 +706,11 @@ impl Bridge {
             return vec![];
         }
         if p["op"] == "cancel" || p["op"] == "error" {
-            self.cancel_output("Minerva cancelled speech");
+            self.cancel_output(if p["op"] == "error" {
+                "Minerva synthesis failed"
+            } else {
+                "Minerva cancelled speech"
+            });
             return vec![error(ErrorCode::TtsFailed, "Speech cancelled")];
         }
         let Some(s) = self.speaker.as_mut() else {
@@ -706,6 +761,9 @@ impl Bridge {
             vec![]
         }
     }
+    pub fn take_barge_frame(&mut self) -> Option<Vec<u8>> {
+        self.barge_frame.take()
+    }
     pub fn speaker_frame(&mut self) -> Option<Vec<u8>> {
         let s = self.speaker.as_mut()?;
         if s.expires.is_some_and(|deadline| Instant::now() >= deadline) {
@@ -734,8 +792,8 @@ impl Bridge {
         frame.extend(s.queue.drain(..count));
         s.last = Some(seq);
         s.sequence = s.sequence.wrapping_add(1);
-        // Reset to the actual send time: scheduling delays never produce catch-up bursts.
-        s.due = Instant::now() + Duration::from_secs_f64(count as f64 / 32000.0);
+        // Absolute media clock: timer jitter cannot skip the next frame deadline.
+        s.due += Duration::from_secs_f64(count as f64 / 32000.0);
         if eos {
             s.eos = Some(seq);
             s.expires = Some(Instant::now() + Duration::from_secs(300));

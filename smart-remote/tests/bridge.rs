@@ -4,6 +4,7 @@ use common::{Device, DEVICE, TOKEN, WAIT};
 use serde_json::{json, Value};
 use smart_remote_plugin::{schema::Schemas, store::TokenStore};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -55,6 +56,9 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
     let drain = tokio::spawn(async move { while let Ok(Some(_)) = logs.next_line().await {} });
     let mut output = BufReader::new(child.stdout.take().unwrap()).lines();
     let (requests, mut seen) = mpsc::channel(64);
+    let hold_end = Arc::new(AtomicBool::new(false));
+    let drop_begin = Arc::new(AtomicBool::new(false));
+    let (hold, drop_request) = (hold_end.clone(), drop_begin.clone());
     let writer = input.clone();
     let host = tokio::spawn(async move {
         while let Some(line) = output.next_line().await.unwrap() {
@@ -63,6 +67,13 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
                 continue;
             }
             let args = &msg["params"]["args"];
+            if msg["params"]["capability"] == "host.audio"
+                && ((args["op"] == "input_end" && hold.load(Ordering::SeqCst))
+                    || (args["op"] == "input_begin" && drop_request.swap(false, Ordering::SeqCst)))
+            {
+                requests.send(msg).await.unwrap();
+                continue;
+            }
             let result = match msg["params"]["capability"].as_str().unwrap() {
                 "host.chat.active" => {
                     json!({"chat_id":"c1","name":"Chat","group":"","group_id":""})
@@ -80,7 +91,8 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
         Arc::new(Schemas::load().unwrap()),
     )
     .await;
-    device.handshake().await;
+    device.send_json(&common::hello(TOKEN, DEVICE)).await;
+    assert_eq!(device.recv_msg().await["type"], "welcome");
     assert_eq!(device.recv_msg().await["chat_id"], "c1");
     assert_eq!(device.recv_msg().await["type"], "draft");
     let registered = next_request(&mut seen, "register").await;
@@ -124,13 +136,31 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
     device
         .expect_silence(std::time::Duration::from_millis(60))
         .await;
+    // A focus switch after transcription retains the bound draft and visibly refuses Send.
+    event(
+        &input,
+        "chat.active_changed",
+        json!({"chat_id":"c2","name":"Other","group":"","group_id":""}),
+    )
+    .await;
+    assert_eq!(device.recv_msg().await["chat_id"], "c2");
+    device.send_json(&json!({"type":"send"})).await;
+    assert_eq!(device.recv_msg().await["code"], "target_changed");
+    event(
+        &input,
+        "chat.active_changed",
+        json!({"chat_id":"c1","name":"Chat","group":"","group_id":""}),
+    )
+    .await;
+    assert_eq!(device.recv_msg().await["chat_id"], "c1");
     // Replacement while the old socket is still live serializes endpoint lifecycle.
     let mut replacement = Device::connect(
         ([127, 0, 0, 1], port).into(),
         Arc::new(Schemas::load().unwrap()),
     )
     .await;
-    replacement.handshake().await;
+    replacement.send_json(&common::hello(TOKEN, DEVICE)).await;
+    assert_eq!(replacement.recv_msg().await["type"], "welcome");
     assert_eq!(replacement.recv_msg().await["chat_id"], "c1");
     assert_eq!(replacement.recv_msg().await["text"], "Hello");
     next_request(&mut seen, "register").await;
@@ -162,16 +192,13 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
         .await;
     assert_eq!(device.recv_msg().await["code"], "tts_failed");
     use base64::{engine::general_purpose::STANDARD, Engine};
-    let source: Vec<u8> = (0..2400)
+    let source: Vec<u8> = (0..36000)
         .flat_map(|n| ((n % 100) as i16).to_le_bytes())
         .collect();
-    event(&input,"voice.audio",json!({"op":"chunk","device_id":endpoint,"stream_id":91,"sequence":0,"pcm":STANDARD.encode(&source)})).await;
-    event(
-        &input,
-        "voice.audio",
-        json!({"op":"end","device_id":endpoint,"stream_id":91,"sequence":1}),
-    )
-    .await;
+    for (sequence, chunk) in source.chunks(6400).enumerate() {
+        event(&input,"voice.audio",json!({"op":"chunk","device_id":endpoint,"stream_id":91,"sequence":sequence,"pcm":STANDARD.encode(chunk)})).await;
+    }
+    event(&input,"voice.audio",json!({"op":"end","device_id":endpoint,"stream_id":91,"sequence":source.chunks(6400).len()})).await;
     let started = tokio::time::Instant::now();
     let (mut count, mut seq) = (0, 0);
     loop {
@@ -183,13 +210,18 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
         assert_eq!(header.seq, seq);
         assert!(frame.len() <= 644);
         count += frame.len() - 4;
+        assert!(count as f64 / 32000.0 - started.elapsed().as_secs_f64() <= 1.0);
         if header.eos {
             break;
         }
         seq += 1;
     }
-    assert_eq!(count, 3200);
-    assert!(started.elapsed() >= std::time::Duration::from_millis(60));
+    assert_eq!(count, 48000);
+    assert!(
+        (1.425..=1.575).contains(&started.elapsed().as_secs_f64()),
+        "pacing elapsed {:?}",
+        started.elapsed()
+    );
     assert!(seen.try_recv().is_err(), "no guessed successful completion");
     device
         .send_json(&json!({"type":"speak_done","stream_id":stream,"ok":true,"last_seq":seq}))
@@ -212,10 +244,98 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
     let abort = device.recv_msg().await;
     assert_eq!(abort["code"], "speak_aborted");
     assert_eq!(abort["reason"], "host_cancel");
+    assert!(abort["message"].as_str().is_some_and(|s| !s.is_empty()));
     assert_eq!(
         next_request(&mut seen, "output_complete").await["params"]["args"]["success"],
         false
     );
+    // Device barge-in uses empty EOS, whereas a synthesis failure uses host abort.
+    event(&input,"voice.audio",json!({"op":"begin","device_id":endpoint,"stream_id":93,"format":"pcm_s16le","sample_rate":16000,"channels":1,"volume":1.0,"origin":{"kind":"explicit"}})).await;
+    let speaking = device.recv_msg().await;
+    device
+        .send_json(&json!({"type":"ptt_down","stream":10}))
+        .await;
+    let common::Event::Binary(eos) = device.recv().await else {
+        panic!("barge EOS")
+    };
+    assert_eq!(eos.len(), 4);
+    let header = smart_remote_plugin::audio::parse_frame(&eos).unwrap().0;
+    assert!(header.eos);
+    assert_eq!(header.stream as u64, speaking["stream"].as_u64().unwrap());
+    assert_eq!(device.recv_msg().await["state"], "recording");
+    next_request(&mut seen, "input_begin").await;
+    device.send_json(&json!({"type":"clear"})).await;
+    assert_eq!(device.recv_msg().await["state"], "idle");
+    assert_eq!(device.recv_msg().await["text"], "");
+    next_request(&mut seen, "clear").await;
+    event(&input,"voice.audio",json!({"op":"begin","device_id":endpoint,"stream_id":94,"format":"pcm_s16le","sample_rate":16000,"channels":1,"volume":1.0,"origin":{"kind":"explicit"}})).await;
+    device.recv_msg().await;
+    event(
+        &input,
+        "voice.audio",
+        json!({"op":"error","device_id":endpoint,"stream_id":94}),
+    )
+    .await;
+    assert_eq!(device.recv_msg().await["code"], "tts_failed");
+    assert_eq!(device.recv_msg().await["reason"], "tts_failed");
+    next_request(&mut seen, "output_complete").await;
+    // A real outstanding STT request outlives the old five-second timeout.
+    hold_end.store(true, Ordering::SeqCst);
+    device
+        .send_json(&json!({"type":"ptt_down","stream":11}))
+        .await;
+    assert_eq!(device.recv_msg().await["state"], "recording");
+    device.send_binary(common::mic(11, 0, true, 0)).await;
+    assert_eq!(device.recv_msg().await["state"], "transcribing");
+    let outstanding = next_request(&mut seen, "input_end").await;
+    tokio::time::sleep(std::time::Duration::from_millis(5200)).await;
+    device
+        .expect_silence(std::time::Duration::from_millis(60))
+        .await;
+    // Reconnect while STT is outstanding; old cancellation completes before new registration.
+    let mut wake = Device::connect(
+        ([127, 0, 0, 1], port).into(),
+        Arc::new(Schemas::load().unwrap()),
+    )
+    .await;
+    wake.send_json(&common::hello(TOKEN, DEVICE)).await;
+    assert_eq!(wake.recv_msg().await["type"], "welcome");
+    assert_eq!(wake.recv_msg().await["chat_id"], "c1");
+    assert_eq!(wake.recv_msg().await["type"], "draft");
+    next_request(&mut seen, "input_cancel").await;
+    next_request(&mut seen, "register").await;
+    assert_eq!(
+        next_request(&mut seen, "availability").await["params"]["args"]["available"],
+        true
+    );
+    device = wake;
+    input.lock().await.write_all(format!("{}\n",json!({"jsonrpc":"2.0","id":outstanding["id"],"result":{"success":true,"result":{}}})).as_bytes()).await.unwrap();
+    // Clear also reaches a terminal state while another STT request is outstanding.
+    device
+        .send_json(&json!({"type":"ptt_down","stream":13}))
+        .await;
+    assert_eq!(device.recv_msg().await["state"], "recording");
+    device.send_binary(common::mic(13, 0, true, 0)).await;
+    assert_eq!(device.recv_msg().await["state"], "transcribing");
+    next_request(&mut seen, "input_end").await;
+    device.send_json(&json!({"type":"clear"})).await;
+    assert_eq!(device.recv_msg().await["state"], "idle");
+    assert_eq!(device.recv_msg().await["text"], "");
+    next_request(&mut seen, "clear").await;
+    hold_end.store(false, Ordering::SeqCst);
+    // A control timeout is surfaced and releases capture; a late reply is not a new session.
+    drop_begin.store(true, Ordering::SeqCst);
+    device
+        .send_json(&json!({"type":"ptt_down","stream":12}))
+        .await;
+    assert_eq!(device.recv_msg().await["state"], "recording");
+    next_request(&mut seen, "input_begin").await;
+    let Some(common::Event::Msg(timeout)) =
+        device.next_event(std::time::Duration::from_secs(6)).await
+    else {
+        panic!("missing timeout")
+    };
+    assert_eq!(timeout["state"], "error");
     // Focus change cancels the actual host session; delayed transcription stays out of the OLED draft.
     device
         .send_json(&json!({"type":"ptt_down","stream":8}))
@@ -253,10 +373,21 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
         Arc::new(Schemas::load().unwrap()),
     )
     .await;
-    reconnect.handshake().await;
+    reconnect.send_json(&common::hello(TOKEN, DEVICE)).await;
+    assert_eq!(reconnect.recv_msg().await["type"], "welcome");
     assert_eq!(reconnect.recv_msg().await["chat_id"], "c1");
     assert_eq!(reconnect.recv_msg().await["type"], "draft");
     next_request(&mut seen, "register").await;
+    assert_eq!(
+        next_request(&mut seen, "availability").await["params"]["args"]["available"],
+        true
+    );
+    drop(reconnect);
+    assert_eq!(
+        next_request(&mut seen, "availability").await["params"]["args"]["available"],
+        false
+    );
+    next_request(&mut seen, "unregister").await;
     host.abort(); // Releases its writer clone; the real host EOF shuts down the plugin.
     let _ = host.await;
     drop(input);
