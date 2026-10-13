@@ -19,6 +19,8 @@ async fn scripted_host_handshake_host_events_and_clean_exit_on_eof() {
         .args([
             "--data-dir",
             data.path().to_str().unwrap(),
+            "--bind",
+            "127.0.0.1",
             "--port",
             "0",
             "--no-mdns",

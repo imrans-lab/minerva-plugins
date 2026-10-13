@@ -17,7 +17,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
-pub const SERVER_NAME: &str = "smart_remote";
+pub const SERVER_NAME: &str = crate::data_dir::PLUGIN_ID;
 const METHOD_NOT_FOUND: i64 = -32601;
 
 #[derive(Debug, Clone, PartialEq)]

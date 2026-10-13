@@ -17,6 +17,7 @@ use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, 
 use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
+use crate::admission::{Admission, Limits, Permit};
 use crate::schema::Schemas;
 use crate::session;
 use crate::store::TokenStore;
@@ -52,6 +53,7 @@ impl Default for Timers {
 pub struct ServerConfig {
     pub bind: SocketAddr,
     pub timers: Timers,
+    pub limits: Limits,
     /// The `welcome.plugin` string.
     pub plugin_name: String,
 }
@@ -61,6 +63,7 @@ impl ServerConfig {
         Self {
             bind,
             timers: Timers::default(),
+            limits: Limits::default(),
             plugin_name: format!("smart-remote {}", env!("CARGO_PKG_VERSION")),
         }
     }
@@ -162,6 +165,7 @@ impl Server {
             shutdown: shutdown.clone(),
             live: Mutex::new(HashMap::new()),
         });
+        let admission = Admission::new(shared.config.limits);
         let next_conn = AtomicU64::new(1);
         let mut sessions = JoinSet::new();
         loop {
@@ -170,7 +174,13 @@ impl Server {
                 accepted = self.listener.accept() => match accepted {
                     Ok((tcp, peer)) => {
                         let conn = next_conn.fetch_add(1, Ordering::Relaxed);
-                        sessions.spawn(serve_connection(tcp, peer, conn, Arc::clone(&shared)));
+                        let Some(permit) = admission.try_admit(peer.ip()) else {
+                            // Over a cap: plain TCP close before any upgrade.
+                            log::warn!("conn {conn} from {peer}: refused, too many unauthenticated connections");
+                            drop(tcp);
+                            continue;
+                        };
+                        sessions.spawn(serve_connection(tcp, peer, conn, permit, Arc::clone(&shared)));
                     }
                     Err(e) => {
                         log::warn!("accept failed: {e}");
@@ -191,7 +201,13 @@ pub(crate) async fn until_shutdown(shutdown: &mut watch::Receiver<bool>) {
     let _ = shutdown.wait_for(|stop| *stop).await;
 }
 
-async fn serve_connection(tcp: TcpStream, peer: SocketAddr, conn: u64, shared: Arc<Shared>) {
+async fn serve_connection(
+    tcp: TcpStream,
+    peer: SocketAddr,
+    conn: u64,
+    permit: Permit,
+    shared: Arc<Shared>,
+) {
     let accepted_at = Instant::now();
     let config = WebSocketConfig::default()
         .max_message_size(Some(WS_MESSAGE_LIMIT))
@@ -221,6 +237,6 @@ async fn serve_connection(tcp: TcpStream, peer: SocketAddr, conn: u64, shared: A
             }
         };
     log::info!("conn {conn} from {peer}: connected");
-    session::run(ws, conn, accepted_at, shared).await;
+    session::run(ws, conn, accepted_at, permit, shared).await;
     log::info!("conn {conn} from {peer}: closed");
 }

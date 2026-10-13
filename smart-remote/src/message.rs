@@ -151,12 +151,21 @@ pub fn decode_device_text(text: &str, schemas: &Schemas) -> Result<DeviceMsg, Re
     contract::check(&value)?;
     // The version is checked before the schema: hello.json pins proto to 1, so
     // schema-first would turn every other version into bad_message, and
-    // protocol.md gives an unsupported proto its own code (4003).
+    // protocol.md gives an unsupported proto its own code (4003). Only a
+    // JSON integer is a version; anything else (2.0, "2") is bad_message.
     if value.get("type").and_then(Value::as_str) == Some("hello") {
-        if let Some(proto) = value.get("proto").and_then(Value::as_u64) {
-            if proto != PROTO_VERSION {
-                return Err(Rejection::ProtoVersion);
+        match value.get("proto") {
+            Some(proto) if proto.is_i64() || proto.is_u64() => {
+                if proto.as_u64() != Some(PROTO_VERSION) {
+                    return Err(Rejection::ProtoVersion);
+                }
             }
+            Some(_) => {
+                return Err(Rejection::BadMessage(
+                    "hello.proto must be an integer".into(),
+                ))
+            }
+            None => {}
         }
     }
     schemas.validate(Direction::DeviceToPlugin, &value)?;
@@ -250,11 +259,24 @@ mod tests {
             decode_device_text(&text, &schemas()),
             Err(Rejection::ProtoVersion)
         );
-        let text = HELLO.replace("\"proto\":1", "\"proto\":\"1\"");
-        assert!(matches!(
-            decode_device_text(&text, &schemas()),
-            Err(Rejection::BadMessage(_))
-        ));
+        for proto in ["-1", "0", "18446744073709551615"] {
+            let text = HELLO.replace("\"proto\":1", &format!("\"proto\":{proto}"));
+            assert_eq!(
+                decode_device_text(&text, &schemas()),
+                Err(Rejection::ProtoVersion),
+                "proto {proto}"
+            );
+        }
+        for proto in ["\"1\"", "\"2\"", "2.0", "1.0", "1e0", "null"] {
+            let text = HELLO.replace("\"proto\":1", &format!("\"proto\":{proto}"));
+            assert!(
+                matches!(
+                    decode_device_text(&text, &schemas()),
+                    Err(Rejection::BadMessage(_))
+                ),
+                "proto {proto}"
+            );
+        }
     }
 
     #[test]

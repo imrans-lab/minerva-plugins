@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
+use smart_remote_plugin::admission::Limits;
 use smart_remote_plugin::audio::{FrameHeader, Kind, HEADER_LEN};
 use smart_remote_plugin::contract::PLUGIN_TEXT_MAX;
 use smart_remote_plugin::message::encode_plugin_value;
@@ -41,6 +42,10 @@ impl Plugin {
     /// A plugin on a free localhost port whose store already pairs DEVICE
     /// with TOKEN.
     pub async fn start(timers: Timers) -> Self {
+        Self::start_with(timers, Limits::default()).await
+    }
+
+    pub async fn start_with(timers: Timers, limits: Limits) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(TokenStore::open(dir.path()).unwrap());
         store
@@ -49,6 +54,7 @@ impl Plugin {
         let schemas = Arc::new(Schemas::load().unwrap());
         let mut config = ServerConfig::new(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
         config.timers = timers;
+        config.limits = limits;
         let server = Server::bind(config, Arc::clone(&store), Arc::clone(&schemas))
             .await
             .unwrap();
@@ -136,6 +142,19 @@ pub struct Device {
 }
 
 impl Device {
+    /// Opens the WebSocket, or returns the upgrade error.
+    pub async fn try_connect(
+        addr: SocketAddr,
+        schemas: Arc<Schemas>,
+    ) -> Result<Self, tokio_tungstenite::tungstenite::Error> {
+        let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}{WS_PATH}")).await?;
+        Ok(Self {
+            ws,
+            schemas,
+            closed: false,
+        })
+    }
+
     pub async fn connect(addr: SocketAddr, schemas: Arc<Schemas>) -> Self {
         let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}{WS_PATH}"))
             .await

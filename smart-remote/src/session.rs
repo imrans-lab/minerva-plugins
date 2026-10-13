@@ -11,6 +11,7 @@ use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::{Bytes, Message};
 use tokio_tungstenite::WebSocketStream;
 
+use crate::admission::Permit;
 use crate::audio::{parse_frame, Kind, MicFrame, MicStream};
 use crate::message::{
     clip, decode_device_text, encode_plugin_msg, DeviceMsg, ErrorCode, Mode, PluginMsg, Rejection,
@@ -67,9 +68,19 @@ impl End {
     }
 }
 
-pub(crate) async fn run(mut ws: Ws, conn: u64, accepted_at: Instant, shared: Arc<Shared>) {
+/// `permit` counts this connection as unauthenticated; it is released once
+/// the hello is accepted or refused, before any close handshake.
+pub(crate) async fn run(
+    mut ws: Ws,
+    conn: u64,
+    accepted_at: Instant,
+    permit: Permit,
+    shared: Arc<Shared>,
+) {
     let deadline = accepted_at + shared.config.timers.hello;
-    let hello = match first_message(&mut ws, deadline, &shared).await {
+    let first = first_message(&mut ws, deadline, &shared).await;
+    drop(permit);
+    let hello = match first {
         Ok(hello) => hello,
         Err(end) => return finish(&mut ws, conn, end, &shared).await,
     };

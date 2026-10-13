@@ -2,16 +2,18 @@
 //! remote on the LAN until Minerva closes stdin.
 //!
 //! Arguments:
-//!   --data-dir <path>  paired-device store location (default: `data/` beside
-//!                      the executable)
+//!   --data-dir <path>  paired-device store location (default: Minerva's
+//!                      per-plugin data root, see `data_dir`)
+//!   --bind <ip>        listen address (default 0.0.0.0, every IPv4 interface)
 //!   --port <n>         WebSocket port (default 47821; 0 picks a free one)
 //!   --no-mdns          do not advertise `_minerva-remote._tcp`
 
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use smart_remote_plugin::data_dir::{self, DataDir};
 use smart_remote_plugin::host::HostLink;
 use smart_remote_plugin::mdns::Advert;
 use smart_remote_plugin::schema::Schemas;
@@ -21,13 +23,15 @@ use tokio::io::BufReader;
 use tokio::sync::watch;
 
 struct Args {
-    data_dir: PathBuf,
+    data_dir: DataDir,
+    bind: IpAddr,
     port: u16,
     mdns: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut data_dir = None;
+    let mut bind = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
     let mut port = DEFAULT_PORT;
     let mut mdns = true;
     let mut args = std::env::args().skip(1);
@@ -36,6 +40,12 @@ fn parse_args() -> Result<Args, String> {
             "--data-dir" => {
                 let path = args.next().filter(|p| !p.is_empty());
                 data_dir = Some(PathBuf::from(path.ok_or("--data-dir requires a path")?));
+            }
+            "--bind" => {
+                let value = args.next().ok_or("--bind requires an IP address")?;
+                bind = value
+                    .parse()
+                    .map_err(|_| format!("--bind: {value:?} is not an IP address"))?;
             }
             "--port" => {
                 let value = args.next().ok_or("--port requires a number")?;
@@ -48,15 +58,19 @@ fn parse_args() -> Result<Args, String> {
         }
     }
     let data_dir = match data_dir {
-        Some(dir) => dir,
-        None => std::env::current_exe()
-            .map_err(|e| format!("cannot locate the executable for the default data dir: {e}"))?
-            .parent()
-            .ok_or("the executable has no parent directory")?
-            .join("data"),
+        Some(dir) => DataDir::Override(dir),
+        None => {
+            let exe = std::env::current_exe()
+                .and_then(std::fs::canonicalize)
+                .map_err(|e| {
+                    format!("cannot locate the executable for the default data dir: {e}")
+                })?;
+            data_dir::resolve(None, &exe)
+        }
     };
     Ok(Args {
         data_dir,
+        bind,
         port,
         mdns,
     })
@@ -79,8 +93,14 @@ async fn main() -> ExitCode {
 async fn run() -> Result<(), String> {
     let args = parse_args()?;
     let schemas = Arc::new(Schemas::load().map_err(|e| e.to_string())?);
-    let store = Arc::new(TokenStore::open(&args.data_dir).map_err(|e| e.to_string())?);
-    let config = ServerConfig::new(SocketAddr::from((Ipv4Addr::UNSPECIFIED, args.port)));
+    if let DataDir::BesideExecutable(dir) = &args.data_dir {
+        log::warn!(
+            "not installed under a Minerva plugins directory; pairings are kept in {} and are lost if this directory is replaced",
+            dir.display()
+        );
+    }
+    let store = Arc::new(TokenStore::open(args.data_dir.path()).map_err(|e| e.to_string())?);
+    let config = ServerConfig::new(SocketAddr::from((args.bind, args.port)));
     let server = Server::bind(config, store, schemas)
         .await
         .map_err(|e| e.to_string())?;
@@ -93,9 +113,17 @@ async fn run() -> Result<(), String> {
     // The device tries its provisioned address first, so a LAN without
     // working multicast degrades to that rather than stopping the plugin.
     let advert = if args.mdns {
-        Advert::start(addr.port())
-            .map_err(|e| log::error!("{e}; continuing without the mDNS advert"))
-            .ok()
+        match Advert::start(addr) {
+            Ok(Some(advert)) => Some(advert),
+            Ok(None) => {
+                log::info!("loopback listener; no mDNS advert");
+                None
+            }
+            Err(e) => {
+                log::error!("{e}; continuing without the mDNS advert");
+                None
+            }
+        }
     } else {
         None
     };

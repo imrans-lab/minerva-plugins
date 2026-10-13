@@ -3,8 +3,10 @@
 //!
 //! Design: Docket `smart-remote:01a12de97992`.
 
+pub mod admission;
 pub mod audio;
 pub mod contract;
+pub mod data_dir;
 pub mod host;
 pub mod mdns;
 pub mod message;

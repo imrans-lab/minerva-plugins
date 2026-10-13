@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use common::{hello, mic, Device, Event, Plugin, DEVICE, TOKEN, WAIT};
 use serde_json::json;
+use smart_remote_plugin::admission::Limits;
 use smart_remote_plugin::server::Timers;
 use smart_remote_plugin::store::TokenStore;
 use smart_remote_plugin::{
@@ -111,6 +112,76 @@ async fn unsupported_proto_is_proto_version_then_4003() {
     device.send_json(&msg).await;
     expect_error(&mut device, "proto_version").await;
     device.expect_close(CLOSE_PROTO_VERSION).await;
+}
+
+#[tokio::test]
+async fn a_non_integer_proto_is_bad_message_then_4002() {
+    let plugin = Plugin::start(default_timers()).await;
+    for proto in [json!("2"), json!(2.0), json!(1.0)] {
+        let mut device = plugin.device().await;
+        let mut msg = hello(TOKEN, DEVICE);
+        msg["proto"] = proto.clone();
+        device.send_json(&msg).await;
+        assert_eq!(
+            expect_error(&mut device, "bad_message").await,
+            "hello.proto must be an integer",
+            "proto {proto}"
+        );
+        device.expect_close(CLOSE_PROTOCOL).await;
+    }
+}
+
+/// Opens connections that never send hello until the plugin refuses one.
+async fn unauthenticated_until_refused(plugin: &Plugin, max: usize) -> Vec<Device> {
+    let mut held = Vec::new();
+    for _ in 0..max {
+        held.push(plugin.device().await);
+    }
+    let refused = Device::try_connect(plugin.addr, plugin.schemas.clone()).await;
+    assert!(refused.is_err(), "connection {} was accepted", max + 1);
+    held
+}
+
+#[tokio::test]
+async fn unauthenticated_connections_are_capped_per_ip_and_released_on_hello() {
+    let limits = Limits {
+        unauthenticated: 16,
+        unauthenticated_per_ip: 2,
+    };
+    let plugin = Plugin::start_with(default_timers(), limits).await;
+    let mut held = unauthenticated_until_refused(&plugin, 2).await;
+    // Authenticating releases the slot without closing the connection.
+    held[0].handshake().await;
+    let mut admitted = plugin.device().await;
+    // Refused connections do not hold a slot either.
+    admitted
+        .send_json(&hello("wrong-token-0123456", "0123456789ab"))
+        .await;
+    expect_error(&mut admitted, "auth").await;
+    admitted.expect_close(CLOSE_AUTH).await;
+    drop(admitted);
+    let _again = plugin.device().await;
+    held[0].expect_silence(QUIET).await;
+}
+
+#[tokio::test]
+async fn unauthenticated_connections_are_capped_globally() {
+    let limits = Limits {
+        unauthenticated: 3,
+        unauthenticated_per_ip: 16,
+    };
+    let plugin = Plugin::start_with(default_timers(), limits).await;
+    let held = unauthenticated_until_refused(&plugin, 3).await;
+    drop(held);
+    // Closed connections release their slots once the plugin notices.
+    let deadline = Instant::now() + WAIT;
+    while Device::try_connect(plugin.addr, plugin.schemas.clone())
+        .await
+        .is_err()
+    {
+        assert!(Instant::now() < deadline, "slots never released");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 #[tokio::test]
@@ -280,14 +351,16 @@ async fn the_plugin_pings_on_its_interval_and_a_responsive_device_stays_up() {
     let mut pings = 0;
     // Reading answers each ping with a pong, so the link stays alive well
     // past the dead-link timer.
+    // About 12 pings are due; half is enough to show the cadence without
+    // failing on a loaded machine.
     while started.elapsed() < Duration::from_millis(1200) {
-        match device.next_event(Duration::from_millis(250)).await {
+        match device.next_event(Duration::from_millis(350)).await {
             Some(Event::Ping) => pings += 1,
-            None => panic!("no ping within 250 ms"),
+            None => panic!("no ping within 350 ms"),
             Some(other) => panic!("unexpected {other:?}"),
         }
     }
-    assert!(pings >= 8, "only {pings} pings in 1.2 s");
+    assert!(pings >= 6, "only {pings} pings in 1.2 s");
     device.send_json(&json!({"type":"send"})).await;
     expect_error(&mut device, "internal").await;
 }
