@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smart-remote.local/protocol/v1/device/picker_open.json",
+  "title": "picker_open",
+  "description": "Long press of the send/confirm button: request the group list.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "const": "picker_open"
+    }
+  },
+  "required": [
+    "type"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,19 @@
+{"dir":"d2p","msg":{"type":"hello","proto":1,"token":"3f9a1c0e7b2d4a6f","device_id":"a4cf12b03e5d","fw":"0.1.0"}}
+{"dir":"p2d","msg":{"type":"welcome","proto":1,"plugin":"smart-remote 0.1.0"}}
+{"dir":"p2d","msg":{"type":"target","chat_id":"chat-17","name":"Firmware notes","group":"Smart remote","group_id":"grp-3"}}
+{"dir":"d2p","msg":{"type":"ptt_down","stream":7}}
+{"dir":"p2d","msg":{"type":"mic_state","state":"recording"}}
+{"dir":"d2p","audio":"01070000","bytes":3200}
+{"dir":"d2p","audio":"01070100","bytes":3200}
+{"dir":"d2p","audio":"81070200","bytes":1280}
+{"dir":"d2p","msg":{"type":"ptt_up","stream":7}}
+{"dir":"p2d","msg":{"type":"mic_state","state":"transcribing"}}
+{"dir":"p2d","msg":{"type":"draft","text":"What's the battery voltage on the bench?"}}
+{"dir":"p2d","msg":{"type":"mic_state","state":"idle"}}
+{"dir":"d2p","msg":{"type":"send"}}
+{"dir":"p2d","msg":{"type":"draft","text":""}}
+{"dir":"p2d","msg":{"type":"status","text":"Sent"}}
+{"dir":"p2d","msg":{"type":"reply","chat_id":"chat-17","text":"About 5.1 volts on the last reading.","outcome":"ok"}}
+{"dir":"p2d","msg":{"type":"speak","stream":2,"chat_id":"chat-17"}}
+{"dir":"p2d","audio":"02020000","bytes":4096}
+{"dir":"p2d","audio":"82020100","bytes":0}

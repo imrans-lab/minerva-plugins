@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smart-remote.local/protocol/v1/device/ptt_down.json",
+  "title": "ptt_down",
+  "description": "PTT pressed; mic frames on this stream follow.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "const": "ptt_down"
+    },
+    "stream": {
+      "$ref": "../common.json#/$defs/stream"
+    }
+  },
+  "required": [
+    "type",
+    "stream"
+  ],
+  "additionalProperties": false
+}

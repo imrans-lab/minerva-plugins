@@ -1,0 +1,61 @@
+{
+  "id": "smart_remote",
+  "name": "Smart Remote",
+  "version": "0.1.0",
+  "host_api_version": "1",
+  "release_targets": [
+    "linux-x86_64",
+    "macos-arm64",
+    "macos-amd64",
+    "windows-x86_64"
+  ],
+  "backend": {
+    "transport": "stdio",
+    "entrypoint": "./smart-remote-plugin",
+    "args": []
+  },
+  "ui": {
+    "panels": [],
+    "ipc_messages": []
+  },
+  "editor_items": [],
+  "events": [],
+  "tools": [],
+  "permissions": {
+    "host_capabilities": [],
+    "host_events": [
+      "chat.turn_completed",
+      "chat.directory_changed"
+    ],
+    "network": {
+      "mode": "unrestricted"
+    }
+  },
+  "autostart": false,
+  "auto_reload": false,
+  "description": "Bridge a Smart Remote V2 to Minerva over the local network using the versioned remote protocol. Requires a compatible remote, Minerva, and a paired device; secure BLE setup and voice endpoint integration are developed separately.",
+  "price": {
+    "amount_minor": 0,
+    "currency": "USD"
+  },
+  "setup": {
+    "requires": [
+      {
+        "tool": "cargo",
+        "min": "1.93"
+      }
+    ],
+    "steps": [
+      {
+        "type": "cargo_build",
+        "manifest_dir": ".",
+        "artifact": "target/release/smart-remote-plugin"
+      },
+      {
+        "type": "copy",
+        "from": "target/release/smart-remote-plugin",
+        "to": "smart-remote-plugin"
+      }
+    ]
+  }
+}

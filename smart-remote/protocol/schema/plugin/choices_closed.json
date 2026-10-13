@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smart-remote.local/protocol/v1/plugin/choices_closed.json",
+  "title": "choices_closed",
+  "description": "The open choices list is finished.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "const": "choices_closed"
+    },
+    "choice_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "reason": {
+      "enum": [
+        "picked",
+        "timeout",
+        "cancelled",
+        "replaced"
+      ]
+    }
+  },
+  "required": [
+    "type",
+    "choice_id",
+    "reason"
+  ],
+  "additionalProperties": false
+}

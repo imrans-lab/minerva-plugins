@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smart-remote.local/protocol/v1/plugin/reply.json",
+  "title": "reply",
+  "description": "Assistant reply to a turn this remote sent.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "const": "reply"
+    },
+    "chat_id": {
+      "$ref": "../common.json#/$defs/chat_id"
+    },
+    "text": {
+      "$ref": "../common.json#/$defs/long_text"
+    },
+    "outcome": {
+      "enum": [
+        "ok",
+        "error",
+        "cancelled"
+      ]
+    }
+  },
+  "required": [
+    "type",
+    "chat_id",
+    "text",
+    "outcome"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smart-remote.local/protocol/v1/device/send.json",
+  "title": "send",
+  "description": "Submit the draft to the locked target. Never sent for a long press.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "const": "send"
+    }
+  },
+  "required": [
+    "type"
+  ],
+  "additionalProperties": false
+}

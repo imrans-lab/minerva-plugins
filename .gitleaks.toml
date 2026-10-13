@@ -17,3 +17,21 @@ condition = "AND"
 regexTarget = "match"
 paths = ['''^docs/plugins\.dct$''']
 regexes = ['''secret-scan35708739383, corpus-policy35708739337''']
+
+# Remote examples and Rust tests replay this fixed, synthetic hello token;
+# tests/common creates an isolated paired store with it, never a live store.
+[[rules.allowlists]]
+description = "Exact synthetic remote protocol replay token"
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^smart-remote/protocol/examples/(?:invalid/)?[A-Za-z0-9_]+\.jsonl$''', '''^smart-remote/src/message\.rs$''']
+regexes = ['''^3f9a1c0e7b2d4a6f$''']
+
+# The rejected unknown device ID follows a token argument in these assertions;
+# the generic credential pattern captures the fixed device ID, not a secret.
+[[rules.allowlists]]
+description = "Exact remote rejection-test device ID"
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^smart-remote/tests/session\.rs$''']
+regexes = ['''^0123456789ab$''']

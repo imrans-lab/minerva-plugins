@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smart-remote.local/protocol/v1/plugin/welcome.json",
+  "title": "welcome",
+  "description": "Handshake accepted.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "const": "welcome"
+    },
+    "proto": {
+      "const": 1
+    },
+    "plugin": {
+      "type": "string",
+      "maxLength": 40
+    }
+  },
+  "required": [
+    "type",
+    "proto",
+    "plugin"
+  ],
+  "additionalProperties": false
+}

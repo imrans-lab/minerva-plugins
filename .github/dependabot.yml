@@ -33,6 +33,7 @@ updates:
       - /drive
       - /movie-gen
       - /scansort
+      - /smart-remote
       - /shared/rust/minerva-media-client
     schedule:
       interval: weekly
