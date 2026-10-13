@@ -5,6 +5,14 @@
 
 pub mod audio;
 pub mod contract;
+pub mod mdns;
 pub mod message;
 pub mod schema;
+pub mod server;
+mod session;
 pub mod store;
+
+pub use session::{
+    AUTH_MESSAGE, CLOSE_AUTH, CLOSE_GOING_AWAY, CLOSE_NORMAL, CLOSE_PROTOCOL, CLOSE_PROTO_VERSION,
+    CLOSE_REPLACED, NOT_IMPLEMENTED,
+};
