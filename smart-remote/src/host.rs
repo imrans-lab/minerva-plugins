@@ -8,12 +8,13 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde_json::{json, Value};
+use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
@@ -28,6 +29,8 @@ pub enum HostError {
     Rpc(Value),
     /// stdin closed before the reply arrived.
     Closed,
+    Overloaded,
+    Timeout,
 }
 
 impl fmt::Display for HostError {
@@ -36,6 +39,8 @@ impl fmt::Display for HostError {
             Self::Denied(m) => write!(f, "capability denied: {m}"),
             Self::Rpc(e) => write!(f, "capability error: {e}"),
             Self::Closed => f.write_str("host link closed"),
+            Self::Overloaded => f.write_str("host link queue is full"),
+            Self::Timeout => f.write_str("host capability timed out"),
         }
     }
 }
@@ -44,10 +49,18 @@ impl std::error::Error for HostError {}
 
 type Pending = Mutex<HashMap<String, oneshot::Sender<Result<Value, HostError>>>>;
 
+#[derive(Debug, Clone)]
+pub struct HostEvent {
+    pub name: String,
+    pub payload: Value,
+}
+
 pub struct HostLink {
-    out: mpsc::UnboundedSender<String>,
+    out: mpsc::Sender<String>,
+    events: broadcast::Sender<HostEvent>,
     pending: Pending,
     next_id: AtomicU64,
+    closed: AtomicBool,
 }
 
 pub struct HostTasks {
@@ -63,11 +76,14 @@ impl HostLink {
         R: AsyncBufRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
-        let (out, rx) = mpsc::unbounded_channel();
+        let (out, rx) = mpsc::channel(64);
+        let (events, _) = broadcast::channel(128);
         let link = Arc::new(Self {
             out,
+            events,
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
+            closed: AtomicBool::new(false),
         });
         let writer = tokio::spawn(write_lines(rx, output));
         let reader = tokio::spawn(read_lines(input, Arc::clone(&link)));
@@ -77,18 +93,32 @@ impl HostLink {
     /// Calls a host capability and waits for its reply, unwrapping the
     /// broker's `{success, result | error_message}` envelope.
     pub async fn call_capability(&self, capability: &str, args: Value) -> Result<Value, HostError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(HostError::Closed);
+        }
         let id = format!("cap-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
         let (tx, rx) = oneshot::channel();
         // Registered before the request is written so the reply cannot
         // arrive first.
         self.lock_pending().insert(id.clone(), tx);
-        self.write(&json!({
+        let request = PendingRequest {
+            link: self,
+            id: id.clone(),
+        };
+        if !self.write(&json!({
             "jsonrpc": "2.0",
             "id": id,
             "method": "minerva/capability",
             "params": {"capability": capability, "args": args},
-        }));
-        rx.await.unwrap_or(Err(HostError::Closed))
+        })) {
+            return Err(HostError::Overloaded);
+        }
+        let result = tokio::time::timeout(Duration::from_secs(5), rx)
+            .await
+            .map_err(|_| HostError::Timeout)?
+            .unwrap_or(Err(HostError::Closed));
+        drop(request);
+        result
     }
 
     pub fn emit_event(&self, event: &str, payload: Value) {
@@ -99,10 +129,18 @@ impl HostLink {
         }));
     }
 
-    fn write(&self, message: &Value) {
+    pub fn subscribe(&self) -> broadcast::Receiver<HostEvent> {
+        self.events.subscribe()
+    }
+
+    fn write(&self, message: &Value) -> bool {
         // Fails only after the writer task ended at shutdown; nothing can
         // reach the host then anyway.
-        let _ = self.out.send(message.to_string());
+        let line = message.to_string();
+        if line.len() > 64 * 1024 {
+            return false;
+        }
+        self.out.try_send(line).is_ok()
     }
 
     fn lock_pending(
@@ -120,6 +158,16 @@ impl HostLink {
         let id = msg.get("id").filter(|id| !id.is_null()).cloned();
         match (msg.get("method").and_then(Value::as_str), id) {
             (Some(method), Some(id)) => self.on_request(method, id),
+            (Some("minerva/host_event"), None) => {
+                if let Some(p) = msg.get("params") {
+                    if let Some(name) = p.get("event").and_then(Value::as_str) {
+                        let _ = self.events.send(HostEvent {
+                            name: name.into(),
+                            payload: p.get("payload").cloned().unwrap_or(Value::Null),
+                        });
+                    }
+                }
+            }
             (Some(method), None) => on_notification(method, msg.get("params")),
             (None, Some(id)) => self.on_reply(&id, &msg),
             (None, None) => log::warn!("host sent JSON-RPC with neither method nor id; ignored"),
@@ -216,6 +264,16 @@ fn id_key(id: &Value) -> Option<String> {
     }
 }
 
+struct PendingRequest<'a> {
+    link: &'a HostLink,
+    id: String,
+}
+impl Drop for PendingRequest<'_> {
+    fn drop(&mut self) {
+        self.link.lock_pending().remove(&self.id);
+    }
+}
+
 async fn read_lines<R: AsyncBufRead + Unpin>(input: R, link: Arc<HostLink>) {
     let mut lines = input.lines();
     loop {
@@ -236,13 +294,11 @@ async fn read_lines<R: AsyncBufRead + Unpin>(input: R, link: Arc<HostLink>) {
             }
         }
     }
+    link.closed.store(true, Ordering::Release);
     link.fail_pending();
 }
 
-async fn write_lines<W: AsyncWrite + Unpin>(
-    mut rx: mpsc::UnboundedReceiver<String>,
-    mut output: W,
-) {
+async fn write_lines<W: AsyncWrite + Unpin>(mut rx: mpsc::Receiver<String>, mut output: W) {
     while let Some(mut line) = rx.recv().await {
         line.push('\n');
         if let Err(e) = output.write_all(line.as_bytes()).await {

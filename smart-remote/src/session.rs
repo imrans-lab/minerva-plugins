@@ -13,11 +13,14 @@ use tokio_tungstenite::WebSocketStream;
 
 use crate::admission::Permit;
 use crate::audio::{parse_frame, Kind, MicFrame, MicStream};
+use crate::bridge::Bridge;
+use crate::host::HostEvent;
 use crate::message::{
     clip, decode_device_text, encode_plugin_msg, DeviceMsg, ErrorCode, Mode, PluginMsg, Rejection,
 };
 use crate::server::{until_shutdown, Shared};
 use crate::store::Verdict;
+use tokio::sync::{broadcast, mpsc};
 
 type Ws = WebSocketStream<TcpStream>;
 
@@ -118,7 +121,7 @@ pub(crate) async fn run(
     let end = if send(&mut ws, &welcome, &shared).await
         && send(&mut ws, &PluginMsg::no_target(), &shared).await
     {
-        serve(&mut ws, &mut replaced, &shared).await
+        serve(&mut ws, &mut replaced, &shared, &device_id, conn).await
     } else {
         End::Gone
     };
@@ -162,48 +165,127 @@ async fn serve(
     ws: &mut Ws,
     replaced: &mut tokio::sync::oneshot::Receiver<()>,
     shared: &Shared,
+    device_id: &str,
+    conn: u64,
 ) -> End {
+    let (mut bridge, mut events, mut updates) = match &shared.host {
+        Some(host) => {
+            let (b, e, u) = Bridge::new(host.clone(), device_id);
+            (Some(b), Some(e), Some(u))
+        }
+        None => (None, None, None),
+    };
+    let mut tick = tokio::time::interval(Duration::from_millis(20));
+    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let timers = shared.config.timers;
     let mut shutdown = shared.shutdown.clone();
     let mut mic = MicStream::default();
     let mut last_rx = Instant::now();
     let mut ping = interval_at(Instant::now() + timers.ping_every, timers.ping_every);
     ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    loop {
-        let reply = tokio::select! {
-            _ = &mut *replaced => return End::Close { code: CLOSE_REPLACED, error: None },
-            () = until_shutdown(&mut shutdown) => return going_away(),
+    let end = loop {
+        let replies = tokio::select! {
+            _ = &mut *replaced => break End::Close { code: CLOSE_REPLACED, error: None },
+            () = until_shutdown(&mut shutdown) => break going_away(),
             () = sleep_until(last_rx + timers.dead_after) => {
                 log::info!("no frame for {:?}; dropping the dead link", timers.dead_after);
-                return End::Gone;
+                break End::Gone;
             }
             _ = ping.tick() => {
                 if ws.send(Message::Ping(Bytes::new())).await.is_err() {
-                    return End::Gone;
+                    break End::Gone;
                 }
                 continue;
             }
+            event = receive_event(&mut events) => {
+                match event {
+                    Ok(event) => bridge.as_mut().map_or_else(Vec::new, |b| b.event(event)),
+                    Err(_) => { if let Some(b) = &mut bridge { b.cancel_mic(); } vec![PluginMsg::error(ErrorCode::Internal, "Host event queue overflow")] },
+                }
+            }
+            update = receive_update(&mut updates) => {
+                if let (Some(b), Some(update)) = (&mut bridge, update) {
+                    let mut replies = b.update(update);
+                    for event in b.take_early() { replies.extend(b.event(event)); }
+                    replies
+                } else { vec![] }
+            }
+            _ = tick.tick() => bridge.as_mut().map_or_else(Vec::new, Bridge::tick),
             msg = ws.next() => {
                 last_rx = Instant::now();
                 match msg {
-                    Some(Ok(Message::Text(text))) => match on_text(text.as_str(), &mut mic, shared) {
-                        Ok(reply) => reply,
-                        Err(end) => return end,
+                    Some(Ok(Message::Text(text))) => {
+                        if let Some(b) = &mut bridge {
+                            match decode_device_text(text.as_str(), &shared.schemas) {
+                                Ok(DeviceMsg::Hello { .. }) => break repeated_hello(),
+                                Ok(DeviceMsg::Mode { mode: Mode::Mouse }) => break End::Close { code: CLOSE_NORMAL, error: None },
+                                Ok(DeviceMsg::Mode { mode: Mode::Voice }) => vec![],
+                                Ok(msg) => {
+                                    let stream = match &msg { DeviceMsg::PttDown { stream } | DeviceMsg::PttUp { stream } => Some(*stream), _ => None };
+                                    let up = matches!(msg, DeviceMsg::PttUp { .. });
+                                    let replies = b.on_text(msg);
+                                    if let Some(stream) = stream {
+                                        if up { mic.end(stream); }
+                                        else if replies.iter().any(|r| matches!(r, PluginMsg::MicState { state, .. } if state == "recording")) { mic.announce(stream); }
+                                    }
+                                    replies
+                                }
+                                Err(rejection) => break End::from_rejection(rejection),
+                            }
+                        } else {
+                            match on_text(text.as_str(), &mut mic, shared) { Ok(reply) => reply.into_iter().collect(), Err(end) => break end }
+                        }
                     },
-                    Some(Ok(Message::Binary(frame))) => match on_binary(&frame, &mut mic) {
-                        Ok(reply) => reply,
-                        Err(end) => return end,
+                    Some(Ok(Message::Binary(frame))) => {
+                        let parsed = parse_frame(&frame);
+                        match on_binary(&frame, &mut mic) {
+                            Ok(reply) => {
+                                let mut replies: Vec<_> = reply.into_iter().collect();
+                                if let (Some(b), Ok((header, pcm))) = (&mut bridge, parsed) {
+                                    // The input worker validates its announced stream too; other streams are never forwarded.
+                                    replies.extend(b.pcm(header.stream, pcm, header.eos));
+                                }
+                                replies
+                            },
+                            Err(end) => break end,
+                        }
                     },
-                    Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => None,
-                    Some(Ok(Message::Close(_)) | Err(_)) | None => return End::Gone,
+                    Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => vec![],
+                    Some(Ok(Message::Close(_)) | Err(_)) | None => break End::Gone,
                 }
             }
         };
-        if let Some(reply) = reply {
+        let mut failed = false;
+        for reply in replies {
             if !send(ws, &reply, shared).await {
-                return End::Gone;
+                failed = true;
+                break;
             }
         }
+        if failed {
+            break End::Gone;
+        }
+    };
+    if let Some(b) = &mut bridge {
+        b.close(shared.is_current(device_id, conn)).await;
+    }
+    end
+}
+
+async fn receive_event(
+    events: &mut Option<broadcast::Receiver<HostEvent>>,
+) -> Result<HostEvent, broadcast::error::RecvError> {
+    match events {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+async fn receive_update(
+    updates: &mut Option<mpsc::Receiver<crate::bridge::Update>>,
+) -> Option<crate::bridge::Update> {
+    match updates {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
     }
 }
 

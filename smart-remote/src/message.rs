@@ -80,6 +80,10 @@ pub enum ErrorCode {
     ProtoVersion,
     BadMessage,
     AudioGap,
+    Busy,
+    NoTarget,
+    SendFailed,
+    TtsFailed,
     Internal,
 }
 
@@ -95,6 +99,19 @@ pub enum PluginMsg {
         name: String,
         group: String,
         group_id: Option<String>,
+    },
+    Draft {
+        text: String,
+    },
+    MicState {
+        state: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+    Reply {
+        chat_id: String,
+        text: String,
+        outcome: String,
     },
     Error {
         code: ErrorCode,

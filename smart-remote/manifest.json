@@ -22,10 +22,16 @@
   "events": [],
   "tools": [],
   "permissions": {
-    "host_capabilities": [],
+    "host_capabilities": [
+      "host.audio",
+      "host.chat.active",
+      "host.chat.input"
+    ],
     "host_events": [
+      "chat.active_changed",
       "chat.turn_completed",
-      "chat.directory_changed"
+      "voice.audio",
+      "voice.transcript"
     ],
     "network": {
       "mode": "unrestricted"

@@ -101,9 +101,12 @@ async fn run() -> Result<(), String> {
     }
     let store = Arc::new(TokenStore::open(args.data_dir.path()).map_err(|e| e.to_string())?);
     let config = ServerConfig::new(SocketAddr::from((args.bind, args.port)));
+    let (link, host_tasks) =
+        HostLink::start(BufReader::new(tokio::io::stdin()), tokio::io::stdout());
     let server = Server::bind(config, store, schemas)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+        .with_host(Arc::clone(&link));
     let addr = server.local_addr().map_err(|e| e.to_string())?;
     log::info!(
         "listening on ws://{addr}{}",
@@ -128,8 +131,6 @@ async fn run() -> Result<(), String> {
         None
     };
 
-    let (link, host_tasks) =
-        HostLink::start(BufReader::new(tokio::io::stdin()), tokio::io::stdout());
     let (stop, stopped) = watch::channel(false);
     let serving = tokio::spawn(server.run(stopped));
 

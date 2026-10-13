@@ -18,6 +18,7 @@ use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 use crate::admission::{Admission, Limits, Permit};
+use crate::host::HostLink;
 use crate::schema::Schemas;
 use crate::session;
 use crate::store::TokenStore;
@@ -93,6 +94,7 @@ pub(crate) struct Shared {
     pub store: Arc<TokenStore>,
     pub schemas: Arc<Schemas>,
     pub shutdown: watch::Receiver<bool>,
+    pub host: Option<Arc<HostLink>>,
     live: Mutex<HashMap<String, (u64, oneshot::Sender<()>)>>,
 }
 
@@ -108,6 +110,12 @@ impl Shared {
             let _ = replaced.send(());
         }
         rx
+    }
+
+    pub fn is_current(&self, device_id: &str, conn: u64) -> bool {
+        self.lock_live()
+            .get(device_id)
+            .is_some_and(|(id, _)| *id == conn)
     }
 
     pub fn unregister(&self, device_id: &str, conn: u64) {
@@ -129,6 +137,7 @@ pub struct Server {
     config: ServerConfig,
     store: Arc<TokenStore>,
     schemas: Arc<Schemas>,
+    host: Option<Arc<HostLink>>,
 }
 
 impl Server {
@@ -148,7 +157,13 @@ impl Server {
             config,
             store,
             schemas,
+            host: None,
         })
+    }
+
+    pub fn with_host(mut self, host: Arc<HostLink>) -> Self {
+        self.host = Some(host);
+        self
     }
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -163,6 +178,7 @@ impl Server {
             store: self.store,
             schemas: self.schemas,
             shutdown: shutdown.clone(),
+            host: self.host,
             live: Mutex::new(HashMap::new()),
         });
         let admission = Admission::new(shared.config.limits);
