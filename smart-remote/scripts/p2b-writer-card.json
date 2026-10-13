@@ -1,0 +1,79 @@
+{
+  "base": "d52384a8da94b36b22fcb0ffc1d3c69f145a199b",
+  "allowed_paths": [
+    "smart-remote/README.md",
+    "smart-remote/manifest.json",
+    "smart-remote/protocol/protocol.md",
+    "smart-remote/protocol/examples/speech_log.jsonl",
+    "smart-remote/protocol/examples/invalid/log_page_limit.jsonl",
+    "smart-remote/scripts/writer_self_check.py",
+    "smart-remote/scripts/check-writer.py",
+    "smart-remote/scripts/p2b-writer-card.json",
+    "smart-remote/scripts/p2b-exits.md",
+    "smart-remote/src/lib.rs",
+    "smart-remote/src/bridge.rs",
+    "smart-remote/src/message.rs",
+    "smart-remote/src/session.rs",
+    "smart-remote/src/speech_log.rs",
+    "smart-remote/tests/bridge.rs",
+    "smart-remote/tests/examples.rs",
+    "smart-remote/tests/speech_log.rs",
+    "smart-remote/protocol/schema/device/log_page.json",
+    "smart-remote/protocol/schema/device/log_play.json",
+    "smart-remote/protocol/schema/device/log_delete.json",
+    "smart-remote/protocol/schema/device/log_delete_all.json",
+    "smart-remote/protocol/schema/device/replay_last.json",
+    "smart-remote/protocol/schema/plugin/missed.json",
+    "smart-remote/protocol/schema/plugin/log_items.json"
+  ],
+  "production_prefixes": [
+    "smart-remote/src/",
+    "smart-remote/manifest.json"
+  ],
+  "production_cap": 400,
+  "failure_patterns": [
+    "log::(?:warn|error)!",
+    "Err\\(",
+    "PluginMsg::error"
+  ],
+  "failure_disposition": "All new log failures become visible Internal OLED errors; permission failures close/unregister endpoint. A closed transport cancels request-local waits; no destructive retry or synthetic success. HostLink owns bounded RPC errors. Some records unavailable is surfaced without private path details. Mutation refresh failure never proves mutation outcome.",
+  "persisted_setting_owners": {
+    "pairing_settings": "smart-remote/src/store.rs::TokenStore (unchanged sole persisted owner)",
+    "speech_log": "Minerva SpeechLog; relay holds only the current request page and counts",
+    "draft": "existing per-device process memory; unchanged owner"
+  },
+  "exit_table": "smart-remote/scripts/p2b-exits.md",
+  "exit_tests": {
+    "Log wait/Cancel": [
+      "smart-remote/tests/speech_log.rs::authoritative_log_controls_cross_real_stdio_and_lan"
+    ],
+    "Log wait/Timeout": [
+      "smart-remote/tests/speech_log.rs::authoritative_log_controls_cross_real_stdio_and_lan"
+    ],
+    "Log wait/Disconnect/reconnect": [
+      "smart-remote/tests/speech_log.rs::authoritative_log_controls_cross_real_stdio_and_lan"
+    ],
+    "Log wait/Revoke": [
+      "smart-remote/tests/speech_log.rs::authoritative_log_controls_cross_real_stdio_and_lan"
+    ],
+    "Log wait/Host EOF": [
+      "smart-remote/tests/speech_log.rs::authoritative_log_controls_cross_real_stdio_and_lan"
+    ],
+    "Mutation/Cancel": [
+      "smart-remote/tests/speech_log.rs::authoritative_log_controls_cross_real_stdio_and_lan"
+    ],
+    "Mutation/Timeout": [
+      "smart-remote/tests/speech_log.rs::authoritative_log_controls_cross_real_stdio_and_lan"
+    ],
+    "Mutation/Disconnect/reconnect": [
+      "smart-remote/tests/speech_log.rs::authoritative_log_controls_cross_real_stdio_and_lan"
+    ],
+    "Mutation/Revoke": [
+      "smart-remote/tests/speech_log.rs::authoritative_log_controls_cross_real_stdio_and_lan"
+    ],
+    "Mutation/Host EOF": [
+      "smart-remote/tests/speech_log.rs::authoritative_log_controls_cross_real_stdio_and_lan"
+    ]
+  },
+  "exit_test_limits": "Named fixture uses actual plugin binary/stdin/LAN with scripted host. Page and mutation cancel/revoke/timeout are independently exercised; pending mutation EOF stops the real binary. Physical gesture/store/playback and actual service remain Minerva/F2/I gates."
+}

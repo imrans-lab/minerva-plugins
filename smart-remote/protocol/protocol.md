@@ -107,3 +107,11 @@ Every binary frame is a 4-byte header followed by PCM:
 | 4002 | protocol violation |
 | 4003 | unsupported protocol version |
 | 4004 | replaced by a newer connection from the same device |
+
+## Minerva speech log
+
+Minerva owns the persistent, newest-first speech log. Device controls are `log_page{offset,limit}` (limit1..10), `log_play{log_id}`, `log_delete{log_id}`, `log_delete_all{}` and `replay_last{}`. IDs are opaque and echoed exactly. The device sends delete only after its explicit confirmation (delete-all requires the firmware’s confirmed gesture); the plugin forwards once, never automatically retries an action, and refreshes the page/count after a successful deletion. Delete-all calls `host.speech_log` with `op:"delete_all",confirmed:true`; Minerva applies the mutation only to this plugin’s scoped records and cancels their current playback. No automatic deletion occurs.
+
+The plugin sends `missed{unheard}` on authenticated hello and the granted `speech_log.changed` event. `log_items{offset,total,unheard,items:[{log_id,age_s,summary,heard}]}` contains only the current bounded page; summaries have at most21 Unicode characters and age is nonnegative seconds from Minerva's UTC timestamp. Paging never deletes history. An unavailable/malformed/partial response is visible as an error. Existing `status{text}` reports `Playing`, `Queued`, terminal `Played`, `Deleted` or an empty log; an admitted play is never proof of physical playback.
+
+Play/replay targets only this authenticated full plugin endpoint. Replay uses explicit audio origin; historical origin remains Minerva-owned metadata. The plugin never synthesizes or marks a record heard. Only Minerva delivery after actual successful drain changes heard. Link loss cancels local pending waits, never replays/deletes on reconnect; new hello fetches authoritative count. Firmware owns modal list rendering, gestures and deletion confirmation.

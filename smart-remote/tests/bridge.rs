@@ -75,6 +75,9 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
                 continue;
             }
             let result = match msg["params"]["capability"].as_str().unwrap() {
+                "host.speech_log" => {
+                    json!({"success":true,"items":[],"unheard":0,"total":0,"errors":[]})
+                }
                 "host.chat.active" => {
                     json!({"chat_id":"c1","name":"Chat","group":"","group_id":""})
                 }
@@ -95,6 +98,7 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
     assert_eq!(device.recv_msg().await["type"], "welcome");
     assert_eq!(device.recv_msg().await["chat_id"], "c1");
     assert_eq!(device.recv_msg().await["type"], "draft");
+    assert_eq!(device.recv_msg().await["type"], "missed");
     let registered = next_request(&mut seen, "register").await;
     let endpoint = registered["params"]["args"]["device_id"].clone();
     assert_eq!(endpoint, format!("remote_{DEVICE}"));
@@ -163,6 +167,7 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
     assert_eq!(replacement.recv_msg().await["type"], "welcome");
     assert_eq!(replacement.recv_msg().await["chat_id"], "c1");
     assert_eq!(replacement.recv_msg().await["text"], "Hello");
+    assert_eq!(replacement.recv_msg().await["type"], "missed");
     next_request(&mut seen, "register").await;
     let available = next_request(&mut seen, "availability").await;
     assert_eq!(available["params"]["args"]["available"], true);
@@ -302,6 +307,7 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
     assert_eq!(wake.recv_msg().await["type"], "welcome");
     assert_eq!(wake.recv_msg().await["chat_id"], "c1");
     assert_eq!(wake.recv_msg().await["type"], "draft");
+    assert_eq!(wake.recv_msg().await["type"], "missed");
     next_request(&mut seen, "input_cancel").await;
     next_request(&mut seen, "register").await;
     assert_eq!(
@@ -377,6 +383,7 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
     assert_eq!(reconnect.recv_msg().await["type"], "welcome");
     assert_eq!(reconnect.recv_msg().await["chat_id"], "c1");
     assert_eq!(reconnect.recv_msg().await["type"], "draft");
+    assert_eq!(reconnect.recv_msg().await["type"], "missed");
     next_request(&mut seen, "register").await;
     assert_eq!(
         next_request(&mut seen, "availability").await["params"]["args"]["available"],
