@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build, copy and launch a real minimal Rust source-tier worker on this platform."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -21,7 +22,11 @@ def main() -> int:
             {"type": "exec", "argv": ["./worker"], "artifact": "worker"},
         ]
         (root / "manifest.json").write_text(json.dumps({"setup": {"requires": [{"tool": "cargo", "min": "1.83"}], "steps": steps}}))
-        result = subprocess.run([sys.executable, str(builder), str(root)], check=True, capture_output=True, text=True, timeout=300)
+        environment = dict(os.environ)
+        environment.pop("CARGO_TARGET_DIR", None)
+        result = subprocess.run([sys.executable, str(builder), str(root)], capture_output=True, text=True, timeout=300, env=environment)
+        print(result.stderr, file=sys.stderr)
+        result.check_returncode()
         report = json.loads(result.stdout)
         suffix = ".exe" if sys.platform == "win32" else ""
         assert [s["artifact"] for s in report["steps"]] == ["target/release/producer-probe" + suffix, "worker" + suffix, "worker" + suffix]
