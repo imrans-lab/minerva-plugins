@@ -1,12 +1,10 @@
-//! Dependency wire diagnostics cannot be enabled through RUST_LOG.
-use log::{Level, Log, Metadata, Record};
+//! Only audited plugin diagnostics reach stderr; dependency payload logs cannot be enabled.
+use log::{Log, Metadata, Record};
 
 struct SafeLogger<L>(L);
 fn allowed(metadata: &Metadata<'_>) -> bool {
     let target = metadata.target();
-    target == "smart_remote_plugin"
-        || target.starts_with("smart_remote_plugin::")
-        || metadata.level() <= Level::Warn
+    target == "smart_remote_plugin" || target.starts_with("smart_remote_plugin::")
 }
 impl<L: Log> Log for SafeLogger<L> {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
@@ -35,6 +33,7 @@ pub fn init() -> Result<(), log::SetLoggerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use log::Level;
     use std::sync::{Arc, Mutex};
     struct Captured(Arc<Mutex<Vec<String>>>);
     impl std::io::Write for Captured {
@@ -60,7 +59,7 @@ mod tests {
             let logger = SafeLogger(builder.build());
             for target in ["btleplug", "btleplug::corebluetooth::central_delegate", "btleplug::winrtble::ble::characteristic",
                 "dbus", "dbus::channel", "bluez_async::session", "bluez_generated::gatt", "D-Bus", "tokio::io::stdio"] {
-                for level in [Level::Trace, Level::Debug, Level::Info] {
+                for level in [Level::Trace, Level::Debug, Level::Info, Level::Warn, Level::Error] {
                     let metadata = Metadata::builder().target(target).level(level).build();
                     assert!(!logger.enabled(&metadata), "{target} {level}");
                     // Direct log() calls must be guarded as well as enabled().
@@ -72,7 +71,7 @@ mod tests {
             let output = captured.lock().unwrap().join("");
             assert!(!output.contains("synthetic-wire"));
             assert!(output.contains("own-diagnostic"));
-            assert!(output.contains("safe-warning"));
+            assert!(!output.contains("safe-warning"));
         }
     }
 }
