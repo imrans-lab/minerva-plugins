@@ -15,3 +15,7 @@ cfb1ece2883d9bf8e1b2079b68a17827c5fd65d3:docs/plugins.dct:generic-api-key:3436
 # docket/release.lock.json key_sha256 is the SHA-256 of the public release signing
 # key file (a pinned trust anchor, published), not a credential.
 1f9c2401f120a741c1c430eada05e2c3bbbbe230:docket/release.lock.json:generic-api-key:7
+# Synthetic known-answer session key: deterministic public inputs via unchanged ESP-IDF client; no owner credential.
+297e9bf190636eedfa8fd47d4ba9f946fbfa68fa:smart-remote/tests/fixtures/security2.rs:generic-api-key:27
+# Synthetic known-answer session key: deterministic public inputs via unchanged ESP-IDF client; no owner credential.
+297e9bf190636eedfa8fd47d4ba9f946fbfa68fa:smart-remote/tests/fixtures/security2.rs:generic-api-key:42
