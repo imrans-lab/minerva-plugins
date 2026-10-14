@@ -9,12 +9,8 @@ import tempfile
 
 def main() -> int:
     root = Path(__file__).resolve().parents[1]
-    if sys.argv[1:] == ["--inventory"]:
-        subprocess.run([sys.executable, "-B", str(root / "scripts/check-writer.py"),
-                        "--repo", str(root.parent), "--card", "smart-remote/scripts/p2b-writer-card.json", "--head", "HEAD"], check=True)
-        return 0
     if len(sys.argv) != 1:
-        raise SystemExit("usage: writer_self_check.py [--inventory]")
+        raise SystemExit("usage: writer_self_check.py")
     for command in (["cargo", "fmt", "--check"],
                     ["cargo", "clippy", "--locked", "--all-targets", "--", "-D", "warnings"],
                     ["cargo", "test", "--locked", "--", "--nocapture"],
