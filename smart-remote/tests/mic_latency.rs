@@ -78,6 +78,9 @@ async fn slow_host(latency: u64, data_eos: bool) {
                     json!({"chat_id":"c1","name":"Chat","group":"","group_id":""})
                 }
                 "host.audio" if args["op"] == "input_begin" => json!({"session_id":23}),
+                "host.speech_log" if args["op"] == "list" => {
+                    json!({"success":true,"unheard":0,"total":0,"items":[],"errors":[]})
+                }
                 _ => json!({}),
             };
             writer.lock().await.write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":msg["id"],"result":{"success":true,"result":result}})).as_bytes()).await.unwrap();
@@ -93,6 +96,10 @@ async fn slow_host(latency: u64, data_eos: bool) {
     assert_eq!(device.recv_msg().await["type"], "welcome");
     assert_eq!(device.recv_msg().await["chat_id"], "c1");
     assert_eq!(device.recv_msg().await["type"], "draft");
+    assert_eq!(
+        device.recv_msg().await,
+        json!({"type":"missed","unheard":0})
+    );
     device
         .send_json(&json!({"type":"ptt_down","stream":7}))
         .await;
