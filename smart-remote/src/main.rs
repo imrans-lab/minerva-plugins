@@ -80,6 +80,10 @@ fn parse_args() -> Result<Args, String> {
 async fn main() -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .target(env_logger::Target::Stderr)
+        // Native BLE libraries may trace wire buffers; suppress even RUST_LOG=trace.
+        .filter_module("btleplug", log::LevelFilter::Off)
+        .filter_module("bluez_async", log::LevelFilter::Off)
+        .filter_module("dbus", log::LevelFilter::Off)
         .init();
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
@@ -138,6 +142,7 @@ async fn run() -> Result<(), String> {
         log::error!("host reader task failed: {e}");
     }
     log::info!("shutting down");
+    link.shutdown_probe().await;
     let _ = stop.send(true);
     if let Err(e) = serving.await {
         log::error!("server task failed: {e}");

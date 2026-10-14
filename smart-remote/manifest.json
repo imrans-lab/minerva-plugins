@@ -20,7 +20,41 @@
   },
   "editor_items": [],
   "events": [],
-  "tools": [],
+  "tools": [
+    {
+      "name": "minerva_smart_remote_ble_probe",
+      "description": "Scan and authenticate a remote in setup, without WiFi writes. start returns immediately; poll status or cancel using operation_id. Read the six-digit code from the OLED; never put it in logs.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "start",
+              "status",
+              "cancel"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "pattern": "^SR2-[0-9A-F]{4}$"
+          },
+          "code": {
+            "type": "string",
+            "pattern": "^[0-9]{6}$"
+          },
+          "operation_id": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ],
   "permissions": {
     "host_capabilities": [
       "host.audio",
@@ -41,7 +75,7 @@
   },
   "autostart": false,
   "auto_reload": false,
-  "description": "Bridge a Smart Remote V2 to Minerva over the local network using the versioned remote protocol. Requires a compatible remote, Minerva, and a paired device; secure BLE setup and voice endpoint integration are developed separately.",
+  "description": "Bridge a Smart Remote V2 to Minerva over the local network. BLE authentication probe available; pairing panel follows separately. Linux source installation requires libdbus-1-dev and pkg-config.",
   "price": {
     "amount_minor": 0,
     "currency": "USD"

@@ -16,6 +16,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
+use zeroize::Zeroizing;
 
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
 pub const SERVER_NAME: &str = crate::data_dir::PLUGIN_ID;
@@ -56,6 +57,7 @@ pub struct HostEvent {
 }
 
 pub struct HostLink {
+    probe: crate::ble::Probe,
     out: mpsc::Sender<String>,
     events: broadcast::Sender<HostEvent>,
     pending: Pending,
@@ -79,6 +81,7 @@ impl HostLink {
         let (out, rx) = mpsc::channel(64);
         let (events, _) = broadcast::channel(128);
         let link = Arc::new(Self {
+            probe: crate::ble::Probe::default(),
             out,
             events,
             pending: Mutex::new(HashMap::new()),
@@ -137,6 +140,9 @@ impl HostLink {
     pub fn subscribe(&self) -> broadcast::Receiver<HostEvent> {
         self.events.subscribe()
     }
+    pub async fn shutdown_probe(&self) {
+        self.probe.shutdown().await;
+    }
 
     fn write(&self, message: &Value) -> bool {
         // Fails only after the writer task ended at shutdown; nothing can
@@ -156,13 +162,14 @@ impl HostLink {
     }
 
     fn on_line(&self, line: &str) {
-        let Ok(msg) = serde_json::from_str::<Value>(line) else {
+        let Ok(mut msg) = serde_json::from_str::<Value>(line) else {
             log::warn!("host sent a line that is not JSON; ignored");
             return;
         };
         let id = msg.get("id").filter(|id| !id.is_null()).cloned();
-        match (msg.get("method").and_then(Value::as_str), id) {
-            (Some(method), Some(id)) => self.on_request(method, id),
+        let method = msg.get("method").and_then(Value::as_str).map(str::to_owned);
+        match (method.as_deref(), id) {
+            (Some(method), Some(id)) => self.on_request(method, id, &mut msg["params"]),
             (Some("minerva/host_event"), None) => {
                 if let Some(p) = msg.get("params") {
                     if let Some(name) = p.get("event").and_then(Value::as_str) {
@@ -177,16 +184,30 @@ impl HostLink {
             (None, Some(id)) => self.on_reply(&id, &msg),
             (None, None) => log::warn!("host sent JSON-RPC with neither method nor id; ignored"),
         }
+        crate::ble::scrub_json(&mut msg);
     }
 
-    fn on_request(&self, method: &str, id: Value) {
+    fn on_request(&self, method: &str, id: Value, params: &mut Value) {
         let result = match method {
             "initialize" => json!({
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION")},
             }),
-            "tools/list" => json!({"tools": []}),
+            "tools/list" => match crate::ble::tool_definition() {
+                Ok(tool) => json!({"tools": [tool]}),
+                Err(error) => json!({"error": error}),
+            },
+            "tools/call" => {
+                let result = if params["name"] == crate::ble::TOOL_NAME {
+                    self.probe.call(&mut params["arguments"])
+                } else {
+                    Err(crate::provisioning::transport::Error::Input)
+                };
+                let failed = result.is_err();
+                let body = result.unwrap_or_else(|error| json!({"error": error}));
+                json!({"content": [{"type": "text", "text": body.to_string()}], "isError": failed})
+            }
             "ping" => json!({}),
             _ => {
                 self.write(&json!({
@@ -284,6 +305,7 @@ async fn read_lines<R: AsyncBufRead + Unpin>(input: R, link: Arc<HostLink>) {
     loop {
         match lines.next_line().await {
             Ok(Some(line)) => {
+                let line = Zeroizing::new(line);
                 let line = line.trim();
                 if !line.is_empty() {
                     link.on_line(line);
@@ -300,6 +322,7 @@ async fn read_lines<R: AsyncBufRead + Unpin>(input: R, link: Arc<HostLink>) {
         }
     }
     link.closed.store(true, Ordering::Release);
+    link.probe.cancel();
     link.fail_pending();
 }
 

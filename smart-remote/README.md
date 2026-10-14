@@ -1,12 +1,14 @@
 # smart-remote Minerva plugin
 
-Rust Minerva plugin that bridges the remote to Minerva over the local network: WebSocket server, paired-device sessions, PTT and chat targeting. Minerva owns STT/TTS; the plugin forwards mic PCM, echoes targeted transcripts, correlates its remote sends, resamples output to 16 kHz, and paces LAN speaker frames. Secured BLE provisioning remains a later campaign batch.
+Rust Minerva plugin that bridges the remote to Minerva over the local network: WebSocket server, paired-device sessions, PTT and chat targeting. Minerva owns STT/TTS; the plugin forwards mic PCM, echoes targeted transcripts, correlates its remote sends, resamples output to 16 kHz, and paces LAN speaker frames. BLE authentication can be tested with the probe below; the provisioning panel follows separately.
 
 Migrated with scoped history from the sandbox; see `SOURCE_PROVENANCE.md`. The authoritative protocol is `protocol/` in this repository. The sandbox copy is retained during migration; check it with `scripts/check-protocol-sync.sh /path/to/ccsandbox/smart-remote-v2/protocol`.
 
 Design: Docket `smart-remote:01a12de97992`. Minerva core prerequisites: `minerva:01a12de939dd`.
 
 ## Build and test
+
+**Linux source installation requires `libdbus-1-dev` and `pkg-config`.** Install them through the OS package manager before building; this plugin uses the system D-Bus library, without a vendored copy. Windows requires the MSVC SDK; macOS uses the system CoreBluetooth framework and Minerva's Bluetooth permission.
 
 ```sh
 cargo build --release --locked
@@ -33,6 +35,12 @@ Minerva starts the binary as a stdio plugin (`manifest.json`) and stops it by cl
 - `--no-mdns`: skip the `_minerva-remote._tcp` advert.
 
 Logs go to stderr (`RUST_LOG` filters them); stdout carries only JSON-RPC.
+
+## BLE authentication probe
+
+Enter remote setup and read its `SR2-XXXX` name and six-digit OLED code. Call `minerva_smart_remote_ble_probe` with `{"action":"start","name":"SR2-XXXX","code":"<OLED code>"}`. Start returns immediately with an `operation_id`; poll `{"action":"status","operation_id":1}` using the returned ID, or send `action:"cancel"` with that ID. One operation runs at a time. The probe uses the first available adapter, scans for five seconds, authenticates Security 2, disconnects, and reports `authenticated`, `failed`, or `cancelled`. It writes no WiFi credentials or pairing record. The code stays in memory and is scrubbed from owned input buffers; native BLE wire logging is disabled.
+
+Each exchange is one whole acknowledged write followed by a complete read, at most512 bytes; the OS handles ATT long writes. Transport failure, timeout or cancellation ends the session and requires a fresh start. Physical long-write interoperability on each platform remains an owner hardware qualification gate.
 
 ## LAN exposure
 

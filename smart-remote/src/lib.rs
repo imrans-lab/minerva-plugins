@@ -5,6 +5,7 @@
 
 pub mod admission;
 pub mod audio;
+pub mod ble;
 pub(crate) mod bridge;
 pub mod contract;
 pub mod data_dir;

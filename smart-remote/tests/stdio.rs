@@ -16,6 +16,7 @@ use tokio::process::Command;
 async fn scripted_host_handshake_host_events_and_clean_exit_on_eof() {
     let data = tempfile::tempdir().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_smart-remote-plugin"))
+        .env("RUST_LOG", "trace")
         .args([
             "--data-dir",
             data.path().to_str().unwrap(),
@@ -51,8 +52,13 @@ async fn scripted_host_handshake_host_events_and_clean_exit_on_eof() {
     })
     .await
     .expect("listening log line");
-    let stderr_drain =
-        tokio::spawn(async move { while let Ok(Some(_)) = stderr.next_line().await {} });
+    let stderr_drain = tokio::spawn(async move {
+        let mut logs = Vec::new();
+        while let Ok(Some(line)) = stderr.next_line().await {
+            logs.push(line);
+        }
+        logs
+    });
 
     let script = [
         json!({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}),
@@ -62,6 +68,8 @@ async fn scripted_host_handshake_host_events_and_clean_exit_on_eof() {
         json!({"jsonrpc":"2.0","method":"minerva/host_event","params":{"event":"chat.directory_changed","payload":{}}}),
         json!({"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}),
         json!({"jsonrpc":"2.0","id":4.0,"method":"ping"}),
+        json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"minerva_smart_remote_ble_probe","arguments":{"action":"start","name":"SR2-abcd","code":"654321"}}}),
+        json!({"jsonrpc":"2.0","id":6,"method":"ping"}),
     ];
     for msg in &script {
         stdin
@@ -73,7 +81,7 @@ async fn scripted_host_handshake_host_events_and_clean_exit_on_eof() {
     stdin.flush().await.unwrap();
 
     let mut replies = Vec::new();
-    for _ in 0..4 {
+    for _ in 0..6 {
         let line = tokio::time::timeout(WAIT, stdout.next_line())
             .await
             .expect("reply within WAIT")
@@ -90,12 +98,28 @@ async fn scripted_host_handshake_host_events_and_clean_exit_on_eof() {
     assert_eq!(replies[1]["result"]["protocolVersion"], "2024-11-05");
     assert_eq!(replies[1]["result"]["serverInfo"]["name"], "smart_remote");
     assert!(replies[1]["result"]["capabilities"].is_object());
+    assert_eq!(replies[2]["id"], 3);
+    assert_eq!(replies[2]["result"]["tools"].as_array().unwrap().len(), 1);
     assert_eq!(
-        replies[2],
-        json!({"jsonrpc":"2.0","id":3,"result":{"tools":[]}})
+        replies[2]["result"]["tools"][0]["name"],
+        "minerva_smart_remote_ble_probe"
+    );
+    assert_eq!(
+        replies[2]["result"]["tools"][0]["inputSchema"]["required"],
+        json!(["action"])
     );
     assert_eq!(replies[3]["id"], 4.0);
     assert_eq!(replies[3]["result"], json!({}));
+    assert_eq!(replies[4]["id"], 5);
+    assert_eq!(replies[4]["result"]["isError"], true);
+    assert_eq!(
+        serde_json::from_str::<Value>(replies[4]["result"]["content"][0]["text"].as_str().unwrap())
+            .unwrap(),
+        json!({"error":"input"})
+    );
+    assert!(!replies[4].to_string().contains("654321"));
+    assert_eq!(replies[5]["id"], 6);
+    assert_eq!(replies[5]["result"], json!({}));
 
     // The LAN side of the same process is up and enforcing auth.
     let schemas = Arc::new(Schemas::load().unwrap());
@@ -115,7 +139,7 @@ async fn scripted_host_handshake_host_events_and_clean_exit_on_eof() {
         None,
         "nothing else on stdout"
     );
-    stderr_drain.await.unwrap();
+    assert!(!stderr_drain.await.unwrap().join("\n").contains("654321"));
 }
 
 #[tokio::test]
