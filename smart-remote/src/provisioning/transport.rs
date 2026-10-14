@@ -39,6 +39,8 @@ pub enum Error {
     ValueTooLarge,
     Protocol,
     Wifi,
+    WrongPassword,
+    NetworkNotFound,
     Store,
 }
 impl std::fmt::Display for Error {

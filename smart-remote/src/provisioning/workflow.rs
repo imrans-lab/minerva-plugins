@@ -4,7 +4,14 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use btleplug::api::Characteristic;
 use prost::Message;
 use rand_core::TryRngCore;
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 use tokio::sync::{mpsc, watch};
 use zeroize::Zeroizing;
 
@@ -14,12 +21,66 @@ pub struct Credentials {
     pub host: String,
     pub port: u16,
 }
+#[derive(Clone, Default)]
+pub struct Persistence(pub(crate) Arc<AtomicU8>);
+impl Persistence {
+    pub fn state(&self) -> u8 {
+        self.0.load(Ordering::Acquire)
+    }
+    pub(crate) async fn pair(
+        &self,
+        store: Arc<crate::store::TokenStore>,
+        id: String,
+        token: Zeroizing<String>,
+        name: String,
+    ) -> Result<(), Error> {
+        self.0.store(1, Ordering::Release);
+        let settlement = Settlement(self.clone());
+        tokio::task::spawn_blocking(move || {
+            let time = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| Error::Store)?
+                .as_secs();
+            let result = store
+                .pair(&id, &token, &name, time)
+                .map_err(|_| Error::Store);
+            settlement
+                .0
+                 .0
+                .store(if result.is_ok() { 2 } else { 3 }, Ordering::Release);
+            result
+        })
+        .await
+        .map_err(|_| Error::Store)?
+    }
+}
+impl serde::Serialize for Persistence {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(match self.state() {
+            1 => "pending",
+            2 => "stored",
+            3 => "failed",
+            _ => "none",
+        })
+    }
+}
+struct Settlement(Persistence);
+impl Drop for Settlement {
+    fn drop(&mut self) {
+        let _ = self
+            .0
+             .0
+            .compare_exchange(1, 3, Ordering::AcqRel, Ordering::Acquire);
+    }
+}
 #[derive(Clone, Default, serde::Serialize)]
 pub struct Progress {
     pub stage: &'static str,
     pub networks: Vec<Network>,
     pub device_id: Option<String>,
     pub error: Option<Error>,
+    pub save_possible: bool,
+    pub persistence: Persistence,
 }
 #[derive(Clone, serde::Serialize)]
 pub struct Network {
@@ -35,17 +96,23 @@ struct Link<'a, P> {
     session: &'a mut Session,
     names: BTreeMap<String, Characteristic>,
     cancel: &'a mut watch::Receiver<bool>,
+    deadline: Option<tokio::time::Instant>,
 }
 impl<P: Peer> Link<'_, P> {
     async fn rpc<M: Message + Default>(&mut self, name: &str, bytes: &[u8]) -> Result<M, Error> {
-        let reply = encrypted(
+        let call = encrypted(
             self.peer,
             &self.names[name],
             self.session,
             bytes,
             self.cancel,
-        )
-        .await?;
+        );
+        let reply = match self.deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, call)
+                .await
+                .map_err(|_| Error::Timeout)??,
+            None => call.await?,
+        };
         decode(&reply).map_err(|_| Error::Protocol)
     }
     async fn scan(
@@ -105,13 +172,14 @@ pub async fn run<P: Peer>(
     cancel: &mut watch::Receiver<bool>,
     mut update: impl FnMut(Progress),
 ) -> Result<(), Error> {
-    let result = tokio::time::timeout(Duration::from_secs(240), async {
+    let result = async {
         let names = endpoints(peer, cancel).await?;
         let mut link = Link {
             peer,
             session,
             names,
             cancel,
+            deadline: None,
         };
         let mut progress = Progress {
             stage: "scanning_wifi",
@@ -200,6 +268,7 @@ pub async fn run<P: Peer>(
         let token = Zeroizing::new(URL_SAFE_NO_PAD.encode(random.as_slice()));
         let mut staged = None;
         loop {
+            link.deadline = None;
             progress.stage = "awaiting_wifi";
             update(progress.clone());
             let credentials = tokio::select! {
@@ -207,6 +276,7 @@ pub async fn run<P: Peer>(
                 _ = link.cancel.changed() => return Err(Error::Cancelled),
                 input = job.input.recv() => input.ok_or(Error::Cancelled)?,
             };
+            link.deadline = Some(tokio::time::Instant::now() + Duration::from_secs(240));
             progress.error = None;
             if staged
                 .as_ref()
@@ -240,6 +310,8 @@ pub async fn run<P: Peer>(
                 Config::RespSetConfig(reply) if reply.status == 0 => (),
                 _ => return Err(Error::Protocol),
             }
+            progress.save_possible = true;
+            update(progress.clone());
             match link
                 .config(
                     WiFiConfigMsgType::TypeCmdApplyConfig,
@@ -286,9 +358,11 @@ pub async fn run<P: Peer>(
                     ) => {}
                     2 if reply.state.is_none() => (),
                     3 => {
-                        if !matches!(reply.state, Some(resp_get_status::State::FailReason(0 | 1))) {
-                            return Err(Error::Protocol);
-                        }
+                        progress.error = Some(match reply.state {
+                            Some(resp_get_status::State::FailReason(0)) => Error::WrongPassword,
+                            Some(resp_get_status::State::FailReason(1)) => Error::NetworkNotFound,
+                            _ => return Err(Error::Protocol),
+                        });
                         failed = true;
                         break;
                     }
@@ -304,28 +378,18 @@ pub async fn run<P: Peer>(
                 .await?;
             }
             if connected {
+                link.deadline = None;
                 let id = progress.device_id.clone().ok_or(Error::Protocol)?;
-                let store = job.store.clone();
-                let stored_token = token.clone();
-                let stored_name = name.to_owned();
-                let stored_id = id.clone();
-                bounded(
-                    async move {
-                        tokio::task::spawn_blocking(move || {
-                            let time = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map_err(|_| Error::Store)?
-                                .as_secs();
-                            store
-                                .pair(&stored_id, &stored_token, &stored_name, time)
-                                .map_err(|_| Error::Store)
-                        })
-                        .await
-                        .map_err(|_| Error::Store)?
-                    },
-                    link.cancel,
-                )
-                .await?;
+                update(progress.clone());
+                progress
+                    .persistence
+                    .pair(
+                        job.store.clone(),
+                        id.clone(),
+                        token.clone(),
+                        name.to_owned(),
+                    )
+                    .await?;
                 progress.stage = "waiting_lan";
                 update(progress.clone());
                 for _ in 0..60 {
@@ -366,11 +430,9 @@ pub async fn run<P: Peer>(
             {
                 return Err(Error::Protocol);
             }
-            progress.error = Some(Error::Wifi);
         }
-    })
-    .await
-    .unwrap_or(Err(Error::Timeout));
+    }
+    .await;
     if result.is_err() {
         session.cancel();
     }

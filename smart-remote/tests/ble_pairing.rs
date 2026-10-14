@@ -55,6 +55,8 @@ impl TryCryptoRng for Fixed {}
 enum Case {
     Good,
     Retry,
+    MissingNetwork,
+    ApplyLostAck,
     WrongKind,
     NonzeroStatus,
     Oversize,
@@ -221,11 +223,19 @@ impl DevicePeer {
                                 sta_state: 1,
                                 state: None,
                             })
-                        } else if self.case == Case::Retry && state.applies == 1 {
+                        } else if matches!(self.case, Case::Retry | Case::MissingNetwork)
+                            && state.applies == 1
+                        {
                             Config::RespGetStatus(RespGetStatus {
                                 status: 0,
                                 sta_state: 3,
-                                state: Some(resp_get_status::State::FailReason(0)),
+                                state: Some(resp_get_status::State::FailReason(
+                                    if self.case == Case::MissingNetwork {
+                                        1
+                                    } else {
+                                        0
+                                    },
+                                )),
                             })
                         } else {
                             Config::RespGetStatus(RespGetStatus {
@@ -311,6 +321,9 @@ impl Peer for DevicePeer {
                 return Err(Error::Transport);
             }
             let reply = self.respond(endpoint, &plain, &mut state);
+            if self.case == Case::ApplyLostAck && state.applies == 1 {
+                return Err(Error::Transport);
+            }
             state.reply = if self.case == Case::Oversize {
                 vec![0; 513]
             } else {
@@ -352,7 +365,7 @@ async fn session(peer: &DevicePeer, cancel: &mut watch::Receiver<bool>) -> Sessi
 
 #[tokio::test]
 async fn independent_full_wire_reset_retry_real_store_and_lan_confirmation() {
-    for case in [Case::Good, Case::Retry] {
+    for case in [Case::Good, Case::Retry, Case::MissingNetwork] {
         let data = tempfile::tempdir().unwrap();
         let store = Arc::new(TokenStore::open(data.path()).unwrap());
         let peer = Arc::new(DevicePeer::new(case));
@@ -386,7 +399,15 @@ async fn independent_full_wire_reset_retry_real_store_and_lan_confirmation() {
             &mut cancelled,
             |progress| {
                 updates.lock().unwrap().push(progress.clone());
-                if progress.stage == "awaiting_wifi" && progress.error == Some(Error::Wifi) {
+                if progress.stage == "awaiting_wifi" && progress.error.is_some() {
+                    assert_eq!(
+                        progress.error,
+                        Some(if case == Case::Retry {
+                            Error::WrongPassword
+                        } else {
+                            Error::NetworkNotFound
+                        })
+                    );
                     input
                         .try_send(credentials())
                         .unwrap_or_else(|_| panic!("retry input"));
@@ -412,8 +433,8 @@ async fn independent_full_wire_reset_retry_real_store_and_lan_confirmation() {
             let state = peer.state.lock().unwrap();
             assert_eq!(state.pages, vec![(0, 4), (4, 4), (8, 4), (12, 4)]);
             assert_eq!(state.customs, 1);
-            assert_eq!(state.applies, if case == Case::Retry { 2 } else { 1 });
-            assert_eq!(state.resets, if case == Case::Retry { 1 } else { 0 });
+            assert_eq!(state.applies, if case == Case::Good { 1 } else { 2 });
+            assert_eq!(state.resets, if case == Case::Good { 0 } else { 1 });
             let token = state.token.as_ref().unwrap();
             assert!(!std::fs::read_to_string(store.path())
                 .unwrap()
@@ -421,6 +442,12 @@ async fn independent_full_wire_reset_retry_real_store_and_lan_confirmation() {
             assert!(!serde_json::to_string(&*updates.lock().unwrap())
                 .unwrap()
                 .contains(token.as_str()));
+            assert!(!std::fs::read_to_string(store.path())
+                .unwrap()
+                .contains("public-test-password"));
+            assert!(!serde_json::to_string(&*updates.lock().unwrap())
+                .unwrap()
+                .contains("public-test-password"));
         }
         stop.send(true).unwrap();
         serving.await.unwrap();
@@ -428,7 +455,7 @@ async fn independent_full_wire_reset_retry_real_store_and_lan_confirmation() {
 }
 
 #[tokio::test]
-async fn cancelled_owner_input_and_overall_deadline_invalidate_the_session_without_pairing() {
+async fn cancelled_owner_input_excludes_typing_time_and_invalidates_the_session_without_pairing() {
     for timeout in [false, true] {
         let data = tempfile::tempdir().unwrap();
         let store = Arc::new(TokenStore::open(data.path()).unwrap());
@@ -449,20 +476,21 @@ async fn cancelled_owner_input_and_overall_deadline_invalidate_the_session_witho
             "SR2-A1B2",
             &mut cancelled,
             |progress| {
-                if progress.stage == "awaiting_wifi" && !timeout {
-                    cancel.send(true).unwrap();
+                if progress.stage == "awaiting_wifi" {
+                    if timeout {
+                        let cancel = cancel.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_secs(300)).await;
+                            cancel.send(true).unwrap();
+                        });
+                    } else {
+                        cancel.send(true).unwrap();
+                    }
                 }
             },
         )
         .await;
-        assert_eq!(
-            result,
-            Err(if timeout {
-                Error::Timeout
-            } else {
-                Error::Cancelled
-            })
-        );
+        assert_eq!(result, Err(Error::Cancelled));
         assert!(store.record(ID).is_none());
         assert_eq!(peer.state.lock().unwrap().customs, 0);
         assert_eq!(
@@ -482,6 +510,7 @@ async fn failed_protocol_ack_bounds_store_and_connection_deadline_never_pair_or_
         (Case::NonzeroStatus, Error::Protocol),
         (Case::Oversize, Error::ValueTooLarge),
         (Case::LostAck, Error::Transport),
+        (Case::ApplyLostAck, Error::Transport),
         (Case::Connecting, Error::Timeout),
         (Case::StoreFailure, Error::Store),
     ] {
@@ -500,6 +529,7 @@ async fn failed_protocol_ack_bounds_store_and_connection_deadline_never_pair_or_
         if case == Case::Connecting {
             tokio::time::pause();
         }
+        let mut save_possible = false;
         assert_eq!(
             workflow::run(
                 &peer,
@@ -510,7 +540,7 @@ async fn failed_protocol_ack_bounds_store_and_connection_deadline_never_pair_or_
                 },
                 "SR2-A1B2",
                 &mut cancelled,
-                |_| {}
+                |progress| save_possible |= progress.save_possible
             )
             .await,
             Err(expected)
@@ -520,6 +550,13 @@ async fn failed_protocol_ack_bounds_store_and_connection_deadline_never_pair_or_
             Err(smart_remote_plugin::provisioning::Error::State)
         );
         assert!(store.record(ID).is_none());
+        assert_eq!(
+            save_possible,
+            matches!(
+                case,
+                Case::ApplyLostAck | Case::Connecting | Case::StoreFailure
+            )
+        );
         assert_eq!(
             peer.state.lock().unwrap().resets,
             0,
@@ -533,59 +570,94 @@ async fn failed_protocol_ack_bounds_store_and_connection_deadline_never_pair_or_
 
 #[tokio::test]
 async fn unconfirmed_pairing_survives_and_a_late_real_hello_confirms_it() {
-    let data = tempfile::tempdir().unwrap();
-    let store = Arc::new(TokenStore::open(data.path()).unwrap());
-    let peer = DevicePeer::new(Case::NoLan);
-    let (_cancel, mut cancelled) = watch::channel(false);
-    let mut session = session(&peer, &mut cancelled).await;
-    let (input, receiver) = mpsc::channel(1);
-    input
-        .try_send(credentials())
-        .unwrap_or_else(|_| panic!("input"));
-    let mut stages = Vec::new();
-    workflow::run(
-        &peer,
-        &mut session,
-        Job {
-            store: store.clone(),
-            input: receiver,
-        },
-        "SR2-A1B2",
-        &mut cancelled,
-        |progress| {
-            if progress.stage == "waiting_lan" {
-                tokio::time::pause();
+    for cancel_after_store in [false, true] {
+        let data = tempfile::tempdir().unwrap();
+        let store = Arc::new(TokenStore::open(data.path()).unwrap());
+        let peer = DevicePeer::new(Case::NoLan);
+        let (cancel, mut cancelled) = watch::channel(false);
+        let mut session = session(&peer, &mut cancelled).await;
+        let (input, receiver) = mpsc::channel(1);
+        tokio::time::pause();
+        let began = tokio::time::Instant::now();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(230)).await;
+            tokio::time::resume();
+            input
+                .try_send(credentials())
+                .unwrap_or_else(|_| panic!("input"));
+        });
+        let mut stages = Vec::new();
+        let mut lan_started = None;
+        let mut final_progress = None;
+        let result = workflow::run(
+            &peer,
+            &mut session,
+            Job {
+                store: store.clone(),
+                input: receiver,
+            },
+            "SR2-A1B2",
+            &mut cancelled,
+            |progress| {
+                if progress.stage == "waiting_lan" {
+                    assert!(began.elapsed() >= Duration::from_secs(230));
+                    lan_started = Some(tokio::time::Instant::now());
+                    if cancel_after_store {
+                        cancel.send(true).unwrap();
+                    } else {
+                        tokio::time::pause();
+                    }
+                }
+                stages.push(progress.stage);
+                final_progress = Some(progress);
+            },
+        )
+        .await;
+        assert_eq!(
+            result,
+            if cancel_after_store {
+                Err(Error::Cancelled)
+            } else {
+                Ok(())
             }
-            stages.push(progress.stage);
-        },
-    )
-    .await
-    .unwrap();
-    assert_eq!(stages.last(), Some(&"unconfirmed"));
-    assert!(!store.record(ID).unwrap().confirmed);
-    tokio::time::resume();
-    let token = peer.state.lock().unwrap().token.clone().unwrap();
-    let schemas = Arc::new(Schemas::load().unwrap());
-    let server = Server::bind(
-        ServerConfig::new(([127, 0, 0, 1], 0).into()),
-        store.clone(),
-        schemas.clone(),
-    )
-    .await
-    .unwrap();
-    let address = server.local_addr().unwrap();
-    let (stop, stopped) = watch::channel(false);
-    let serving = tokio::spawn(server.run(stopped));
-    let mut device = common::Device::connect(address, schemas).await;
-    device.send_json(&common::hello(&token, ID)).await;
-    assert_eq!(device.recv_msg().await["type"], "welcome");
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while !store.record(ID).unwrap().confirmed {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+        );
+        let progress = final_progress.unwrap();
+        assert_eq!(progress.persistence.state(), 2);
+        assert!(progress.save_possible);
+        if !cancel_after_store {
+            assert!(lan_started.unwrap().elapsed() >= Duration::from_secs(60));
+            assert_eq!(stages.last(), Some(&"unconfirmed"));
+            tokio::time::resume();
+        } else {
+            assert_eq!(
+                session.encrypt(b"cancelled monitor"),
+                Err(smart_remote_plugin::provisioning::Error::State)
+            );
         }
-    })
-    .await
-    .unwrap();
-    stop.send(true).unwrap();
-    serving.await.unwrap();
+        assert!(!store.record(ID).unwrap().confirmed);
+        let token = peer.state.lock().unwrap().token.clone().unwrap();
+        let schemas = Arc::new(Schemas::load().unwrap());
+        let server = Server::bind(
+            ServerConfig::new(([127, 0, 0, 1], 0).into()),
+            store.clone(),
+            schemas.clone(),
+        )
+        .await
+        .unwrap();
+        let address = server.local_addr().unwrap();
+        let (stop, stopped) = watch::channel(false);
+        let serving = tokio::spawn(server.run(stopped));
+        let mut device = common::Device::connect(address, schemas).await;
+        device.send_json(&common::hello(&token, ID)).await;
+        assert_eq!(device.recv_msg().await["type"], "welcome");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !store.record(ID).unwrap().confirmed {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        stop.send(true).unwrap();
+        serving.await.unwrap();
+    }
 }

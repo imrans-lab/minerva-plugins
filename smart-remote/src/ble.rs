@@ -86,10 +86,15 @@ impl Operation {
         matches!(
             self.stage,
             Stage::Scanning | Stage::Connecting | Stage::Authenticating
-        ) || matches!(
-            self.progress.stage,
-            "scanning_wifi" | "awaiting_wifi" | "applying_wifi" | "connecting_wifi" | "waiting_lan"
-        )
+        ) || self.progress.persistence.state() == 1
+            || matches!(
+                self.progress.stage,
+                "scanning_wifi"
+                    | "awaiting_wifi"
+                    | "applying_wifi"
+                    | "connecting_wifi"
+                    | "waiting_lan"
+            )
     }
     fn status(&self) -> Value {
         json!({"operation_id": self.id, "stage": self.stage, "error": self.error, "pairing": self.progress})
@@ -101,6 +106,7 @@ struct State {
     operation: Option<Operation>,
     worker: Option<tokio::task::JoinHandle<()>>,
     context: Option<(Arc<crate::store::TokenStore>, u16)>,
+    host: Option<String>,
 }
 /// Owns one worker; status/cancel do not wait on the adapter or stdio reader.
 #[derive(Clone, Default)]
@@ -128,33 +134,51 @@ impl Probe {
     pub fn configure(&self, store: Arc<crate::store::TokenStore>, port: u16) {
         if let Ok(mut state) = self.0.lock() {
             state.context = Some((store, port));
+            // UDP connect only selects an OS route; no datagram is sent.
+            state.host = std::net::UdpSocket::bind("0.0.0.0:0")
+                .and_then(|socket| {
+                    socket.connect("1.1.1.1:9")?;
+                    socket.local_addr()
+                })
+                .ok()
+                .map(|address| address.ip())
+                .filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
+                .map(|ip| ip.to_string());
         }
     }
     pub fn pairing(&self, arguments: &mut Value) -> Result<Value, Error> {
         let password = take_secret(arguments, "password");
         match arguments["action"].as_str() {
-            Some("describe") => {
+            Some("describe" | "status" | "cancel") => {
+                let describe = arguments["action"] == "describe";
+                if !describe {
+                    self.call_mode(arguments, true)?;
+                }
                 let state = self.0.lock().map_err(|_| Error::Operation)?;
                 let mut status = state
                     .operation
                     .as_ref()
                     .map(Operation::status)
                     .unwrap_or(json!({}));
-                if matches!(
-                    status["pairing"]["stage"].as_str(),
-                    Some("waiting_lan" | "unconfirmed")
-                ) {
+                if matches!(status["pairing"]["persistence"].as_str(), Some("stored")) {
                     if let Some(id) = status["pairing"]["device_id"].as_str() {
-                        if state
-                            .context
-                            .as_ref()
-                            .is_some_and(|(store, _)| store.record(id).is_some_and(|r| r.confirmed))
-                        {
-                            status["pairing"]["stage"] = json!("confirmed");
+                        if let Some((store, _)) = &state.context {
+                            match store.try_record(id) {
+                                Some(Some(record)) if record.confirmed => {
+                                    status["pairing"]["stage"] = json!("confirmed")
+                                }
+                                None => status["pairing"]["confirmation_pending"] = json!(true),
+                                _ => status["pairing"]["stage"] = json!("unconfirmed"),
+                            }
                         }
                     }
                 }
-                Ok(json!({"port": state.context.as_ref().map(|c| c.1), "operation": status}))
+                if !describe {
+                    return Ok(status);
+                }
+                Ok(
+                    json!({"host": state.host, "port": state.context.as_ref().map(|c| c.1), "operation": status}),
+                )
             }
             Some("apply") => {
                 let mut state = self.0.lock().map_err(|_| Error::Operation)?;
@@ -634,15 +658,30 @@ mod tests {
         assert_eq!(describe()["port"], 12345);
         assert_eq!(describe()["operation"]["pairing"]["stage"], "applying_wifi");
         store.pair(id, "new synthetic token", "remote", 2).unwrap();
-        probe
-            .0
-            .lock()
-            .unwrap()
-            .operation
-            .as_mut()
-            .unwrap()
-            .progress
-            .stage = "unconfirmed";
+        {
+            let mut state = probe.0.lock().unwrap();
+            let operation = state.operation.as_mut().unwrap();
+            operation.progress.stage = "unconfirmed";
+            operation
+                .progress
+                .persistence
+                .0
+                .store(2, std::sync::atomic::Ordering::Release);
+        }
+        {
+            let _store_lock = store.hold_store_lock_for_test();
+            assert_eq!(
+                describe()["operation"]["pairing"]["confirmation_pending"],
+                true
+            );
+            probe
+                .pairing(&mut json!({"action":"status","operation_id":2}))
+                .unwrap();
+            probe
+                .pairing(&mut json!({"action":"cancel","operation_id":2}))
+                .unwrap();
+        }
+        probe.finish(2, Err(Error::Cancelled));
         assert_eq!(describe()["operation"]["pairing"]["stage"], "unconfirmed");
         store.confirm(id, "old synthetic token").unwrap();
         assert_eq!(describe()["operation"]["pairing"]["stage"], "unconfirmed");
@@ -675,5 +714,97 @@ mod tests {
         ] {
             assert!(!format!("{error:?} {error}").contains("654321"));
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_dropped_worker_keeps_its_slot_until_the_real_store_write_settles() {
+        let data = tempfile::tempdir().unwrap();
+        let store = Arc::new(crate::store::TokenStore::open(data.path()).unwrap());
+        let (locked, lock_ready) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let held_store = store.clone();
+        let holder = std::thread::spawn(move || {
+            let _lock = held_store.hold_store_lock_for_test();
+            locked.send(()).unwrap();
+            released.recv().unwrap();
+        });
+        lock_ready.recv().unwrap();
+        let probe = Probe::default();
+        probe.configure(store.clone(), 47821);
+        let (cancel, _cancelled) = watch::channel(false);
+        let progress = Progress {
+            stage: "connecting_wifi",
+            device_id: Some("aabbccddeeff".into()),
+            save_possible: true,
+            ..Default::default()
+        };
+        let persistence = progress.persistence.clone();
+        probe.0.lock().unwrap().operation = Some(Operation {
+            id: 3,
+            stage: Stage::Authenticating,
+            error: None,
+            cancel,
+            input: None,
+            progress,
+        });
+        let guard = WorkerGuard {
+            probe: probe.clone(),
+            id: 3,
+        };
+        let writing_store = store.clone();
+        let writing = persistence.clone();
+        let worker = tokio::spawn(async move {
+            let _guard = guard;
+            writing
+                .pair(
+                    writing_store,
+                    "aabbccddeeff".into(),
+                    Zeroizing::new("synthetic-token".into()),
+                    "remote".into(),
+                )
+                .await
+                .unwrap();
+        });
+        while persistence.state() != 1 {
+            tokio::task::yield_now().await;
+        }
+        worker.abort();
+        assert!(worker.await.is_err());
+        let status = probe
+            .pairing(&mut json!({"action":"status","operation_id":3}))
+            .unwrap();
+        assert_eq!(status["pairing"]["persistence"], "pending");
+        assert_eq!(status["error"], "interrupted");
+        assert_eq!(
+            probe.pairing(&mut json!({"action":"start","name":"SR2-A1B2","code":"654321"})),
+            Err(Error::Busy)
+        );
+        probe
+            .pairing(&mut json!({"action":"cancel","operation_id":3}))
+            .unwrap();
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while persistence.state() == 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(persistence.state(), 2);
+        assert!(store.record("aabbccddeeff").is_some());
+        assert!(!probe.0.lock().unwrap().operation.as_ref().unwrap().active());
+        assert_eq!(
+            probe.pairing(&mut json!({"action":"describe"})).unwrap()["operation"]["pairing"]
+                ["stage"],
+            "unconfirmed"
+        );
+        store.confirm("aabbccddeeff", "synthetic-token").unwrap();
+        assert_eq!(
+            probe
+                .pairing(&mut json!({"action":"status","operation_id":3}))
+                .unwrap()["pairing"]["stage"],
+            "confirmed"
+        );
     }
 }

@@ -179,6 +179,13 @@ impl TokenStore {
     pub fn record(&self, device_id: &str) -> Option<DeviceRecord> {
         self.lock().get(device_id).cloned()
     }
+    /// A busy persistence lock is pending, distinct from an absent record.
+    pub fn try_record(&self, device_id: &str) -> Option<Option<DeviceRecord>> {
+        self.devices
+            .try_lock()
+            .map(|records| records.get(device_id).cloned())
+            .ok()
+    }
 
     /// Compares the token's hash with the stored one in constant time. An
     /// unknown device is compared against a zero digest so both refusals do
@@ -325,6 +332,14 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl TokenStore {
+        pub(crate) fn hold_store_lock_for_test(
+            &self,
+        ) -> MutexGuard<'_, BTreeMap<String, DeviceRecord>> {
+            self.lock()
+        }
+    }
 
     const ID: &str = "a4cf12b03e5d";
     const TOKEN: &str = "3f9a1c0e7b2d4a6f-plaintext-token";

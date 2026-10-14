@@ -15,7 +15,18 @@ fn configuration_bytes_obey_the_firmware_contract() {
         serde_json::json!({"v":1,"host":"minerva.local","port":47821,"token":token})
     );
     for host in [
-        "", "::1", "0.0.0.0.", "-host", "host-", "a..b", "a/b", "a\0b",
+        "",
+        "::1",
+        "::",
+        "0.0.0.0",
+        "127.0.0.1",
+        "127.9.8.7",
+        "0.0.0.0.",
+        "-host",
+        "host-",
+        "a..b",
+        "a/b",
+        "a\0b",
     ] {
         assert_eq!(config_request(host, 47821, &token), Err(Error::Config));
     }

@@ -5,6 +5,9 @@ use zeroize::Zeroizing;
 
 pub fn config_request(host: &str, port: u16, token: &str) -> Result<SecretBytes, Error> {
     if port == 0
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback() || ip.is_unspecified())
         || host.is_empty()
         || host.len() > 253
         || !host.split('.').all(|label| {
