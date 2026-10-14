@@ -117,6 +117,9 @@ func receive(channel: String, payload: Dictionary, id: String, helper: IPC) -> v
 			body = operation.duplicate(true)
 			delayed = hold_apply
 		"cancel":
+			if int(payload.operation_id) != int(operation.get("operation_id", 0)):
+				helper.reply(id, {"success": false, "error_code": "mcp_tool_error"})
+				return
 			operation = status("cancelled", int(payload.operation_id))
 			operation.stage = "cancelled"
 			body = operation.duplicate(true)
@@ -168,6 +171,25 @@ func _run() -> void:
 	check(calls.back().action == "cancel" and calls.back().operation_id == next_id, "cancel pending start")
 	check(text.text.contains("cancelled"), "cancel receipt rendered")
 	hold_start = false
+	for empty: bool in [false, true]:
+		operation = {} if empty else status("cancelled", next_id)
+		hold_start = true
+		hold_poll = true
+		view.call("_poll")
+		await ticks()
+		start.pressed.emit()
+		cancel.pressed.emit()
+		await ticks()
+		release_one() # Old describe arrives BEFORE the new Start receipt.
+		await ticks()
+		check(int(view.get("_operation")) == 0 and bool(view.get("_cancel_requested")), "old poll preserves unknown-ID cancellation")
+		check(start.disabled and not cancel.disabled, "old poll preserves new-operation controls")
+		release_one()
+		await ticks()
+		check(calls.back().action == "cancel" and calls.back().operation_id == next_id, "cancel targets NEW operation after old poll")
+		check(operation.stage == "cancelled", "new operation actually cancelled")
+		hold_start = false
+		hold_poll = false
 	hold_poll = true
 	view.call("_poll")
 	await ticks()
@@ -219,6 +241,12 @@ func _run() -> void:
 	good.pairing.device_id = "aabbccddeeff"
 	view.call("_render", JSON.parse_string(JSON.stringify(good)))
 	check(host.text == "192.0.2.99" and not host.editable, "staged address restored")
+	for bad_port: Variant in [45678.5, 0, 65536, "45678"]:
+		good.pairing.port = bad_port
+		view.call("_render", JSON.parse_string(JSON.stringify(good)))
+		check(text.text == "Invalid staged port." and apply.disabled, "invalid JSON staged port refused")
+		check(int(view.get("_port")) == 45678, "staged port is not truncated or replaced")
+	good.pairing.port = 45678
 	good.pairing.persistence = "pending"
 	view.call("_render", envelope(good).result)
 	check(text.text.contains("Saving pairing") and start.disabled, "pending store ownership")

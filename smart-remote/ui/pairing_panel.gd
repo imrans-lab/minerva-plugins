@@ -106,7 +106,7 @@ func _poll() -> void:
 	if _pending > 0 or _closed:
 		return
 	var body: Dictionary = await _call({"action": "describe"})
-	if body.is_empty():
+	if body.is_empty() or _pending > 0 or _closed:
 		return
 	if not _defaults_initialized and body.has("port"):
 		var port: Variant = body.port
@@ -168,8 +168,14 @@ func _render(body: Dictionary) -> void:
 	_cancel_button.disabled = _operation == 0
 	_host.editable = details.get("device_id") == null
 	if details.get("host") != null:
+		var port: Variant = details.get("port")
+		if (not (port is int or port is float) or not is_finite(float(port))
+				or float(port) != floor(float(port)) or float(port) < 1 or float(port) > 65535):
+			_status.text = "Invalid staged port."
+			_apply_button.disabled = true
+			return
 		_host.text = str(details.host)
-		_port = int(details.port)
+		_port = int(port)
 	var networks: Array = details.get("networks", [])
 	if waiting and _networks.item_count == 0:
 		for row: Dictionary in networks:
