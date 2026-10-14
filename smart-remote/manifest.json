@@ -53,6 +53,59 @@
         ],
         "additionalProperties": false
       }
+    },
+    {
+      "name": "minerva_smart_remote_pairing",
+      "description": "Complete owner-entered BLE pairing. start scans/authenticates and returns immediately; describe/status report redacted state, apply supplies WiFi and Minerva address at awaiting_wifi, cancel stops monitoring. Never send live credentials through an agent.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "start",
+              "status",
+              "cancel",
+              "describe",
+              "apply"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "pattern": "^SR2-[0-9A-F]{4}$"
+          },
+          "code": {
+            "type": "string",
+            "pattern": "^[0-9]{6}$"
+          },
+          "operation_id": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "ssid": {
+            "type": "string",
+            "maxLength": 44,
+            "description": "Selected network SSID bytes in base64url without padding."
+          },
+          "password": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "host": {
+            "type": "string",
+            "maxLength": 253
+          },
+          "port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      }
     }
   ],
   "permissions": {

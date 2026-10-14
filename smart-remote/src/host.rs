@@ -143,6 +143,9 @@ impl HostLink {
     pub async fn shutdown_probe(&self) {
         self.probe.shutdown().await;
     }
+    pub fn configure_pairing(&self, store: Arc<crate::store::TokenStore>, port: u16) {
+        self.probe.configure(store, port);
+    }
 
     fn write(&self, message: &Value) -> bool {
         // Fails only after the writer task ended at shutdown; nothing can
@@ -194,13 +197,15 @@ impl HostLink {
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION")},
             }),
-            "tools/list" => match crate::ble::tool_definition() {
-                Ok(tool) => json!({"tools": [tool]}),
+            "tools/list" => match crate::ble::tool_definitions() {
+                Ok(tools) => json!({"tools": tools}),
                 Err(error) => json!({"error": error}),
             },
             "tools/call" => {
                 let result = if params["name"] == crate::ble::TOOL_NAME {
                     self.probe.call(&mut params["arguments"])
+                } else if params["name"] == crate::ble::PAIRING_TOOL {
+                    self.probe.pairing(&mut params["arguments"])
                 } else {
                     Err(crate::provisioning::transport::Error::Input)
                 };

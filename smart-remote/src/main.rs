@@ -102,11 +102,12 @@ async fn run() -> Result<(), String> {
     let store = Arc::new(TokenStore::open(args.data_dir.path()).map_err(|e| e.to_string())?);
     let config = ServerConfig::new(SocketAddr::from((args.bind, args.port)));
     let (link, host_tasks) = HostLink::start(tokio::io::stdin(), tokio::io::stdout());
-    let server = Server::bind(config, store, schemas)
+    let server = Server::bind(config, store.clone(), schemas)
         .await
         .map_err(|e| e.to_string())?
         .with_host(Arc::clone(&link));
     let addr = server.local_addr().map_err(|e| e.to_string())?;
+    link.configure_pairing(store, addr.port());
     log::info!(
         "listening on ws://{addr}{}",
         smart_remote_plugin::server::WS_PATH

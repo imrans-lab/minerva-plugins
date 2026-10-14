@@ -1,5 +1,7 @@
-//! Bounded BLE authentication smoke probe. No pairing or credential writes.
+//! Bounded BLE authentication and complete provisioning operations.
 use crate::provisioning::transport::{self, bounded, Error, Peer, SERVICE};
+use crate::provisioning::workflow::{self, Credentials, Job, Progress};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use btleplug::api::{
     Central, Characteristic, Descriptor, Manager as _, Peripheral as _, ScanFilter, WriteType,
 };
@@ -8,10 +10,11 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use zeroize::{Zeroize, Zeroizing};
 
 pub const TOOL_NAME: &str = "minerva_smart_remote_ble_probe";
+pub const PAIRING_TOOL: &str = "minerva_smart_remote_pairing";
 
 pub(crate) fn scrub_json(value: &mut Value) {
     match value {
@@ -22,13 +25,11 @@ pub(crate) fn scrub_json(value: &mut Value) {
     }
 }
 
-pub fn tool_definition() -> Result<Value, Error> {
+pub fn tool_definitions() -> Result<Vec<Value>, Error> {
     let manifest: Value =
         serde_json::from_str(include_str!("../manifest.json")).map_err(|_| Error::Input)?;
-    let tool = &manifest["tools"][0];
-    Ok(
-        json!({"name": tool["name"], "description": tool["description"], "inputSchema": tool["input_schema"]}),
-    )
+    Ok(manifest["tools"].as_array().ok_or(Error::Input)?.iter().map(|tool|
+        json!({"name": tool["name"], "description": tool["description"], "inputSchema": tool["input_schema"]})).collect())
 }
 
 struct Native(Peripheral);
@@ -55,6 +56,9 @@ impl Peer for Native {
             .map_err(|_| Error::Transport)
     }
     async fn disconnect(&self) -> Result<(), Error> {
+        if !self.0.is_connected().await.map_err(|_| Error::Transport)? {
+            return Ok(());
+        }
         self.0.disconnect().await.map_err(|_| Error::Transport)
     }
 }
@@ -74,16 +78,21 @@ struct Operation {
     stage: Stage,
     error: Option<Error>,
     cancel: watch::Sender<bool>,
+    input: Option<mpsc::Sender<Credentials>>,
+    progress: Progress,
 }
 impl Operation {
     fn active(&self) -> bool {
         matches!(
             self.stage,
             Stage::Scanning | Stage::Connecting | Stage::Authenticating
+        ) || matches!(
+            self.progress.stage,
+            "scanning_wifi" | "awaiting_wifi" | "applying_wifi" | "connecting_wifi" | "waiting_lan"
         )
     }
     fn status(&self) -> Value {
-        json!({"operation_id": self.id, "stage": self.stage, "error": self.error})
+        json!({"operation_id": self.id, "stage": self.stage, "error": self.error, "pairing": self.progress})
     }
 }
 #[derive(Default)]
@@ -91,6 +100,7 @@ struct State {
     next: u64,
     operation: Option<Operation>,
     worker: Option<tokio::task::JoinHandle<()>>,
+    context: Option<(Arc<crate::store::TokenStore>, u16)>,
 }
 /// Owns one worker; status/cancel do not wait on the adapter or stdio reader.
 #[derive(Clone, Default)]
@@ -109,22 +119,96 @@ impl Drop for WorkerGuard {
             {
                 operation.stage = Stage::Failed;
                 operation.error = Some(Error::Interrupted);
+                operation.progress.stage = "";
             }
         }
     }
 }
 impl Probe {
-    pub fn call(&self, arguments: &mut Value) -> Result<Value, Error> {
-        // Take the sole parsed code allocation before any validation failure.
-        let code = match arguments.get_mut("code").map(Value::take) {
-            Some(Value::String(code)) => Zeroizing::new(code),
-            other => {
-                if let Some(mut value) = other {
-                    scrub_json(&mut value);
+    pub fn configure(&self, store: Arc<crate::store::TokenStore>, port: u16) {
+        if let Ok(mut state) = self.0.lock() {
+            state.context = Some((store, port));
+        }
+    }
+    pub fn pairing(&self, arguments: &mut Value) -> Result<Value, Error> {
+        let password = take_secret(arguments, "password");
+        match arguments["action"].as_str() {
+            Some("describe") => {
+                let state = self.0.lock().map_err(|_| Error::Operation)?;
+                let mut status = state
+                    .operation
+                    .as_ref()
+                    .map(Operation::status)
+                    .unwrap_or(json!({}));
+                if matches!(
+                    status["pairing"]["stage"].as_str(),
+                    Some("waiting_lan" | "unconfirmed")
+                ) {
+                    if let Some(id) = status["pairing"]["device_id"].as_str() {
+                        if state
+                            .context
+                            .as_ref()
+                            .is_some_and(|(store, _)| store.record(id).is_some_and(|r| r.confirmed))
+                        {
+                            status["pairing"]["stage"] = json!("confirmed");
+                        }
+                    }
                 }
-                Zeroizing::new(String::new())
+                Ok(json!({"port": state.context.as_ref().map(|c| c.1), "operation": status}))
             }
-        };
+            Some("apply") => {
+                let mut state = self.0.lock().map_err(|_| Error::Operation)?;
+                let operation = state
+                    .operation
+                    .as_mut()
+                    .filter(|o| Some(o.id) == arguments["operation_id"].as_u64())
+                    .ok_or(Error::Operation)?;
+                if operation.progress.stage != "awaiting_wifi" {
+                    return Err(Error::Busy);
+                }
+                let ssid = Zeroizing::new(
+                    URL_SAFE_NO_PAD
+                        .decode(arguments["ssid"].as_str().ok_or(Error::Input)?)
+                        .map_err(|_| Error::Input)?,
+                );
+                let host = arguments["host"].as_str().ok_or(Error::Input)?.to_owned();
+                let port = arguments["port"]
+                    .as_u64()
+                    .and_then(|p| u16::try_from(p).ok())
+                    .filter(|p| *p != 0)
+                    .ok_or(Error::Input)?;
+                if ssid.is_empty()
+                    || ssid.len() > 32
+                    || ssid.contains(&0)
+                    || password.len() > 64
+                    || password.as_bytes().contains(&0)
+                {
+                    return Err(Error::Input);
+                }
+                operation
+                    .input
+                    .as_ref()
+                    .ok_or(Error::Operation)?
+                    .try_send(Credentials {
+                        ssid,
+                        password,
+                        host,
+                        port,
+                    })
+                    .map_err(|_| Error::Busy)?;
+                operation.progress.stage = "applying_wifi";
+                operation.progress.error = None;
+                Ok(operation.status())
+            }
+            _ => self.call_mode(arguments, true),
+        }
+    }
+    pub fn call(&self, arguments: &mut Value) -> Result<Value, Error> {
+        self.call_mode(arguments, false)
+    }
+    fn call_mode(&self, arguments: &mut Value, pairing: bool) -> Result<Value, Error> {
+        // Take the sole parsed code allocation before any validation failure.
+        let code = take_secret(arguments, "code");
         let action = arguments["action"].as_str().ok_or(Error::Input)?;
         let mut state = self.0.lock().map_err(|_| Error::Operation)?;
         match action {
@@ -142,11 +226,22 @@ impl Probe {
                 state.next = state.next.checked_add(1).ok_or(Error::Operation)?;
                 let id = state.next;
                 let (cancel, cancelled) = watch::channel(false);
+                let (input, receiver) = mpsc::channel(1);
+                let job = if pairing {
+                    Some(Job {
+                        store: state.context.as_ref().ok_or(Error::Operation)?.0.clone(),
+                        input: receiver,
+                    })
+                } else {
+                    None
+                };
                 state.operation = Some(Operation {
                     id,
                     stage: Stage::Scanning,
                     error: None,
                     cancel,
+                    input: pairing.then_some(input),
+                    progress: Progress::default(),
                 });
                 let probe = self.clone();
                 let name = name.to_owned();
@@ -157,7 +252,7 @@ impl Probe {
                 };
                 state.worker = Some(runtime.spawn(async move {
                     let _guard = guard;
-                    let result = probe.run(id, &name, code, cancelled).await;
+                    let result = probe.run(id, &name, code, cancelled, job).await;
                     probe.finish(id, result);
                 }));
                 Ok(state.operation.as_ref().ok_or(Error::Operation)?.status())
@@ -208,6 +303,9 @@ impl Probe {
         if let Ok(mut state) = self.0.lock() {
             if let Some(operation) = state.operation.as_mut().filter(|o| o.id == id) {
                 operation.error = result.err();
+                if operation.error.is_some() {
+                    operation.progress.stage = "";
+                }
                 operation.stage = match operation.error {
                     None => Stage::Authenticated,
                     Some(Error::Cancelled) => Stage::Cancelled,
@@ -222,6 +320,7 @@ impl Probe {
         name: &str,
         code: Zeroizing<String>,
         mut cancel: watch::Receiver<bool>,
+        job: Option<Job>,
     ) -> Result<(), Error> {
         let manager = bounded(
             async { Manager::new().await.map_err(|_| Error::Adapter) },
@@ -300,7 +399,18 @@ impl Probe {
             )
             .await?;
             self.stage(id, Stage::Authenticating);
-            transport::authenticate(&peer, code, &mut cancel).await
+            let mut session = transport::authenticate(&peer, code, &mut cancel).await?;
+            if let Some(job) = job {
+                workflow::run(&peer, &mut session, job, name, &mut cancel, |progress| {
+                    if let Ok(mut state) = self.0.lock() {
+                        if let Some(operation) = state.operation.as_mut().filter(|o| o.id == id) {
+                            operation.progress = progress;
+                        }
+                    }
+                })
+                .await?;
+            }
+            Ok(session)
         }
         .await;
         transport::finish_probe(&peer, result, &cancel).await
@@ -312,6 +422,17 @@ fn valid_name(name: &str) -> bool {
         && name.as_bytes()[4..]
             .iter()
             .all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(b))
+}
+fn take_secret(arguments: &mut Value, key: &str) -> Zeroizing<String> {
+    match arguments.get_mut(key).map(Value::take) {
+        Some(Value::String(text)) => Zeroizing::new(text),
+        other => {
+            if let Some(mut value) = other {
+                scrub_json(&mut value);
+            }
+            Zeroizing::new(String::new())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -328,6 +449,8 @@ mod tests {
                 stage: Stage::Authenticating,
                 error: None,
                 cancel,
+                input: None,
+                progress: Progress::default(),
             });
             let guard = WorkerGuard {
                 probe: probe.clone(),
@@ -356,6 +479,8 @@ mod tests {
                 stage: Stage::Authenticating,
                 error: None,
                 cancel,
+                input: None,
+                progress: Progress::default(),
             });
             drop(WorkerGuard {
                 probe: probe.clone(),
@@ -415,6 +540,116 @@ mod tests {
             "scanning"
         );
         probe.shutdown().await;
+    }
+
+    #[test]
+    fn pairing_apply_receipts_are_single_use_redacted_and_identity_bound() {
+        let probe = Probe::default();
+        let (cancel, _cancelled) = watch::channel(false);
+        let (input, mut received) = mpsc::channel(1);
+        probe.0.lock().unwrap().operation = Some(Operation {
+            id: 9,
+            stage: Stage::Authenticating,
+            error: None,
+            cancel,
+            input: Some(input),
+            progress: Progress {
+                stage: "awaiting_wifi",
+                error: Some(Error::Wifi),
+                ..Default::default()
+            },
+        });
+        let request = || {
+            json!({"action":"apply","operation_id":9,"ssid":"bmV0",
+            "password":"synthetic-password","host":"192.0.2.1","port":8000})
+        };
+        let mut invalid = request();
+        invalid["operation_id"] = json!(8);
+        assert_eq!(probe.pairing(&mut invalid), Err(Error::Operation));
+        assert!(invalid["password"].is_null());
+        for field in ["ssid", "port"] {
+            let mut invalid = request();
+            invalid[field] = if field == "ssid" {
+                json!("AA")
+            } else {
+                json!(0)
+            };
+            assert_eq!(probe.pairing(&mut invalid), Err(Error::Input));
+            assert!(invalid["password"].is_null());
+        }
+        let mut apply = request();
+        let receipt = probe.pairing(&mut apply).unwrap();
+        assert!(apply["password"].is_null());
+        assert_eq!(receipt["pairing"]["stage"], "applying_wifi");
+        assert!(receipt["pairing"]["error"].is_null());
+        assert!(!receipt.to_string().contains("synthetic-password"));
+        let credentials = received.try_recv().unwrap();
+        assert_eq!(&*credentials.ssid, b"net");
+        assert_eq!(&*credentials.password, "synthetic-password");
+        assert_eq!(probe.pairing(&mut request()), Err(Error::Busy));
+        probe
+            .pairing(&mut json!({"action":"cancel","operation_id":9}))
+            .unwrap();
+        assert!(*probe
+            .0
+            .lock()
+            .unwrap()
+            .operation
+            .as_ref()
+            .unwrap()
+            .cancel
+            .borrow());
+        probe.finish(8, Err(Error::Store));
+        assert_eq!(
+            probe
+                .pairing(&mut json!({"action":"status","operation_id":9}))
+                .unwrap()["pairing"]["stage"],
+            "applying_wifi"
+        );
+    }
+
+    #[test]
+    fn pairing_describe_does_not_confirm_staging_and_refreshes_a_late_lan_hello() {
+        let data = tempfile::tempdir().unwrap();
+        let store = Arc::new(crate::store::TokenStore::open(data.path()).unwrap());
+        let id = "aabbccddeeff";
+        store.pair(id, "old synthetic token", "remote", 1).unwrap();
+        store.confirm(id, "old synthetic token").unwrap();
+        let probe = Probe::default();
+        probe.configure(store.clone(), 12345);
+        let (cancel, _cancelled) = watch::channel(false);
+        probe.0.lock().unwrap().operation = Some(Operation {
+            id: 2,
+            stage: Stage::Authenticating,
+            error: None,
+            cancel,
+            input: None,
+            progress: Progress {
+                stage: "applying_wifi",
+                device_id: Some(id.into()),
+                ..Default::default()
+            },
+        });
+        let describe = || probe.pairing(&mut json!({"action":"describe"})).unwrap();
+        assert_eq!(describe()["port"], 12345);
+        assert_eq!(describe()["operation"]["pairing"]["stage"], "applying_wifi");
+        store.pair(id, "new synthetic token", "remote", 2).unwrap();
+        probe
+            .0
+            .lock()
+            .unwrap()
+            .operation
+            .as_mut()
+            .unwrap()
+            .progress
+            .stage = "unconfirmed";
+        assert_eq!(describe()["operation"]["pairing"]["stage"], "unconfirmed");
+        store.confirm(id, "old synthetic token").unwrap();
+        assert_eq!(describe()["operation"]["pairing"]["stage"], "unconfirmed");
+        store.confirm(id, "new synthetic token").unwrap();
+        let result = describe();
+        assert_eq!(result["operation"]["pairing"]["stage"], "confirmed");
+        assert!(!result.to_string().contains("synthetic token"));
     }
 
     #[test]

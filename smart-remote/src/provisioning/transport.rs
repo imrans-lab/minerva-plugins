@@ -37,6 +37,9 @@ pub enum Error {
     Timeout,
     Cancelled,
     ValueTooLarge,
+    Protocol,
+    Wifi,
+    Store,
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -157,6 +160,29 @@ pub async fn exchange<P: Peer>(
         return Err(Error::ValueTooLarge);
     }
     Ok(response)
+}
+pub async fn encrypted<P: Peer>(
+    peer: &P,
+    characteristic: &Characteristic,
+    session: &mut Session,
+    request: &[u8],
+    cancel: &mut watch::Receiver<bool>,
+) -> Result<super::SecretBytes, Error> {
+    let result = async {
+        if request.len() > VALUE_LIMIT - 16 {
+            return Err(Error::ValueTooLarge);
+        }
+        let request = session
+            .encrypt(request)
+            .map_err(|_| Error::Authentication)?;
+        let reply = exchange(peer, characteristic, &request, cancel).await?;
+        session.decrypt(&reply).map_err(|_| Error::Authentication)
+    }
+    .await;
+    if result.is_err() {
+        session.cancel();
+    }
+    result
 }
 
 #[derive(serde::Deserialize)]

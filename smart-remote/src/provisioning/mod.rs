@@ -3,6 +3,7 @@
 mod config;
 mod security2;
 pub mod transport;
+pub mod workflow;
 pub use config::{config_request, config_response, wifi_config};
 pub use security2::Session;
 

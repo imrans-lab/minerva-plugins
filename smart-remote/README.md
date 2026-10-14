@@ -44,6 +44,14 @@ Each exchange is one whole acknowledged write followed by a complete read, at mo
 
 Only this plugin's own logging targets are user-tunable; dependency diagnostics are capped at warnings regardless of more-specific `RUST_LOG` directives. The application-owned raw input buffers, parsed string values and code allocation are scrubbed. OS/stdio and serde parsing intermediates, compiler copies and opaque SRP allocations cannot be promised erased; this is not machine-wide memory erasure. Linux missing-header diagnostics are supplied by the upstream `libdbus-sys` build script, which names `libdbus-1-dev` and `pkg-config` before the plugin's build script can run.
 
+## Complete BLE pairing backend
+
+`minerva_smart_remote_pairing` shares `start`, `status`, and `cancel` receipts with the probe; `start` keeps the authenticated connection open and scans WiFi. `describe` returns the current operation and actual listener port. At `pairing.stage:"awaiting_wifi"`, `apply` takes the operation ID, the selected network's base64url `ssid`, a freshly entered `password`, reachable Minerva `host`, and `port`. Secret input belongs to the owner; the native entry panel follows in S3b. Do not send live setup codes or WiFi passwords through an agent or logs.
+
+The backend generates the token and stages it with the host address over Security2, then sets/applies WiFi and checks its status. A verified WiFi failure resets the device's WiFi state and accepts fresh credentials while retaining the staged host/port/token. These address fields are frozen after staging; changing them requires cancelling and starting setup again. Transport loss or timeout ends the session; ciphertext is never retried. Setup work has a240-second limit.
+
+Only a validated connected response installs the token hash as an unconfirmed local pairing. The first authenticated LAN hello confirms it; after60 seconds without one, `unconfirmed` remains visible and a later hello still updates `describe`. No plaintext token is returned or persisted. A store failure is a failure, and an interrupted worker cannot remain busy. Cancel stops monitoring/disconnects; after Apply it cannot undo a device save, so a cancelled or interrupted setup may need to be entered again.
+
 ## LAN exposure
 
 By default the plugin listens on every IPv4 interface, so anything on the local network can open a connection. Traffic is plain `ws://`: audio, drafts and the pairing token cross the LAN unencrypted (accepted for the prototype in the design). A connection does nothing until its `hello` carries a paired token; unauthenticated connections are capped at 16 in total and 4 per IP address and must send `hello` within 5 s. Bind a single address with `--bind` to limit exposure; the mDNS advert follows the bind (IPv4 only for `0.0.0.0`, just the bound address for a specific one, none for loopback).

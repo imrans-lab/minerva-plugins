@@ -1,0 +1,5 @@
+These unchanged Python helpers come from Apache-2.0 ESP-IDF commit `8c750b088c7cd857d079c0eeb495da199b359461`, under `tools/esp_prov/prov/`; see [upstream](https://github.com/espressif/esp-idf/tree/8c750b088c7cd857d079c0eeb495da199b359461/tools/esp_prov/prov) and [license](../../../proto/espressif/LICENSE.md).
+
+`wifi_scan.py` SHA-256: `de99e9b7cf5cd7055caa58349727e0c1d634b55061a77d447f1b275f7b6d85d3`; `wifi_prov.py`: `ffa63404b6e151146e36079a3f7bc69344ad55455c0a798cf4bd3d0f46ec6eb7`.
+
+The public synthetic plaintext command vectors in `../wifi.rs` were recorded with these exact helpers and an identity encryption context against the canonical protobufs using test-only protoc3.21.12/Python protobuf3.21.12. Scan start uses nonblocking/active/group0/120ms; scan page uses index0/count4; set uses `synthetic-network`/`public-test-password`. Existing Security2 fixtures independently establish authentication/key/cipher bytes. This is a synthetic client oracle, not a real device capture; these helpers are never linked into the plugin.

@@ -99,7 +99,7 @@ async fn scripted_host_handshake_host_events_and_clean_exit_on_eof() {
     assert_eq!(replies[1]["result"]["serverInfo"]["name"], "smart_remote");
     assert!(replies[1]["result"]["capabilities"].is_object());
     assert_eq!(replies[2]["id"], 3);
-    assert_eq!(replies[2]["result"]["tools"].as_array().unwrap().len(), 1);
+    assert_eq!(replies[2]["result"]["tools"].as_array().unwrap().len(), 2);
     assert_eq!(
         replies[2]["result"]["tools"][0]["name"],
         "minerva_smart_remote_ble_probe"
