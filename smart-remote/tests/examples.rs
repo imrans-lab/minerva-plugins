@@ -28,6 +28,7 @@ const VALID: &[(&str, usize)] = &[
     ("ptt_interrupts_speech.jsonl", 2),
     ("ptt_turn.jsonl", 2),
     ("send_refusals.jsonl", 3),
+    ("speech_log.jsonl", 2),
 ];
 
 /// What the plugin answers to the device frames of each invalid example.
@@ -40,6 +41,10 @@ enum Invalid {
 }
 
 const INVALID: &[(&str, Invalid)] = &[
+    (
+        "log_page_limit.jsonl",
+        Invalid::DeviceSide(&["error:bad_message", "close:4002"]),
+    ),
     ("chats_without_group.jsonl", Invalid::PluginSide),
     (
         "speaker_early_ack.jsonl",

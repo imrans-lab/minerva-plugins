@@ -61,6 +61,19 @@ pub enum DeviceMsg {
         last_seq: Option<u16>,
         error: Option<String>,
     },
+    LogPage {
+        #[serde(deserialize_with = "crate::speech_log::deserialize_number")]
+        offset: u64,
+        limit: u8,
+    },
+    LogPlay {
+        log_id: String,
+    },
+    LogDelete {
+        log_id: String,
+    },
+    LogDeleteAll,
+    ReplayLast,
     Clear,
     Send,
     Mode {
@@ -121,6 +134,18 @@ pub enum PluginMsg {
         origin: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         chat_id: Option<String>,
+    },
+    Missed {
+        unheard: u64,
+    },
+    LogItems {
+        offset: u64,
+        total: u64,
+        unheard: u64,
+        items: Vec<crate::speech_log::LogItem>,
+    },
+    Status {
+        text: String,
     },
     Draft {
         text: String,
@@ -355,6 +380,11 @@ mod tests {
     fn every_device_type_has_a_variant() {
         let s = schemas();
         let samples = [
+            json!({"type":"log_page","offset":0,"limit":10}),
+            json!({"type":"log_play","log_id":"speech_7"}),
+            json!({"type":"log_delete","log_id":"speech_7"}),
+            json!({"type":"log_delete_all"}),
+            json!({"type":"replay_last"}),
             json!({"type":"speak_done","stream_id":1,"ok":true,"last_seq":2}),
             json!({"type":"ptt_down","stream":1}),
             json!({"type":"ptt_up","stream":1}),

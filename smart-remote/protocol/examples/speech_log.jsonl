@@ -1,0 +1,11 @@
+{"dir":"d2p","msg":{"type":"hello","proto":1,"token":"3f9a1c0e7b2d4a6f","device_id":"a4cf12b03e5d","fw":"0.1.0"}}
+{"dir":"p2d","msg":{"type":"welcome","proto":1,"plugin":"smart-remote 0.1.0"}}
+{"dir":"p2d","msg":{"type":"missed","unheard":1}}
+{"dir":"d2p","msg":{"type":"log_page","offset":0,"limit":2}}
+{"dir":"p2d","msg":{"type":"log_items","offset":0,"total":1,"unheard":1,"items":[{"log_id":"speech_7","age_s":3,"summary":"Saved speech","heard":false}]}}
+{"dir":"d2p","msg":{"type":"log_play","log_id":"speech_7"}}
+{"dir":"p2d","msg":{"type":"status","text":"Playing"}}
+{"dir":"d2p","msg":{"type":"log_delete","log_id":"speech_7"}}
+{"dir":"p2d","msg":{"type":"status","text":"Deleted"}}
+{"dir":"d2p","msg":{"type":"replay_last"}}
+{"dir":"d2p","msg":{"type":"log_delete_all"}}

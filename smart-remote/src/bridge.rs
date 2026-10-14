@@ -15,6 +15,7 @@ use tokio::time::Instant;
 pub(crate) type RemoteMemory = Arc<Mutex<HashMap<String, (Value, String, Option<String>)>>>;
 
 pub(crate) enum Update {
+    Log(Result<crate::speech_log::Reply, HostError>),
     Ready(Result<Value, HostError>),
     Started(u64, u64),
     Submitted(String, Result<Value, HostError>),
@@ -50,6 +51,10 @@ pub(crate) struct Bridge {
     pub sends: HashMap<u64, String>,
     pending_send: bool,
     pending_clear: bool,
+    log_pending: bool,
+    log_available: bool,
+    log_page: (u64, u8),
+    log_cancel: watch::Sender<bool>,
     speaker: Option<Speaker>,
     next_speaker: u8,
     aborts: VecDeque<PluginMsg>,
@@ -88,6 +93,10 @@ impl Bridge {
             sends: HashMap::new(),
             pending_send: false,
             pending_clear: false,
+            log_pending: false,
+            log_available: true,
+            log_page: (0, 10),
+            log_cancel: watch::channel(false).0,
             speaker: None,
             next_speaker: 0,
             aborts: VecDeque::new(),
@@ -107,6 +116,21 @@ impl Bridge {
     }
     pub fn update(&mut self, update: Update) -> Vec<PluginMsg> {
         match update {
+            Update::Log(result) => {
+                self.log_pending = false;
+                match result {
+                    Ok(mut reply) => {
+                        if let Some(page) = reply.page {
+                            self.log_page = page;
+                        }
+                        if let Some(e) = reply.failure {
+                            reply.messages.extend(self.log_failure(e));
+                        }
+                        reply.messages
+                    }
+                    Err(e) => self.log_failure(e),
+                }
+            }
             Update::OutputFailed(message) => {
                 if permission_failure(&message) {
                     self.stopped = true;
@@ -123,6 +147,7 @@ impl Bridge {
                     return vec![error(ErrorCode::NoTarget, "Invalid target chat")];
                 }
                 self.target = target;
+                self.start_log(crate::speech_log::Action::Count);
                 vec![
                     self.target_message(),
                     PluginMsg::Draft {
@@ -210,6 +235,22 @@ impl Bridge {
     }
     pub fn on_text(&mut self, msg: DeviceMsg) -> Vec<PluginMsg> {
         match msg {
+            DeviceMsg::LogPage { offset, limit } => {
+                self.start_log(crate::speech_log::Action::Page(offset, limit))
+            }
+            DeviceMsg::LogPlay { log_id } => {
+                self.start_log(crate::speech_log::Action::Play(log_id))
+            }
+            DeviceMsg::LogDelete { log_id } => self.start_log(crate::speech_log::Action::Delete(
+                log_id,
+                self.log_page.0,
+                self.log_page.1,
+            )),
+            DeviceMsg::LogDeleteAll => self.start_log(crate::speech_log::Action::DeleteAll(
+                self.log_page.0,
+                self.log_page.1,
+            )),
+            DeviceMsg::ReplayLast => self.start_log(crate::speech_log::Action::ReplayLast),
             DeviceMsg::SpeakDone {
                 stream_id,
                 ok,
@@ -389,6 +430,12 @@ impl Bridge {
     pub fn event(&mut self, event: HostEvent) -> Vec<PluginMsg> {
         let p = &event.payload;
         match event.name.as_str() {
+            "speech_log.changed" if self.log_available => match crate::speech_log::counts(p) {
+                Ok((unheard, _)) => {
+                    vec![PluginMsg::Missed { unheard }]
+                }
+                Err(e) => vec![error(ErrorCode::Internal, &e.to_string())],
+            },
             "voice.audio" if p["device_id"].as_str() == Some(self.device.as_str()) => {
                 self.audio_event(event)
             }
@@ -511,6 +558,37 @@ impl Bridge {
         }
         failures
     }
+    fn log_failure(&mut self, e: HostError) -> Vec<PluginMsg> {
+        if permission_failure(&e.to_string()) {
+            self.log_available = false;
+            vec![PluginMsg::Status {
+                text: "Missed list unavailable".into(),
+            }]
+        } else {
+            vec![error(ErrorCode::Internal, &e.to_string())]
+        }
+    }
+    fn start_log(&mut self, action: crate::speech_log::Action) -> Vec<PluginMsg> {
+        if !self.ready || !self.log_available {
+            return vec![PluginMsg::Status {
+                text: "Missed list unavailable".into(),
+            }];
+        }
+        if self.log_pending {
+            return vec![PluginMsg::Status {
+                text: "Speech log request is pending".into(),
+            }];
+        }
+        self.log_pending = true;
+        let (host, device, updates) =
+            (self.host.clone(), self.device.clone(), self.updates.clone());
+        let mut cancel = self.log_cancel.subscribe();
+        self.tasks.spawn(async move {
+            let result=tokio::select!{biased; _=cancel.changed()=>return, result=crate::speech_log::request(host,device,action)=>result};
+            let _=updates.send(Update::Log(result)).await;
+        });
+        vec![]
+    }
     pub fn cancel_mic(&mut self) {
         if let Some(m) = self.mic.take() {
             let _ = m.cancel.send(true);
@@ -536,6 +614,7 @@ impl Bridge {
             );
     }
     pub async fn close(&mut self, current: bool) {
+        let _ = self.log_cancel.send(true);
         if current {
             self.remember();
         }

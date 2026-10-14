@@ -15,6 +15,7 @@ pub mod resample;
 pub mod schema;
 pub mod server;
 mod session;
+pub mod speech_log;
 pub mod store;
 
 pub use session::{

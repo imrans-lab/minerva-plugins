@@ -37,3 +37,7 @@ Logs go to stderr (`RUST_LOG` filters them); stdout carries only JSON-RPC.
 ## LAN exposure
 
 By default the plugin listens on every IPv4 interface, so anything on the local network can open a connection. Traffic is plain `ws://`: audio, drafts and the pairing token cross the LAN unencrypted (accepted for the prototype in the design). A connection does nothing until its `hello` carries a paired token; unauthenticated connections are capped at 16 in total and 4 per IP address and must send `hello` within 5 s. Bind a single address with `--bind` to limit exposure; the mDNS advert follows the bind (IPv4 only for `0.0.0.0`, just the bound address for a specific one, none for loopback).
+
+## Speech log relay
+
+Requires Minerva M1c's `host.speech_log` capability and the granted `speech_log.changed` event. The relay projects a current page (at most10 rows,21-character summaries), plays only this authenticated endpoint, and forwards confirmed single/all deletion once. `log_delete_all` requires the firmware confirmation gesture and forwards the host’s explicit `confirmed:true` guard; Minerva owns scoped deletion and playback cancellation. Minerva owns records, delivery and heard state; the plugin does not keep a shadow log. `replay_last` reads the authoritative newest item before playing its exact ID. Missing/invalid responses and timeouts are visible; no destructive retry occurs. F2 owns confirmation and the modal OLED browser. Actual store/service and firmware integration are separate from the scripted transport fixture.

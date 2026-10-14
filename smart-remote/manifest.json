@@ -25,13 +25,15 @@
     "host_capabilities": [
       "host.audio",
       "host.chat.active",
-      "host.chat.input"
+      "host.chat.input",
+      "host.speech_log"
     ],
     "host_events": [
       "chat.active_changed",
       "chat.turn_completed",
       "voice.audio",
-      "voice.transcript"
+      "voice.transcript",
+      "speech_log.changed"
     ],
     "network": {
       "mode": "unrestricted"

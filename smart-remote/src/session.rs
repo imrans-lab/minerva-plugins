@@ -341,7 +341,12 @@ fn on_text(text: &str, mic: &mut MicStream, shared: &Shared) -> Result<Option<Pl
             mic.end(stream);
             Ok(Some(not_implemented()))
         }
-        DeviceMsg::Clear
+        DeviceMsg::LogPage { .. }
+        | DeviceMsg::LogPlay { .. }
+        | DeviceMsg::LogDelete { .. }
+        | DeviceMsg::LogDeleteAll
+        | DeviceMsg::ReplayLast
+        | DeviceMsg::Clear
         | DeviceMsg::Send
         | DeviceMsg::PickerOpen
         | DeviceMsg::PickerList { .. }

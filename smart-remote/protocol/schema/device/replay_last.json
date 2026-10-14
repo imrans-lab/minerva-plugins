@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smart-remote.local/protocol/v1/device/replay_last.json",
+  "title": "replay_last",
+  "type": "object",
+  "properties": {
+    "type": {
+      "const": "replay_last"
+    }
+  },
+  "required": [
+    "type"
+  ],
+  "additionalProperties": false
+}
