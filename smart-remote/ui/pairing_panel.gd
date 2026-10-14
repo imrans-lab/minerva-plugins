@@ -55,10 +55,10 @@ func _on_panel_loaded(_ctx: Dictionary) -> void:
 
 func _integer(value: Variant, maximum: int) -> int:
 	if value is int:
-		var integer: int = value as int
+		var integer: int = value
 		return integer if integer >= 1 and integer <= maximum else 0
 	if value is float:
-		var number: float = value as float
+		var number: float = value
 		if is_finite(number) and number == floor(number) and number >= 1.0 and number <= float(maximum):
 			return int(number)
 	return 0
@@ -81,12 +81,15 @@ func _call(arguments: Dictionary) -> Dictionary:
 	if not reply is Dictionary:
 		_status.text = "Pairing request failed. Reopen to see progress or retry."
 		return {}
-	var response: Dictionary = reply as Dictionary
+	var response: Dictionary = reply
 	if response.get("success", false) != true:
 		_status.text = "Pairing request failed. Reopen to see progress or retry."
 		return {}
 	var body: Variant = response.get("result", {})
-	return body as Dictionary if body is Dictionary else {}
+	if body is Dictionary:
+		var result: Dictionary = body
+		return result
+	return {}
 
 func _start() -> void:
 	var arguments := {"action": "start", "name": _name.text, "code": _code.text}
@@ -133,7 +136,7 @@ func _poll() -> void:
 		_defaults_initialized = true
 	var operation: Variant = body.get("operation", {})
 	if operation is Dictionary:
-		var current: Dictionary = operation as Dictionary
+		var current: Dictionary = operation
 		if current.is_empty():
 			_start_button.disabled = false
 			_cancel_button.disabled = true
@@ -153,7 +156,7 @@ func _render(body: Dictionary) -> void:
 	if not value is Dictionary:
 		_status.text = "Invalid pairing status."
 		return
-	var details: Dictionary = value as Dictionary
+	var details: Dictionary = value
 	var stage: String = str(details.get("stage", ""))
 	if stage.is_empty():
 		stage = str(body.get("stage", "idle"))
