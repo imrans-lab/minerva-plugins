@@ -23,5 +23,5 @@ plugin=$2
 echo "Pre-push candidate: $base..$head ($plugin)"
 scripts/check-corpus-policy.sh
 scripts/scan-secret-history.sh --range "$base..$head"
-(cd "$plugin" && cargo fmt --all -- --check && cargo clippy --locked --all-targets -- -D warnings)
+(cd -- "./$plugin" && cargo fmt --all -- --check && cargo clippy --locked --all-targets -- -D warnings)
 echo "Pre-push checks passed for $head"
