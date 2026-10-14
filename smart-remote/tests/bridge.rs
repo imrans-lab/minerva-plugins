@@ -53,11 +53,20 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
     })
     .await
     .unwrap();
-    let drain = tokio::spawn(async move { while let Ok(Some(_)) = logs.next_line().await {} });
+    let drain = tokio::spawn(async move {
+        let mut captured = String::new();
+        while let Ok(Some(line)) = logs.next_line().await {
+            captured.push_str(&line);
+            captured.push('\n');
+        }
+        captured
+    });
     let mut output = BufReader::new(child.stdout.take().unwrap()).lines();
     let (requests, mut seen) = mpsc::channel(64);
     let hold_end = Arc::new(AtomicBool::new(false));
     let drop_begin = Arc::new(AtomicBool::new(false));
+    let refuse_start = Arc::new(AtomicBool::new(false));
+    let refusal = refuse_start.clone();
     let (hold, drop_request) = (hold_end.clone(), drop_begin.clone());
     let writer = input.clone();
     let host = tokio::spawn(async move {
@@ -67,6 +76,11 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
                 continue;
             }
             let args = &msg["params"]["args"];
+            if args["op"] == "register" && refusal.load(Ordering::SeqCst) {
+                writer.lock().await.write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":msg["id"],"result":{"success":false,"error_code":"endpoint_refused","error_message":"Fixture endpoint registration refused"}})).as_bytes()).await.unwrap();
+                requests.send(msg).await.unwrap();
+                continue;
+            }
             if msg["params"]["capability"] == "host.audio"
                 && ((args["op"] == "input_end" && hold.load(Ordering::SeqCst))
                     || (args["op"] == "input_begin" && drop_request.swap(false, Ordering::SeqCst)))
@@ -395,6 +409,19 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
         false
     );
     next_request(&mut seen, "unregister").await;
+    refuse_start.store(true, Ordering::SeqCst);
+    let mut refused = Device::connect(
+        ([127, 0, 0, 1], port).into(),
+        Arc::new(Schemas::load().unwrap()),
+    )
+    .await;
+    refused.send_json(&common::hello(TOKEN, DEVICE)).await;
+    assert_eq!(refused.recv_msg().await["type"], "welcome");
+    assert!(refused.recv_msg().await["message"]
+        .as_str()
+        .unwrap()
+        .contains("Fixture endpoint registration refused"));
+    next_request(&mut seen, "register").await;
     host.abort(); // Releases its writer clone; the real host EOF shuts down the plugin.
     let _ = host.await;
     drop(input);
@@ -403,7 +430,12 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
         .unwrap()
         .unwrap()
         .success());
-    drain.await.unwrap();
+    let diagnostics = drain.await.unwrap();
+    assert!(diagnostics.contains("bridge startup failed: Fixture endpoint registration refused"));
+    assert!(
+        !diagnostics.contains(TOKEN),
+        "pairing token stays out of stderr"
+    );
 }
 async fn next_request(rx: &mut mpsc::Receiver<Value>, op: &str) -> Value {
     tokio::time::timeout(WAIT, async {

@@ -3,6 +3,7 @@
   "name": "Smart Remote",
   "version": "0.1.0",
   "host_api_version": "1",
+  "log_stderr": true,
   "release_targets": [
     "linux-x86_64",
     "macos-arm64",

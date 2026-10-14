@@ -144,6 +144,7 @@ impl Bridge {
                     .is_some_and(|s| s.is_empty() || s.len() > 128)
                 {
                     self.stopped = true;
+                    log::error!("bridge startup failed: Invalid target chat");
                     return vec![error(ErrorCode::NoTarget, "Invalid target chat")];
                 }
                 self.target = target;
@@ -157,6 +158,7 @@ impl Bridge {
             }
             Update::Ready(Err(e)) => {
                 self.stopped = true;
+                log::error!("bridge startup failed: {e}");
                 vec![error(ErrorCode::Internal, &e.to_string())]
             }
             Update::Started(epoch, session) => {
