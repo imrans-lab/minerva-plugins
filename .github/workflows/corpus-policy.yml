@@ -15,31 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Ban product board files
-        run: |
-          set -euo pipefail
-          # Public plugin source is allowed; product board data stays private.
-          while IFS= read -r path; do
-            case "$path" in
-              .github/workflows/smart-remote.yml) continue ;;
-              smart-remote/proto/espressif/*.proto) continue ;;
-              smart-remote/*.rs|smart-remote/*.md|smart-remote/*.py) continue ;;
-              smart-remote/Cargo.toml|smart-remote/Cargo.lock|smart-remote/manifest.json|smart-remote/.gitignore|smart-remote/deny.toml) continue ;;
-              smart-remote/protocol/schema/*.json|smart-remote/protocol/examples/*.jsonl) continue ;;
-              smart-remote/scripts/check-protocol-sync.sh|smart-remote/scripts/protocol-owner-amendment.json) continue ;;
-            esac
-            echo "::error::product board file is banned: $path (see pcb/worker/tests/testdata/POLICY.md)"
-            exit 1
-          done < <(git ls-files | grep -iE 'smart[-_]?remote' || true)
-      - name: Ban product board identities in YAML
-        run: |
-          set -euo pipefail
-          # A renamed file still declares its identity in the canonical
-          # board contract's `name:` field — ban the identity itself.
-          if git grep -nE '^[[:space:]]*name:[[:space:]]*["'"'"']?smart[-_]?remote' -- '*.yml' '*.yaml' ':!.github/workflows/smart-remote.yml'; then
-            echo "::error::the smart-remote board definition is banned from this public repo (see pcb/worker/tests/testdata/POLICY.md)"
-            exit 1
-          fi
+      - name: Check corpus policy
+        run: scripts/check-corpus-policy.sh
 
   secret-scan:
     uses: ./.github/workflows/secret-scan.yml
