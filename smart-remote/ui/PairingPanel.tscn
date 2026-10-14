@@ -1,0 +1,66 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="pairing_panel.gd" id="1"]
+
+[node name="PairingPanel" type="VBoxContainer"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+script = ExtResource("1")
+
+[node name="Instructions" type="Label" parent="."]
+layout_mode = 2
+text = "Hold SW2 while waking the remote. Enter its SR2 name and OLED code here."
+autowrap_mode = 3
+
+[node name="Name" type="LineEdit" parent="."]
+layout_mode = 2
+placeholder_text = "Remote name: SR2-XXXX"
+max_length = 8
+
+[node name="Code" type="LineEdit" parent="."]
+layout_mode = 2
+placeholder_text = "Six-digit OLED code"
+secret = true
+max_length = 6
+
+[node name="Start" type="Button" parent="."]
+layout_mode = 2
+text = "Connect and scan WiFi"
+
+[node name="Networks" type="OptionButton" parent="."]
+layout_mode = 2
+
+[node name="Password" type="LineEdit" parent="."]
+layout_mode = 2
+placeholder_text = "WiFi password (empty for an open network)"
+secret = true
+max_length = 64
+
+[node name="Host" type="LineEdit" parent="."]
+visible = false
+layout_mode = 2
+placeholder_text = "Minerva IPv4 address or DNS name reachable by the remote"
+max_length = 253
+
+[node name="Apply" type="Button" parent="."]
+layout_mode = 2
+text = "Connect WiFi and pair"
+disabled = true
+
+[node name="Cancel" type="Button" parent="."]
+layout_mode = 2
+text = "Cancel"
+
+[node name="Notice" type="Label" parent="."]
+layout_mode = 2
+text = "Closing this window doesn’t stop pairing; reopen to see progress or cancel. Cancel cannot undo a remote save."
+autowrap_mode = 3
+
+[node name="Status" type="Label" parent="."]
+layout_mode = 2
+text = "Ready. Enter setup details above."
+autowrap_mode = 3
+
+[node name="Poll" type="Timer" parent="."]
+wait_time = 1.0

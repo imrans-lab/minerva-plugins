@@ -15,10 +15,32 @@
     "args": []
   },
   "ui": {
-    "panels": [],
-    "ipc_messages": []
+    "panels": [
+      {
+        "name": "smart_remote_pairing",
+        "kind": "godot_scene",
+        "entry_scene": "ui/PairingPanel.tscn",
+        "scripts": [
+          "ui/pairing_panel.gd"
+        ],
+        "ipc_channels": [
+          "minerva_smart_remote_pairing"
+        ],
+        "save_mode": "none"
+      }
+    ],
+    "ipc_messages": [
+      "minerva_smart_remote_pairing"
+    ]
   },
-  "editor_items": [],
+  "editor_items": [
+    {
+      "id": "open_pairing",
+      "name": "Pair Smart Remote",
+      "panel": "smart_remote_pairing",
+      "default_filename": "pairing.smartremote"
+    }
+  ],
   "events": [],
   "tools": [
     {
@@ -128,7 +150,7 @@
   },
   "autostart": false,
   "auto_reload": false,
-  "description": "Bridge a Smart Remote V2 to Minerva over the local network. BLE authentication probe available; pairing panel follows separately. Linux source installation requires libdbus-1-dev and pkg-config.",
+  "description": "Bridge a Smart Remote V2 to Minerva over the local network. Pair through the native owner-entered setup panel. Linux source installation requires libdbus-1-dev and pkg-config.",
   "price": {
     "amount_minor": 0,
     "currency": "USD"

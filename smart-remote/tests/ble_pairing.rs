@@ -476,21 +476,20 @@ async fn cancelled_owner_input_excludes_typing_time_and_invalidates_the_session_
             "SR2-A1B2",
             &mut cancelled,
             |progress| {
-                if progress.stage == "awaiting_wifi" {
-                    if timeout {
-                        let cancel = cancel.clone();
-                        tokio::spawn(async move {
-                            tokio::time::sleep(Duration::from_secs(300)).await;
-                            cancel.send(true).unwrap();
-                        });
-                    } else {
-                        cancel.send(true).unwrap();
-                    }
+                if progress.stage == "awaiting_wifi" && !timeout {
+                    cancel.send(true).unwrap();
                 }
             },
         )
         .await;
-        assert_eq!(result, Err(Error::Cancelled));
+        assert_eq!(
+            result,
+            Err(if timeout {
+                Error::InputTimeout
+            } else {
+                Error::Cancelled
+            })
+        );
         assert!(store.record(ID).is_none());
         assert_eq!(peer.state.lock().unwrap().customs, 0);
         assert_eq!(

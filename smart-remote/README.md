@@ -1,6 +1,6 @@
 # smart-remote Minerva plugin
 
-Rust Minerva plugin that bridges the remote to Minerva over the local network: WebSocket server, paired-device sessions, PTT and chat targeting. Minerva owns STT/TTS; the plugin forwards mic PCM, echoes targeted transcripts, correlates its remote sends, resamples output to 16 kHz, and paces LAN speaker frames. BLE authentication can be tested with the probe below; the provisioning panel follows separately.
+Rust Minerva plugin that bridges the remote to Minerva over the local network: WebSocket server, paired-device sessions, PTT and chat targeting. Minerva owns STT/TTS; the plugin forwards mic PCM, echoes targeted transcripts, correlates its remote sends, resamples output to 16 kHz, and paces LAN speaker frames. Open **Pair Smart Remote** in Minerva to provision through the native panel.
 
 Migrated with scoped history from the sandbox; see `SOURCE_PROVENANCE.md`. The authoritative protocol is `protocol/` in this repository. The sandbox copy is retained during migration; check it with `scripts/check-protocol-sync.sh /path/to/ccsandbox/smart-remote-v2/protocol`.
 
@@ -46,13 +46,15 @@ Only this plugin's own logging targets are user-tunable; dependency diagnostics 
 
 ## Complete BLE pairing backend
 
-`minerva_smart_remote_pairing` shares `start`, `status`, and `cancel` receipts with the probe; `start` keeps the authenticated connection open and scans WiFi. `describe` returns the current operation and actual listener port. At `pairing.stage:"awaiting_wifi"`, `apply` takes the operation ID, the selected network's base64url `ssid`, a freshly entered `password`, reachable Minerva `host`, and `port`. Secret input belongs to the owner; the native entry panel follows in S3b. Do not send live setup codes or WiFi passwords through an agent or logs.
+`minerva_smart_remote_pairing` shares `start`, `status`, and `cancel` receipts with the probe; `start` keeps the authenticated connection open and scans WiFi. `describe` returns the current operation and actual listener port. At `pairing.stage:"awaiting_wifi"`, `apply` takes the operation ID, the selected network's base64url `ssid`, a freshly entered `password`, reachable Minerva `host`, and `port`. Enter secrets only in the native panel; choose a scanned network and enter its password. The host field appears only when automatic route selection has no default. Do not send live setup codes or WiFi passwords through an agent or logs.
 
 The backend generates the token and stages it with the host address over Security2, then sets/applies WiFi and checks its status. A verified WiFi failure reports `wrong_password` or `network_not_found`, resets the device's WiFi state and accepts fresh credentials while retaining the staged host/port/token. These address fields are frozen after staging; changing them requires cancelling and starting setup again. Transport loss or timeout ends the session; ciphertext is never retried. Each supplied credential attempt has a240-second provisioning deadline; owner typing and the separate60-second LAN window are excluded.
 
 Only a validated connected response installs the token hash as an unconfirmed local pairing. The first authenticated LAN hello confirms it; after60 seconds without one, `unconfirmed` remains visible and a later hello still updates `describe` and `status`. No plaintext token is returned or persisted. A store failure is a failure; interrupted persistence keeps its operation slot until settlement. Cancel stops monitoring/disconnects; after Apply it cannot undo a device save, so a cancelled or interrupted setup may need to be entered again.
 
 Receipts retain `save_possible` after an Apply attempt and independently report persistence as `none`, `pending`, `stored`, or `failed`; cancellation cannot discard an installed hash or a late LAN confirmation. Pending persistence retains the operation slot until its write settles. A busy confirmation fsync reports `confirmation_pending` without blocking status/cancel. `describe.host` defaults to the plugin's outward-route IPv4 using OS route selection without sending a packet; if unavailable, supply an explicit reachable host. Loopback and unspecified IP addresses are rejected.
+
+Closing the window does not stop pairing; reopen to see its current progress or cancel. Code/password fields are cleared on submit, Cancel, close and restore; the panel saves no document state. Each network/password input wait expires after300 seconds with `input_timeout`, freeing the operation slot. Explicit Cancel works during pending panel calls; after Apply it still cannot undo a remote save.
 
 ## LAN exposure
 

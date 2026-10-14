@@ -8,6 +8,7 @@ while IFS= read -r path; do
   case "$path" in
     .github/workflows/smart-remote.yml) continue ;;
     smart-remote/proto/espressif/*.proto) continue ;;
+    smart-remote/ui/PairingPanel.tscn|smart-remote/ui/pairing_panel.gd|smart-remote/ui/pairing_panel.gd.uid) continue ;;
     smart-remote/*.rs|smart-remote/*.md|smart-remote/*.py) continue ;;
     smart-remote/Cargo.toml|smart-remote/Cargo.lock|smart-remote/manifest.json|smart-remote/.gitignore|smart-remote/deny.toml) continue ;;
     smart-remote/protocol/schema/*.json|smart-remote/protocol/examples/*.jsonl) continue ;;

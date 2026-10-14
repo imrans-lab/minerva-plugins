@@ -78,6 +78,8 @@ pub struct Progress {
     pub stage: &'static str,
     pub networks: Vec<Network>,
     pub device_id: Option<String>,
+    pub host: Option<String>,
+    pub port: Option<u16>,
     pub error: Option<Error>,
     pub save_possible: bool,
     pub persistence: Persistence,
@@ -271,11 +273,15 @@ pub async fn run<P: Peer>(
             link.deadline = None;
             progress.stage = "awaiting_wifi";
             update(progress.clone());
-            let credentials = tokio::select! {
-                biased;
-                _ = link.cancel.changed() => return Err(Error::Cancelled),
-                input = job.input.recv() => input.ok_or(Error::Cancelled)?,
-            };
+            let credentials = tokio::time::timeout(Duration::from_secs(300), async {
+                tokio::select! {
+                    biased;
+                    _ = link.cancel.changed() => Err(Error::Cancelled),
+                    input = job.input.recv() => input.ok_or(Error::Cancelled),
+                }
+            })
+            .await
+            .map_err(|_| Error::InputTimeout)??;
             link.deadline = Some(tokio::time::Instant::now() + Duration::from_secs(240));
             progress.error = None;
             if staged
@@ -297,6 +303,8 @@ pub async fn run<P: Peer>(
                 .await?;
                 progress.device_id = Some(config_response(&reply).map_err(|_| Error::Protocol)?);
                 staged = Some((credentials.host.clone(), credentials.port));
+                progress.host = Some(credentials.host.clone());
+                progress.port = Some(credentials.port);
             }
             progress.stage = "applying_wifi";
             update(progress.clone());

@@ -35,6 +35,7 @@ pub enum Error {
     Version,
     Authentication,
     Timeout,
+    InputTimeout,
     Cancelled,
     ValueTooLarge,
     Protocol,

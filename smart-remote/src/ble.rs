@@ -97,7 +97,7 @@ impl Operation {
             )
     }
     fn status(&self) -> Value {
-        json!({"operation_id": self.id, "stage": self.stage, "error": self.error, "pairing": self.progress})
+        json!({"ok": true, "operation_id": self.id, "stage": self.stage, "error": self.error, "pairing": self.progress})
     }
 }
 #[derive(Default)]
@@ -714,6 +714,36 @@ mod tests {
         ] {
             assert!(!format!("{error:?} {error}").contains("654321"));
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn owner_input_expiry_is_terminal_and_releases_the_operation_slot() {
+        let probe = Probe::default();
+        let (cancel, _cancelled) = watch::channel(false);
+        probe.0.lock().unwrap().operation = Some(Operation {
+            id: 4,
+            stage: Stage::Authenticating,
+            error: None,
+            cancel,
+            input: None,
+            progress: Progress {
+                stage: "awaiting_wifi",
+                ..Default::default()
+            },
+        });
+        probe.0.lock().unwrap().next = 4;
+        probe.finish(4, Err(Error::InputTimeout));
+        let receipt = probe
+            .pairing(&mut json!({"action":"status","operation_id":4}))
+            .unwrap();
+        assert_eq!(receipt["error"], "input_timeout");
+        assert!(!probe.0.lock().unwrap().operation.as_ref().unwrap().active());
+        let next = probe
+            .call(&mut json!({"action":"start","name":"SR2-A1B2","code":"654321"}))
+            .unwrap();
+        assert_eq!(next["operation_id"], 5);
+        // Cancel before yielding: exercise slot reuse without touching an adapter.
+        probe.shutdown().await;
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -370,6 +370,66 @@ async fn write_lines<W: AsyncWrite + Unpin>(mut rx: mpsc::Receiver<String>, mut 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pairing_mcp_receipts_preserve_worker_markers_and_redacted_domain_outcomes() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let data = tempfile::tempdir().unwrap();
+        let store = Arc::new(crate::store::TokenStore::open(data.path()).unwrap());
+        let (input, host_input) = tokio::io::duplex(1024);
+        let (output, host_output) = tokio::io::duplex(16384);
+        let (link, tasks) = HostLink::start(input, output);
+        link.configure_pairing(store, 47821);
+        let mut start = json!({"name":crate::ble::PAIRING_TOOL,"arguments":{
+            "action":"start","name":"SR2-A1B2","code":"654321"}});
+        link.on_request("tools/call", json!(1), &mut start);
+        assert!(start["arguments"]["code"].is_null());
+        link.on_request(
+            "tools/call",
+            json!(2),
+            &mut json!({"name":crate::ble::PAIRING_TOOL,
+            "arguments":{"action":"cancel","operation_id":1}}),
+        );
+        // No await before cancellation, so the adapter future is never polled.
+        link.shutdown_probe().await;
+        link.on_request(
+            "tools/call",
+            json!(3),
+            &mut json!({"name":crate::ble::PAIRING_TOOL,
+            "arguments":{"action":"status","operation_id":1}}),
+        );
+        let mut lines = BufReader::new(host_output).lines();
+        let mut receipts = Vec::new();
+        for id in 1..=3 {
+            let receipt: Value = serde_json::from_str(
+                &tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(receipt["id"], id);
+            assert_eq!(receipt["result"]["isError"], false);
+            let body: Value =
+                serde_json::from_str(receipt["result"]["content"][0]["text"].as_str().unwrap())
+                    .unwrap();
+            assert_eq!(body["ok"], true);
+            assert!(!receipt.to_string().contains("654321"));
+            if id == 3 {
+                assert_eq!(body["stage"], "cancelled");
+                assert_eq!(body["error"], "cancelled");
+            }
+            receipts.push(receipt);
+        }
+        if let Some(path) = std::env::var_os("SMART_REMOTE_PANEL_RECEIPTS") {
+            std::fs::write(path, serde_json::to_vec_pretty(&receipts).unwrap()).unwrap();
+        }
+        drop(host_input);
+        tasks.reader.await.unwrap();
+        drop(link);
+        tasks.writer.await.unwrap();
+    }
     use tokio::io::{duplex, AsyncBufReadExt, BufReader};
 
     #[tokio::test(flavor = "current_thread")]
