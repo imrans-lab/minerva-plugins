@@ -50,7 +50,7 @@ fn ready(v: &Vector) -> Session {
     client
 }
 #[test]
-fn official_espressif_transcripts_match_full_and_short_public_keys() {
+fn synthetic_transcripts_from_espressif_client_match_full_and_short_keys() {
     for v in VECTORS {
         let mut client = ready(v);
         assert_eq!(

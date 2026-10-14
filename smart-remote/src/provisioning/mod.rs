@@ -1,4 +1,5 @@
 //! ESP-IDF Security 2 provisioning, independent of BLE transport.
+//! Owned buffers zeroize on drop; srp's internal session-key copy does not.
 mod config;
 mod security2;
 pub use config::{config_request, config_response, wifi_config};
