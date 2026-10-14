@@ -27,7 +27,10 @@ pub(crate) struct Reply {
     pub failure: Option<HostError>,
 }
 fn bad() -> HostError {
-    HostError::Denied("Malformed speech log response".into())
+    HostError::Refused {
+        code: String::new(),
+        reason: "Malformed speech log response".into(),
+    }
 }
 pub(crate) fn counts(value: &Value) -> Result<(u64, u64), HostError> {
     let (unheard, total) = (number(&value["unheard"])?, number(&value["total"])?);

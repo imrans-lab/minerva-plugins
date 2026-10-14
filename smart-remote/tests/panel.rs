@@ -154,18 +154,24 @@ func _run() -> void:
 	var cancel: Button = view.get_node("Cancel")
 	var notice: Label = view.get_node("Notice")
 	var text: Label = view.get_node("Status")
-	check(code.secret and password.secret, "native secret fields")
+	check(not code.secret and password.secret, "visible setup code and secret WiFi password")
+	check(view.get_node_or_null("Name") == null, "code alone identifies the remote")
 	check(not host.visible and host.text == "192.0.2.1", "automatic host hidden")
 	check(notice.text.contains("doesn’t stop pairing"), "honest close notice")
-	view.get_node("Name").text = "SR2-A1B2"
+	var before: int = calls.size()
+	code.text = "12345x"
+	code.text_submitted.emit(code.text)
+	await ticks()
+	check(calls.size() == before and text.text.contains("six-digit"), "invalid code stays local")
 	code.text = "654321"
 	hold_start = true
-	start.pressed.emit()
+	code.text_submitted.emit(code.text)
+	code.text_submitted.emit("654321")
 	check(code.text.is_empty(), "code cleared before deferred IPC")
 	check(not cancel.disabled, "cancel available before start receipt")
 	cancel.pressed.emit()
 	await ticks()
-	check(calls.back().action == "start", "cancel intent retained while ID unknown")
+	check(calls.back().action == "start" and not calls.back().has("name") and calls.size() == before + 1, "Enter starts once with code alone; pending cancel retained")
 	release_one()
 	await ticks()
 	check(calls.back().action == "cancel" and calls.back().operation_id == next_id, "cancel pending start")
@@ -177,6 +183,7 @@ func _run() -> void:
 		hold_poll = true
 		view.call("_poll")
 		await ticks()
+		code.text = "654321"
 		start.pressed.emit()
 		cancel.pressed.emit()
 		await ticks()
@@ -193,6 +200,7 @@ func _run() -> void:
 	hold_poll = true
 	view.call("_poll")
 	await ticks()
+	code.text = "654321"
 	start.pressed.emit()
 	await ticks()
 	check(not cancel.disabled and start.disabled, "active controls before stale startup poll")
@@ -266,6 +274,9 @@ func _run() -> void:
 	good.pairing.save_possible = true
 	view.call("_render", envelope(good).result)
 	check(text.text.contains("confirmation is unknown"), "uncertain device save")
+	good.error = "not_found"
+	view.call("_render", envelope(good).result)
+	check(text.text.contains("No remote in setup"), "remote absent label")
 	good.error = "input_timeout"
 	good.pairing.save_possible = false
 	view.call("_render", envelope(good).result)
@@ -282,6 +293,7 @@ func _run() -> void:
 	view.call("_on_panel_load_request", {"code": "654321", "password": "public-fixture-password"})
 	check(code.text.is_empty() and password.text.is_empty(), "restore cannot populate secrets")
 	hold_start = true
+	code.text = "654321"
 	start.pressed.emit()
 	await ticks()
 	var count: int = calls.size()

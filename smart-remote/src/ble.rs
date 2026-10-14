@@ -13,6 +13,8 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use zeroize::{Zeroize, Zeroizing};
 
+const REMOTE_NAME: &str = "smart-remote";
+
 pub const TOOL_NAME: &str = "minerva_smart_remote_ble_probe";
 pub const PAIRING_TOOL: &str = "minerva_smart_remote_pairing";
 
@@ -237,9 +239,7 @@ impl Probe {
         let mut state = self.0.lock().map_err(|_| Error::Operation)?;
         match action {
             "start" => {
-                let name = arguments["name"].as_str().ok_or(Error::Input)?;
-                if !valid_name(name) || code.len() != 6 || !code.bytes().all(|b| b.is_ascii_digit())
-                {
+                if code.len() != 6 || !code.bytes().all(|b| b.is_ascii_digit()) {
                     return Err(Error::Input);
                 }
                 if state.operation.as_ref().is_some_and(Operation::active) {
@@ -268,7 +268,6 @@ impl Probe {
                     progress: Progress::default(),
                 });
                 let probe = self.clone();
-                let name = name.to_owned();
                 // Captured before polling so abort/drop of an unpolled worker clears Busy.
                 let guard = WorkerGuard {
                     probe: self.clone(),
@@ -276,7 +275,7 @@ impl Probe {
                 };
                 state.worker = Some(runtime.spawn(async move {
                     let _guard = guard;
-                    let result = probe.run(id, &name, code, cancelled, job).await;
+                    let result = probe.run(id, code, cancelled, job).await;
                     probe.finish(id, result);
                 }));
                 Ok(state.operation.as_ref().ok_or(Error::Operation)?.status())
@@ -341,7 +340,6 @@ impl Probe {
     async fn run(
         &self,
         id: u64,
-        name: &str,
         code: Zeroizing<String>,
         mut cancel: watch::Receiver<bool>,
         job: Option<Job>,
@@ -382,16 +380,16 @@ impl Probe {
                             .map_err(|_| Error::Transport)?;
                         if properties.is_some_and(|p| {
                             p.services.contains(&SERVICE)
-                                && (p.local_name.as_deref() == Some(name)
-                                    || p.advertisement_name.as_deref() == Some(name))
+                                && (p.local_name.as_deref() == Some(REMOTE_NAME)
+                                    || p.advertisement_name.as_deref() == Some(REMOTE_NAME))
                         }) {
                             matches.push(peripheral);
                         }
                     }
-                    match matches.len() {
-                        0 => Err(Error::NotFound),
-                        1 => matches.pop().ok_or(Error::NotFound),
-                        _ => Err(Error::Ambiguous),
+                    if matches.is_empty() {
+                        Err(Error::NotFound)
+                    } else {
+                        Ok(matches)
                     }
                 },
                 &mut cancel,
@@ -400,52 +398,77 @@ impl Probe {
         }
         .await;
         let stopped = tokio::time::timeout(Duration::from_secs(3), adapter.stop_scan()).await;
-        let peripheral = result?;
+        let peripherals = result?;
         stopped
             .map_err(|_| Error::Timeout)?
             .map_err(|_| Error::Adapter)?;
-        self.stage(id, Stage::Connecting);
-        let peer = Native(peripheral);
-        let result = async {
-            bounded(
-                async { peer.0.connect().await.map_err(|_| Error::Transport) },
-                &mut cancel,
-            )
-            .await?;
-            bounded(
-                async {
-                    peer.0
-                        .discover_services()
-                        .await
-                        .map_err(|_| Error::Transport)
-                },
-                &mut cancel,
-            )
-            .await?;
-            self.stage(id, Stage::Authenticating);
-            let mut session = transport::authenticate(&peer, code, &mut cancel).await?;
-            if let Some(job) = job {
-                workflow::run(&peer, &mut session, job, name, &mut cancel, |progress| {
-                    if let Ok(mut state) = self.0.lock() {
-                        if let Some(operation) = state.operation.as_mut().filter(|o| o.id == id) {
-                            operation.progress = progress;
-                        }
-                    }
-                })
+        // The shared advertised name discovers candidates; the code authenticates one.
+        let mut last_error = Error::Authentication;
+        for peripheral in peripherals {
+            self.stage(id, Stage::Connecting);
+            let peer = Native(peripheral);
+            let result = async {
+                bounded(
+                    async { peer.0.connect().await.map_err(|_| Error::Transport) },
+                    &mut cancel,
+                )
                 .await?;
+                bounded(
+                    async {
+                        peer.0
+                            .discover_services()
+                            .await
+                            .map_err(|_| Error::Transport)
+                    },
+                    &mut cancel,
+                )
+                .await?;
+                self.stage(id, Stage::Authenticating);
+                transport::authenticate(&peer, code.clone(), &mut cancel).await
             }
-            Ok(session)
+            .await;
+            let mut session = match result {
+                Ok(session) => session,
+                Err(error) => {
+                    // Cleanup completes before attempting the next advertised remote.
+                    tokio::time::timeout(Duration::from_secs(3), peer.disconnect())
+                        .await
+                        .map_err(|_| Error::Timeout)??;
+                    last_error = error;
+                    if last_error == Error::Cancelled {
+                        return Err(last_error);
+                    }
+                    continue;
+                }
+            };
+            drop(code);
+            let result = async {
+                if let Some(job) = job {
+                    workflow::run(
+                        &peer,
+                        &mut session,
+                        job,
+                        REMOTE_NAME,
+                        &mut cancel,
+                        |progress| {
+                            if let Ok(mut state) = self.0.lock() {
+                                if let Some(operation) =
+                                    state.operation.as_mut().filter(|o| o.id == id)
+                                {
+                                    operation.progress = progress;
+                                }
+                            }
+                        },
+                    )
+                    .await?;
+                }
+                Ok(session)
+            }
+            .await;
+            return transport::finish_probe(&peer, result, &cancel).await;
         }
-        .await;
-        transport::finish_probe(&peer, result, &cancel).await
+        Err(last_error)
     }
-}
-fn valid_name(name: &str) -> bool {
-    name.len() == 8
-        && name.starts_with("SR2-")
-        && name.as_bytes()[4..]
-            .iter()
-            .all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(b))
 }
 fn take_secret(arguments: &mut Value, key: &str) -> Zeroizing<String> {
     match arguments.get_mut(key).map(Value::take) {
@@ -528,13 +551,13 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn async_operation_receipts_busy_cancel_and_late_completion_are_redacted() {
         let probe = Probe::default();
-        let mut start = json!({"action":"start","name":"SR2-A1B2","code":"654321"});
+        let mut start = json!({"action":"start","code":"654321"});
         let receipt = probe.call(&mut start).unwrap();
         assert_eq!(start["code"], Value::Null);
         assert_eq!(receipt["stage"], "scanning");
         assert!(!receipt.to_string().contains("654321"));
         let id = receipt["operation_id"].as_u64().unwrap();
-        let mut busy = json!({"action":"start","name":"SR2-A1B2","code":"654321"});
+        let mut busy = json!({"action":"start","code":"654321"});
         assert_eq!(probe.call(&mut busy), Err(Error::Busy));
         assert_eq!(busy["code"], Value::Null);
         assert_eq!(
@@ -553,7 +576,7 @@ mod tests {
         assert_eq!(status["stage"], "cancelled");
         assert_eq!(status["error"], "cancelled");
         let next = probe
-            .call(&mut json!({"action":"start","name":"SR2-A1B2","code":"654321"}))
+            .call(&mut json!({"action":"start","code":"654321"}))
             .unwrap();
         assert_eq!(next["operation_id"], id + 1);
         probe.finish(id, Ok(())); // Previous worker cannot update its replacement.
@@ -696,8 +719,8 @@ mod tests {
         let probe = Probe::default();
         for arguments in [
             json!({"code":"654321"}),
-            json!({"action":"start","name":"SR2-abcd","code":"654321"}),
-            json!({"action":"start","name":"SR2-ABCD","code":{"nested":"654321"}}),
+            json!({"action":"start","code":"12345x"}),
+            json!({"action":"start","code":{"nested":"654321"}}),
         ] {
             let mut arguments = arguments;
             assert_eq!(probe.call(&mut arguments), Err(Error::Input));
@@ -739,7 +762,7 @@ mod tests {
         assert_eq!(receipt["error"], "input_timeout");
         assert!(!probe.0.lock().unwrap().operation.as_ref().unwrap().active());
         let next = probe
-            .call(&mut json!({"action":"start","name":"SR2-A1B2","code":"654321"}))
+            .call(&mut json!({"action":"start","code":"654321"}))
             .unwrap();
         assert_eq!(next["operation_id"], 5);
         // Cancel before yielding: exercise slot reuse without touching an adapter.
@@ -806,7 +829,7 @@ mod tests {
         assert_eq!(status["pairing"]["persistence"], "pending");
         assert_eq!(status["error"], "interrupted");
         assert_eq!(
-            probe.pairing(&mut json!({"action":"start","name":"SR2-A1B2","code":"654321"})),
+            probe.pairing(&mut json!({"action":"start","code":"654321"})),
             Err(Error::Busy)
         );
         probe

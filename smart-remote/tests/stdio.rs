@@ -68,7 +68,7 @@ async fn scripted_host_handshake_host_events_and_clean_exit_on_eof() {
         json!({"jsonrpc":"2.0","method":"minerva/host_event","params":{"event":"chat.directory_changed","payload":{}}}),
         json!({"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}),
         json!({"jsonrpc":"2.0","id":4.0,"method":"ping"}),
-        json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"minerva_smart_remote_ble_probe","arguments":{"action":"start","name":"SR2-abcd","code":"654321"}}}),
+        json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"minerva_smart_remote_ble_probe","arguments":{"action":"start","code":"65432x"}}}),
         json!({"jsonrpc":"2.0","id":6,"method":"ping"}),
     ];
     for msg in &script {

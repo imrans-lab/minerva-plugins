@@ -16,6 +16,8 @@ const LABELS := {
 	"failed": "Pairing stopped."
 }
 const ERRORS := {
+	"input": "Enter the six-digit setup code shown on the remote.",
+	"not_found": "No remote in setup was found. Hold SW2 while waking it, then retry.",
 	"wrong_password": "Wrong WiFi password; enter a fresh password.",
 	"network_not_found": "WiFi network not found; check its availability.",
 	"input_timeout": "Timed out waiting for input. Start again.",
@@ -26,7 +28,6 @@ const ERRORS := {
 @onready var _password: LineEdit = $Password
 @onready var _networks: OptionButton = $Networks
 @onready var _status: Label = $Status
-@onready var _name: LineEdit = $Name
 @onready var _host: LineEdit = $Host
 @onready var _start_button: Button = $Start
 @onready var _apply_button: Button = $Apply
@@ -44,6 +45,7 @@ var _port: int = 47821
 
 func _ready() -> void:
 	_start_button.pressed.connect(_start)
+	_code.text_submitted.connect(func(_text: String) -> void: _start())
 	_apply_button.pressed.connect(_apply)
 	_cancel_button.pressed.connect(_cancel)
 	_poll_timer.timeout.connect(_poll)
@@ -92,7 +94,17 @@ func _call(arguments: Dictionary) -> Dictionary:
 	return {}
 
 func _start() -> void:
-	var arguments := {"action": "start", "name": _name.text, "code": _code.text}
+	if _closed or _start_button.disabled:
+		return
+	if _code.text.length() != 6:
+		_status.text = str(ERRORS.input)
+		return
+	for index: int in _code.text.length():
+		var digit: int = _code.text.unicode_at(index)
+		if digit < 48 or digit > 57:
+			_status.text = str(ERRORS.input)
+			return
+	var arguments := {"action": "start", "code": _code.text}
 	_code.clear()
 	_networks.clear()
 	_operation = 0

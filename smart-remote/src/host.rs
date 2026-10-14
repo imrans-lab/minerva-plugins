@@ -24,8 +24,11 @@ const METHOD_NOT_FOUND: i64 = -32601;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum HostError {
-    /// The host refused the capability; the text is the host's reason.
-    Denied(String),
+    /// The host refused the operation; preserve its reason and error code.
+    Refused {
+        code: String,
+        reason: String,
+    },
     /// A JSON-RPC error reply.
     Rpc(Value),
     /// stdin closed before the reply arrived.
@@ -37,7 +40,13 @@ pub enum HostError {
 impl fmt::Display for HostError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Denied(m) => write!(f, "capability denied: {m}"),
+            Self::Refused { code, reason } => {
+                f.write_str(reason)?;
+                if !code.is_empty() {
+                    write!(f, " [{code}]")?;
+                }
+                Ok(())
+            }
             Self::Rpc(e) => write!(f, "capability error: {e}"),
             Self::Closed => f.write_str("host link closed"),
             Self::Overloaded => f.write_str("host link queue is full"),
@@ -268,15 +277,13 @@ fn on_notification(method: &str, params: Option<&Value>) {
 fn unwrap_envelope(result: Value) -> Result<Value, HostError> {
     match result.get("success").and_then(Value::as_bool) {
         Some(true) => Ok(result.get("result").cloned().unwrap_or(Value::Null)),
-        Some(false) => Err(HostError::Denied(
-            result
-                .get("error_message")
-                .or_else(|| result.get("error_code"))
-                .map_or_else(
-                    || result.to_string(),
-                    |v| v.as_str().map_or_else(|| v.to_string(), str::to_owned),
-                ),
-        )),
+        Some(false) => Err(HostError::Refused {
+            code: result["error_code"].as_str().unwrap_or("").to_owned(),
+            reason: result["error_message"]
+                .as_str()
+                .unwrap_or("Host operation failed")
+                .to_owned(),
+        }),
         None => Ok(result),
     }
 }
@@ -381,7 +388,7 @@ mod tests {
         let (link, tasks) = HostLink::start(input, output);
         link.configure_pairing(store, 47821);
         let mut start = json!({"name":crate::ble::PAIRING_TOOL,"arguments":{
-            "action":"start","name":"SR2-A1B2","code":"654321"}});
+            "action":"start","code":"654321"}});
         link.on_request("tools/call", json!(1), &mut start);
         assert!(start["arguments"]["code"].is_null());
         link.on_request(
@@ -429,6 +436,19 @@ mod tests {
         tasks.reader.await.unwrap();
         drop(link);
         tasks.writer.await.unwrap();
+    }
+    #[test]
+    fn host_refusals_show_reason_and_keep_code_without_permission_label() {
+        let error = unwrap_envelope(json!({"success":false,"error_code":"busy",
+            "error_message":"Another microphone is recording"}))
+        .unwrap_err();
+        assert_eq!(error.to_string(), "Another microphone is recording [busy]");
+        assert_eq!(
+            unwrap_envelope(json!({"success":false,"error_code":"permission_denied"}))
+                .unwrap_err()
+                .to_string(),
+            "Host operation failed [permission_denied]"
+        );
     }
     use tokio::io::{duplex, AsyncBufReadExt, BufReader};
 
@@ -514,7 +534,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             call.await.unwrap(),
-            Err(HostError::Denied("not granted".into()))
+            Err(HostError::Refused {
+                code: String::new(),
+                reason: "not granted".into()
+            })
         );
 
         link.emit_event("smart_remote.test", json!({"n":1}));

@@ -57,10 +57,6 @@
               "cancel"
             ]
           },
-          "name": {
-            "type": "string",
-            "pattern": "^SR2-[0-9A-F]{4}$"
-          },
           "code": {
             "type": "string",
             "pattern": "^[0-9]{6}$"
@@ -91,10 +87,6 @@
               "describe",
               "apply"
             ]
-          },
-          "name": {
-            "type": "string",
-            "pattern": "^SR2-[0-9A-F]{4}$"
           },
           "code": {
             "type": "string",

@@ -902,8 +902,10 @@ async fn input(
 ) {
     let result = host.call_capability("host.audio", json!({"op":"input_begin","device_id":device,"expected_chat_id":chat,"format":"pcm_s16le","sample_rate":16000,"channels":1})).await;
     let session = match result.and_then(|v| {
-        integer(&v["session_id"])
-            .ok_or_else(|| HostError::Denied("Missing integer input session ID".into()))
+        integer(&v["session_id"]).ok_or_else(|| HostError::Refused {
+            code: String::new(),
+            reason: "Missing integer input session ID".into(),
+        })
     }) {
         Ok(id) => id,
         Err(e) => {
