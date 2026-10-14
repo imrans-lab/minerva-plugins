@@ -19,7 +19,6 @@ use smart_remote_plugin::mdns::Advert;
 use smart_remote_plugin::schema::Schemas;
 use smart_remote_plugin::server::{Server, ServerConfig, DEFAULT_PORT};
 use smart_remote_plugin::store::TokenStore;
-use tokio::io::BufReader;
 use tokio::sync::watch;
 
 struct Args {
@@ -78,13 +77,10 @@ fn parse_args() -> Result<Args, String> {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .target(env_logger::Target::Stderr)
-        // Native BLE libraries may trace wire buffers; suppress even RUST_LOG=trace.
-        .filter_module("btleplug", log::LevelFilter::Off)
-        .filter_module("bluez_async", log::LevelFilter::Off)
-        .filter_module("dbus", log::LevelFilter::Off)
-        .init();
+    if let Err(error) = smart_remote_plugin::logging::init() {
+        eprintln!("cannot initialize plugin logging: {error}");
+        return ExitCode::from(2);
+    }
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
@@ -105,8 +101,7 @@ async fn run() -> Result<(), String> {
     }
     let store = Arc::new(TokenStore::open(args.data_dir.path()).map_err(|e| e.to_string())?);
     let config = ServerConfig::new(SocketAddr::from((args.bind, args.port)));
-    let (link, host_tasks) =
-        HostLink::start(BufReader::new(tokio::io::stdin()), tokio::io::stdout());
+    let (link, host_tasks) = HostLink::start(tokio::io::stdin(), tokio::io::stdout());
     let server = Server::bind(config, store, schemas)
         .await
         .map_err(|e| e.to_string())?

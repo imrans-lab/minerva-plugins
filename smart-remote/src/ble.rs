@@ -95,6 +95,24 @@ struct State {
 /// Owns one worker; status/cancel do not wait on the adapter or stdio reader.
 #[derive(Clone, Default)]
 pub struct Probe(Arc<Mutex<State>>);
+struct WorkerGuard {
+    probe: Probe,
+    id: u64,
+}
+impl Drop for WorkerGuard {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.probe.0.lock() {
+            if let Some(operation) = state
+                .operation
+                .as_mut()
+                .filter(|o| o.id == self.id && o.active())
+            {
+                operation.stage = Stage::Failed;
+                operation.error = Some(Error::Interrupted);
+            }
+        }
+    }
+}
 impl Probe {
     pub fn call(&self, arguments: &mut Value) -> Result<Value, Error> {
         // Take the sole parsed code allocation before any validation failure.
@@ -119,6 +137,8 @@ impl Probe {
                 if state.operation.as_ref().is_some_and(Operation::active) {
                     return Err(Error::Busy);
                 }
+                let runtime =
+                    tokio::runtime::Handle::try_current().map_err(|_| Error::Operation)?;
                 state.next = state.next.checked_add(1).ok_or(Error::Operation)?;
                 let id = state.next;
                 let (cancel, cancelled) = watch::channel(false);
@@ -130,7 +150,13 @@ impl Probe {
                 });
                 let probe = self.clone();
                 let name = name.to_owned();
-                state.worker = Some(tokio::spawn(async move {
+                // Captured before polling so abort/drop of an unpolled worker clears Busy.
+                let guard = WorkerGuard {
+                    probe: self.clone(),
+                    id,
+                };
+                state.worker = Some(runtime.spawn(async move {
+                    let _guard = guard;
                     let result = probe.run(id, &name, code, cancelled).await;
                     probe.finish(id, result);
                 }));
@@ -291,6 +317,64 @@ fn valid_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn worker_drop_panic_and_normal_finish_clear_busy_without_clobbering_results() {
+        for panic in [false, true] {
+            let probe = Probe::default();
+            let (cancel, _) = watch::channel(false);
+            probe.0.lock().unwrap().operation = Some(Operation {
+                id: 7,
+                stage: Stage::Authenticating,
+                error: None,
+                cancel,
+            });
+            let guard = WorkerGuard {
+                probe: probe.clone(),
+                id: 7,
+            };
+            let worker = tokio::spawn(async move {
+                let _guard = guard;
+                if panic {
+                    panic!("synthetic worker failure");
+                }
+                std::future::pending::<()>().await;
+            });
+            if !panic {
+                worker.abort();
+            }
+            assert!(worker.await.is_err());
+            let status = probe
+                .call(&mut json!({"action":"status","operation_id":7}))
+                .unwrap();
+            assert_eq!(status["stage"], "failed");
+            assert_eq!(status["error"], "interrupted");
+            assert!(!probe.0.lock().unwrap().operation.as_ref().unwrap().active());
+            let (cancel, _) = watch::channel(false);
+            probe.0.lock().unwrap().operation = Some(Operation {
+                id: 8,
+                stage: Stage::Authenticating,
+                error: None,
+                cancel,
+            });
+            drop(WorkerGuard {
+                probe: probe.clone(),
+                id: 7,
+            });
+            assert!(probe.0.lock().unwrap().operation.as_ref().unwrap().active());
+            probe.finish(8, Ok(()));
+            drop(WorkerGuard {
+                probe: probe.clone(),
+                id: 8,
+            });
+            assert_eq!(
+                probe
+                    .call(&mut json!({"action":"status","operation_id":8}))
+                    .unwrap()["stage"],
+                "authenticated"
+            );
+        }
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn async_operation_receipts_busy_cancel_and_late_completion_are_redacted() {

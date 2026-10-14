@@ -16,7 +16,7 @@ use tokio::process::Command;
 async fn scripted_host_handshake_host_events_and_clean_exit_on_eof() {
     let data = tempfile::tempdir().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_smart-remote-plugin"))
-        .env("RUST_LOG", "trace")
+        .env("RUST_LOG", "trace,btleplug::corebluetooth::central_delegate=trace,dbus::channel=trace,bluez_async::session=trace,tokio::io::stdio=trace")
         .args([
             "--data-dir",
             data.path().to_str().unwrap(),

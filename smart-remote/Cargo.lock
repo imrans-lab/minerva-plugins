@@ -1875,7 +1875,6 @@ dependencies = [
  "jsonschema",
  "log",
  "mdns-sd",
- "pkg-config",
  "prost",
  "prost-build",
  "protox",

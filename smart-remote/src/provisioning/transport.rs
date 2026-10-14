@@ -26,6 +26,7 @@ pub enum Error {
     Input,
     Busy,
     Operation,
+    Interrupted,
     Adapter,
     NotFound,
     Ambiguous,

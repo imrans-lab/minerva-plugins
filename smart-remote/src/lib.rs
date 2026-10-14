@@ -10,6 +10,7 @@ pub(crate) mod bridge;
 pub mod contract;
 pub mod data_dir;
 pub mod host;
+pub mod logging;
 pub mod mdns;
 pub mod message;
 pub mod provisioning;

@@ -42,6 +42,8 @@ Enter remote setup and read its `SR2-XXXX` name and six-digit OLED code. Call `m
 
 Each exchange is one whole acknowledged write followed by a complete read, at most512 bytes; the OS handles ATT long writes. Transport failure, timeout or cancellation ends the session and requires a fresh start. Physical long-write interoperability on each platform remains an owner hardware qualification gate.
 
+Only this plugin's own logging targets are user-tunable; dependency diagnostics are capped at warnings regardless of more-specific `RUST_LOG` directives. The application-owned raw input buffers, parsed string values and code allocation are scrubbed. OS/stdio and serde parsing intermediates, compiler copies and opaque SRP allocations cannot be promised erased; this is not machine-wide memory erasure. Linux missing-header diagnostics are supplied by the upstream `libdbus-sys` build script, which names `libdbus-1-dev` and `pkg-config` before the plugin's build script can run.
+
 ## LAN exposure
 
 By default the plugin listens on every IPv4 interface, so anything on the local network can open a connection. Traffic is plain `ws://`: audio, drafts and the pairing token cross the LAN unencrypted (accepted for the prototype in the design). A connection does nothing until its `hello` carries a paired token; unauthenticated connections are capped at 16 in total and 4 per IP address and must send `hello` within 5 s. Bind a single address with `--bind` to limit exposure; the mDNS advert follows the bind (IPv4 only for `0.0.0.0`, just the bound address for a specific one, none for loopback).

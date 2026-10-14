@@ -13,10 +13,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde_json::{json, Value};
 use std::time::Duration;
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
 pub const SERVER_NAME: &str = crate::data_dir::PLUGIN_ID;
@@ -75,7 +75,7 @@ pub struct HostTasks {
 impl HostLink {
     pub fn start<R, W>(input: R, output: W) -> (Arc<Self>, HostTasks)
     where
-        R: AsyncBufRead + Unpin + Send + 'static,
+        R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
         let (out, rx) = mpsc::channel(64);
@@ -300,20 +300,42 @@ impl Drop for PendingRequest<'_> {
     }
 }
 
-async fn read_lines<R: AsyncBufRead + Unpin>(input: R, link: Arc<HostLink>) {
-    let mut lines = input.lines();
-    loop {
-        match lines.next_line().await {
-            Ok(Some(line)) => {
-                let line = Zeroizing::new(line);
-                let line = line.trim();
-                if !line.is_empty() {
-                    link.on_line(line);
-                }
-            }
-            Ok(None) => {
+fn dispatch_raw(raw: &mut [u8], link: &HostLink) {
+    match std::str::from_utf8(raw) {
+        Ok(line) if !line.trim().is_empty() => link.on_line(line.trim()),
+        Ok(_) => (),
+        Err(_) => log::warn!("host sent invalid UTF-8; ignored"),
+    }
+    raw.zeroize();
+}
+async fn read_lines<R: AsyncRead + Unpin>(mut input: R, link: Arc<HostLink>) {
+    // Fixed storage avoids reallocating a credential-bearing raw line.
+    let mut raw = Zeroizing::new(vec![0; 64 * 1024]);
+    let mut chunk = Zeroizing::new([0; 1024]);
+    let mut used = 0;
+    'reading: loop {
+        match input.read(&mut chunk[..]).await {
+            Ok(0) => {
+                dispatch_raw(&mut raw[..used], &link);
                 log::info!("host closed stdin");
                 break;
+            }
+            Ok(count) => {
+                for index in 0..count {
+                    let byte = chunk[index];
+                    chunk[index] = 0;
+                    if byte == b'\n' {
+                        dispatch_raw(&mut raw[..used], &link);
+                        used = 0;
+                    } else {
+                        if used == raw.len() {
+                            log::warn!("host request exceeds 64 KiB; closing link");
+                            break 'reading;
+                        }
+                        raw[used] = byte;
+                        used += 1;
+                    }
+                }
             }
             Err(e) => {
                 log::error!("reading from host failed: {e}");
@@ -343,14 +365,60 @@ async fn write_lines<W: AsyncWrite + Unpin>(mut rx: mpsc::Receiver<String>, mut 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{duplex, BufReader};
+    use tokio::io::{duplex, AsyncBufReadExt, BufReader};
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn raw_input_storage_is_erased_after_valid_invalid_and_partial_lines() {
+        let (link, tasks) = HostLink::start(tokio::io::empty(), tokio::io::sink());
+        for message in [
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"minerva_smart_remote_ble_probe","arguments":{"action":"start","name":"invalid","code":"654321"}}}"#.as_slice(),
+            b"not JSON 654321",
+            b"\xff 654321",
+        ] {
+            let mut raw = message.to_vec();
+            dispatch_raw(&mut raw, &link);
+            assert!(raw.iter().all(|byte| *byte == 0));
+        }
+        tasks.reader.await.unwrap();
+        drop(link);
+        tasks.writer.await.unwrap();
+
+        struct CheckedInput {
+            bytes: &'static [u8],
+            reads: usize,
+        }
+        impl AsyncRead for CheckedInput {
+            fn poll_read(
+                mut self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+                buffer: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                // The raw read scratch must be zero before every reuse, including EOF.
+                assert!(buffer.initialized().iter().all(|byte| *byte == 0));
+                self.reads += 1;
+                let count = self.bytes.len().min(3);
+                buffer.put_slice(&self.bytes[..count]);
+                self.bytes = &self.bytes[count..];
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+        // Split code across reads, a newline, then a final partial line at EOF.
+        let input = CheckedInput {
+            bytes: b"invalid 654321\npartial 654321",
+            reads: 0,
+        };
+        let (link, tasks) = HostLink::start(input, tokio::io::sink());
+        tasks.reader.await.unwrap();
+        drop(link);
+        tasks.writer.await.unwrap();
+    }
 
     #[tokio::test]
     async fn capability_call_round_trips_and_unwraps_the_envelope() {
         let (host_side, plugin_side) = duplex(4096);
         let (plugin_read, plugin_write) = tokio::io::split(plugin_side);
         let (host_read, mut host_write) = tokio::io::split(host_side);
-        let (link, tasks) = HostLink::start(BufReader::new(plugin_read), plugin_write);
+        let (link, tasks) = HostLink::start(plugin_read, plugin_write);
         let mut host_lines = BufReader::new(host_read).lines();
 
         let call = tokio::spawn({
