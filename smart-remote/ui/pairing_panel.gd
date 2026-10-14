@@ -53,6 +53,16 @@ func _on_panel_loaded(_ctx: Dictionary) -> void:
 	_poll_timer.start()
 	_poll()
 
+func _integer(value: Variant, maximum: int) -> int:
+	if value is int:
+		var integer: int = value as int
+		return integer if integer >= 1 and integer <= maximum else 0
+	if value is float:
+		var number: float = value as float
+		if is_finite(number) and number == floor(number) and number >= 1.0 and number <= float(maximum):
+			return int(number)
+	return 0
+
 func _call(arguments: Dictionary) -> Dictionary:
 	if _ipc == null or _closed:
 		arguments.clear()
@@ -68,11 +78,15 @@ func _call(arguments: Dictionary) -> Dictionary:
 	if _closed or ticket < _delivered:
 		return {}
 	_delivered = ticket
-	if not reply is Dictionary or not bool(reply.get("success", false)):
+	if not reply is Dictionary:
 		_status.text = "Pairing request failed. Reopen to see progress or retry."
 		return {}
-	var body: Variant = reply.get("result", {})
-	return body if body is Dictionary else {}
+	var response: Dictionary = reply as Dictionary
+	if response.get("success", false) != true:
+		_status.text = "Pairing request failed. Reopen to see progress or retry."
+		return {}
+	var body: Variant = response.get("result", {})
+	return body as Dictionary if body is Dictionary else {}
 
 func _start() -> void:
 	var arguments := {"action": "start", "name": _name.text, "code": _code.text}
@@ -109,39 +123,37 @@ func _poll() -> void:
 	if body.is_empty() or _pending > 0 or _closed:
 		return
 	if not _defaults_initialized and body.has("port"):
-		var port: Variant = body.port
-		if (not (port is int or port is float) or not is_finite(float(port))
-				or float(port) != floor(float(port)) or float(port) < 1 or float(port) > 65535):
+		var port: int = _integer(body.get("port"), 65535)
+		if port == 0:
 			_status.text = "Invalid listener port."
 			return
-		_port = int(port)
+		_port = port
 		_host.text = str(body.host) if body.get("host") != null else ""
 		_host.visible = _host.text.is_empty()
 		_defaults_initialized = true
 	var operation: Variant = body.get("operation", {})
 	if operation is Dictionary:
-		if operation.is_empty():
+		var current: Dictionary = operation as Dictionary
+		if current.is_empty():
 			_start_button.disabled = false
 			_cancel_button.disabled = true
-		_render(operation)
+		_render(current)
 
 func _render(body: Dictionary) -> void:
 	if body.is_empty():
 		return
-	var number: Variant = body.get("operation_id", 0)
-	if (not (number is int or number is float) or not is_finite(float(number))
-			or float(number) != floor(float(number)) or float(number) < 1
-			or float(number) > 9007199254740991.0):
+	var number: int = _integer(body.get("operation_id"), 9007199254740991)
+	if number == 0:
 		_status.text = "Invalid pairing operation."
 		return
-	if int(number) < _operation:
+	if number < _operation:
 		return
-	_operation = int(number)
+	_operation = number
 	var value: Variant = body.get("pairing", {})
 	if not value is Dictionary:
 		_status.text = "Invalid pairing status."
 		return
-	var details: Dictionary = value
+	var details: Dictionary = value as Dictionary
 	var stage: String = str(details.get("stage", ""))
 	if stage.is_empty():
 		stage = str(body.get("stage", "idle"))
@@ -151,9 +163,9 @@ func _render(body: Dictionary) -> void:
 		_status.text = "Saving pairing; please wait…"
 	elif storage == "stored" and stage != "confirmed":
 		_status.text = "Pairing saved, not yet confirmed."
-	elif bool(details.get("save_possible", false)) and stage in ["failed", "cancelled"]:
+	elif details.get("save_possible", false) == true and stage in ["failed", "cancelled"]:
 		_status.text += " The remote may have saved settings; confirmation is unknown."
-	if bool(details.get("confirmation_pending", false)):
+	if details.get("confirmation_pending", false) == true:
 		_status.text += " Checking saved state…"
 	var error: Variant = body.get("error")
 	if error == null:
@@ -168,14 +180,13 @@ func _render(body: Dictionary) -> void:
 	_cancel_button.disabled = _operation == 0
 	_host.editable = details.get("device_id") == null
 	if details.get("host") != null:
-		var port: Variant = details.get("port")
-		if (not (port is int or port is float) or not is_finite(float(port))
-				or float(port) != floor(float(port)) or float(port) < 1 or float(port) > 65535):
+		var port: int = _integer(details.get("port"), 65535)
+		if port == 0:
 			_status.text = "Invalid staged port."
 			_apply_button.disabled = true
 			return
 		_host.text = str(details.host)
-		_port = int(port)
+		_port = port
 	var networks: Array = details.get("networks", [])
 	if waiting and _networks.item_count == 0:
 		for row: Dictionary in networks:
