@@ -281,7 +281,7 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
     assert_eq!(abort["reason"], "host_cancel");
     assert!(abort["message"].as_str().is_some_and(|s| !s.is_empty()));
     // The host already cancelled stream92; it must not get a second terminal report.
-    device.send_json(&json!({"type":"speak_done","stream_id":abort["stream_id"],"ok":false,"error":"cancelled"})).await;
+    device.send_json(&json!({"type":"speak_done","stream_id":abort["stream_id"],"ok":false,"last_seq":null,"error":"cancelled"})).await;
     while let Ok(request) = seen.try_recv() {
         assert_ne!(request["params"]["args"]["stream_id"], 92);
     }
