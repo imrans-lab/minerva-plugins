@@ -17,6 +17,7 @@ pub(crate) type RemoteMemory = Arc<Mutex<HashMap<String, (Value, String, Option<
 pub(crate) enum Update {
     Log(Result<crate::speech_log::Reply, HostError>),
     Ready(Result<Value, HostError>),
+    Target(u64, Value),
     Started(u64, u64),
     Submitted(String, Result<Value, HostError>),
     Cleared(Result<Value, HostError>),
@@ -160,6 +161,16 @@ impl Bridge {
                 self.stopped = true;
                 log::error!("bridge startup failed: {e}");
                 vec![error(ErrorCode::Internal, &e.to_string())]
+            }
+            Update::Target(epoch, target) => {
+                if let Some(m) = &mut self.mic {
+                    if m.generation == epoch {
+                        m.chat = target["chat_id"].as_str().unwrap_or("").to_owned();
+                        self.target = target;
+                        return vec![self.target_message()];
+                    }
+                }
+                vec![]
             }
             Update::Started(epoch, session) => {
                 if let Some(m) = &mut self.mic {
@@ -307,13 +318,7 @@ impl Bridge {
                         "Previous transcription is still active",
                     )];
                 }
-                let Some(chat) = self.target["chat_id"]
-                    .as_str()
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned)
-                else {
-                    return vec![error(ErrorCode::NoTarget, "No target chat")];
-                };
+                let chat = self.target["chat_id"].as_str().unwrap_or("").to_owned();
                 if !self.draft.is_empty() && self.draft_chat.as_deref() != Some(chat.as_str()) {
                     return vec![error(
                         ErrorCode::TargetChanged,
@@ -442,11 +447,9 @@ impl Bridge {
                 self.audio_event(event)
             }
             "chat.active_changed" => {
-                if self
-                    .mic
-                    .as_ref()
-                    .is_some_and(|m| p["chat_id"].as_str() != Some(m.chat.as_str()))
-                {
+                if self.mic.as_ref().is_some_and(|m| {
+                    !m.chat.is_empty() && p["chat_id"].as_str() != Some(m.chat.as_str())
+                }) {
                     self.cancel_mic();
                     self.aborts
                         .push_back(mic_state("error", Some("target_changed")));
@@ -896,12 +899,39 @@ impl Bridge {
 async fn input(
     host: Arc<HostLink>,
     device: String,
-    chat: String,
+    mut chat: String,
     epoch: u64,
     mut pcm: mpsc::Receiver<(Vec<u8>, bool)>,
     mut cancel: watch::Receiver<bool>,
     updates: mpsc::Sender<Update>,
 ) {
+    if chat.is_empty() {
+        let result = tokio::select! {
+            biased;
+            _ = cancel.changed() => return,
+            result = host.call_capability("host.chat.input", json!({"op":"ensure_chat"})) => result,
+        };
+        match result {
+            Ok(target)
+                if target["chat_id"]
+                    .as_str()
+                    .is_some_and(|id| !id.is_empty() && id.len() <= 128) =>
+            {
+                chat = target["chat_id"].as_str().unwrap_or("").to_owned();
+                if updates.send(Update::Target(epoch, target)).await.is_err() || *cancel.borrow() {
+                    return;
+                }
+            }
+            result => {
+                let message = result
+                    .err()
+                    .map(|e| e.to_string())
+                    .unwrap_or("Host did not create a chat".into());
+                let _ = updates.send(Update::Failed(epoch, message)).await;
+                return;
+            }
+        }
+    }
     let result = host.call_capability("host.audio", json!({"op":"input_begin","device_id":device,"expected_chat_id":chat,"format":"pcm_s16le","sample_rate":16000,"channels":1})).await;
     let session = match result.and_then(|v| {
         integer(&v["session_id"]).ok_or_else(|| HostError::Refused {
