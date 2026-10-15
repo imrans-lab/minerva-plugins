@@ -194,21 +194,25 @@ impl TokenStore {
     pub fn record(&self, device_id: &str) -> Option<DeviceRecord> {
         self.lock().get(device_id).cloned()
     }
-    pub(crate) fn ble_addresses(&self) -> Vec<String> {
-        self.lock()
-            .values()
-            .filter_map(|record| record.ble_address.clone())
-            .collect()
+    fn try_devices(&self) -> Option<MutexGuard<'_, BTreeMap<String, DeviceRecord>>> {
+        match self.devices.try_lock() {
+            Ok(records) => Some(records),
+            Err(std::sync::TryLockError::Poisoned(error)) => Some(error.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        }
+    }
+    pub(crate) fn ble_addresses(&self) -> Option<Vec<String>> {
+        self.try_devices().map(|records| {
+            records
+                .values()
+                .filter_map(|record| record.ble_address.clone())
+                .collect()
+        })
     }
     /// A busy persistence lock is pending, distinct from an absent record.
     pub fn try_record(&self, device_id: &str) -> Option<Option<DeviceRecord>> {
-        match self.devices.try_lock() {
-            Ok(records) => Some(records.get(device_id).cloned()),
-            Err(std::sync::TryLockError::Poisoned(error)) => {
-                Some(error.into_inner().get(device_id).cloned())
-            }
-            Err(std::sync::TryLockError::WouldBlock) => None,
-        }
+        self.try_devices()
+            .map(|records| records.get(device_id).cloned())
     }
 
     /// Compares the token's hash with the stored one in constant time. An

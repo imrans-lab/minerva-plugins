@@ -2,6 +2,7 @@ extends VBoxContainer
 signal request(channel: String, payload: Dictionary, reply_id: String)
 const CHANNEL := "minerva_smart_remote_pairing"
 const LABELS := {
+	"authenticated": "Setup code verified. Start pairing to choose WiFi.",
 	"scanning": "Looking for the remote…",
 	"connecting": "Connecting…",
 	"authenticating": "Checking the setup code…",

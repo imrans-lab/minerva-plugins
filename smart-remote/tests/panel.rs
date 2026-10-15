@@ -264,6 +264,9 @@ func _run() -> void:
 	good.error = "cancelled"
 	view.call("_render", envelope(good).result)
 	check(text.text.contains("saved, not yet confirmed"), "saved cancelled operation")
+	good.stage = "authenticated"
+	view.call("_render", envelope(good).result)
+	check(not start.disabled, "completed probe permits pairing")
 	good.pairing.stage = "confirmed"
 	view.call("_render", envelope(good).result)
 	check(text.text.contains("Paired and connected"), "late confirmation")

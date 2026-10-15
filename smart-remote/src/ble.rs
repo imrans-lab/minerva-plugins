@@ -318,11 +318,8 @@ impl Probe {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
-        let addresses = state
-            .context
-            .as_ref()
-            .map(|c| c.0.ble_addresses())
-            .unwrap_or_default();
+        let addresses = state.context.as_ref().and_then(|c| c.0.ble_addresses());
+        let Some(addresses) = addresses else { return };
         let observer = state.mouse_observer.clone();
         state.mouse_checked = Some(std::time::Instant::now());
         // UDP connect only selects an OS route; no datagram is sent.
