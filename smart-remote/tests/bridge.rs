@@ -86,6 +86,7 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
                     args["stream_id"], 92,
                     "host-cancelled stream completed twice"
                 );
+                assert_ne!(args["stream_id"], 94, "host error already retired the stream");
                 assert_ne!(args["stream_id"], 95, "disconnect retired the stream");
             }
             if args["op"] == "register" && refusal.load(Ordering::SeqCst) {
@@ -310,7 +311,6 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
     .await;
     assert_eq!(device.recv_msg().await["code"], "tts_failed");
     assert_eq!(device.recv_msg().await["reason"], "tts_failed");
-    next_request(&mut seen, "output_complete").await;
     // A real outstanding STT request outlives the old five-second timeout.
     hold_end.store(true, Ordering::SeqCst);
     device

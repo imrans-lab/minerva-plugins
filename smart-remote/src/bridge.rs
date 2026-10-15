@@ -703,7 +703,7 @@ impl Bridge {
                 reason: reason.into(),
                 message: clip(message.into(), 200),
             });
-            if reason == "tts_failed" {
+            if reason == "tts_failed" && message != "Minerva synthesis failed" {
                 self.complete(s.host, false, message);
             }
         }
