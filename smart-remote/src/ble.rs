@@ -109,6 +109,8 @@ struct State {
     worker: Option<tokio::task::JoinHandle<()>>,
     context: Option<(Arc<crate::store::TokenStore>, u16)>,
     host: Option<String>,
+    mouse_paired: Option<bool>,
+    mouse_query: Option<tokio::task::JoinHandle<()>>,
 }
 /// Owns one worker; status/cancel do not wait on the adapter or stdio reader.
 #[derive(Clone, Default)]
@@ -153,6 +155,9 @@ impl Probe {
         match arguments["action"].as_str() {
             Some("describe" | "status" | "cancel") => {
                 let describe = arguments["action"] == "describe";
+                if describe {
+                    self.refresh_mouse();
+                }
                 if !describe {
                     self.call_mode(arguments, true)?;
                 }
@@ -179,7 +184,7 @@ impl Probe {
                     return Ok(status);
                 }
                 Ok(
-                    json!({"host": state.host, "port": state.context.as_ref().map(|c| c.1), "operation": status}),
+                    json!({"host": state.host, "port": state.context.as_ref().map(|c| c.1), "operation": status, "mouse_paired": state.mouse_paired}),
                 )
             }
             Some("apply") => {
@@ -302,8 +307,33 @@ impl Probe {
             }
         }
     }
+    fn refresh_mouse(&self) {
+        let Ok(mut state) = self.0.lock() else { return };
+        if state
+            .mouse_query
+            .as_ref()
+            .is_some_and(|task| !task.is_finished())
+        {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let probe = self.clone();
+        state.mouse_query = Some(runtime.spawn(async move {
+            let paired = crate::mouse_pairing::paired().await;
+            if let Ok(mut state) = probe.0.lock() {
+                state.mouse_paired = paired;
+            }
+        }));
+    }
     pub async fn shutdown(&self) {
         self.cancel();
+        if let Ok(mut state) = self.0.lock() {
+            if let Some(task) = state.mouse_query.take() {
+                task.abort();
+            }
+        }
         let worker = self.0.lock().ok().and_then(|mut state| state.worker.take());
         if let Some(mut worker) = worker {
             if tokio::time::timeout(Duration::from_secs(4), &mut worker)

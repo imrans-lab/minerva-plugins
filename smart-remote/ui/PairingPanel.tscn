@@ -58,3 +58,12 @@ autowrap_mode = 3
 
 [node name="Poll" type="Timer" parent="."]
 wait_time = 1.0
+
+[node name="MouseInstructions" type="Label" parent="."]
+layout_mode = 2
+text = "Mouse setup: Pair 'Smart Remote V2' in your Bluetooth settings."
+autowrap_mode = 3
+
+[node name="MouseStatus" type="Label" parent="."]
+layout_mode = 2
+text = "Checking mouse pairing…"

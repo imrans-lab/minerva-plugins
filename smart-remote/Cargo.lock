@@ -1867,6 +1867,7 @@ dependencies = [
  "aes-gcm",
  "base64",
  "btleplug",
+ "dbus",
  "env_logger",
  "futures-util",
  "gethostname",
@@ -1890,6 +1891,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "uuid",
+ "windows",
  "zeroize",
 ]
 

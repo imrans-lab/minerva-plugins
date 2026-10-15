@@ -13,6 +13,7 @@ pub mod host;
 pub mod logging;
 pub mod mdns;
 pub mod message;
+mod mouse_pairing;
 pub mod provisioning;
 pub mod resample;
 pub mod schema;

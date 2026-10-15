@@ -97,3 +97,10 @@ The firmware, not the WiFi stack, owns the committed configuration, so one write
 ## Open
 
 - Token at rest on the device is plaintext NVS unless flash encryption is enabled. Flash encryption and secure boot are not yet ruled (discussion `01a08ecd92d3`, decision 10).
+
+## Mouse setup
+
+The panel also directs the owner to pair `Smart Remote V2` in Bluetooth settings.
+Linux reads the known HID device's BlueZ bond state; Windows reads the native
+paired-device state. Neither initiates pairing. Query failure is unavailable,
+not unpaired. macOS shows instructions only: a GATT connection is not a bond.

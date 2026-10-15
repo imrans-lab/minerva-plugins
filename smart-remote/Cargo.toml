@@ -38,6 +38,12 @@ gethostname = "1"
 base64 = "0.22"
 rubato = { version = "0.16.2", default-features = false }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus = "=0.9.12"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "=0.62.2", features = ["Devices_Bluetooth", "Devices_Enumeration"] }
+
 [build-dependencies]
 prost-build = "=0.14.4"
 protox = "=0.10.0"

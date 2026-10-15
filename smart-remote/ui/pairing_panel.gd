@@ -44,6 +44,7 @@ var _cancel_requested: bool = false
 var _port: int = 47821
 
 func _ready() -> void:
+	$MouseStatus.visible = OS.get_name() in ["Linux", "Windows"]
 	_start_button.pressed.connect(_start)
 	_code.text_submitted.connect(func(_text: String) -> void: _start())
 	_apply_button.pressed.connect(_apply)
@@ -137,6 +138,9 @@ func _poll() -> void:
 	var body: Dictionary = await _call({"action": "describe"})
 	if body.is_empty() or _pending > 0 or _closed:
 		return
+	if $MouseStatus.visible:
+		var paired: Variant = body.get("mouse_paired")
+		$MouseStatus.text = "Mouse paired: %s" % ("yes" if paired else "no") if paired is bool else "Mouse pairing status unavailable."
 	if not _defaults_initialized and body.has("port"):
 		var port: int = _integer(body.get("port"), 65535)
 		if port == 0:
