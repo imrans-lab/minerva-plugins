@@ -53,6 +53,7 @@ jobs:
         with:
           workspaces: smart-remote -> target
           key: smart-remote-${{ matrix.target }}
+          cache-on-failure: true
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
