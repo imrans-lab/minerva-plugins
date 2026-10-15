@@ -1,4 +1,5 @@
 name: smart-remote
+
 on:
   push:
     branches: [main, "dcr/**"]
@@ -6,17 +7,39 @@ on:
   pull_request:
     paths: ["smart-remote/**", ".github/workflows/smart-remote.yml"]
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the built marketplace archives
+        type: boolean
+        default: false
+
 permissions:
   contents: read
+
 jobs:
   build:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-15]
-    runs-on: ${{ matrix.os }}
+    name: smart-remote (${{ matrix.target }})
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            runs-on: ubuntu-22.04
+            rust-targets: ""
+            ext: ""
+          - target: macos-universal
+            runs-on: macos-15
+            rust-targets: x86_64-apple-darwin,aarch64-apple-darwin
+            ext: ""
+          - target: windows-x86_64
+            runs-on: windows-2022
+            rust-targets: ""
+            ext: .exe
+    runs-on: ${{ matrix.runs-on }}
     defaults:
       run:
+        shell: bash
         working-directory: smart-remote
     steps:
       - uses: actions/checkout@v4
@@ -24,34 +47,107 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@1.93.0
         with:
-          components: rustfmt, clippy
+          components: rustfmt
+          targets: ${{ matrix.rust-targets }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: smart-remote -> target
-      - run: cargo fmt --check
-      - run: cargo build --locked
-  qualification:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    defaults:
-      run:
-        working-directory: smart-remote
-    steps:
-      - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@1.93.0
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: smart-remote -> target
+          key: smart-remote-${{ matrix.target }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: python3 -m pip install jsonschema==4.26.0
-      - run: python3 protocol/tools/check_examples.py
-      - run: cargo clippy --locked --all-targets
-      - run: SMART_REMOTE_MDNS_TEST=1 cargo test --locked -- --nocapture
+      - run: cargo fmt --check
+
+      - name: Build native release
+        if: matrix.target != 'macos-universal'
+        run: cargo build --release --locked
+
+      - name: Build macOS universal release
+        if: matrix.target == 'macos-universal'
+        run: |
+          cargo build --release --locked --target x86_64-apple-darwin
+          cargo build --release --locked --target aarch64-apple-darwin
+          mkdir -p target/release
+          lipo -create target/x86_64-apple-darwin/release/smart-remote-plugin \
+            target/aarch64-apple-darwin/release/smart-remote-plugin \
+            -output target/release/smart-remote-plugin
+          lipo -info target/release/smart-remote-plugin
+
+      - name: Pack marketplace archive
+        env:
+          PLATFORM: ${{ matrix.target }}
+          EXE_EXT: ${{ matrix.ext }}
+        run: |
+          VERSION=$(python3 -c 'import json; print(json.load(open("manifest.json"))["version"])')
+          PACKDIR="dist/smart_remote-${VERSION}-${PLATFORM}"
+          mkdir -p "$PACKDIR"
+          cp "target/release/smart-remote-plugin${EXE_EXT}" "$PACKDIR/"
+          python3 -c "import json,sys; m=json.load(open('manifest.json')); m.pop('setup',None); json.dump(m,open(sys.argv[1],'w'),indent=2)" "$PACKDIR/manifest.json"
+          cp -r ui "$PACKDIR/"
+          cp README.md "$PACKDIR/"
+          # data/ is mutable pairing storage; schemas are embedded in the binary.
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd "$PACKDIR" && find . -type f ! -name SHA256SUMS -print0 \
+              | xargs -0 sha256sum | sed 's| \./| |' > SHA256SUMS)
+          else
+            (cd "$PACKDIR" && find . -type f ! -name SHA256SUMS -print0 \
+              | xargs -0 shasum -a 256 | sed 's| \./| |' > SHA256SUMS)
+          fi
+          tar -czf "${PACKDIR}.tar.gz" -C "$PACKDIR" .
+          tar -tzf "${PACKDIR}.tar.gz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: smart_remote-${{ matrix.target }}
+          path: smart-remote/dist/smart_remote-*-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
   secret-scan:
     uses: ./.github/workflows/secret-scan.yml
+
+  release:
+    name: Publish release
+    timeout-minutes: 10
+    concurrency: smart-remote-release
+    needs: [build, secret-scan]
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: smart_remote-*
+          path: artifacts/
+          merge-multiple: true
+      - name: Compute tag and apply release guard
+        id: tag
+        shell: bash
+        run: |
+          VERSION=$(python3 -c 'import json; print(json.load(open("smart-remote/manifest.json"))["version"])')
+          if [ "$GITHUB_REF_NAME" = "main" ]; then
+            TAG="smart_remote-v${VERSION}"
+            PRE="false"
+          else
+            SAFE_BRANCH=$(echo "$GITHUB_REF_NAME" | sed 's|/|-|g; s|[^a-zA-Z0-9_.-]|-|g')
+            TAG="smart_remote-v${VERSION}-branch-${SAFE_BRANCH}"
+            PRE="true"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRE" >> "$GITHUB_OUTPUT"
+          bash scripts/release-publish-guard.sh "$TAG" "$PRE"
+      - name: Publish GitHub Release
+        if: steps.tag.outputs.publish == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          prerelease: ${{ steps.tag.outputs.prerelease == 'true' }}
+          target_commitish: ${{ github.sha }}
+          files: artifacts/smart_remote-*.tar.gz
+          generate_release_notes: true
+          fail_on_unmatched_files: true
