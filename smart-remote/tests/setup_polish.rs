@@ -33,6 +33,12 @@ async fn combined(mode: &str) {
         .local_addr()
         .unwrap()
         .port();
+    let profile = data.path().join("profile");
+    let user = profile.join("godot/app_userdata/Minerva");
+    std::fs::create_dir_all(&user).unwrap();
+    if mode == "audio" {
+        std::fs::write(user.join("config_file.cfg"), "[Voice]\ninput_device=\"plugin:smart_remote:remote_a4cf12b03e5d\"\noutput_device=\"plugin:smart_remote:remote_a4cf12b03e5d\"\n[AudioSettings]\nSelectedMic=\"Default\"\n").unwrap();
+    }
     let ready = data.path().join("device-ready");
     let mut child = Command::new(std::env::var("SMART_REMOTE_GODOT").unwrap_or("godot".into()))
         .args([
@@ -42,6 +48,8 @@ async fn combined(mode: &str) {
             "--script",
             "res://test/fixtures/smart_remote_setup.gd",
         ])
+        .env("XDG_DATA_HOME", &profile)
+        .env("XDG_CONFIG_HOME", data.path().join("config"))
         .env("SMART_REMOTE_SETUP_MODE", mode)
         .env("SMART_REMOTE_SETUP_DATA", data.path())
         .env("SMART_REMOTE_SETUP_PORT", port.to_string())
