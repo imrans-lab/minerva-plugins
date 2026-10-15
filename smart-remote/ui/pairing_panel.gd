@@ -177,8 +177,10 @@ func _render(body: Dictionary) -> void:
 		return
 	var details: Dictionary = value
 	var stage_value: Variant = details.get("stage", "")
-	if stage_value is String and stage_value.is_empty():
-		stage_value = body.get("stage", "")
+	if stage_value is String:
+		var progress_stage: String = stage_value
+		if progress_stage.is_empty():
+			stage_value = body.get("stage", "")
 	if not stage_value is String or not LABELS.has(stage_value):
 		_status.text = "Invalid pairing stage."
 		_start_button.disabled = true
@@ -222,12 +224,18 @@ func _render(body: Dictionary) -> void:
 		return
 	if waiting and _networks.item_count == 0:
 		for entry: Variant in networks:
-			if not entry is Dictionary or not entry.get("label") is String or not entry.get("ssid") is String:
+			if not entry is Dictionary:
+				_status.text = "Invalid WiFi network."
+				_apply_button.disabled = true
+				return
+			var row: Dictionary = entry
+			if not row.get("label") is String or not row.get("ssid") is String:
 				_status.text = "Invalid WiFi network."
 				_apply_button.disabled = true
 				return
 		for entry: Dictionary in networks:
-			_networks.add_item(entry.label)
+			var label: String = entry.label
+			_networks.add_item(label)
 			_networks.set_item_metadata(_networks.item_count - 1, entry.ssid)
 	if _cancel_requested:
 		_cancel()
