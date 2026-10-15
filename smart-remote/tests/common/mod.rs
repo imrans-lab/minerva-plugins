@@ -277,7 +277,7 @@ impl Device {
         self.send_json(&hello(TOKEN, DEVICE)).await;
         assert_eq!(
             self.recv_msg().await,
-            json!({"type":"welcome","proto":1,"plugin":"smart-remote 0.1.0"})
+            json!({"type":"welcome","proto":1,"plugin":format!("smart-remote {}", env!("CARGO_PKG_VERSION"))})
         );
         assert_eq!(
             self.recv_msg().await,

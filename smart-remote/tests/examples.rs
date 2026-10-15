@@ -105,7 +105,11 @@ async fn valid_examples_replay_up_to_the_batch_boundary() {
             match frame {
                 Frame::DeviceMsg(msg) => device.send_json(msg).await,
                 Frame::PluginMsg(expected) => {
-                    assert_eq!(&device.recv_msg().await, expected, "{name}");
+                    let mut expected = expected.clone();
+                    if expected["type"] == "welcome" {
+                        expected["plugin"] = json!(format!("smart-remote {}", env!("CARGO_PKG_VERSION")));
+                    }
+                    assert_eq!(device.recv_msg().await, expected, "{name}");
                     saw_welcome |= expected["type"] == "welcome";
                 }
                 other => panic!("{name}: audio inside the batch-3 prefix: {other:?}"),
