@@ -197,6 +197,24 @@
         "amount_minor": 0,
         "currency": "USD"
       }
+    },
+    {
+      "id": "smart_remote",
+      "name": "Smart Remote",
+      "version": "0.1.0",
+      "manifest_version": "0.1.0",
+      "release_tag": "smart_remote-v0.1.0",
+      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/smart_remote-v0.1.0/smart-remote/manifest.json",
+      "downloads": {
+        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/smart_remote-v0.1.0/smart_remote-0.1.0-linux-x86_64.tar.gz",
+        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/smart_remote-v0.1.0/smart_remote-0.1.0-macos-universal.tar.gz",
+        "windows-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/smart_remote-v0.1.0/smart_remote-0.1.0-windows-x86_64.tar.gz"
+      },
+      "description": "Bridge a Smart Remote V2 to Minerva over the local network. Pair through the native owner-entered setup panel. Linux source installation requires libdbus-1-dev and pkg-config.",
+      "price": {
+        "amount_minor": 0,
+        "currency": "USD"
+      }
     }
   ]
 }
