@@ -70,14 +70,26 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
     let (hold, drop_request) = (hold_end.clone(), drop_begin.clone());
     let writer = input.clone();
     let host = tokio::spawn(async move {
+        let mut offline = false;
         while let Some(line) = output.next_line().await.unwrap() {
             let msg: Value = serde_json::from_str(&line).unwrap();
             if msg["method"] != "minerva/capability" {
                 continue;
             }
             let args = &msg["params"]["args"];
+            if args["op"] == "availability" {
+                offline = args["available"] == false;
+            }
+            if args["op"] == "output_complete" {
+                assert!(!offline, "completion after availability:false");
+                assert_ne!(
+                    args["stream_id"], 92,
+                    "host-cancelled stream completed twice"
+                );
+                assert_ne!(args["stream_id"], 95, "disconnect retired the stream");
+            }
             if args["op"] == "register" && refusal.load(Ordering::SeqCst) {
-                writer.lock().await.write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":msg["id"],"result":{"success":false,"error_code":"endpoint_refused","error_message":"Fixture endpoint registration refused"}})).as_bytes()).await.unwrap();
+                writer.lock().await.write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":msg["id"],"result":{"success":false,"error_code":"endpoint_refused","error_message":"Fixture endpoint registration refused","detail":{"reason":"fixture refusal detail"}}})).as_bytes()).await.unwrap();
                 requests.send(msg).await.unwrap();
                 continue;
             }
@@ -264,10 +276,11 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
     assert_eq!(abort["code"], "speak_aborted");
     assert_eq!(abort["reason"], "host_cancel");
     assert!(abort["message"].as_str().is_some_and(|s| !s.is_empty()));
-    assert_eq!(
-        next_request(&mut seen, "output_complete").await["params"]["args"]["success"],
-        false
-    );
+    // The host already cancelled stream92; it must not get a second terminal report.
+    device.send_json(&json!({"type":"speak_done","stream_id":abort["stream_id"],"ok":false,"error":"cancelled"})).await;
+    while let Ok(request) = seen.try_recv() {
+        assert_ne!(request["params"]["args"]["stream_id"], 92);
+    }
     // Device barge-in uses empty EOS, whereas a synthesis failure uses host abort.
     event(&input,"voice.audio",json!({"op":"begin","device_id":endpoint,"stream_id":93,"format":"pcm_s16le","sample_rate":16000,"channels":1,"volume":1.0,"origin":{"kind":"explicit"}})).await;
     let speaking = device.recv_msg().await;
@@ -311,6 +324,8 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
     device
         .expect_silence(std::time::Duration::from_millis(60))
         .await;
+    event(&input,"voice.audio",json!({"op":"begin","device_id":endpoint,"stream_id":95,"format":"pcm_s16le","sample_rate":16000,"channels":1,"volume":1.0,"origin":{"kind":"explicit"}})).await;
+    assert_eq!(device.recv_msg().await["type"], "speak");
     // Reconnect while STT is outstanding; old cancellation completes before new registration.
     let mut wake = Device::connect(
         ([127, 0, 0, 1], port).into(),

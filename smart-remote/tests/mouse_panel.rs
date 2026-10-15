@@ -58,8 +58,12 @@ fn bonded_mouse_is_visible_through_real_plugin_and_minerva_panel() {
                     let properties: PropMap = HashMap::from([
                         (
                             "Name".into(),
-                            Variant(Box::new("Smart Remote V2".to_owned())
+                            Variant(Box::new("Renamed paired remote".to_owned())
                                 as Box<dyn dbus::arg::RefArg>),
+                        ),
+                        (
+                            "Address".into(),
+                            Variant(Box::new("AA:BB:CC:DD:EE:FF".to_owned())),
                         ),
                         ("Bonded".into(), Variant(Box::new(true))),
                         ("Paired".into(), Variant(Box::new(true))),
@@ -96,6 +100,17 @@ fn bonded_mouse_is_visible_through_real_plugin_and_minerva_panel() {
         PANEL_FIXTURE,
     )
     .unwrap();
+    let data = tempfile::tempdir().unwrap();
+    smart_remote_plugin::store::TokenStore::open(data.path())
+        .unwrap()
+        .pair_with_address(
+            "aabbccddeeff",
+            "fixture-token",
+            "remote",
+            0,
+            Some("AA:BB:CC:DD:EE:FF".into()),
+        )
+        .unwrap();
     let mut godot = Command::new(std::env::var("SMART_REMOTE_GODOT").unwrap_or("godot".into()))
         .args([
             "--headless",
@@ -105,6 +120,9 @@ fn bonded_mouse_is_visible_through_real_plugin_and_minerva_panel() {
             "res://test/test_smart_remote_mouse_setup.gd",
         ])
         .env("SMART_REMOTE_TEST_BUS", &address)
+        .env("SMART_REMOTE_MOUSE_DATA", data.path())
+        .env("XDG_DATA_HOME", data.path().join("profile"))
+        .env("XDG_CONFIG_HOME", data.path().join("config"))
         .env("SMART_REMOTE_PLUGIN_ROOT", env!("CARGO_MANIFEST_DIR"))
         .env(
             "SMART_REMOTE_PLUGIN_BIN",
@@ -151,7 +169,7 @@ func _run() -> void:
 	manager._db._plugins[definition.id] = definition
 	var connection = load("res://Scripts/Services/MCP/MCPServerConnection.gd").new(definition.id)
 	connection.configure_stdio("/usr/bin/env", ["DBUS_SYSTEM_BUS_ADDRESS=" + OS.get_environment("SMART_REMOTE_TEST_BUS"),
-		OS.get_environment("SMART_REMOTE_PLUGIN_BIN"), "--data-dir", ProjectSettings.globalize_path("user://mouse-plugin"),
+		OS.get_environment("SMART_REMOTE_PLUGIN_BIN"), "--data-dir", OS.get_environment("SMART_REMOTE_MOUSE_DATA"),
 		"--bind", "127.0.0.1", "--port", "0", "--no-mdns"])
 	if await connection.connect_to_server() != OK:
 		quit(1)

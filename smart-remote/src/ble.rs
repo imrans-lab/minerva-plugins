@@ -110,6 +110,8 @@ struct State {
     context: Option<(Arc<crate::store::TokenStore>, u16)>,
     host: Option<String>,
     mouse_paired: Option<bool>,
+    mouse_observer: Arc<crate::mouse_pairing::Observer>,
+    mouse_checked: Option<std::time::Instant>,
     mouse_query: Option<tokio::task::JoinHandle<()>>,
 }
 /// Owns one worker; status/cancel do not wait on the adapter or stdio reader.
@@ -138,16 +140,6 @@ impl Probe {
     pub fn configure(&self, store: Arc<crate::store::TokenStore>, port: u16) {
         if let Ok(mut state) = self.0.lock() {
             state.context = Some((store, port));
-            // UDP connect only selects an OS route; no datagram is sent.
-            state.host = std::net::UdpSocket::bind("0.0.0.0:0")
-                .and_then(|socket| {
-                    socket.connect("1.1.1.1:9")?;
-                    socket.local_addr()
-                })
-                .ok()
-                .map(|address| address.ip())
-                .filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
-                .map(|ip| ip.to_string());
         }
     }
     pub fn pairing(&self, arguments: &mut Value) -> Result<Value, Error> {
@@ -260,6 +252,7 @@ impl Probe {
                     Some(Job {
                         store: state.context.as_ref().ok_or(Error::Operation)?.0.clone(),
                         input: receiver,
+                        address: None,
                     })
                 } else {
                     None
@@ -310,6 +303,12 @@ impl Probe {
     fn refresh_mouse(&self) {
         let Ok(mut state) = self.0.lock() else { return };
         if state
+            .mouse_checked
+            .is_some_and(|last| last.elapsed() < Duration::from_secs(5))
+        {
+            return;
+        }
+        if state
             .mouse_query
             .as_ref()
             .is_some_and(|task| !task.is_finished())
@@ -319,9 +318,26 @@ impl Probe {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
+        let addresses = state
+            .context
+            .as_ref()
+            .map(|c| c.0.ble_addresses())
+            .unwrap_or_default();
+        let observer = state.mouse_observer.clone();
+        state.mouse_checked = Some(std::time::Instant::now());
+        // UDP connect only selects an OS route; no datagram is sent.
+        state.host = std::net::UdpSocket::bind("0.0.0.0:0")
+            .and_then(|socket| {
+                socket.connect("1.1.1.1:9")?;
+                socket.local_addr()
+            })
+            .ok()
+            .map(|address| address.ip())
+            .filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
+            .map(|ip| ip.to_string());
         let probe = self.clone();
         state.mouse_query = Some(runtime.spawn(async move {
-            let paired = crate::mouse_pairing::paired().await;
+            let paired = crate::mouse_pairing::paired(observer, addresses).await;
             if let Ok(mut state) = probe.0.lock() {
                 state.mouse_paired = paired;
             }
@@ -374,6 +390,7 @@ impl Probe {
         mut cancel: watch::Receiver<bool>,
         job: Option<Job>,
     ) -> Result<(), Error> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
         let manager = bounded(
             async { Manager::new().await.map_err(|_| Error::Adapter) },
             &mut cancel,
@@ -433,11 +450,14 @@ impl Probe {
             .map_err(|_| Error::Timeout)?
             .map_err(|_| Error::Adapter)?;
         // The shared advertised name discovers candidates; the code authenticates one.
-        let mut last_error = Error::Authentication;
+        let mut last_error = Error::NotFound;
         for peripheral in peripherals {
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
             self.stage(id, Stage::Connecting);
             let peer = Native(peripheral);
-            let result = async {
+            let result = tokio::time::timeout_at(deadline, async {
                 bounded(
                     async { peer.0.connect().await.map_err(|_| Error::Transport) },
                     &mut cancel,
@@ -455,25 +475,38 @@ impl Probe {
                 .await?;
                 self.stage(id, Stage::Authenticating);
                 transport::authenticate(&peer, code.clone(), &mut cancel).await
-            }
-            .await;
+            })
+            .await
+            .unwrap_or(Err(Error::Timeout));
             let mut session = match result {
                 Ok(session) => session,
                 Err(error) => {
                     // Cleanup completes before attempting the next advertised remote.
-                    tokio::time::timeout(Duration::from_secs(3), peer.disconnect())
-                        .await
-                        .map_err(|_| Error::Timeout)??;
-                    last_error = error;
-                    if last_error == Error::Cancelled {
-                        return Err(last_error);
+                    if !matches!(
+                        tokio::time::timeout(Duration::from_secs(3), peer.disconnect()).await,
+                        Ok(Ok(()))
+                    ) {
+                        log::debug!("BLE candidate cleanup did not complete");
+                    }
+                    if error == Error::Cancelled {
+                        return Err(error);
+                    }
+                    let priority = |error| match error {
+                        Error::Authentication => 3,
+                        Error::Endpoint | Error::Version | Error::Protocol => 2,
+                        Error::Transport => 1,
+                        _ => 0,
+                    };
+                    if last_error == Error::NotFound || priority(error) >= priority(last_error) {
+                        last_error = error;
                     }
                     continue;
                 }
             };
             drop(code);
             let result = async {
-                if let Some(job) = job {
+                if let Some(mut job) = job {
+                    job.address = Some(peer.0.address().to_string());
                     workflow::run(
                         &peer,
                         &mut session,
@@ -844,6 +877,7 @@ mod tests {
                     "aabbccddeeff".into(),
                     Zeroizing::new("synthetic-token".into()),
                     "remote".into(),
+                    None,
                 )
                 .await
                 .unwrap();

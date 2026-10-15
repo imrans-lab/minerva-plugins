@@ -392,6 +392,7 @@ async fn independent_full_wire_reset_retry_real_store_and_lan_confirmation() {
             &*peer,
             &mut session,
             Job {
+                address: None,
                 store: store.clone(),
                 input: receiver,
             },
@@ -470,6 +471,7 @@ async fn cancelled_owner_input_excludes_typing_time_and_invalidates_the_session_
             &peer,
             &mut session,
             Job {
+                address: None,
                 store: store.clone(),
                 input: receiver,
             },
@@ -534,6 +536,7 @@ async fn failed_protocol_ack_bounds_store_and_connection_deadline_never_pair_or_
                 &peer,
                 &mut session,
                 Job {
+                    address: None,
                     store: store.clone(),
                     input: receiver
                 },
@@ -592,6 +595,7 @@ async fn unconfirmed_pairing_survives_and_a_late_real_hello_confirms_it() {
             &peer,
             &mut session,
             Job {
+                address: None,
                 store: store.clone(),
                 input: receiver,
             },

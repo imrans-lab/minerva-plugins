@@ -71,6 +71,7 @@ pub struct DeviceRecord {
     pub name: String,
     pub paired_at: u64,
     pub confirmed: bool,
+    pub ble_address: Option<String>,
     token_sha256: Digest32,
 }
 
@@ -80,6 +81,8 @@ struct StoredRecord {
     name: String,
     paired_at: u64,
     confirmed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ble_address: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -144,6 +147,17 @@ impl TokenStore {
         name: &str,
         paired_at: u64,
     ) -> Result<(), StoreError> {
+        self.pair_with_address(device_id, token, name, paired_at, None)
+    }
+
+    pub fn pair_with_address(
+        &self,
+        device_id: &str,
+        token: &str,
+        name: &str,
+        paired_at: u64,
+        ble_address: Option<String>,
+    ) -> Result<(), StoreError> {
         if !is_device_id(device_id) {
             return Err(StoreError::BadDeviceId);
         }
@@ -155,6 +169,7 @@ impl TokenStore {
                 name: name.to_owned(),
                 paired_at,
                 confirmed: false,
+                ble_address,
                 token_sha256: hash(token),
             },
         );
@@ -179,12 +194,21 @@ impl TokenStore {
     pub fn record(&self, device_id: &str) -> Option<DeviceRecord> {
         self.lock().get(device_id).cloned()
     }
+    pub(crate) fn ble_addresses(&self) -> Vec<String> {
+        self.lock()
+            .values()
+            .filter_map(|record| record.ble_address.clone())
+            .collect()
+    }
     /// A busy persistence lock is pending, distinct from an absent record.
     pub fn try_record(&self, device_id: &str) -> Option<Option<DeviceRecord>> {
-        self.devices
-            .try_lock()
-            .map(|records| records.get(device_id).cloned())
-            .ok()
+        match self.devices.try_lock() {
+            Ok(records) => Some(records.get(device_id).cloned()),
+            Err(std::sync::TryLockError::Poisoned(error)) => {
+                Some(error.into_inner().get(device_id).cloned())
+            }
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        }
     }
 
     /// Compares the token's hash with the stored one in constant time. An
@@ -243,6 +267,7 @@ impl TokenStore {
                             name: r.name.clone(),
                             paired_at: r.paired_at,
                             confirmed: r.confirmed,
+                            ble_address: r.ble_address.clone(),
                         },
                     )
                 })
@@ -281,6 +306,7 @@ fn parse(path: &Path, bytes: &[u8]) -> Result<BTreeMap<String, DeviceRecord>, St
                 name: r.name,
                 paired_at: r.paired_at,
                 confirmed: r.confirmed,
+                ble_address: r.ble_address,
                 token_sha256,
             },
         );
@@ -349,7 +375,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = TokenStore::open(dir.path()).unwrap();
         assert_eq!(store.verify(ID, TOKEN), Verdict::Refused);
-        store.pair(ID, TOKEN, "SR2-3E5D", 1_760_000_000).unwrap();
+        store
+            .pair_with_address(
+                ID,
+                TOKEN,
+                "SR2-3E5D",
+                1_760_000_000,
+                Some("AA:BB:CC:DD:EE:FF".into()),
+            )
+            .unwrap();
         assert_eq!(
             store.verify(ID, TOKEN),
             Verdict::Accepted {
@@ -365,6 +399,12 @@ mod tests {
         assert!(record.confirmed);
         assert_eq!(record.name, "SR2-3E5D");
         assert_eq!(record.paired_at, 1_760_000_000);
+        assert_eq!(record.ble_address.as_deref(), Some("AA:BB:CC:DD:EE:FF"));
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = reopened.devices.lock().unwrap();
+            panic!("fixture lock poison");
+        });
+        assert!(reopened.try_record(ID).unwrap().unwrap().confirmed);
         assert_eq!(
             reopened.verify(ID, TOKEN),
             Verdict::Accepted {

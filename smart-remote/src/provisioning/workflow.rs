@@ -33,6 +33,7 @@ impl Persistence {
         id: String,
         token: Zeroizing<String>,
         name: String,
+        address: Option<String>,
     ) -> Result<(), Error> {
         self.0.store(1, Ordering::Release);
         let settlement = Settlement(self.clone());
@@ -42,7 +43,7 @@ impl Persistence {
                 .map_err(|_| Error::Store)?
                 .as_secs();
             let result = store
-                .pair(&id, &token, &name, time)
+                .pair_with_address(&id, &token, &name, time, address)
                 .map_err(|_| Error::Store);
             settlement
                 .0
@@ -92,6 +93,7 @@ pub struct Network {
 pub struct Job {
     pub store: Arc<crate::store::TokenStore>,
     pub input: mpsc::Receiver<Credentials>,
+    pub address: Option<String>,
 }
 struct Link<'a, P> {
     peer: &'a P,
@@ -396,6 +398,7 @@ pub async fn run<P: Peer>(
                         id.clone(),
                         token.clone(),
                         name.to_owned(),
+                        job.address.clone(),
                     )
                     .await?;
                 progress.stage = "waiting_lan";

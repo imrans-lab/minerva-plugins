@@ -4,7 +4,12 @@ use serde::Deserialize;
 use zeroize::Zeroizing;
 
 pub fn config_request(host: &str, port: u16, token: &str) -> Result<SecretBytes, Error> {
+    let normalized = host.trim_end_matches('.').to_ascii_lowercase();
     if port == 0
+        || normalized == "localhost"
+        || normalized.ends_with(".localhost")
+        || host.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+            && host.parse::<std::net::Ipv4Addr>().is_err()
         || host
             .parse::<std::net::IpAddr>()
             .is_ok_and(|ip| ip.is_loopback() || ip.is_unspecified())

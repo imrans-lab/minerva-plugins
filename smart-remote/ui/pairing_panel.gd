@@ -40,7 +40,7 @@ var _delivered: int = 0
 var _operation: int = 0
 var _pending: int = 0
 var _closed: bool = false
-var _defaults_initialized: bool = false
+var _default_host: String = ""
 var _cancel_requested: bool = false
 var _port: int = 47821
 
@@ -142,15 +142,16 @@ func _poll() -> void:
 	if _mouse_status.visible:
 		var paired: Variant = body.get("mouse_paired")
 		_mouse_status.text = "Mouse paired: %s" % ("yes" if paired else "no") if paired is bool else "Mouse pairing status unavailable."
-	if not _defaults_initialized and body.has("port"):
+	if body.has("port"):
 		var port: int = _integer(body.get("port"), 65535)
 		if port == 0:
 			_status.text = "Invalid listener port."
 			return
 		_port = port
-		_host.text = str(body.host) if body.get("host") != null else ""
-		_host.visible = _host.text.is_empty()
-		_defaults_initialized = true
+		if _host.editable and _host.text == _default_host:
+			_default_host = str(body.host) if body.get("host") != null else ""
+			_host.text = _default_host
+		_host.visible = _host.text.is_empty() or _host.text != _default_host
 	var operation: Variant = body.get("operation", {})
 	if operation is Dictionary:
 		var current: Dictionary = operation
@@ -174,9 +175,15 @@ func _render(body: Dictionary) -> void:
 		_status.text = "Invalid pairing status."
 		return
 	var details: Dictionary = value
-	var stage: String = str(details.get("stage", ""))
-	if stage.is_empty():
-		stage = str(body.get("stage", "idle"))
+	var stage_value: Variant = details.get("stage", "")
+	if stage_value is String and stage_value.is_empty():
+		stage_value = body.get("stage", "")
+	if not stage_value is String or not LABELS.has(stage_value):
+		_status.text = "Invalid pairing stage."
+		_start_button.disabled = true
+		_apply_button.disabled = true
+		return
+	var stage: String = stage_value
 	_status.text = str(LABELS.get(stage, stage.replace("_", " ")))
 	var storage: String = str(details.get("persistence", "none"))
 	if storage == "pending":
@@ -207,11 +214,20 @@ func _render(body: Dictionary) -> void:
 			return
 		_host.text = str(details.host)
 		_port = port
-	var networks: Array = details.get("networks", [])
+	var networks: Variant = details.get("networks", [])
+	if not networks is Array:
+		_status.text = "Invalid WiFi network list."
+		_apply_button.disabled = true
+		return
 	if waiting and _networks.item_count == 0:
-		for row: Dictionary in networks:
-			_networks.add_item(str(row.label))
-			_networks.set_item_metadata(_networks.item_count - 1, str(row.ssid))
+		for entry: Variant in networks:
+			if not entry is Dictionary or not entry.get("label") is String or not entry.get("ssid") is String:
+				_status.text = "Invalid WiFi network."
+				_apply_button.disabled = true
+				return
+		for entry: Dictionary in networks:
+			_networks.add_item(entry.label)
+			_networks.set_item_metadata(_networks.item_count - 1, entry.ssid)
 	if _cancel_requested:
 		_cancel()
 

@@ -277,13 +277,21 @@ fn on_notification(method: &str, params: Option<&Value>) {
 fn unwrap_envelope(result: Value) -> Result<Value, HostError> {
     match result.get("success").and_then(Value::as_bool) {
         Some(true) => Ok(result.get("result").cloned().unwrap_or(Value::Null)),
-        Some(false) => Err(HostError::Refused {
-            code: result["error_code"].as_str().unwrap_or("").to_owned(),
-            reason: result["error_message"]
-                .as_str()
-                .unwrap_or("Host operation failed")
-                .to_owned(),
-        }),
+        Some(false) => {
+            if let Some(detail) = result.get("detail") {
+                log::warn!(
+                    "Host refusal detail: {}",
+                    crate::message::clip(detail.to_string(), 1000)
+                );
+            }
+            Err(HostError::Refused {
+                code: result["error_code"].as_str().unwrap_or("").to_owned(),
+                reason: result["error_message"]
+                    .as_str()
+                    .unwrap_or("Host operation failed")
+                    .to_owned(),
+            })
+        }
         None => Ok(result),
     }
 }

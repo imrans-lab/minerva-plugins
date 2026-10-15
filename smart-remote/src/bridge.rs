@@ -39,6 +39,7 @@ pub(crate) struct Bridge {
     pub device: String,
     updates: mpsc::Sender<Update>,
     tasks: JoinSet<()>,
+    completions: JoinSet<()>,
     startup: Option<tokio::task::JoinHandle<()>>,
     ready: bool,
     pub stopped: bool,
@@ -81,6 +82,7 @@ impl Bridge {
             device: format!("remote_{id}"),
             updates,
             tasks: JoinSet::new(),
+            completions: JoinSet::new(),
             startup: None,
             ready: false,
             stopped: false,
@@ -544,7 +546,11 @@ impl Bridge {
             return vec![error(ErrorCode::TtsFailed, "Speaker completion unknown")];
         }
         let mut failures = Vec::new();
-        while let Some(r) = self.tasks.try_join_next() {
+        while let Some(r) = self
+            .tasks
+            .try_join_next()
+            .or_else(|| self.completions.try_join_next())
+        {
             if let Err(e) = r {
                 failures.push(error(ErrorCode::Internal, "Host task failed"));
                 log::error!("Host task failed: {e}");
@@ -625,6 +631,8 @@ impl Bridge {
         }
         self.cancel_mic();
         self.cancel_output("Remote disconnected");
+        self.completions.abort_all();
+        while self.completions.join_next().await.is_some() {}
         if let Some(startup) = self.startup.take() {
             let _ = startup.await;
         }
@@ -657,7 +665,7 @@ impl Bridge {
             clip(message.into(), 200),
         );
         let updates = self.updates.clone();
-        self.tasks.spawn(async move {
+        self.completions.spawn(async move {
             if let Err(e) = host.call_capability("host.audio", json!({"op":"output_complete","device_id":device,"stream_id":stream,"success":success,"error_message":message})).await {
                 let _ = updates.send(Update::OutputFailed(e.to_string())).await;
                 log::warn!("Speaker completion refused: {e}");
@@ -695,7 +703,9 @@ impl Bridge {
                 reason: reason.into(),
                 message: clip(message.into(), 200),
             });
-            self.complete(s.host, false, message);
+            if reason == "tts_failed" {
+                self.complete(s.host, false, message);
+            }
         }
     }
     pub fn take_controls(&mut self) -> Vec<PluginMsg> {
