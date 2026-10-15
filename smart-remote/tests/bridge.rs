@@ -86,7 +86,10 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
                     args["stream_id"], 92,
                     "host-cancelled stream completed twice"
                 );
-                assert_ne!(args["stream_id"], 94, "host error already retired the stream");
+                assert_ne!(
+                    args["stream_id"], 94,
+                    "host error already retired the stream"
+                );
                 assert_ne!(args["stream_id"], 95, "disconnect retired the stream");
             }
             if args["op"] == "register" && refusal.load(Ordering::SeqCst) {
