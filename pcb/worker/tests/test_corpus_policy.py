@@ -285,12 +285,12 @@ def _admitted_plugin_path(name: str) -> bool:
 
 
 def _identity_text(repo: Path, name: str, text: str) -> str:
-    return text.removeprefix("name: smart-remote\n") if repo == PLUGINS_ROOT and name == ".github/workflows/smart-remote.yml" else text
+    return text.removeprefix("name: smart-remote\n").replace("    name: smart-remote (${{ matrix.target }})\n", "", 1).replace("          name: smart_remote-${{ matrix.target }}\n", "", 1) if repo == PLUGINS_ROOT and name == ".github/workflows/smart-remote.yml" else text
 
 
-def test_identity_in_an_admitted_file_is_still_detected():
+def test_identity_in_an_admitted_file_is_still_detected() -> None:
     assert _IDENTITY.search(_identity_text(PLUGINS_ROOT, "smart-remote/README.md", "name: smart-remote\n"))
-    assert _IDENTITY.search(_identity_text(PLUGINS_ROOT, ".github/workflows/smart-remote.yml", "name: smart-remote\nname: smart-remote\n"))
+    assert _IDENTITY.search(_identity_text(PLUGINS_ROOT, ".github/workflows/smart-remote.yml", "name: smart-remote\n    name: smart-remote (${{ matrix.target }})\n          name: smart_remote-${{ matrix.target }}\nname: smart-remote\n"))
 
 
 def _tracked_text_files(repo: Path) -> list[str]:
