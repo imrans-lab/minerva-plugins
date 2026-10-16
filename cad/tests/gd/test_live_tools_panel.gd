@@ -105,8 +105,11 @@ func _run() -> void:
 		not unknown.get("success", true) and unknown.get("error", {}).get("kind") == "translate"
 		and not FileAccess.file_exists(unknown_args.path), str(unknown))
 	var blocked := directory.path_join("blocked.stl")
-	DirAccess.make_dir_recursive_absolute(blocked)
-	args["path"] = blocked
+	var blocker := FileAccess.open(blocked, FileAccess.WRITE)
+	if blocker != null:
+		blocker.store_string("regular file blocks a child export path")
+		blocker.close()
+	args["path"] = blocked.path_join("out.stl")
 	args["wait_ms"] = 0
 	var failed_export: Dictionary = await registry.handle_tool_call("minerva_cad_export", args)
 	var failed_id := str(failed_export.get("job_id", failed_export.get("error", {}).get("job_id", "")))

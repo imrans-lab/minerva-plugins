@@ -68,7 +68,9 @@ func _cad_export(args: Dictionary) -> Dictionary:
 
 static func _source_version(value: Variant) -> int:
 	if value is int: return value
-	if value is float: return int(value)
+	if value is float:
+		var number: float = value
+		return int(number)
 	return -1
 
 static func export_document_args(args: Dictionary) -> Dictionary:
@@ -365,7 +367,7 @@ func _cad_clear_edge_annotations(args: Dictionary) -> Dictionary:
 			to_remove.append(str(ann_dict.get("id", "")))
 		else:
 			# Match by group_id in payload.
-			var payload: Variant = ann_dict.get("payload", {})
+			var payload: Variant = ann_dict.get("kind_payload", ann_dict.get("payload", {}))
 			if payload is Dictionary:
 				var ann_group: String = str((payload as Dictionary).get("group_id", ""))
 				if ann_group == filter_group:
@@ -412,7 +414,7 @@ func _cad_list_user_labels(args: Dictionary) -> Dictionary:
 			continue
 		var edge_id: int = int(anchor_d["id"])
 
-		var payload: Dictionary = ann_dict.get("payload", {}) as Dictionary
+		var payload: Dictionary = ann_dict.get("kind_payload", ann_dict.get("payload", {})) as Dictionary
 		var text: String = str(payload.get("text", ""))
 
 		labels.append({
