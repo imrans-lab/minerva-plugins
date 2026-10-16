@@ -1391,6 +1391,7 @@
           "ui/scripts/reference_report.gd",
           "ui/scripts/cad_note.gd",
     "ui/scripts/CadAnchorTypes.gd",
+    "ui/scripts/CadEdgeAnchor.gd",
     "ui/scripts/CadPointAnchor.gd",
     "ui/scripts/reference_selection.gd",
     "ui/scripts/reference_click.gd",
