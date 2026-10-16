@@ -139,7 +139,8 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 	# A keyed export job already owns its source snapshot; collecting it
 	# neither reads nor rebuilds the panel's current document.
 	if tool_name == "minerva_cad_export" and not str(args.get("job_id", "")).is_empty():
-		var live: RefCounted = preload("scripts/live_tools.gd").new(panel)
+		var host_panel: Object = panel
+		var live: RefCounted = preload("scripts/live_tools.gd").new(host_panel)
 		return await live.call("handle", tool_name, args)
 	if (_Freshness.MEASURING_VERBS.has(tool_name) or tool_name == "minerva_cad_export" or tool_name.begins_with("minerva_cad_snapshot")) and panel.has_method("verify_dependencies"):
 		panel.verify_dependencies()
@@ -193,7 +194,8 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 
 static func _dispatch(panel, tool_name: String, args: Dictionary) -> Dictionary:
 	if preload("scripts/live_tools.gd").TOOL_NAMES.has(tool_name):
-		var live: RefCounted = preload("scripts/live_tools.gd").new(panel)
+		var host_panel: Object = panel
+		var live: RefCounted = preload("scripts/live_tools.gd").new(host_panel)
 		return await live.call("handle", tool_name, args)
 	match tool_name:
 		"minerva_cad_object":

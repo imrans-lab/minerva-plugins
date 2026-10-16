@@ -83,7 +83,8 @@ func _run() -> void:
 	var path := directory.path_join("box.stl")
 	var before: Dictionary = panel.get_evaluation_state().duplicate(true)
 	args = locator.duplicate()
-	args.merge({"part": "shaft", "format": "stl", "path": path, "wait_ms": 0})
+	args.merge({"part": "shaft", "format": "stl", "path": path, "wait_ms": 0,
+		"require_source_version": JSON.parse_string(JSON.stringify(before.source_version))})
 	var exported: Dictionary = await registry.handle_tool_call("minerva_cad_export", args)
 	check("export starts a collectable backend job", exported.get("status") in ["pending", "completed"]
 		and not str(exported.get("job_id", "")).is_empty(), str(exported))
@@ -93,6 +94,16 @@ func _run() -> void:
 		and initial_complete.get("provenance", {}).get("operation") == "export"
 		and initial_complete.get("provenance", {}).get("format") == "stl"
 		and initial_complete.get("provenance", {}).get("part") == "shaft", str(initial_complete))
+	var unknown_args := args.duplicate()
+	unknown_args["part"] = "no_such_part"
+	unknown_args["path"] = directory.path_join("unknown.stl")
+	var unknown: Dictionary = await registry.handle_tool_call("minerva_cad_export", unknown_args)
+	while unknown.get("status") == "pending":
+		unknown = await registry.handle_tool_call("minerva_cad_export", {
+			"editor_name": rig.panel_name, "job_id": unknown.get("job_id", ""), "wait_ms": 1000})
+	check("unknown part preserves a structured backend error instead of exporting the whole model",
+		not unknown.get("success", true) and unknown.get("error", {}).get("kind") == "translate"
+		and not FileAccess.file_exists(unknown_args.path), str(unknown))
 	var blocked := directory.path_join("blocked.stl")
 	DirAccess.make_dir_recursive_absolute(blocked)
 	args["path"] = blocked

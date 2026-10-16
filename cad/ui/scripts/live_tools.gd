@@ -66,6 +66,11 @@ func _cad_export(args: Dictionary) -> Dictionary:
 	var result: Dictionary = payload
 	return _ok(result)
 
+static func _source_version(value: Variant) -> int:
+	if value is int: return value
+	if value is float: return int(value)
+	return -1
+
 static func export_document_args(args: Dictionary) -> Dictionary:
 	var fmt := str(args.get("format", "")).strip_edges().to_lower()
 	if fmt not in ["stl", "step", "stp", "3mf", "glb"]:
@@ -77,8 +82,8 @@ static func export_document_args(args: Dictionary) -> Dictionary:
 	var source := str(document.get("source", ""))
 	if source.is_empty():
 		return {"error": "No source is available to export"}
-	var version := int(document.get("source_version", -1))
-	if args.has("require_source_version") and int(args.require_source_version) != version:
+	var version := _source_version(document.get("source_version", -1))
+	if args.has("require_source_version") and _source_version(args.require_source_version) != version:
 		return {"error": "Export source does not match require_source_version"}
 	if args.has("require_source_digest") and str(args.require_source_digest) != source.sha256_text():
 		return {"error": "Export source does not match require_source_digest"}
