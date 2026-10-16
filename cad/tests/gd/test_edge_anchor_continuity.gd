@@ -5,7 +5,7 @@ const Tool := preload("res://../../minerva-plugins/cad/ui/tools/cad_edge_number_
 const Records := preload("res://../../minerva-plugins/cad/ui/scripts/object_records.gd")
 const LiveTools := preload("res://../../minerva-plugins/cad/ui/scripts/live_tools.gd")
 # Routing adapter only: the real tools and annotation host own all behavior.
-class Panel extends RefCounted:
+class TestPanel extends RefCounted:
 	var host: AnnotationHost
 	func _init(value: AnnotationHost) -> void:
 		host = value
@@ -42,12 +42,12 @@ func _run() -> void:
 	var consumed: Dictionary = tool._build_annotation(int(data.consumed.id), Vector3.ZERO)
 	assert(not host.add_annotation(survivor).is_empty())
 	assert(not host.add_annotation(consumed).is_empty())
-	var tools := LiveTools.new(Panel.new(host))
-	var authored: Dictionary = tools.handle("minerva_cad_annotate_edges", {"edge_ids": [int(data.survivor.id)]})
+	var tools := LiveTools.new(TestPanel.new(host))
+	var authored: Dictionary = await tools.handle("minerva_cad_annotate_edges", {"edge_ids": [int(data.survivor.id)]})
 	var annotations: Array = host.get_annotations()
 	var agent_annotation: Dictionary = annotations.back()
 	host.set_edge_registry(data.after)
-	var listing: Dictionary = tools.handle("minerva_cad_list_user_labels", {})
+	var listing: Dictionary = await tools.handle("minerva_cad_list_user_labels", {})
 	var labels: Array = listing.get("labels", [])
 	var agent_resolved: Dictionary = host._resolve_edge_anchor(agent_annotation.anchor)
 	check("agent tools author geometry and report the current survivor id or stale saved midpoint",
