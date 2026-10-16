@@ -276,14 +276,21 @@ _IDENTITY = re.compile(r"^[ \t]*name:[ \t]*[\"']?smart[-_ ]?remote",
                        re.IGNORECASE | re.MULTILINE)
 
 
-def _admitted_plugin_path(repo: Path, name: str) -> bool:
+def _admitted_plugin_path(name: str) -> bool:
     """Use public plugin admissions owned by the shipped corpus guard."""
-    if repo != PLUGINS_ROOT:
-        return False
-    policy = (repo / "scripts/check-corpus-policy.sh").read_text()
+    policy = (PLUGINS_ROOT / "scripts/check-corpus-policy.sh").read_text()
     rules = re.findall(r"^\s+(.+)\) continue ;;$", policy, re.MULTILINE)
     assert rules, "the corpus guard's explicit admissions must be readable"
     return any(fnmatchcase(name, pattern) for rule in rules for pattern in rule.split("|"))
+
+
+def _identity_text(repo: Path, name: str, text: str) -> str:
+    return text.removeprefix("name: smart-remote\n") if repo == PLUGINS_ROOT and name == ".github/workflows/smart-remote.yml" else text
+
+
+def test_identity_in_an_admitted_file_is_still_detected():
+    assert _IDENTITY.search(_identity_text(PLUGINS_ROOT, "smart-remote/README.md", "name: smart-remote\n"))
+    assert _IDENTITY.search(_identity_text(PLUGINS_ROOT, ".github/workflows/smart-remote.yml", "name: smart-remote\nname: smart-remote\n"))
 
 
 def _tracked_text_files(repo: Path) -> list[str]:
@@ -301,8 +308,8 @@ def test_no_tracked_file_declares_the_product_board_identity(repo):
     fixture or a ``.json`` snapshot is invisible to it. This is the same check
     over every tracked text file."""
     offenders = [name for name in _tracked_text_files(repo)
-                 if not _admitted_plugin_path(repo, name) and _IDENTITY.search(
-                     (repo / name).read_text(encoding="utf-8", errors="ignore"))]
+                 if _IDENTITY.search(_identity_text(repo, name,
+                     (repo / name).read_text(encoding="utf-8", errors="ignore")))]
     assert not offenders, (
         f"[{repo.name}] these tracked files declare the banned board identity: "
         f"{offenders} — see pcb/worker/tests/testdata/POLICY.md")
@@ -316,7 +323,7 @@ def test_no_tracked_file_is_named_after_the_product(repo):
                              capture_output=True, text=True,
                              check=False).stdout.split("\n")
     banned = re.compile(r"smart[-_]?remote", re.IGNORECASE)
-    offenders = [n for n in tracked if n and banned.search(n) and not _admitted_plugin_path(repo, n)]
+    offenders = [n for n in tracked if n and banned.search(n) and not (repo == PLUGINS_ROOT and _admitted_plugin_path(n))]
     assert not offenders, (
         f"[{repo.name}] files named after the product are banned: {offenders}")
 
@@ -368,11 +375,11 @@ def _path_reference_text(repo: Path, name: str) -> str:
     """Remove public plugin references; private path literals still count."""
     text = (repo / name).read_text(encoding="utf-8", errors="ignore")
     if name == "registry.json":
-        text = re.sub(r'https://raw\.githubusercontent\.com/imrans-lab/minerva-plugins/[^/\s"]+/smart-remote/manifest\.json', '', text)
+        text = re.sub(r'https://raw\.githubusercontent\.com/imrans-lab/minerva-plugins/[^/\s"]+/' + re.escape("smart-remote") + r'/manifest\.json', '', text)
     elif name == ".github/dependabot.yml":
         text = re.sub(r"(?m)^[ \t]*-[ \t]+/smart-remote[ \t]*$", "", text)
-    elif _admitted_plugin_path(repo, name):
-        text = re.sub(r"(?:<plugins>|/Minerva/plugins(?:/data)?)/smart_remote/", "plugins/plugin/", text)
+    elif _admitted_plugin_path(name):
+        text = re.sub(r"(?:<plugins>(?:/data)?|/Minerva/plugins(?:/data)?)/" + re.escape("smart_remote") + r"(?=[/\"'\s]|$)", "plugins/plugin", text)
     return text
 
 
