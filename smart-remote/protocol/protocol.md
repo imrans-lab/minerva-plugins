@@ -7,7 +7,7 @@ Message fields are defined only in `schema/`; this document defines behaviour. `
 
 Minerva owns STT and TTS through its normal voice-service pipeline. The plugin is a Minerva-internal PCM microphone/speaker endpoint, with no OS audio driver. The plugin owns remote pairing and PTT sessions, audio framing, playback pacing and conversion/resampling of host audio (including Kokoro 24 kHz output) to the protocol's 16 kHz mono s16le format.
 
-Minerva sends transcription results to the plugin as events for the OLED draft. Speech is routed to the remote only for replies to remote-originated turns, even when the remote is selected as speaker; keyboard-originated turns retain their existing output behavior. This ownership ruling supersedes the former plugin-owned STT/TTS path (Docket `smart-remote:01a12de97992` comment 122).
+Minerva sends transcription results to the plugin as events for the OLED draft. Speech follows the selected speaker, including keyboard and pass-through replies. Remote-originated turns retain their turn correlation; replies originating elsewhere use explicit playback authorization without claiming remote turn ownership. This selected-speaker rule supersedes the earlier remote-origin-only routing rule (RCA `minerva:01a1428a4f3c`).
 
 ## Transport
 
@@ -61,11 +61,11 @@ Every binary frame is a 4-byte header followed by PCM:
 
 ## Replies and speech
 
-- When the assistant finishes a turn the remote sent, the plugin sends `reply{chat_id, text, outcome}`, then `speak{stream, origin:"turn", chat_id}` followed by speaker frames ending in EOS. Replies to turns the remote did not send are never spoken.
+- When the assistant finishes a turn the remote sent, the plugin sends `reply{chat_id, text, outcome}`, then, when this remote is selected as speaker, `speak{stream, origin:"turn", chat_id}` followed by speaker frames ending in EOS. Replies to other turns may be spoken through explicit selected-speaker playback, without a remote-owned `reply` event.
 - Minerva synthesizes each admitted remote-origin reply once and supplies its PCM to the plugin endpoint. The plugin converts/resamples that audio to 16 kHz mono s16le, then frames it for the remote.
 - The plugin paces speaker frames at real time with at most 1 s lead, so the device needs no flow control beyond its playback buffer.
 - `speak.origin` is optional; absence means `turn` and requires `chat_id`.
-- Explicit speech when this remote is selected uses `speak{stream, origin:"explicit"}` without `chat_id`; no turn origin is inferred from focus or event order.
+- Explicit speech when this remote is selected uses `speak{stream, origin:"explicit"}` without `chat_id`; this includes automatic speech for keyboard/pass-through turns. No turn origin is inferred from focus or event order. Minerva retains the real chat origin in its speech log separately from transport authorization.
 - Device sends `speak_done{stream_id,ok:true,last_seq}` only after receiving speaker EOS, emptying its playback queue and physically draining DMA. `last_seq` is the exact EOS sequence. Missing acknowledgement is completion unknown and must never be reported to Minerva as successful playback.
 - Failure terminates playback with `speak_done{stream_id,ok:false,last_seq,error}`; error is `speaker_start`, `speaker_write` or `cancelled`. `last_seq` is the last accepted speaker-frame sequence, or null only when no frame was accepted. Connection, active stream and sequence are checked; stale/duplicate completions never finish another stream.
 - Host-side plugin abort is `error{code:"speak_aborted",message,stream_id,reason:"tts_failed"|"host_cancel"|"plugin_stopping"}`. The current device speaker stream flushes immediately and mutes; it returns failed `speak_done` with error `cancelled` and shows the reason. Capture is unaffected. Other errors keep their existing meanings; only `busy` cancels a new capture.
