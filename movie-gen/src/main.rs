@@ -23,7 +23,7 @@ use minerva_media_client::{
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "movie_gen";
-const SERVER_VERSION: &str = "0.0.2";
+const SERVER_VERSION: &str = "0.0.3";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // JSON-RPC types

@@ -25,7 +25,7 @@ const (
 	protocolVersion = "2024-11-05"
 	serverName      = "orchview"
 	// serverVersion equals the version in manifest.json.
-	serverVersion = "0.1.0"
+	serverVersion = "0.1.1"
 	// maxLine bounds one inbound line; Docket replies for large projects
 	// arrive as single lines.
 	maxLine = 32 << 20

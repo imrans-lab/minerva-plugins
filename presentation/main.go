@@ -43,7 +43,7 @@ import (
 const (
 	protocolVersion = "2024-11-05"
 	serverName      = "presentation"
-	serverVersion   = "0.0.1"
+	serverVersion   = "0.0.5"
 )
 
 type rpcRequest struct {

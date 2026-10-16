@@ -961,6 +961,4 @@ test_live_tools.gd assertions=96
 test_live_tools_panel.gd assertions=17
 
 # Migrated annotation/reload coverage; source bodies retained until host batch C.
-test_cad_edge_number_kind.gd
-test_cad_edge_number_tool.gd
 test_cad_panel_reload_integrity.gd assertions=6

@@ -137,7 +137,7 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 		var host_panel: Object = panel
 		var live: RefCounted = preload("scripts/live_tools.gd").new(host_panel)
 		return await live.call("handle", tool_name, args)
-	if (_Freshness.MEASURING_VERBS.has(tool_name) or tool_name == "minerva_cad_export" or tool_name == "minerva_cad_snapshot_fit") and panel.has_method("verify_dependencies"):
+	if (_Freshness.MEASURING_VERBS.has(tool_name) or tool_name == "minerva_cad_export" or tool_name.begins_with("minerva_cad_snapshot")) and panel.has_method("verify_dependencies"):
 		panel.verify_dependencies()
 	var freshness: Dictionary = _Freshness.read(panel)
 	if tool_name not in ["minerva_cad_build", "minerva_cad_await_eval", "minerva_cad_model"]:

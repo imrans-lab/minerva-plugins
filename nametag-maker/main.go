@@ -28,7 +28,7 @@ import (
 const (
 	protocolVersion = "2024-11-05"
 	serverName      = "nametag-maker"
-	serverVersion   = "0.0.1"
+	serverVersion   = "0.0.2"
 
 	// stdinBufferMax bounds a single inbound JSON line. host.pdf.generate
 	// replies carry a base64 PDF (contract payload cap is 8 MB); allow headroom
