@@ -3,6 +3,7 @@ extends AnnotationHost
 
 const _CadAnchorTypesScript = preload("scripts/CadAnchorTypes.gd")
 const _CadPointAnchorScript = preload("scripts/CadPointAnchor.gd")
+const _CadEdgeAnchorScript = preload("scripts/CadEdgeAnchor.gd")
 const _SchemaScript = preload("res://Scripts/Services/Annotations/AnnotationV2Schema.gd")
 const _SourceKind := preload("kinds/cad_source_annotation_kind.gd")
 const _SourceAnnotations := preload("scripts/source_annotations.gd")
@@ -1009,25 +1010,28 @@ func get_current_selection_anchor(kind: String = "") -> Dictionary:
 
 ## Resolve a CAD edge anchor to its current world-space midpoint.
 ##
-## anchor shape: { "plugin": "cad", "type": "edge", "id": <int> }
+## New anchors carry geometry; legacy id-only anchors retain their lookup.
 ## Returns a Dict with position (Vector3), edge_id (int), stale (bool).
 ## Returns null when the anchor dict is malformed (substrate calls fallback).
 ## Returns { stale: true, ... } when edge id is not in the live registry.
 func _resolve_edge_anchor(anchor: Dictionary) -> Variant:
 	if not anchor.has("id"):
 		return null
+	if anchor.has("geometry"):
+		return _CadEdgeAnchorScript.resolve(anchor, _edge_registry_data)
 	var edge_id: int = int(anchor["id"])
-	for edge_info in _edge_registry_data:
-		if not (edge_info is Dictionary):
+	for value: Variant in _edge_registry_data:
+		if not value is Dictionary:
 			continue
-		if int((edge_info as Dictionary).get("id", -1)) != edge_id:
+		var edge_info: Dictionary = value
+		if int(edge_info.get("id", -1)) != edge_id:
 			continue
-		var start_raw: Variant = (edge_info as Dictionary).get("start", null)
-		var end_raw: Variant = (edge_info as Dictionary).get("end", null)
+		var start_raw: Variant = edge_info.get("start", null)
+		var end_raw: Variant = edge_info.get("end", null)
 		var start_3d := _vec3_from_raw(start_raw)
 		var end_3d := _vec3_from_raw(end_raw)
 		return {
-			"position": start_3d.lerp(end_3d, 0.5),
+			"position": _vec3_from_raw(edge_info.midpoint) if edge_info.has("midpoint") else start_3d.lerp(end_3d, 0.5),
 			"edge_id": edge_id,
 			"stale": false,
 		}

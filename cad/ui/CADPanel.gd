@@ -852,6 +852,8 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 	if not bool(result.get("success", false)):
 		var err_code: String = str(result.get("error_code", "unknown"))
 		var err_msg: String = str(result.get("error_message", ""))
+		var raw_details: Variant = result.get("error_details")
+		var details: Dictionary = raw_details if raw_details is Dictionary else {}
 		# IPC-layer timeout surfaces as success=false with a timeout-ish code.
 		var st: String = "timeout" if err_code.findn("timeout") != -1 else "error"
 		# How long it waited is the point of a give-up: "still pending" and
@@ -860,6 +862,7 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 			"status": st,
 			"error_kind": err_code,
 			"error_message": err_msg,
+			"error_details": details.duplicate(true),
 			"elapsed_ms": elapsed_ms,
 			"request_id": request_id,
 			"ts": Time.get_unix_time_from_system(),
@@ -870,8 +873,13 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 		)
 		var _what: String = ("gave up after %.1f s" % (elapsed_ms / 1000.0)
 			if st == "timeout" else "failed")
+		var diagnostic := ""
+		if details.has("pointer") and details.has("original"):
+			diagnostic = "\nAt %s: %s" % [str(details.pointer), str(details.original)]
+			if details.has("adapted"):
+				diagnostic += " (read as %s)" % str(details.adapted)
 		_show_eval_error("CAD evaluation %s: %s" % [_what,
-			err_msg if err_msg != "" else err_code])
+			(err_msg if err_msg != "" else err_code) + diagnostic])
 		return
 
 	# PluginScenePanelBroker wraps the worker payload in backend_success(),

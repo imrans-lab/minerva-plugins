@@ -30,6 +30,7 @@ extends "res://Scripts/Services/Annotations/AnnotationAuthorTool.gd"
 ## Maximum screen-space distance (px) for an edge midpoint to be considered
 ## "clicked". Clicks farther than this from every edge midpoint are ignored.
 const EDGE_PICK_THRESHOLD_PX: float = 30.0
+const _CadEdgeAnchorScript = preload("../scripts/CadEdgeAnchor.gd")
 
 ## Default screen-space pixel offset from edge midpoint to text-box center
 ## at placement time. Back-projected to world space at the edge's depth so
@@ -83,6 +84,8 @@ func on_activate(host: AnnotationHost) -> void:
 		_compute_default_box_offset(camera, edge_world) if camera != null else Vector3.ZERO
 	)
 	var annotation := _build_annotation(int(anchor.get("id", -1)), box_offset)
+	if annotation.is_empty():
+		return
 	_open_text_dialog(annotation)
 
 
@@ -130,6 +133,8 @@ func on_pointer_down(pos: Vector2, button: int, mods: int) -> bool:
 		_compute_default_box_offset(camera, edge_world) if camera != null else Vector3.ZERO
 	)
 	var annotation := _build_annotation(int(result.get("edge_id", -1)), box_offset)
+	if annotation.is_empty():
+		return false
 	_open_text_dialog(annotation)
 	return true
 
@@ -248,6 +253,14 @@ static func _raw_to_v3(raw: Variant) -> Vector3:
 # ── Annotation builder ─────────────────────────────────────────────────────────
 
 func _build_annotation(edge_id: int, box_offset: Vector3) -> Dictionary:
+	var anchor: Dictionary = {}
+	if _host != null and _host.has_method("get_edge_registry"):
+		var raw_edges: Variant = _host.call("get_edge_registry")
+		if raw_edges is Array:
+			var edges: Array = raw_edges
+			anchor = _CadEdgeAnchorScript.build(edge_id, edges)
+	if anchor.is_empty():
+		return {}
 	var view_ctx := ""
 	if _host != null and _host.has_method("get_view_context"):
 		view_ctx = str(_host.get_view_context())
@@ -257,11 +270,7 @@ func _build_annotation(edge_id: int, box_offset: Vector3) -> Dictionary:
 		"schema_version": _schema_version,
 		"author":         {"kind": "human"},
 		"view_context":   view_ctx,
-		"anchor": {
-			"plugin": "cad",
-			"type":   "edge",
-			"id":     edge_id,
-		},
+		"anchor": anchor,
 		"payload": {
 			"text":       "",
 			"box_offset": [box_offset.x, box_offset.y, box_offset.z],
