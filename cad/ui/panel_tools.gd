@@ -151,6 +151,8 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 				"error": requirement_error, "error_code": "evaluation_requirement"}, freshness)
 		args = args.duplicate(true)
 		args["_evaluated_document"] = preload("scripts/evaluation_state.gd").document(panel)
+		if tool_name == "minerva_cad_export" and args.has("part") and not args.has("selection"):
+			args["selection"] = args.part
 
 	var context_error: String = preload("scripts/model_views.gd").prepare_measurement(args, tool_name)
 	if not context_error.is_empty():

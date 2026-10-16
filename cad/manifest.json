@@ -508,7 +508,7 @@
             "type": "string"
           },
           "job_id": {
-            "description": "Collect an existing export without an editor or source.",
+            "description": "Collect an existing export with editor_name and job_id; source is already pinned by the job.",
             "type": "string"
           },
           "part": {

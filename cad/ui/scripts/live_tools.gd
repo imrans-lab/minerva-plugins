@@ -54,9 +54,15 @@ func _cad_export(args: Dictionary) -> Dictionary:
 			return _err(str(backend_args.error))
 	if args.has("wait_ms"):
 		backend_args["wait_ms"] = args.wait_ms
-	var payload: Dictionary = preload("worker_reply.gd").unwrap(
-		await _panel.call("call_backend", "cad.export", backend_args), "export")
-	return _err(str(payload.error)) if payload.has("error") else _ok(payload)
+	var envelope: Dictionary = await _panel.call("call_backend", "cad.export", backend_args)
+	if not envelope.get("success", false): return envelope
+	var reply: Dictionary = envelope.get("result", {})
+	if reply.has("error"): return {"success": false, "error": reply.error}
+	if not reply.get("ok", false): return _err("cad_export_failed: " + JSON.stringify(reply))
+	var payload: Variant = reply.get("result", reply)
+	if not payload is Dictionary: return _err("cad_export_failed: unexpected payload")
+	var result: Dictionary = payload
+	return _ok(result)
 
 static func export_document_args(args: Dictionary) -> Dictionary:
 	var fmt := str(args.get("format", "")).strip_edges().to_lower()

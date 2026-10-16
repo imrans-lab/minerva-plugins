@@ -34,7 +34,7 @@ func _run() -> void:
 	rig.broker.plugin_manager = manager
 	rig.broker.register_panel(panel, "cad", rig.panel_name,
 		PackedStringArray(["cad.evaluate", "cad.export", "cad.cancel_eval"]), "cad_panel")
-	await _attach_document(rig, "part=cube(10,20,30)\npart\n")
+	await _attach_document(rig, "shaft=cube(10,20,30)\nother=translate([100,0,0],cube(20,20,20))\nwhole=shaft+other\nwhole\n")
 	var ready: Dictionary = await panel.await_evaluation(30000)
 	check("real geometry reaches the CAD panel", not ready.get("timed_out", false)
 		and _status(panel) == "ok", str(ready).left(600))
@@ -81,11 +81,17 @@ func _run() -> void:
 	check("group clear preserves the human annotation", cleared.get("cleared_count") == 1
 		and host.get_annotations().size() == 1, str(cleared))
 	var path := directory.path_join("box.stl")
+	var before: Dictionary = panel.get_evaluation_state().duplicate(true)
 	args = locator.duplicate()
-	args.merge({"format": "stl", "path": path, "wait_ms": 0})
+	args.merge({"part": "shaft", "format": "stl", "path": path, "wait_ms": 0})
 	var exported: Dictionary = await registry.handle_tool_call("minerva_cad_export", args)
 	check("export starts a collectable backend job", exported.get("status") in ["pending", "completed"]
 		and not str(exported.get("job_id", "")).is_empty(), str(exported))
+	var blocked := directory.path_join("blocked.stl")
+	DirAccess.make_dir_recursive_absolute(blocked)
+	args["path"] = blocked
+	var failed_export: Dictionary = await registry.handle_tool_call("minerva_cad_export", args)
+	var failed_id := str(failed_export.get("job_id", failed_export.get("error", {}).get("job_id", "")))
 	panel.set_build_mode("manual")
 	rig.buffer.apply_edit("part=cube(40,20,30)\npart\n")
 	var deadline := Time.get_ticks_msec() + 30000
@@ -93,11 +99,25 @@ func _run() -> void:
 		exported = await registry.handle_tool_call("minerva_cad_export", {
 			"editor_name": rig.panel_name, "job_id": exported.get("job_id", ""), "wait_ms": 1000})
 		if exported.get("status") != "pending": break
-	check("collection succeeds while the panel is stale and writes a real STL", exported.get("status") == "completed"
+	var library := preload("../../ui/scripts/reference_meshes.gd").new()
+	var loaded = library.load_file(path, "mm", "z")
+	check("part-only export retains its source provenance while collecting on a stale panel", exported.get("status") == "completed"
 		and panel.evaluation_freshness().get("stale", false) and FileAccess.file_exists(path)
-		and FileAccess.get_file_as_bytes(path).size() > 84, str(exported))
+		and loaded.is_ok() and is_equal_approx(loaded.local_aabb.size.x, 10.0)
+		and exported.get("source_digest") == str(before.source).sha256_text()
+		and exported.get("source_version") == before.source_version, str(exported))
+	while Time.get_ticks_msec() < deadline:
+		failed_export = await registry.handle_tool_call("minerva_cad_export", {
+			"editor_name": rig.panel_name, "job_id": failed_id, "wait_ms": 1000})
+		if failed_export.get("status") != "pending": break
+	var backend_error: Dictionary = await connection.call_tool("cad.export", {"job_id": failed_id})
+	check("failed collection preserves the backend error object", failed_export.get("error") == backend_error.get("error")
+		and failed_export.get("error", {}).get("kind") == "io"
+		and failed_export.get("error", {}).get("status") == "failed"
+		and failed_export.get("error", {}).get("job_id") == failed_id, str(failed_export))
 	var missing: Dictionary = await registry.handle_tool_call("minerva_cad_export", {"job_id": exported.get("job_id", "")})
 	check("job collection requires its editor locator", not missing.get("success", true), str(missing))
 	_teardown(rig)
 	connection.disconnect_from_server()
 	DirAccess.remove_absolute(path)
+	DirAccess.remove_absolute(blocked)
