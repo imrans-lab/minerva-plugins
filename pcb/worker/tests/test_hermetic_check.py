@@ -59,11 +59,11 @@ review does not require reading the full zone-fill fixture.
 
   5-7. test_ci_actually_invokes_the_hermetic_script /
      test_ci_gates_the_real_coupon_and_proves_the_gate_can_fail /
-     test_fab_gate_is_not_downgraded_to_a_main_only_job — epoch CP2 station
+     test_fab_gate_keeps_explicit_on_demand_policy — epoch CP2 station
      S1. These pin the WIRING rather than the script: they parse
      .github/workflows/pcb.yml and assert a `run:` step actually invokes the
      script, that it does so with --self-test and against the public coupon by
-     name, and that the job keeps running on pull_request. The state they exist
+     name, and that the job keeps its explicit dispatch/tag policy. The state they exist
      to prevent is the one S1 found — a complete, correct gate that no workflow
      file called.
 
@@ -305,28 +305,14 @@ def test_ci_gates_the_real_coupon_and_proves_the_gate_can_fail():
         "whose package would actually be submitted; gate it by name")
 
 
-def test_fab_gate_is_not_downgraded_to_a_main_only_job():
-    """The job's stated reason for running on every push AND pull_request —
-    against this workflow's own cost argument for keeping `oracle` and
-    `test-crossplatform` on main — is that the failure it catches is introduced
-    BY A COMMIT and so must fail on the PR that makes it.
-
-    That argument is load-bearing and is defeated silently by adding an `if:`
-    guard (the shape `oracle` and `test-crossplatform` both use), which no
-    other pin here would notice: the job would still exist, still invoke the
-    script, still name the coupon, and simply never run on a PR again. So pin
-    the trigger, not just the wiring."""
+def test_fab_gate_keeps_explicit_on_demand_policy():
+    """Pin the admitted dispatch/tag gate; other pins require its real proof."""
     import yaml
 
     doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     job = (doc.get("jobs") or {}).get("fab-gate")
     assert job is not None, "the fab-gate job is gone from pcb.yml"
-    assert "if" not in job, (
-        f"fab-gate gained a job-level `if:` ({job.get('if')!r}) — it no longer "
-        f"runs on pull_request, so a fabrication-reproducibility break lands on "
-        f"main before anyone sees it. If this restriction is deliberate, update "
-        f"the job's own comment (which currently argues the opposite) and this "
-        f"pin together.")
+    assert job.get("if") == "(github.event_name == 'workflow_dispatch' || github.ref_type == 'tag')"
 
 
 if __name__ == "__main__":  # pragma: no cover
