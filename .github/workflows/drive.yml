@@ -195,7 +195,7 @@ jobs:
       # council.yml pin; if you bump it, bump all four and re-check the files
       # listed in each plugin's tests/gd/REQUIRED_HOST_FILES still exist at the
       # new SHA.
-      MINERVA_SHA: "7fd6602167da9ddf2d6bda5d04adc9d31b82ceae"
+      MINERVA_SHA: "79e847b23f3c9fff5be91ce811518b5149d17084"
     steps:
       - name: Checkout minerva-plugins
         uses: actions/checkout@v4

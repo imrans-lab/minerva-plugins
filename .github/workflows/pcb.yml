@@ -520,7 +520,7 @@ jobs:
       # both if you bump it.
       #
       # Head of turnrocklabs/Minerva `development` on 2026-07-25.
-      MINERVA_SHA: "7fd6602167da9ddf2d6bda5d04adc9d31b82ceae"
+      MINERVA_SHA: "79e847b23f3c9fff5be91ce811518b5149d17084"
     steps:
       - name: Checkout minerva-plugins
         uses: actions/checkout@v4

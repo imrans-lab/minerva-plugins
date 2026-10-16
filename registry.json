@@ -144,15 +144,15 @@
     {
       "id": "pcb",
       "name": "PCB Editor",
-      "version": "0.8.3",
-      "manifest_version": "0.8.3",
-      "release_tag": "pcb-v0.8.3",
-      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/pcb-v0.8.3/pcb/manifest.json",
+      "version": "0.8.4",
+      "manifest_version": "0.8.4",
+      "release_tag": "pcb-v0.8.4",
+      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/pcb-v0.8.4/pcb/manifest.json",
       "downloads": {
-        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/pcb-v0.8.3/pcb-0.8.3-linux-x86_64.tar.gz",
-        "linux-arm64": "https://github.com/imrans-lab/minerva-plugins/releases/download/pcb-v0.8.3/pcb-0.8.3-linux-arm64.tar.gz",
-        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/pcb-v0.8.3/pcb-0.8.3-macos-universal.tar.gz",
-        "windows-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/pcb-v0.8.3/pcb-0.8.3-windows-x86_64.tar.gz"
+        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/pcb-v0.8.4/pcb-0.8.4-linux-x86_64.tar.gz",
+        "linux-arm64": "https://github.com/imrans-lab/minerva-plugins/releases/download/pcb-v0.8.4/pcb-0.8.4-linux-arm64.tar.gz",
+        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/pcb-v0.8.4/pcb-0.8.4-macos-universal.tar.gz",
+        "windows-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/pcb-v0.8.4/pcb-0.8.4-windows-x86_64.tar.gz"
       },
       "description": "Design printed circuit boards in Minerva. Place and route components, manage nets and copper layers, and check your design. When the board is ready, export a manufacturing order package in JLCPCB's format or a 3D model of the assembled board. Your AI agent can read and edit the board with you. Adding official KiCad parts and fetching vendor 3D models needs an internet connection; nothing else to install.",
       "price": {
