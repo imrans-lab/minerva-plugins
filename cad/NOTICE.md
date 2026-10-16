@@ -181,13 +181,13 @@ matplotlib dependency.
 
 stack-data dependency.
 
-## ezdxf 1.4.4
+## ezdxf 1.4.5
 
 - Licence: MIT
 - Copyright (c) 2020 Manfred Moitzi
 - Source: https://github.com/mozman/ezdxf
 - Arrives via: `ezdxf` wheel
-- Licence text: `cad/licenses/runtime/ezdxf-1.4.4.LICENSE.txt` (sha256 db97ca426fc0d2b8124145de0f36181db73e6e713ce642d42fed2efc442edf19)
+- Licence text: `cad/licenses/runtime/ezdxf-1.4.5.LICENSE.txt` (sha256 db97ca426fc0d2b8124145de0f36181db73e6e713ce642d42fed2efc442edf19)
 
 DXF reader/writer build123d uses for 2D import and export.
 
@@ -222,13 +222,13 @@ Transitive through build123d. Nothing in the cad worker imports it; it ships bec
 
 IPython dependency.
 
-## jedi 0.20.0
+## jedi 0.20.1
 
 - Licence: MIT
 - Copyright (c) <2013> <David Halter and others, see AUTHORS.txt>
 - Source: https://github.com/davidhalter/jedi
 - Arrives via: `jedi` wheel
-- Licence text: `cad/licenses/runtime/jedi-0.20.0.LICENSE.txt` (sha256 78e60cd0b8f28694f30195482c33d76908d846b0d15278deb7332aa22ba8e412)
+- Licence text: `cad/licenses/runtime/jedi-0.20.1.LICENSE.txt` (sha256 78e60cd0b8f28694f30195482c33d76908d846b0d15278deb7332aa22ba8e412)
 
 IPython completion dependency.
 
@@ -282,13 +282,13 @@ IPython/matplotlib glue.
 
 sympy dependency.
 
-## numpy 2.5.3
+## numpy 2.5.4
 
 - Licence: BSD-3-Clause
 - Copyright (c) 2005-2025, NumPy Developers.
 - Source: https://github.com/numpy/numpy
 - Arrives via: `numpy` wheel
-- Licence text: `cad/licenses/runtime/numpy-2.5.3.LICENSE.txt` (sha256 4860083caa0de2ac3292ca98bd074bd8f45d8b32624e37b1e70a240bff61e488)
+- Licence text: `cad/licenses/runtime/numpy-2.5.4.LICENSE.txt` (sha256 4860083caa0de2ac3292ca98bd074bd8f45d8b32624e37b1e70a240bff61e488)
 
 Array backbone for the worker's geometry code. The text inventoried here is not BSD-3-Clause alone: after NumPy's own licence it carries the statements for the shared libraries the wheel ships in numpy.libs — OpenBLAS and the LAPACK bundled inside it (both BSD-3-Clause), and libgfortran and libquadmath (GPL-3.0-or-later under the GCC Runtime Library Exception, whose full text is included). The wheel ALSO ships per-component texts under its dist-info for source it vendors (Mersenne Twister, PCG64, pocketfft, LAPACK-lite, highway, dragon4, libdivide, x86-simd-sort); those are compiled into _multiarray and friends rather than shipped as separate files.
 

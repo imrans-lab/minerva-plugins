@@ -376,11 +376,11 @@ RUNTIME_COMPONENTS: tuple = (
     RuntimeComponent(
         distribution='ezdxf',
         component='ezdxf',
-        version='1.4.4',
+        version='1.4.5',
         license='MIT',
         copyright='Copyright (c) 2020 Manfred Moitzi',
         source_url='https://github.com/mozman/ezdxf',
-        license_files=('ezdxf-1.4.4.LICENSE.txt',),
+        license_files=('ezdxf-1.4.5.LICENSE.txt',),
         note='DXF reader/writer build123d uses for 2D import and export.',
     ),
     RuntimeComponent(
@@ -422,12 +422,12 @@ RUNTIME_COMPONENTS: tuple = (
     RuntimeComponent(
         distribution='jedi',
         component='jedi',
-        version='0.20.0',
+        version='0.20.1',
         license='MIT',
         copyright='Copyright (c) <2013> <David Halter and others, see '
                   'AUTHORS.txt>',
         source_url='https://github.com/davidhalter/jedi',
-        license_files=('jedi-0.20.0.LICENSE.txt',),
+        license_files=('jedi-0.20.1.LICENSE.txt',),
         note='IPython completion dependency.',
     ),
     RuntimeComponent(
@@ -490,11 +490,11 @@ RUNTIME_COMPONENTS: tuple = (
     RuntimeComponent(
         distribution='numpy',
         component='numpy',
-        version='2.5.3',
+        version='2.5.4',
         license='BSD-3-Clause',
         copyright='Copyright (c) 2005-2025, NumPy Developers.',
         source_url='https://github.com/numpy/numpy',
-        license_files=('numpy-2.5.3.LICENSE.txt',),
+        license_files=('numpy-2.5.4.LICENSE.txt',),
         note="Array backbone for the worker's geometry code. The text "
              'inventoried here is not BSD-3-Clause alone: after NumPy\'s own '
              'licence it carries the statements for the shared libraries the '
