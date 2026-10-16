@@ -1,5 +1,6 @@
 extends RefCounted
 ## Live solid inspection and edge annotations belong to the panel that owns them.
+const EdgeAnchor := preload("CadEdgeAnchor.gd")
 const TOOL_NAMES: Array[String] = [
 	"minerva_cad_get_mesh_info", "minerva_cad_list_edges", "minerva_cad_get_edge",
 	"minerva_cad_get_selected_edge", "minerva_cad_annotate_edges",
@@ -267,6 +268,16 @@ func _cad_annotate_edges(args: Dictionary) -> Dictionary:
 
 	var label_format_override: Variant = args.get("label_format", null)
 
+	# Validate geometry before writing any labels; an evaluation-local id cannot
+	# identify a newly authored label across topology changes.
+	var anchors: Dictionary = {}
+	for edge_id: int in target_ids:
+		if edge_lookup.has(edge_id):
+			var anchor := EdgeAnchor.build(edge_id, all_edges)
+			if anchor.is_empty():
+				return _err("cad_annotate_edges: edge %d has no usable registry geometry. Re-evaluate the model before labelling it." % edge_id)
+			anchors[edge_id] = anchor
+
 	# ── Create annotations ────────────────────────────────────────────────────
 	var created_ids: Array = []
 	var skipped_unknown: Array = []
@@ -299,11 +310,7 @@ func _cad_annotate_edges(args: Dictionary) -> Dictionary:
 			"schema_version": 2,
 			"author": {"kind": "ai"},
 			"view_context": view_context,
-			"anchor": {
-				"plugin": "cad",
-				"type": "edge",
-				"id": edge_id,
-			},
+			"anchor": anchors[edge_id],
 			"payload": {
 				"text": label,
 				"group_id": group_id,
@@ -412,13 +419,24 @@ func _cad_list_user_labels(args: Dictionary) -> Dictionary:
 		var anchor_d: Dictionary = anchor as Dictionary
 		if not anchor_d.has("id"):
 			continue
-		var edge_id: int = int(anchor_d["id"])
+		var resolved_value: Variant = host.call("_resolve_edge_anchor", anchor_d)
+		if not resolved_value is Dictionary:
+			continue
+		var resolved: Dictionary = resolved_value
+		var stale: bool = resolved.get("stale", true) == true
+		var edge_id: int = -1 if stale else int(resolved.get("edge_id", -1))
+		var midpoint_value: Variant = resolved.get("position", Vector3.ZERO)
+		var midpoint: Vector3 = Vector3.ZERO
+		if midpoint_value is Vector3:
+			midpoint = midpoint_value
 
 		var payload: Dictionary = ann_dict.get("kind_payload", ann_dict.get("payload", {})) as Dictionary
 		var text: String = str(payload.get("text", ""))
 
 		labels.append({
 			"edge_id": edge_id,
+			"stale": stale,
+			"midpoint": [midpoint.x, midpoint.y, midpoint.z],
 			"text": text,
 			"annotation_id": str(ann_dict.get("id", "")),
 			"view_context": str(ann_dict.get("view_context", "")),

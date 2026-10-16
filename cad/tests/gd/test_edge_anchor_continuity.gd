@@ -3,6 +3,15 @@ extends SceneTree
 const Host := preload("res://../../minerva-plugins/cad/ui/CadAnnotationHost.gd")
 const Tool := preload("res://../../minerva-plugins/cad/ui/tools/cad_edge_number_tool.gd")
 const Records := preload("res://../../minerva-plugins/cad/ui/scripts/object_records.gd")
+const LiveTools := preload("res://../../minerva-plugins/cad/ui/scripts/live_tools.gd")
+# Routing adapter only: the real tools and annotation host own all behavior.
+class Panel extends RefCounted:
+	var host: AnnotationHost
+	func _init(value: AnnotationHost) -> void:
+		host = value
+	func get_annotation_host() -> AnnotationHost:
+		return host
+
 var failed: int = 0
 
 func _initialize() -> void:
@@ -31,7 +40,22 @@ func _run() -> void:
 	host.set_edge_registry(data.before)
 	var survivor: Dictionary = tool._build_annotation(int(data.survivor.id), Vector3.ZERO)
 	var consumed: Dictionary = tool._build_annotation(int(data.consumed.id), Vector3.ZERO)
+	assert(not host.add_annotation(survivor).is_empty())
+	assert(not host.add_annotation(consumed).is_empty())
+	var tools := LiveTools.new(Panel.new(host))
+	var authored: Dictionary = tools.handle("minerva_cad_annotate_edges", {"edge_ids": [int(data.survivor.id)]})
+	var annotations: Array = host.get_annotations()
+	var agent_annotation: Dictionary = annotations.back()
 	host.set_edge_registry(data.after)
+	var listing: Dictionary = tools.handle("minerva_cad_list_user_labels", {})
+	var labels: Array = listing.get("labels", [])
+	var agent_resolved: Dictionary = host._resolve_edge_anchor(agent_annotation.anchor)
+	check("agent tools author geometry and report the current survivor id or stale saved midpoint",
+		bool(authored.get("success", false)) and agent_annotation.anchor.has("geometry")
+		and not agent_resolved.stale and agent_resolved.edge_id == int(data.survivor_after.id)
+		and labels.size() == 2 and labels[0].edge_id == int(data.survivor_after.id) and not labels[0].stale
+		and labels[1].edge_id == -1 and labels[1].stale
+		and vec(labels[1].midpoint).distance_to(vec(data.consumed.midpoint)) < 0.0001)
 	var same: Dictionary = host._resolve_edge_anchor(survivor.anchor)
 	var stale: Dictionary = host._resolve_edge_anchor(consumed.anchor)
 	var midpoint := vec(data.survivor.midpoint)
@@ -68,7 +92,7 @@ func _run() -> void:
 	check("surface arrow retains its stamped point on the same model",
 		anchor.has("geometry_stamp") and not attached.stale and attached.position.distance_to(point) < 0.0001)
 	tool._host = null
-	print("=== Results: %d passed, %d failed ===" % [2 - failed, failed])
+	print("=== Results: %d passed, %d failed ===" % [3 - failed, failed])
 	quit(1 if failed else 0)
 
 func vec(raw: Array) -> Vector3:

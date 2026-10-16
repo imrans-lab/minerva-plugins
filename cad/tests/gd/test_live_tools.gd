@@ -419,11 +419,11 @@ func test_selected_edge_missing_host(tools) -> void:
 ## Edges 1-5 as straight edges with known start/end so midpoint is computable.
 func _annotation_edges() -> Array:
 	return [
-		{"id": 1, "kind": "straight", "length": 10.0, "start": [0.0, 0.0, 0.0], "end": [2.0, 0.0, 0.0], "tags": []},
-		{"id": 2, "kind": "straight", "length": 10.0, "start": [0.0, 1.0, 0.0], "end": [2.0, 1.0, 0.0], "tags": []},
-		{"id": 3, "kind": "straight", "length": 10.0, "start": [0.0, 2.0, 0.0], "end": [2.0, 2.0, 0.0], "tags": []},
-		{"id": 4, "kind": "straight", "length": 10.0, "start": [0.0, 3.0, 0.0], "end": [2.0, 3.0, 0.0], "tags": []},
-		{"id": 5, "kind": "straight", "length": 10.0, "start": [0.0, 4.0, 0.0], "end": [2.0, 4.0, 0.0], "tags": []},
+		{"id": 1, "kind": "straight", "length": 10.0, "start": [0.0, 0.0, 0.0], "end": [2.0, 0.0, 0.0], "midpoint": [1.0, 0.0, 0.0], "tags": []},
+		{"id": 2, "kind": "straight", "length": 10.0, "start": [0.0, 1.0, 0.0], "end": [2.0, 1.0, 0.0], "midpoint": [1.0, 1.0, 0.0], "tags": []},
+		{"id": 3, "kind": "straight", "length": 10.0, "start": [0.0, 2.0, 0.0], "end": [2.0, 2.0, 0.0], "midpoint": [1.0, 2.0, 0.0], "tags": []},
+		{"id": 4, "kind": "straight", "length": 10.0, "start": [0.0, 3.0, 0.0], "end": [2.0, 3.0, 0.0], "midpoint": [1.0, 3.0, 0.0], "tags": []},
+		{"id": 5, "kind": "straight", "length": 10.0, "start": [0.0, 4.0, 0.0], "end": [2.0, 4.0, 0.0], "midpoint": [1.0, 4.0, 0.0], "tags": []},
 	]
 
 
@@ -512,9 +512,9 @@ func test_annotate_edges_tags_any_filter(tools) -> void:
 	var h := _make_host("MyCAD")
 	# Edges with explicit tags for filtering.
 	h.set_edge_registry([
-		{"id": 1, "kind": "straight", "start": [0.0, 0.0, 0.0], "end": [1.0, 0.0, 0.0], "tags": ["outer"]},
-		{"id": 2, "kind": "straight", "start": [0.0, 1.0, 0.0], "end": [1.0, 1.0, 0.0], "tags": ["inner"]},
-		{"id": 3, "kind": "straight", "start": [0.0, 2.0, 0.0], "end": [1.0, 2.0, 0.0], "tags": ["outer", "feature"]},
+		{"id": 1, "kind": "straight", "start": [0.0, 0.0, 0.0], "end": [1.0, 0.0, 0.0], "midpoint": [0.5, 0.0, 0.0], "length": 1.0, "tags": ["outer"]},
+		{"id": 2, "kind": "straight", "start": [0.0, 1.0, 0.0], "end": [1.0, 1.0, 0.0], "midpoint": [0.5, 1.0, 0.0], "length": 1.0, "tags": ["inner"]},
+		{"id": 3, "kind": "straight", "start": [0.0, 2.0, 0.0], "end": [1.0, 2.0, 0.0], "midpoint": [0.5, 2.0, 0.0], "length": 1.0, "tags": ["outer", "feature"]},
 	])
 	var result: Dictionary = tools.handle(
 		"minerva_cad_annotate_edges",
@@ -571,7 +571,7 @@ func test_annotate_edges_prefers_worker_midpoint(tools) -> void:
 		{
 			"id": 1, "kind": "straight",
 			"start": [0.0, 0.0, 0.0], "end": [10.0, 0.0, 0.0],
-			"midpoint": [5.0, 5.0, 0.0],
+			"midpoint": [5.0, 5.0, 0.0], "length": 10.0,
 			"tags": [],
 		},
 	])
@@ -591,29 +591,18 @@ func test_annotate_edges_prefers_worker_midpoint(tools) -> void:
 	AnnotationHostRegistry._reset_for_test()
 
 
-## Missing midpoint data should not matter because the annotation stores a live
-## edge id, not a baked point.
+## Incomplete registry geometry must not create an id-only label that can drift.
 func test_annotate_edges_chord_fallback(tools) -> void:
 	var h := _make_host("MyCAD")
-	h.set_edge_registry([
-		{
-			"id": 1, "kind": "straight",
-			"start": [0.0, 0.0, 0.0], "end": [10.0, 0.0, 0.0],
-			# NO midpoint field — should fall back to chord.
-			"tags": [],
-		},
-	])
+	h.set_edge_registry([{
+		"id": 1, "kind": "straight", "length": 10.0,
+		"start": [0.0, 0.0, 0.0], "end": [10.0, 0.0, 0.0], "tags": [],
+	}])
 	var result: Dictionary = tools.handle(
-		"minerva_cad_annotate_edges",
-		{"editor_name": "MyCAD", "edge_ids": [1]}
-	)
-	check("success=true", bool(result.get("success", false)) == true)
-	var stored: Array = h.get_annotations()
-	if stored.size() == 1:
-		var ann: Dictionary = stored[0] as Dictionary
-		var anchor: Dictionary = ann.get("anchor", {}) as Dictionary
-		check("anchor survives without midpoint", int(anchor.get("id", -1)) == 1)
-		check("no chord fallback primitive is stored", not ann.has("primitives"))
+		"minerva_cad_annotate_edges", {"editor_name": "MyCAD", "edge_ids": [1]})
+	check("missing geometry is refused", not bool(result.get("success", false)))
+	check("no drifting annotation stored", h.get_annotations().is_empty())
+	check("recovery says re-evaluate", str(result.get("error", "")).contains("Re-evaluate"))
 	AnnotationHostRegistry._reset_for_test()
 
 

@@ -7,7 +7,7 @@ from typing import Any
 
 # Tests run from the host project; resolve the worker beside this fixture.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "worker"))
-from mcad_worker.methods import handle_request  # noqa: E402 -- worker path above
+from mcad_worker.methods import handle_request
 
 
 def evaluate(source: str) -> dict[str, Any]:
