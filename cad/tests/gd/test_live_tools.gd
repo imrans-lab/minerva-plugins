@@ -35,8 +35,6 @@ class ToolDriver extends RefCounted:
 	func handle(tool_name: String, args: Dictionary) -> Dictionary:
 		var editor_name := str(args.get("editor_name", ""))
 		var host := AnnotationHostRegistry.get_host(editor_name)
-		if host == null:
-			return {"success": false, "error": "No CAD test panel: " + editor_name}
 		return load(LIVE_TOOLS_PATH).new(TestPanel.new(host)).handle(tool_name, args)
 
 var _pass_count: int = 0

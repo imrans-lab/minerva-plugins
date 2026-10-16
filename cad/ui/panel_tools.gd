@@ -141,7 +141,7 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 	if tool_name == "minerva_cad_export" and not str(args.get("job_id", "")).is_empty():
 		var live: RefCounted = preload("scripts/live_tools.gd").new(panel)
 		return await live.call("handle", tool_name, args)
-	if (_Freshness.MEASURING_VERBS.has(tool_name) or tool_name.begins_with("minerva_cad_snapshot")) and panel.has_method("verify_dependencies"):
+	if (_Freshness.MEASURING_VERBS.has(tool_name) or tool_name == "minerva_cad_export" or tool_name.begins_with("minerva_cad_snapshot")) and panel.has_method("verify_dependencies"):
 		panel.verify_dependencies()
 	var freshness: Dictionary = _Freshness.read(panel)
 	if tool_name not in ["minerva_cad_build", "minerva_cad_await_eval", "minerva_cad_model"]:
@@ -151,8 +151,6 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 				"error": requirement_error, "error_code": "evaluation_requirement"}, freshness)
 		args = args.duplicate(true)
 		args["_evaluated_document"] = preload("scripts/evaluation_state.gd").document(panel)
-		if tool_name == "minerva_cad_export" and args.has("part") and not args.has("selection"):
-			args["selection"] = args.part
 
 	var context_error: String = preload("scripts/model_views.gd").prepare_measurement(args, tool_name)
 	if not context_error.is_empty():
@@ -166,7 +164,8 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 	# an against= key on any other verb is ignored by its body and must not
 	# lift the gate.
 	var pair_call: bool = PAIR_VERBS.has(tool_name) and _ReferenceVerbs.is_pair_call(args)
-	if not pair_call and not _Freshness.accepts_stale(args) and _Freshness.blocks(tool_name, freshness):
+	var stale_export: bool = tool_name == "minerva_cad_export" and freshness.get("known", false) and freshness.get("stale", false)
+	if not pair_call and not _Freshness.accepts_stale(args) and (_Freshness.blocks(tool_name, freshness) or stale_export):
 		var refused: Dictionary = _Freshness.refusal(freshness)
 		if tool_name == "minerva_cad_export":
 			refused["success"] = false

@@ -43,7 +43,6 @@ extends RefCounted
 ## front of its pin. minerva_cad_await_eval is deliberately not among them: it
 ## is the way out of a stale panel.
 const MEASURING_VERBS: Array = [
-	"minerva_cad_export",
 	"minerva_cad_gauge",
 	"minerva_cad_material",
 	"minerva_cad_check_motion",

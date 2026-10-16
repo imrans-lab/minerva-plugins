@@ -27,35 +27,10 @@
       "executor": "panel",
       "description": "Return geometry summary for a live CAD editor: vertex count, face count, axis-aligned bounding box, and whether any geometry exists. Bounding box coordinates are in millimetres (CAD always uses mm). has_geometry is false when the panel has not yet evaluated any DSL source. Use minerva_doc_read (with the editor's file path) to check what DSL is loaded.",
       "input_schema": {
-        "allOf": [
-          {
-            "anyOf": [
-              {
-                "required": [
-                  "editor_name"
-                ]
-              },
-              {
-                "required": [
-                  "document_id"
-                ]
-              },
-              {
-                "required": [
-                  "view_id"
-                ]
-              }
-            ]
-          }
-        ],
         "properties": {
           "accept_last_completed": {
             "description": "Allow the last completed model while edits are pending; replies retain stale provenance.",
             "type": "boolean"
-          },
-          "document_id": {
-            "description": "Live document handle from minerva_list_editors. Selects this plugin's unique view.",
-            "type": "string"
           },
           "editor_name": {
             "description": "Editor tab title (as returned by minerva_list_editors). Must match a live CAD panel.",
@@ -68,10 +43,6 @@
           "require_source_version": {
             "description": "Require this completed buffer revision.",
             "type": "integer"
-          },
-          "view_id": {
-            "description": "Live view handle from minerva_list_editors; stable through tab rename.",
-            "type": "string"
           }
         },
         "required": [
@@ -85,35 +56,10 @@
       "executor": "panel",
       "description": "Return the full edge registry from a live CAD editor as an array of edge dicts. Each dict has at minimum: id (int), kind (string: 'straight' or 'circle'). Straight edges include length (mm); circle edges include radius (mm). The exact dict shape mirrors what the CAD worker returns \u2014 no transformation. Returns an empty array when no geometry has been evaluated yet.",
       "input_schema": {
-        "allOf": [
-          {
-            "anyOf": [
-              {
-                "required": [
-                  "editor_name"
-                ]
-              },
-              {
-                "required": [
-                  "document_id"
-                ]
-              },
-              {
-                "required": [
-                  "view_id"
-                ]
-              }
-            ]
-          }
-        ],
         "properties": {
           "accept_last_completed": {
             "description": "Allow the last completed model while edits are pending; replies retain stale provenance.",
             "type": "boolean"
-          },
-          "document_id": {
-            "description": "Live document handle from minerva_list_editors. Selects this plugin's unique view.",
-            "type": "string"
           },
           "editor_name": {
             "description": "Editor tab title (as returned by minerva_list_editors).",
@@ -126,10 +72,6 @@
           "require_source_version": {
             "description": "Require this completed buffer revision.",
             "type": "integer"
-          },
-          "view_id": {
-            "description": "Live view handle from minerva_list_editors; stable through tab rename.",
-            "type": "string"
           }
         },
         "required": [
@@ -143,38 +85,13 @@
       "executor": "panel",
       "description": "Return a single edge dict from a live CAD editor by integer id. Returns {ok: true, edge: null} when the id is not found (not an error). Use cad_list_edges to enumerate available ids.",
       "input_schema": {
-        "allOf": [
-          {
-            "anyOf": [
-              {
-                "required": [
-                  "editor_name"
-                ]
-              },
-              {
-                "required": [
-                  "document_id"
-                ]
-              },
-              {
-                "required": [
-                  "view_id"
-                ]
-              }
-            ]
-          }
-        ],
         "properties": {
           "accept_last_completed": {
             "description": "Allow the last completed model while edits are pending; replies retain stale provenance.",
             "type": "boolean"
           },
-          "document_id": {
-            "description": "Live document handle from minerva_list_editors. Selects this plugin's unique view.",
-            "type": "string"
-          },
           "edge_id": {
-            "description": "Numeric edge id as reported by cad_list_edges_live.",
+            "description": "Numeric edge id as reported by cad_list_edges.",
             "type": "integer"
           },
           "editor_name": {
@@ -188,10 +105,6 @@
           "require_source_version": {
             "description": "Require this completed buffer revision.",
             "type": "integer"
-          },
-          "view_id": {
-            "description": "Live view handle from minerva_list_editors; stable through tab rename.",
-            "type": "string"
           }
         },
         "required": [
@@ -206,35 +119,10 @@
       "executor": "panel",
       "description": "Return the currently selected edge id and its full dict from a live CAD editor. selected_edge_id is -1 and edge is null when no edge is selected. Edge selection is driven by the user clicking in the 3-D viewport or via the Prev/Next buttons in the sidebar.",
       "input_schema": {
-        "allOf": [
-          {
-            "anyOf": [
-              {
-                "required": [
-                  "editor_name"
-                ]
-              },
-              {
-                "required": [
-                  "document_id"
-                ]
-              },
-              {
-                "required": [
-                  "view_id"
-                ]
-              }
-            ]
-          }
-        ],
         "properties": {
           "accept_last_completed": {
             "description": "Allow the last completed model while edits are pending; replies retain stale provenance.",
             "type": "boolean"
-          },
-          "document_id": {
-            "description": "Live document handle from minerva_list_editors. Selects this plugin's unique view.",
-            "type": "string"
           },
           "editor_name": {
             "description": "Editor tab title (as returned by minerva_list_editors).",
@@ -247,10 +135,6 @@
           "require_source_version": {
             "description": "Require this completed buffer revision.",
             "type": "integer"
-          },
-          "view_id": {
-            "description": "Live view handle from minerva_list_editors; stable through tab rename.",
-            "type": "string"
           }
         },
         "required": [
@@ -264,35 +148,10 @@
       "executor": "panel",
       "description": "Create one cad_edge_number annotation per resolved edge on a live CAD panel. Exactly one selector must be supplied: either edge_ids (explicit list of integer edge ids) or tags_any (list of tag strings \u2014 edges whose tags intersect this set are annotated). An optional group_id groups annotations for later bulk clearing; one is minted if omitted. An optional label_format overrides the display text (default: str(edge_id)). Returns {group_id, created_edge_ids, skipped_unknown_ids}. Unknown edge ids are skipped with a warning rather than causing an error.",
       "input_schema": {
-        "allOf": [
-          {
-            "anyOf": [
-              {
-                "required": [
-                  "editor_name"
-                ]
-              },
-              {
-                "required": [
-                  "document_id"
-                ]
-              },
-              {
-                "required": [
-                  "view_id"
-                ]
-              }
-            ]
-          }
-        ],
         "properties": {
           "accept_last_completed": {
             "description": "Allow the last completed model while edits are pending; replies retain stale provenance.",
             "type": "boolean"
-          },
-          "document_id": {
-            "description": "Live document handle from minerva_list_editors. Selects this plugin's unique view.",
-            "type": "string"
           },
           "edge_ids": {
             "description": "Explicit list of edge ids to annotate. Mutually exclusive with tags_any.",
@@ -327,10 +186,6 @@
               "type": "string"
             },
             "type": "array"
-          },
-          "view_id": {
-            "description": "Live view handle from minerva_list_editors; stable through tab rename.",
-            "type": "string"
           }
         },
         "required": [
@@ -344,27 +199,6 @@
       "executor": "panel",
       "description": "Remove cad_edge_number annotations from a live CAD panel. Exactly one predicate must be supplied: group_id removes only annotations with that group label; all=true removes all cad_edge_number annotations regardless of group. Returns {cleared_count}. Returns cleared_count=0 (not an error) when no matching annotations exist.",
       "input_schema": {
-        "allOf": [
-          {
-            "anyOf": [
-              {
-                "required": [
-                  "editor_name"
-                ]
-              },
-              {
-                "required": [
-                  "document_id"
-                ]
-              },
-              {
-                "required": [
-                  "view_id"
-                ]
-              }
-            ]
-          }
-        ],
         "properties": {
           "accept_last_completed": {
             "description": "Allow the last completed model while edits are pending; replies retain stale provenance.",
@@ -373,10 +207,6 @@
           "all": {
             "description": "If true, remove ALL cad_edge_number annotations on this host. Mutually exclusive with group_id.",
             "type": "boolean"
-          },
-          "document_id": {
-            "description": "Live document handle from minerva_list_editors. Selects this plugin's unique view.",
-            "type": "string"
           },
           "editor_name": {
             "description": "Editor tab title (as returned by minerva_list_editors).",
@@ -393,10 +223,6 @@
           "require_source_version": {
             "description": "Require this completed buffer revision.",
             "type": "integer"
-          },
-          "view_id": {
-            "description": "Live view handle from minerva_list_editors; stable through tab rename.",
-            "type": "string"
           }
         },
         "required": [
@@ -410,35 +236,10 @@
       "executor": "panel",
       "description": "Return the list of cad_edge_number annotations the USER has authored on a live CAD panel. Use this whenever the user references 'the edges I labeled' (or 'pinned', 'tagged', 'marked', 'selected') and expects you to operate on a SET of edges they identified \u2014 minerva_cad_get_selected_edge only returns the single most-recent click, not the set the user has been building up. Returns {labels: [{edge_id, text, annotation_id, view_context}], count}. Each label corresponds to one cad_edge_number annotation with author=='human'; agent-minted annotations (via minerva_cad_annotate_edges) are excluded. text is whatever the user typed in the annotation dialog (may be empty). When count==0 the user has not labelled anything \u2014 fall back to minerva_cad_get_selected_edge or ask which edges they mean.",
       "input_schema": {
-        "allOf": [
-          {
-            "anyOf": [
-              {
-                "required": [
-                  "editor_name"
-                ]
-              },
-              {
-                "required": [
-                  "document_id"
-                ]
-              },
-              {
-                "required": [
-                  "view_id"
-                ]
-              }
-            ]
-          }
-        ],
         "properties": {
           "accept_last_completed": {
             "description": "Allow the last completed model while edits are pending; replies retain stale provenance.",
             "type": "boolean"
-          },
-          "document_id": {
-            "description": "Live document handle from minerva_list_editors. Selects this plugin's unique view.",
-            "type": "string"
           },
           "editor_name": {
             "description": "Editor tab title (as returned by minerva_list_editors).",
@@ -451,10 +252,6 @@
           "require_source_version": {
             "description": "Require this completed buffer revision.",
             "type": "integer"
-          },
-          "view_id": {
-            "description": "Live view handle from minerva_list_editors; stable through tab rename.",
-            "type": "string"
           }
         },
         "required": [
@@ -487,10 +284,6 @@
             "type": "boolean"
           },
           "configuration": {
-            "type": "string"
-          },
-          "document_id": {
-            "description": "Live document handle from minerva_list_editors. Selects this plugin's unique view.",
             "type": "string"
           },
           "editor_name": {
@@ -528,10 +321,6 @@
             "type": "integer"
           },
           "selection": {
-            "type": "string"
-          },
-          "view_id": {
-            "description": "Live view handle from minerva_list_editors; stable through tab rename.",
             "type": "string"
           },
           "wait_ms": {

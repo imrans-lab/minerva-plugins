@@ -33,8 +33,8 @@ func handle(tool_name: String, args: Dictionary) -> Dictionary:
 func _resolve_host(_args: Dictionary) -> AnnotationHost:
 	return _panel.call("get_annotation_host") if is_instance_valid(_panel) else null
 
-func _no_host_error(_args: Dictionary) -> Dictionary:
-	return _err("The CAD panel has no live annotation host")
+func _no_host_error(args: Dictionary) -> Dictionary:
+	return _err("The CAD panel has no live annotation host for '%s'" % str(args.get("editor_name", "")))
 
 static func _ok(data: Dictionary = {}) -> Dictionary:
 	var result := {"success": true}
@@ -55,7 +55,9 @@ func _cad_export(args: Dictionary) -> Dictionary:
 	if args.has("wait_ms"):
 		backend_args["wait_ms"] = args.wait_ms
 	var envelope: Dictionary = await _panel.call("call_backend", "cad.export", backend_args)
-	if not envelope.get("success", false): return envelope
+	if not envelope.get("success", false):
+		envelope["error"] = envelope.get("error", envelope.get("error_message", "CAD export IPC failed"))
+		return envelope
 	var reply: Dictionary = envelope.get("result", {})
 	if reply.has("error"): return {"success": false, "error": reply.error}
 	if not reply.get("ok", false): return _err("cad_export_failed: " + JSON.stringify(reply))
