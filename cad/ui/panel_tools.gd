@@ -173,7 +173,8 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 		return refused
 	var scopes := preload("scripts/scoped_queries.gd")
 	var reply: Dictionary
-	if scopes.applies(tool_name, args):
+	# Export's backend already owns selection and configuration.
+	if tool_name != "minerva_cad_export" and scopes.applies(tool_name, args):
 		reply = await scopes.run(panel, tool_name, args, _dispatch)
 	else:
 		reply = await _dispatch(panel, tool_name, args)

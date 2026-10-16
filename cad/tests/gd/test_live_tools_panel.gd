@@ -87,9 +87,16 @@ func _run() -> void:
 	var exported: Dictionary = await registry.handle_tool_call("minerva_cad_export", args)
 	check("export starts a collectable backend job", exported.get("status") in ["pending", "completed"]
 		and not str(exported.get("job_id", "")).is_empty(), str(exported))
+	args["wait_ms"] = 20000
+	var initial_complete: Dictionary = await registry.handle_tool_call("minerva_cad_export", args)
+	check("an initial completed reply retains export operation provenance", initial_complete.get("status") == "completed"
+		and initial_complete.get("provenance", {}).get("operation") == "export"
+		and initial_complete.get("provenance", {}).get("format") == "stl"
+		and initial_complete.get("provenance", {}).get("part") == "shaft", str(initial_complete))
 	var blocked := directory.path_join("blocked.stl")
 	DirAccess.make_dir_recursive_absolute(blocked)
 	args["path"] = blocked
+	args["wait_ms"] = 0
 	var failed_export: Dictionary = await registry.handle_tool_call("minerva_cad_export", args)
 	var failed_id := str(failed_export.get("job_id", failed_export.get("error", {}).get("job_id", "")))
 	panel.set_build_mode("manual")

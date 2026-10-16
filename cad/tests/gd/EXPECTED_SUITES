@@ -958,4 +958,4 @@ test_object_annotations.gd assertions=10
 
 # Solid and edge tool contracts owned by the CAD panel.
 test_live_tools.gd assertions=96
-test_live_tools_panel.gd assertions=13
+test_live_tools_panel.gd assertions=14
