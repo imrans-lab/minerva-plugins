@@ -286,7 +286,7 @@ func _set_pane_mesh_visible(mesh_root_path: String, visible_flag: bool) -> void:
 ## CADPanel.get_view_state(). Surfaces layout/camera state the panel already
 ## tracks — width_class (which ResponsiveContainer breakpoint is active),
 ## active_viewport_id (which pane
-## an agent's minerva_cad_snapshot view="active" would capture), the
+## an agent's minerva_snapshot view="active" would capture), the
 ## narrow-mode projection dropdown selection, and the active pane's camera
 ## orientation/zoom (OrbitCamera's own get_target/get_distance/get_yaw/
 ## get_pitch/get_debug_state — no new camera state was added for this tool).

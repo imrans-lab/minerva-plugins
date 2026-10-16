@@ -2,7 +2,7 @@ extends RefCounted
 ## A picture from A STATED PLACE, and optionally CUT OPEN.
 ##
 ## Every other image verb reads the panes the owner left behind.
-## minerva_cad_snapshot returns the last drawn frame of one of four fixed
+## minerva_snapshot returns the last drawn frame of one of four fixed
 ## panes; minerva_cad_snapshot_fit reframes one of those panes without turning
 ## it. Neither can be asked to stand somewhere: nothing takes a yaw, a pitch or
 ## a direction. That is how three floorless STLs were exported — a missing

@@ -649,19 +649,16 @@ func _test_manual_builds() -> void:
 		note_script.restore(note, panel) and _evaluations(rig.dispatched).size() == before_restore,
 		str(panel.build_status()))
 	var completed: Dictionary = panel.evaluation_freshness()
-	AnnotationHostRegistry.register("manual-provenance-host", panel._annotation_host)
-	var legacy_tools = load("res://Scripts/Services/MCP/Modules/MCPCadTools.gd").new(null)
-	var legacy: Dictionary = await legacy_tools.handle("minerva_cad_get_mesh_info",
-		{"editor_name": "manual-provenance-host", "require_source_digest": EDITED_SOURCE.sha256_text()})
-	check("legacy host inspection carries the plugin evaluation contract",
-		legacy.get("success", false) and legacy.get("provenance", {}) == completed.provenance,
-		str(legacy))
-	var legacy_refused: Dictionary = await legacy_tools.handle("minerva_cad_get_mesh_info",
-		{"editor_name": "manual-provenance-host", "require_source_digest": "wrong"})
-	check("legacy revision refusal remains a serializable tool reply",
-		not legacy_refused.get("success", true) and not legacy_refused.has("panel")
-		and JSON.parse_string(JSON.stringify(legacy_refused)) is Dictionary, str(legacy_refused))
-	AnnotationHostRegistry.deregister("manual-provenance-host")
+	var inspection: Dictionary = await PanelTools.handle(panel, "minerva_cad_get_mesh_info",
+		{"require_source_digest": EDITED_SOURCE.sha256_text()})
+	check("panel inspection carries the plugin evaluation contract",
+		inspection.get("success", false) and inspection.get("provenance", {}) == completed.provenance,
+		str(inspection))
+	var refused_inspection: Dictionary = await PanelTools.handle(panel, "minerva_cad_get_mesh_info",
+		{"require_source_digest": "wrong"})
+	check("revision refusal remains a serializable tool reply",
+		not refused_inspection.get("success", true) and not refused_inspection.has("panel")
+		and JSON.parse_string(JSON.stringify(refused_inspection)) is Dictionary, str(refused_inspection))
 	rig.buffer.apply_edit(BROKEN_SOURCE)
 	var mismatch: Dictionary = await PanelTools.handle(panel, "minerva_cad_check_interference",
 		{"require_source_version": rig.buffer.version, "accept_last_completed": true})

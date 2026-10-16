@@ -1,7 +1,7 @@
 extends SceneTree
 ## A picture of a big scene comes back, or says why — it never just stops.
 ##
-## minerva_cad_snapshot asks the panel's host for a view's image. The host used
+## minerva_snapshot asks the panel's host for a view's image. The host used
 ## to answer a cold call with null and BOOK a capture for the next drawn frame,
 ## so the verb's only recourse was to await RenderingServer.frame_post_draw and
 ## try again. That signal fires only while the engine is drawing: a window that

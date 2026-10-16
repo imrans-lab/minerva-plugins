@@ -52,14 +52,9 @@ extends "panel_tools_view.gd"
 ##                               evaluation — the wait a buffer edit needs
 ##                               before anything measures the result.
 ##
-## WHY THESE ARE PANEL VERBS AND NOT CORE ONES. minerva_cad_get_mesh_info and
-## minerva_cad_snapshot live in Minerva's own MCPCadTools; extending them is a
-## host change and a host release. These verbs are declared executor:"panel" in
-## the manifest instead, so the plugin ships them on its own. The division that
-## falls out is a clean one: get_mesh_info describes the evaluated SOLID,
-## minerva_cad_references describes the foreign REFERENCES, and the overlay
-## verb puts a ruler into the scene so the host's existing snapshot verb
-## captures it without knowing anything about measurement.
+## CAD inspection and measurement are plugin panel verbs. The generic
+## minerva_snapshot captures the exposed viewport slots, with geometry and
+## freshness supplied by the panel's snapshot_extra hook.
 ##
 ## EVERY NUMBER IS MILLIMETRES, IN BOTH FRAMES. A position is reported as
 ## {world, local}: world is the posed CAD scene, local is the reference file's
@@ -142,7 +137,7 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 		var host_panel: Object = panel
 		var live: RefCounted = preload("scripts/live_tools.gd").new(host_panel)
 		return await live.call("handle", tool_name, args)
-	if (_Freshness.MEASURING_VERBS.has(tool_name) or tool_name == "minerva_cad_export" or tool_name.begins_with("minerva_cad_snapshot")) and panel.has_method("verify_dependencies"):
+	if (_Freshness.MEASURING_VERBS.has(tool_name) or tool_name == "minerva_cad_export" or tool_name == "minerva_cad_snapshot_fit") and panel.has_method("verify_dependencies"):
 		panel.verify_dependencies()
 	var freshness: Dictionary = _Freshness.read(panel)
 	if tool_name not in ["minerva_cad_build", "minerva_cad_await_eval", "minerva_cad_model"]:

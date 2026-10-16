@@ -46,6 +46,27 @@ func _run() -> void:
 	registry.scene_panel_broker = rig.broker
 	var registered: Dictionary = registry.register_plugin_tools("cad", definition.tools)
 	check("the actual manifest tools register through the host", not registered.has("error"), str(registered))
+	panel._apply_width_class(&"lg")
+	panel._active_viewport_id = "front"
+	var projection: OptionButton = panel.get_node(
+		"ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/FrontView/ProjectionRow/ProjectionDropdown")
+	projection.item_selected.emit(0)
+	var wide: Dictionary = panel.get_viewports()
+	var metadata: Dictionary = panel.snapshot_extra("active")
+	var expected_keys := ["projection", "has_geometry", "vertex_count", "face_count", "bounding_box",
+		"units", "source_version", "buffer_version", "evaluated_at", "stale"]
+	check("wide snapshots expose pane slots, focused pixels and only the declared metadata",
+		wide.size() == 5 and wide.has_all(["active", "iso", "top", "front", "right"])
+		and wide.active == wide.front and metadata.size() == expected_keys.size()
+		and metadata.has_all(expected_keys) and metadata.projection == "Perspective"
+		and metadata.has_geometry and metadata.vertex_count > 0 and metadata.face_count > 0
+		and metadata.units == "mm" and not metadata.stale, str(metadata))
+	panel._apply_width_class(&"sm")
+	var narrow: Dictionary = panel.get_viewports()
+	check("narrow snapshots expose only the actual single viewport",
+		narrow.size() == 1 and narrow.has("active")
+		and narrow.active == panel.get_node("ResponsiveContainer/NarrowLayout/SingleView/SubViewport"), str(narrow))
+	panel._apply_width_class(&"lg")
 	var locator := {"editor_name": rig.panel_name}
 	var mesh: Dictionary = await registry.handle_tool_call("minerva_cad_get_mesh_info", locator)
 	var edges: Dictionary = await registry.handle_tool_call("minerva_cad_list_edges", locator)
@@ -123,7 +144,8 @@ func _run() -> void:
 	var library := preload("../../ui/scripts/reference_meshes.gd").new()
 	var loaded = library.load_file(path, "mm", "z")
 	check("part-only export retains its source provenance while collecting on a stale panel", exported.get("status") == "completed"
-		and panel.evaluation_freshness().get("stale", false) and FileAccess.file_exists(path)
+		and panel.evaluation_freshness().get("stale", false) and panel.snapshot_extra("active").stale
+		and FileAccess.file_exists(path)
 		and loaded.is_ok() and is_equal_approx(loaded.local_aabb.size.x, 10.0)
 		and exported.get("source_digest") == str(before.source).sha256_text()
 		and exported.get("source_version") == before.source_version, str(exported))

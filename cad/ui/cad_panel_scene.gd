@@ -478,6 +478,30 @@ func get_pane_presets() -> Dictionary:
 	return _pane_projection.presets() if _pane_projection != null else {}
 
 
+## Snapshot slots identify panes, even when their projection dropdown changes.
+func get_viewports() -> Dictionary[String, SubViewport]:
+	var slots: Dictionary[String, SubViewport] = {}
+	if _narrow_layout != null and _narrow_layout.visible:
+		if _single_view_container != null:
+			var single: SubViewport = _single_view_container.get_node_or_null("SubViewport")
+			if single != null: slots["active"] = single
+		return slots
+	var containers: Dictionary[String, SubViewportContainer] = {
+		"iso": _iso_view_container, "top": _top_view_container,
+		"front": _front_view_container, "right": _right_view_container,
+	}
+	for slot: String in containers:
+		var container: SubViewportContainer = containers[slot]
+		if container == null: continue
+		var viewport: SubViewport = container.get_node_or_null("SubViewport")
+		if viewport != null: slots[slot] = viewport
+	if slots.has(_active_viewport_id):
+		slots["active"] = slots[_active_viewport_id]
+	elif slots.has("iso"):
+		slots["active"] = slots["iso"]
+	return slots
+
+
 ## Closing the tab has to take the annotation host's pending frame captures off
 ## RenderingServer. That singleton outlives every panel, and a one-shot that
 ## never fired — the tab closed first, or no frame was ever drawn — would leave

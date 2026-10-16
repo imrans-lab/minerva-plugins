@@ -2,7 +2,7 @@ extends SceneTree
 ## Can the agent stand where it needs to stand, and cut the part open?
 ##
 ## THE DEFECT. Every image verb read the panes as the owner left them:
-## minerva_cad_snapshot returns the last drawn frame of one of four fixed panes
+## minerva_snapshot returns the last drawn frame of one of four fixed panes
 ## and minerva_cad_snapshot_fit reframes one of those panes without turning it.
 ## No verb took a yaw, a pitch, a direction or a target — so nothing could look
 ## UNDER a part, and three floorless STL exports shipped, because a missing

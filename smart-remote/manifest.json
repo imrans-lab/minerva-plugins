@@ -1,8 +1,8 @@
 {
   "id": "smart_remote",
   "name": "Smart Remote",
-  "version": "0.1.1",
-  "host_api_version": "1",
+  "version": "0.1.2",
+  "host_api_version": "2",
   "log_stderr": true,
   "release_targets": [
     "linux-x86_64",

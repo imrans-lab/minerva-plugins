@@ -661,6 +661,23 @@ func await_evaluation(timeout_ms: int) -> Dictionary:
 func evaluation_freshness() -> Dictionary:
 	return _evaluation_state.freshness(self)
 
+func snapshot_extra(slot: String) -> Dictionary:
+	var mesh: Dictionary = _annotation_host.call("get_mesh_data") if _annotation_host != null else {}
+	var vertices: Array = mesh.get("vertices", [])
+	var faces: Array = mesh.get("faces", [])
+	var bounds: Variant = null
+	if not vertices.is_empty():
+		bounds = preload("scripts/live_tools.gd")._compute_bbox(vertices)
+	var result := {
+		"projection": get_pane_preset(_active_viewport_id if slot == "active" else slot),
+		"has_geometry": not vertices.is_empty(), "vertex_count": vertices.size(),
+		"face_count": faces.size(), "bounding_box": bounds, "units": "mm",
+	}
+	var freshness := evaluation_freshness()
+	for key: String in ["source_version", "buffer_version", "evaluated_at", "stale"]:
+		result[key] = freshness.get(key)
+	return result
+
 func get_evaluation_state() -> Dictionary:
 	return _evaluation_state.completed.duplicate()
 

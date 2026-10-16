@@ -958,4 +958,9 @@ test_object_annotations.gd assertions=10
 
 # Solid and edge tool contracts owned by the CAD panel.
 test_live_tools.gd assertions=96
-test_live_tools_panel.gd assertions=15
+test_live_tools_panel.gd assertions=17
+
+# Migrated annotation/reload coverage; source bodies retained until host batch C.
+test_cad_edge_number_kind.gd
+test_cad_edge_number_tool.gd
+test_cad_panel_reload_integrity.gd assertions=6

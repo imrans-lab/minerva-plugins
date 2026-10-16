@@ -57,7 +57,7 @@ static func _view_overlay(panel, args: Dictionary) -> Dictionary:
 		"grid_mm": float(drawn.get("grid_mm", 0.0)),
 		"lines": int(drawn.get("lines", 0)),
 		"views": views,
-		"note": "Take the picture with minerva_cad_snapshot; the overlay is "
+		"note": "Take the picture with minerva_snapshot; the overlay is "
 			+ "scene geometry and is captured with everything else.",
 	}
 	if not refusal.is_empty():

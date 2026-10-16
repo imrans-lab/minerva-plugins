@@ -1,5 +1,5 @@
 extends "test_eval_await.gd"
-const EXPORT_ADAPTER_PATH := "res://Scripts/Services/MCP/Modules/MCPCadEvaluation.gd"
+const EXPORT_ADAPTER_PATH := "res://../../minerva-plugins/cad/ui/scripts/live_tools.gd"
 
 func _run() -> void:
 	_document_path = OS.get_user_data_dir().path_join("cad_model_views.mcad")
@@ -32,11 +32,11 @@ func _run() -> void:
 		and refused.reason.contains("Presentation-only"), str(refused))
 	var export_args: Dictionary = load(EXPORT_ADAPTER_PATH).export_document_args({"_evaluated_document": panel.get_evaluation_state(),
 		"format": "step", "path": "/tmp/assembly.step"})
-	check("host exports the displayed configuration by default", export_args.configuration == "exploded"
+	check("plugin exports the displayed configuration by default", export_args.configuration == "exploded"
 		and export_args.source == SOURCE, str(export_args))
 	var explicitly_selected: Dictionary = load(EXPORT_ADAPTER_PATH).export_document_args({"_evaluated_document": panel.get_evaluation_state(),
 		"format": "step", "path": "/tmp/assembly.step", "selection": "instance:left", "configuration": "assembled"})
-	check("host preserves explicit export selection and configuration", explicitly_selected.configuration == "assembled"
+	check("plugin preserves explicit export selection and configuration", explicitly_selected.configuration == "assembled"
 		and explicitly_selected.selection == "instance:left", str(explicitly_selected))
 	await PanelTools.handle(panel, "minerva_cad_build", {"action": "set_mode", "mode": "manual"})
 	rig.buffer.apply_edit(EDITED_SOURCE)

@@ -1,10 +1,10 @@
 {
   "id": "orchview",
   "name": "Orchestration View",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "See the work your agents are doing as one tree: objectives, their tasks, each dispatch attempt, the roles in it and the agents holding them. Every row shows what the work records say (status, result, review, who owns it, what blocks it) apart from what Minerva last observed of the agent's session, and says unknown when there is no recent evidence. Each objective lists the acceptance criteria still open. A node opens its Docket record, and shows the commits, reviews and job runs recorded on it (a run opens its log; an artifact that is gone reads missing) and any token/time table the process recorded, with its unknowns; the footer shows what the viewer itself costs per refresh. It only reads: nothing in it changes work. It reads Docket work records tagged in the W1 convention.",
   "price": {"amount_minor": 0, "currency": "USD"},
-  "host_api_version": "1",
+  "host_api_version": "2",
   "release_targets": [
     "linux-x86_64"
   ],

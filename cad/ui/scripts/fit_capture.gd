@@ -2,7 +2,7 @@ extends RefCounted
 ## A picture FRAMED ON SOMETHING, rather than on wherever the pane's camera
 ## happens to be sitting.
 ##
-## minerva_cad_snapshot captures the pane as the owner has it, and the owner
+## minerva_snapshot captures the pane as the owner has it, and the owner
 ## has it pulled back far enough to work in: a 98 x 177 mm body fills about a
 ## fifth of the frame, and a grille hole is two pixels. A vision model reading
 ## that picture is reading nothing. The camera COULD be flown in first, but
@@ -37,7 +37,7 @@ const _CadNote: Script = preload("cad_note.gd")
 ## binding axis. 5% keeps the silhouette off the edge without wasting pixels.
 const DEFAULT_MARGIN: float = 0.05
 const MAX_MARGIN: float = 0.5
-## Long edge of the returned PNG, matching minerva_cad_snapshot's own default.
+## Long edge of the returned PNG, matching minerva_snapshot's own default.
 const DEFAULT_MAX_EDGE: int = 1024
 ## Where a capture goes when the caller names no path.
 const DEFAULT_DIR: String = "user://cad_snapshots"
@@ -76,7 +76,7 @@ static func snapshot(panel, args: Dictionary) -> Dictionary:
 			+ "its outline in the pane itself, not in the world — an offscreen "
 			+ "render of it would be the shaded mesh and not the drawing you "
 			+ "see. Fit a pane on Perspective, or take an unfitted "
-			+ "minerva_cad_snapshot of this one."
+			+ "minerva_snapshot of this one."
 		)
 
 	var box_reply := resolve_box(panel, args.get("fit", "solid"))
@@ -400,7 +400,7 @@ static func _render(panel, source: Camera3D, box: AABB, margin: float) -> Dictio
 		return {"error": "no frame was drawn in %d main-loop iterations, so the "
 			% MAX_WAIT_ITERATIONS
 			+ "fitted view was never rendered — the Minerva window is most "
-			+ "likely occluded or minimised. minerva_cad_snapshot reads the "
+			+ "likely occluded or minimised. minerva_snapshot reads the "
 			+ "pane's last drawn frame and answers without one."}
 	if image == null or image.is_empty():
 		return {"error": "the offscreen render produced no pixels"}
@@ -420,7 +420,7 @@ static func downscale(image: Image, max_edge: int) -> Image:
 	return resized
 
 
-## Write the PNG where minerva_cad_snapshot writes its own, and by the same
+## Write the PNG where minerva_snapshot writes its own, and by the same
 ## rules: res:// refused, ~ expanded, parent directory created. `label` names
 ## the file when the caller named no path. Public: the posed capture writes its
 ## pictures the same way, and a second copy of these rules would be a second

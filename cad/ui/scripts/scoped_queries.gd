@@ -89,7 +89,7 @@ static func run(panel: Node, tool: String, args: Dictionary, dispatch: Callable)
 	scoped["_evaluated_document"] = context.document
 	scoped["source"] = context.document.get("source", "")
 	scoped["mesh"] = context.document.get("mesh", {})
-	if tool.begins_with("minerva_cad_snapshot") and not scoped.has("fit") and scoped.mesh.get("faces", []).is_empty():
+	if tool == "minerva_cad_snapshot_fit" and not scoped.has("fit") and scoped.mesh.get("faces", []).is_empty():
 		var bounds: AABB = context.report.get("world_aabb", AABB())
 		if bounds.size.length() > 0:
 			scoped["fit"] = [[bounds.position.x,bounds.position.y,bounds.position.z], [bounds.end.x,bounds.end.y,bounds.end.z]]
