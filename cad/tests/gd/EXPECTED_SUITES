@@ -955,3 +955,7 @@ test_bulk_reply_seam.gd assertions=12
 test_contract_guard.gd assertions=39
 
 test_object_annotations.gd assertions=10
+
+# Solid and edge tool contracts owned by the CAD panel.
+test_live_tools.gd assertions=96
+test_live_tools_panel.gd assertions=12

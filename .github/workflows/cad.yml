@@ -416,7 +416,7 @@ jobs:
       # stale and the plugin system does not exist there. Same SHA pcb.yml
       # pin; if you bump it, bump all four and re-check the files listed in each
       # plugin's tests/gd/REQUIRED_HOST_FILES still exist at the new SHA.
-      MINERVA_SHA: "2289b80d0885692b9ffbe4ab538a9dca0618681c"
+      MINERVA_SHA: "7fd6602167da9ddf2d6bda5d04adc9d31b82ceae"
     steps:
       - name: Checkout minerva-plugins
         uses: actions/checkout@v4

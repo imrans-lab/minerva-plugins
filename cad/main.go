@@ -182,9 +182,9 @@ func initWorker() {
 		// Prefer it over a same-version embedded-runtime cache so reinstalling
 		// actually runs the worker source beside the rebuilt wrapper. Release
 		// tarballs ship no worker tree and therefore fall through to the embed.
-		PreferVenv:     true,
-		PluginID:       serverName,
-		PluginVersion:  serverVersion,
+		PreferVenv:    true,
+		PluginID:      serverName,
+		PluginVersion: serverVersion,
 	})
 	if err != nil {
 		log.Printf("cad-plugin: WARNING: %v — mcad_validate will fail until python3 is on PATH or .venv exists", err)
@@ -516,11 +516,6 @@ func workerErrorToast(toolName string, we *bridge.WorkerError) (level, message s
 		return "warning", fmt.Sprintf("CAD plugin [%s]: request timed out — %s", toolName, we.Message)
 	case "cancelled":
 		// Cancellation is expected; no toast needed. Return empty to suppress.
-		return "info", ""
-	case "running":
-		// Not a failure: a detached export the caller is asked to collect by
-		// calling again. Toasting it would put an error in front of the user
-		// every time a heavy document is exported.
 		return "info", ""
 	default:
 		return "error", fmt.Sprintf("CAD plugin [%s]: worker error (%s) — %s", toolName, we.Kind, we.Message)

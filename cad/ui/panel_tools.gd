@@ -136,6 +136,11 @@ const PAIR_VERBS: Array[String] = [
 
 
 static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
+	# A keyed export job already owns its source snapshot; collecting it
+	# neither reads nor rebuilds the panel's current document.
+	if tool_name == "minerva_cad_export" and not str(args.get("job_id", "")).is_empty():
+		var live: RefCounted = preload("scripts/live_tools.gd").new(panel)
+		return await live.call("handle", tool_name, args)
 	if (_Freshness.MEASURING_VERBS.has(tool_name) or tool_name.begins_with("minerva_cad_snapshot")) and panel.has_method("verify_dependencies"):
 		panel.verify_dependencies()
 	var freshness: Dictionary = _Freshness.read(panel)
@@ -160,7 +165,10 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 	# lift the gate.
 	var pair_call: bool = PAIR_VERBS.has(tool_name) and _ReferenceVerbs.is_pair_call(args)
 	if not pair_call and not _Freshness.accepts_stale(args) and _Freshness.blocks(tool_name, freshness):
-		return _Freshness.refusal(freshness)
+		var refused: Dictionary = _Freshness.refusal(freshness)
+		if tool_name == "minerva_cad_export":
+			refused["success"] = false
+		return refused
 	var scopes := preload("scripts/scoped_queries.gd")
 	var reply: Dictionary
 	if scopes.applies(tool_name, args):
@@ -182,6 +190,9 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 
 
 static func _dispatch(panel, tool_name: String, args: Dictionary) -> Dictionary:
+	if preload("scripts/live_tools.gd").TOOL_NAMES.has(tool_name):
+		var live: RefCounted = preload("scripts/live_tools.gd").new(panel)
+		return await live.call("handle", tool_name, args)
 	match tool_name:
 		"minerva_cad_object":
 			return preload("scripts/object_tools.gd").handle(panel, args)
