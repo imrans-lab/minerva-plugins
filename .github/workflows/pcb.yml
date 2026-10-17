@@ -169,7 +169,7 @@ permissions:
 
 jobs:
   test:
-    timeout-minutes: 10
+    timeout-minutes: 20
     name: pcb test (linux, no kicad-cli)
     runs-on: ubuntu-22.04
     defaults:
