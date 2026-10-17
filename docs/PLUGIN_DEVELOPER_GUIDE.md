@@ -704,6 +704,8 @@ document-buffer, annotation-schema/builtin-kind and responsive-container APIs.
 `ctx.data_directory` remains the original install directory. Read or write user
 data through that context or host services, rather than the disposable scene slot.
 
+The `live_reload` capability requires at least one `godot_scene` panel.
+
 An optional synchronous `_on_panel_self_check() -> bool` checks initialization and
 state import. Return `false` to refuse a candidate. Loaded/unload hooks must balance
 subscriptions. Validation can invoke the loaded lifecycle on a temporary panel
@@ -720,8 +722,10 @@ are refused for live activation; restart to adopt that policy in new tabs.
 build while preserving current user data. Without a retained version it refuses.
 Marketplace updates keep the current scene selected and show “Update installed;
 restart to load the new panels”. Reload and Revert wait for that restart. On the
-next start the host validates the installed scene build, keeping the retained build
-if validation fails. Non-opt-in plugins retain restart-required behavior.
+next start the host validates the installed scene build. A refusal keeps the
+previous build, consumes the pending update identity, and shows “Installed update
+failed validation; using the previous version” with its reason. Reload stays
+available to fix forward; the next start does not retry that refused build. Non-opt-in plugins retain restart-required behavior.
 
 **The `ctx` Dictionary** passed to `_on_panel_loaded` (and to the create-note /
 render-for-llm hooks):
