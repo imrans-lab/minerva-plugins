@@ -116,7 +116,9 @@ func _check_label_presentation(host: Host, tool: Tool, data: Dictionary) -> void
 	var survivor: Dictionary = stored[0]
 	var consumed: Dictionary = stored[1]
 	# A live edge now owns the consumed edge's old evaluation-local number.
-	var replacement: Dictionary = tool._build_annotation(int(data.consumed.id), Vector3.ZERO)
+	var consumed_record: Dictionary = data.consumed
+	var consumed_number: float = consumed_record.id
+	var replacement: Dictionary = tool._build_annotation(int(consumed_number), Vector3.ZERO)
 	assert(not host.add_annotation(replacement).is_empty())
 	stored = host.get_annotations()
 	var live_replacement: Dictionary = stored.back()
@@ -134,6 +136,8 @@ func _check_label_presentation(host: Host, tool: Tool, data: Dictionary) -> void
 	var positions: Dictionary = Layout.get_layout(host, camera, rect, stored)
 	var stale_key: String = str(consumed.id)
 	var replacement_key: String = str(live_replacement.id)
+	var stale_position: Vector2 = positions.get(stale_key, Vector2.ZERO)
+	var replacement_position: Vector2 = positions.get(replacement_key, Vector2.ZERO)
 	var drawing := Drawing.new()
 	drawing.host = host
 	var kind := Kind.new()
@@ -141,16 +145,21 @@ func _check_label_presentation(host: Host, tool: Tool, data: Dictionary) -> void
 	var stale_bounds: Rect2 = kind.bounds(consumed)
 	check("stale label draws ? and owns a layout slot apart from its reused old number",
 		drawing.labels == ["?"] and positions.has(stale_key) and positions.has(replacement_key)
-		and positions[stale_key].distance_to(positions[replacement_key]) > 1.0
-		and stale_bounds.get_center().distance_to(positions[stale_key]) < 0.01)
+		and stale_position.distance_to(replacement_position) > 1.0
+		and stale_bounds.get_center().distance_to(stale_position) < 0.01)
 	drawing.labels.clear()
 	kind.render(drawing, survivor)
-	var current_id: int = int(data.survivor_after.id)
-	var live_key: Variant = str(survivor.id) if positions.has(str(survivor.id)) else current_id
+	var survivor_record: Dictionary = data.survivor_after
+	var current_number: float = survivor_record.id
+	var current_id: int = int(current_number)
+	var live_key: String = str(survivor.id)
+	# Support the unchanged-base key as well, so this anti-case passes there.
+	var has_live_position: bool = positions.has(live_key) or positions.has(current_id)
+	var live_position: Vector2 = positions.get(live_key, positions.get(current_id, Vector2.ZERO))
 	var live_bounds: Rect2 = kind.bounds(survivor)
 	check("renumbered live label keeps its current title and slot; stale hit target survives",
-		drawing.labels == [str(current_id)] and positions.has(live_key)
-		and live_bounds.get_center().distance_to(positions[live_key]) < 0.01
+		drawing.labels == [str(current_id)] and has_live_position
+		and live_bounds.get_center().distance_to(live_position) < 0.01
 		and stale_bounds.size.x > 0.0 and stale_bounds.size.y > 0.0
 		and kind.hit_test(consumed, stale_bounds.get_center(), 0.0))
 	AnnotationHostRegistry.deregister("batch3_edge_labels", host)
