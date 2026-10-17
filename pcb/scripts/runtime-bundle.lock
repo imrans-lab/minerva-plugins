@@ -26,7 +26,7 @@ CPYTHON="3.12.13"
 # the PyPI release files for 12.3.0 and matches WHEEL_PLATS on all five build
 # targets: macosx_10_13_x86_64, macosx_11_0_arm64, the
 # manylinux_2_27/_2_28 x86_64 + aarch64 pair, and win_amd64.
-PIP_PKGS="pyyaml==6.0.2 gerber-writer==0.4.3.3 pyclipper==1.4.0 pillow==12.3.0"
+PIP_PKGS="pyyaml==6.0.3 gerber-writer==0.4.3.3 pyclipper==1.4.0 pillow==12.3.0"
 
 # gerbonara is a RUNTIME dependency: pcb.fab_preview re-parses the emitted
 # Gerber/Excellon bytes with it — a reader independent of the writer is the

@@ -1,6 +1,6 @@
 module github.com/imrans-lab/minerva-plugins/docket
 
-go 1.23.0
+go 1.25.0
 
 require (
 	github.com/ProtonMail/go-crypto v1.5.2
@@ -12,6 +12,6 @@ replace github.com/imrans-lab/minerva-plugins/shared => ../shared
 
 require (
 	github.com/cloudflare/circl v1.6.3 // indirect
-	github.com/klauspost/compress v1.17.11 // indirect
+	github.com/klauspost/compress v1.20.3 // indirect
 	golang.org/x/crypto v0.41.0 // indirect
 )

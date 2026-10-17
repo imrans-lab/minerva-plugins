@@ -1,9 +1,9 @@
 name: Docket signed release
 on:
   pull_request:
-    paths: ['docket/**', '.github/workflows/docket.yml']
+    paths: ['.go-version', 'docket/**', '.github/workflows/docket.yml']
   push:
-    paths: ['docket/**', '.github/workflows/docket.yml']
+    paths: ['.go-version', 'docket/**', '.github/workflows/docket.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -22,7 +22,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.23.x'
+          go-version-file: .go-version
           cache-dependency-path: docket/go.sum
       - name: Compile source and test files
         run: GOWORK=off go vet -mod=readonly ./...

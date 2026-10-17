@@ -27,6 +27,26 @@ LOCK = PCB_ROOT / "scripts" / "runtime-bundle.lock"
 BUILDER = PCB_ROOT.parent / "scripts" / "build-python-runtime-bundle.sh"
 
 
+def test_pyyaml_worker_floor_matches_the_shipped_bundle_pin() -> None:
+    project = (PCB_ROOT / "worker/pyproject.toml").read_text()
+    match = re.search(r'(?m)^\s*"(pyyaml[^\"]+)"', project)
+    assert match is not None
+    floor = match[1]
+    pin = next(package for package in _lock_vars()["PIP_PKGS"].split()
+               if package.lower().startswith("pyyaml=="))
+    assert floor == f"pyyaml>={pin.split('==')[1]},<7"
+
+
+def test_public_board_loader_refuses_yaml_object_construction(tmp_path: Path) -> None:
+    from pcb_worker.board_model import BoardParseError, load_board
+
+    sentinel = tmp_path / "constructed"
+    source = f"!!python/object/apply:builtins.open ['{sentinel.as_posix()}', 'w']"
+    with pytest.raises(BoardParseError, match="invalid YAML"):
+        load_board({"yaml": source})
+    assert not sentinel.exists()
+
+
 def _usable_bash() -> str | None:
     """Resolve bash to an ABSOLUTE PATH and prove that exact binary runs.
 

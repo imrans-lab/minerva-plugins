@@ -4,6 +4,7 @@ on:
   push:
     branches: [main, "dcr/**"]
     paths:
+      - ".go-version"
       - "cad/**"
       - ".github/workflows/cad.yml"
       - "scripts/**"
@@ -11,6 +12,7 @@ on:
     # Main publishes version tags after CI; pushing that tag must not build again.
   pull_request:
     paths:
+      - ".go-version"
       - "cad/**"
       - ".github/workflows/cad.yml"
       - "scripts/**"
@@ -42,7 +44,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26"
+          go-version-file: .go-version
           cache: false
       - uses: actions/setup-python@v5
         with:
@@ -95,9 +97,9 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.26"
-          # cad has no external deps (no go.sum); disable module cache to avoid
-          # cache-dependency-path errors. Build cache still works automatically.
+          go-version-file: .go-version
+          # Module caching is disabled by choice for this small locally replaced
+          # module tree. The Go build cache still works automatically.
           cache: false
 
       # Surfaces the version setup-go actually RESOLVED. Without this, a
@@ -598,7 +600,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26'
+          go-version-file: .go-version
           cache-dependency-path: cad/go.sum
       - name: Compile and link source
         run: |

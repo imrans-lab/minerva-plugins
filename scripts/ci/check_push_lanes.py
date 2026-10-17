@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import yaml
+from check_dependencies import check_dependencies
 
 DENIED = re.compile(
     r"\bgo test\b|\bcargo test\b|\bzig build test\b|\bpytest\b|-m unittest|"
@@ -133,7 +134,7 @@ def lane_budget(path: Path, seen: frozenset[Path]) -> int:
 
 
 def main() -> int:
-    errors: list[str] = []
+    errors = check_dependencies(Path("."))
     checked = 0
     for path in sorted(Path(".github/workflows").glob("*.y*ml")):
         data = yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)

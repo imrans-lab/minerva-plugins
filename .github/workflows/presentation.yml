@@ -10,11 +10,13 @@ on:
   push:
     branches: [main, "dcr/**"]
     paths:
+      - ".go-version"
       - "presentation/**"
       - ".github/workflows/presentation.yml"
       - "scripts/smoke/**"
   pull_request:
     paths:
+      - ".go-version"
       - "presentation/**"
       - ".github/workflows/presentation.yml"
       - "scripts/smoke/**"
@@ -72,7 +74,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.26"
+          go-version-file: .go-version
           cache: false
 
       # Surfaces the version setup-go actually RESOLVED. Without this, a
