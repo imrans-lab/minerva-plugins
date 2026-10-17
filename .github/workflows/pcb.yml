@@ -159,6 +159,9 @@ on:
     # panel job): resolves the branch once to a full SHA and records it.
     - cron: "17 9 * * *"
 
+env:
+  PYTHONUTF8: "1"
+
 permissions:
   contents: read
 

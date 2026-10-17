@@ -27,6 +27,9 @@ on:
         type: boolean
         default: false
 
+env:
+  PYTHONUTF8: "1"
+
 permissions:
   contents: read
 

@@ -26,6 +26,9 @@ on:
     # panel job): resolves the branch once to a full SHA and records it.
     - cron: "17 9 * * *"
 
+env:
+  PYTHONUTF8: "1"
+
 permissions:
   contents: read
 
@@ -365,6 +368,19 @@ jobs:
           echo "Packed contents ($(wc -l < "$LISTING") entries, first 30):"
           head -30 "$LISTING"
           ls -la "dist/cad-${VERSION}-${PLATFORM}.tar.gz"
+
+      - name: Verify packed manifest matches source
+        run: |
+          python3 - <<'PYTHON'
+          import json
+          from pathlib import Path
+
+          source = json.loads(Path("manifest.json").read_text(encoding="utf-8"))
+          version = source["version"]
+          source.pop("setup", None)
+          packed = Path("dist") / f"cad-{version}-${{ matrix.target }}" / "manifest.json"
+          assert json.loads(packed.read_text(encoding="utf-8")) == source, packed
+          PYTHON
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

@@ -965,3 +965,7 @@ test_cad_panel_reload_integrity.gd assertions=6
 
 # Persistent edge geometry plus the independent surface-arrow point contract.
 test_edge_anchor_continuity.gd assertions=3
+
+# Real offscreen captures: run under Xvfb with MINERVA_TEST_DISPLAY=test_pose_arguments.gd.
+# One fix case (schema + actionable refusal + nested PNG), one view-only anti-case.
+test_pose_arguments.gd assertions=2

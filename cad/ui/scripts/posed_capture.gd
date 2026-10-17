@@ -199,6 +199,9 @@ static func snapshot(panel, args: Dictionary) -> Dictionary:
 ## pose is a snapshot_fit, and answering it under this name would return a
 ## picture from a direction the caller never chose.
 static func resolve_pose(args: Dictionary) -> Dictionary:
+	for field: String in ["yaw_deg", "pitch_deg", "distance_mm", "target_mm"]:
+		if args.has(field):
+			return {"error": "put %s inside pose, e.g. pose: {yaw_deg: -70, pitch_deg: 12}" % field}
 	var pose := {
 		"view": "",
 		"yaw_deg": 0.0,
