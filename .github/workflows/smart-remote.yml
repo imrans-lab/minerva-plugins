@@ -77,6 +77,10 @@ jobs:
             -output target/release/smart-remote-plugin
           lipo -info target/release/smart-remote-plugin
 
+      - name: Cargo test (Linux dispatch only)
+        if: github.event_name == 'workflow_dispatch' && matrix.target == 'linux-x86_64'
+        run: cargo test --release --locked
+
       - name: Pack marketplace archive
         env:
           PLATFORM: ${{ matrix.target }}

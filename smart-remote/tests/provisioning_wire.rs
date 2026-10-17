@@ -1,7 +1,36 @@
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use prost::Message;
 use smart_remote_plugin::provisioning::{
     config_request, config_response, decode, wifi_config, wire::*, Error,
 };
+
+#[test]
+fn fixed_token_has_canonical_unpadded_url_safe_encoding() {
+    // Synthetic bytes, with an independent RFC 4648 literal as the oracle.
+    let raw: Vec<u8> = (0..32).collect();
+    let encoded = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
+    assert_eq!(URL_SAFE_NO_PAD.encode(&raw), encoded);
+    let request = config_request("minerva.local", 47821, encoded).unwrap();
+    let config: serde_json::Value = serde_json::from_slice(&request).unwrap();
+    assert_eq!(config["token"], encoded);
+    assert_eq!(
+        URL_SAFE_NO_PAD
+            .decode(config["token"].as_str().unwrap())
+            .unwrap(),
+        raw
+    );
+    for bad in [
+        format!("{encoded}="),
+        format!("{}9", &encoded[..42]), // Same decoded bytes, non-canonical trailing bits.
+        format!("+{}", &encoded[1..]),
+        format!("/{}", &encoded[1..]),
+    ] {
+        assert_eq!(
+            config_request("minerva.local", 47821, &bad),
+            Err(Error::Config)
+        );
+    }
+}
 
 #[test]
 fn configuration_bytes_obey_the_firmware_contract() {

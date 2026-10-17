@@ -136,15 +136,24 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
         .send_json(&json!({"type":"ptt_down","stream":7}))
         .await;
     assert_eq!(device.recv_msg().await["state"], "recording");
-    let mut pcm = common::mic(7, 0, false, 4);
-    pcm[4..].copy_from_slice(&[1, 2, 3, 4]);
+    // Signed s16le extrema, -1, 0 and 1; literal RFC 4648 oracle.
+    let samples = [0x00, 0x80, 0xff, 0xff, 0x00, 0x00, 0x01, 0x00, 0xff, 0x7f];
+    let mut pcm = common::mic(7, 0, false, samples.len());
+    pcm[4..].copy_from_slice(&samples);
     device.send_binary(pcm).await;
     device.send_binary(common::mic(7, 1, true, 0)).await;
     assert_eq!(device.recv_msg().await["state"], "transcribing");
     let chunk = next_request(&mut seen, "input_chunk").await;
     assert_eq!(chunk["params"]["args"]["session_id"], 23);
     assert_eq!(chunk["params"]["args"]["sequence"], 0);
-    assert_eq!(chunk["params"]["args"]["pcm"], "AQIDBA==");
+    assert_eq!(chunk["params"]["args"]["pcm"], "AID//wAAAQD/fw==");
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    assert_eq!(
+        STANDARD
+            .decode(chunk["params"]["args"]["pcm"].as_str().unwrap())
+            .unwrap(),
+        samples
+    );
     assert_eq!(
         next_request(&mut seen, "input_end").await["params"]["args"]["sequence"],
         1
@@ -226,7 +235,6 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
         .send_json(&json!({"type":"speak_done","stream_id":stream,"ok":true,"last_seq":0}))
         .await;
     assert_eq!(device.recv_msg().await["code"], "tts_failed");
-    use base64::{engine::general_purpose::STANDARD, Engine};
     let source: Vec<u8> = (0..36000)
         .flat_map(|n| ((n % 100) as i16).to_le_bytes())
         .collect();
@@ -421,6 +429,46 @@ async fn remote_pcm_transcript_submit_and_reply_cross_real_stdio() {
         next_request(&mut seen, "availability").await["params"]["args"]["available"],
         true
     );
+    // The same signed samples return through the real host-to-device decoder.
+    event(&input,"voice.audio",json!({"op":"begin","device_id":endpoint,"stream_id":101,"format":"pcm_s16le","sample_rate":16000,"channels":1,"volume":1.0,"origin":{"kind":"explicit"}})).await;
+    let speaking = reconnect.recv_msg().await;
+    assert_eq!(speaking["type"], "speak");
+    event(&input,"voice.audio",json!({"op":"chunk","device_id":endpoint,"stream_id":101,"sequence":0,"pcm":"AID//wAAAQD/fw=="})).await;
+    event(
+        &input,
+        "voice.audio",
+        json!({"op":"end","device_id":endpoint,"stream_id":101,"sequence":1}),
+    )
+    .await;
+    let common::Event::Binary(frame) = reconnect.recv().await else {
+        panic!("expected golden speaker PCM")
+    };
+    let (header, decoded) = smart_remote_plugin::audio::parse_frame(&frame).unwrap();
+    assert!(header.eos);
+    assert_eq!(decoded, samples);
+    reconnect.send_json(&json!({"type":"speak_done","stream_id":speaking["stream"],"ok":true,"last_seq":header.seq})).await;
+    assert_eq!(
+        next_request(&mut seen, "output_complete").await["params"]["args"]["success"],
+        true
+    );
+    for (stream, bad) in [(102, "not base64"), (103, "AID__wAAAQD_fw==")] {
+        event(&input,"voice.audio",json!({"op":"begin","device_id":endpoint,"stream_id":stream,"format":"pcm_s16le","sample_rate":16000,"channels":1,"volume":1.0,"origin":{"kind":"explicit"}})).await;
+        assert_eq!(reconnect.recv_msg().await["type"], "speak");
+        event(
+            &input,
+            "voice.audio",
+            json!({"op":"chunk","device_id":endpoint,"stream_id":stream,"sequence":0,"pcm":bad}),
+        )
+        .await;
+        let refused = reconnect.recv_msg().await;
+        assert_eq!(refused["code"], "tts_failed");
+        assert_eq!(refused["message"], "Malformed PCM base64");
+        assert_eq!(reconnect.recv_msg().await["code"], "speak_aborted");
+        assert_eq!(
+            next_request(&mut seen, "output_complete").await["params"]["args"]["success"],
+            false
+        );
+    }
     drop(reconnect);
     assert_eq!(
         next_request(&mut seen, "availability").await["params"]["args"]["available"],

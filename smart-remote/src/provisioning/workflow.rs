@@ -90,6 +90,14 @@ pub struct Network {
     pub ssid: String,
     pub label: String,
 }
+impl Network {
+    fn from_ssid(ssid: &[u8]) -> Self {
+        Self {
+            ssid: URL_SAFE_NO_PAD.encode(ssid),
+            label: String::from_utf8_lossy(ssid).into_owned(),
+        }
+    }
+}
 pub struct Job {
     pub store: Arc<crate::store::TokenStore>,
     pub input: mpsc::Receiver<Credentials>,
@@ -259,10 +267,7 @@ pub async fn run<P: Peer>(
                 {
                     return Err(Error::Protocol);
                 }
-                progress.networks.push(Network {
-                    ssid: URL_SAFE_NO_PAD.encode(&entry.ssid),
-                    label: String::from_utf8_lossy(&entry.ssid).into_owned(),
-                });
+                progress.networks.push(Network::from_ssid(&entry.ssid));
             }
         }
         let mut random = Zeroizing::new([0u8; 32]);
@@ -448,4 +453,22 @@ pub async fn run<P: Peer>(
         session.cancel();
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn binary_ssid_keeps_url_safe_wire_bytes_separate_from_display_label() {
+        let raw = b"\xff\xfeM\xc3\xbcn\xff";
+        let network = Network::from_ssid(raw);
+        assert_eq!(network.ssid, "__5Nw7xu_w");
+        assert_eq!(URL_SAFE_NO_PAD.decode(&network.ssid).unwrap(), raw);
+        assert_eq!(network.label, "\u{fffd}\u{fffd}Mün\u{fffd}");
+        assert_ne!(
+            network.ssid,
+            URL_SAFE_NO_PAD.encode(network.label.as_bytes())
+        );
+    }
 }

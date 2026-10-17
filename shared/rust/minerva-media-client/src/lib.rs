@@ -422,7 +422,7 @@ fn set_read_timeout(ws: &mut WebSocket<MaybeTlsStream<std::net::TcpStream>>, t: 
 mod tests {
     use super::*;
     use crate::wire::{decode_frame, FrameEvent, MessageAssembler, FRAME_FILE_DATA, FRAME_FILE_END, FRAME_FILE_INFO, FRAME_NEW_MESSAGE};
-    use crate::frames::{build_heartbeat_response, build_request_msg, encode_base64_std, jwt_sub};
+    use crate::frames::{build_heartbeat_response, build_request_msg, jwt_sub};
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -677,8 +677,7 @@ mod tests {
         assert_eq!(f["content_type"], "image/png");
 
         // data field should be standard base64 of the input bytes.
-        let expected_b64 = encode_base64_std(file_bytes);
-        assert_eq!(f["data"], expected_b64);
+        assert_eq!(f["data"], "UE5HIERBVEE=");
     }
 
     // ── §3 test: JWT sub extraction ───────────────────────────────────────

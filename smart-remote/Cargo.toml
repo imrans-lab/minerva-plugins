@@ -1,6 +1,6 @@
 [package]
 name = "smart-remote-plugin"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 publish = false
 
@@ -35,7 +35,7 @@ hex = "0.4"
 log = "0.4"
 env_logger = "0.11"
 gethostname = "1"
-base64 = "0.22"
+base64 = "0.23"
 rubato = { version = "0.16.2", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
