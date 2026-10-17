@@ -718,8 +718,8 @@ Changes to an open panel's `save_mode`, `chrome_suppress`, or `write_guidance`
 are refused for live activation; restart to adopt that policy in new tabs.
 **Revert to previous version** / `minerva_plugin_revert` selects the retained scene
 build while preserving current user data. Without a retained version it refuses.
-After a marketplace update, scene revert is a live-session escape: the backend
-remains installed, and the status asks for a restart to finish that update. On the
+Marketplace updates keep the current scene selected and show “Update installed;
+restart to load the new panels”. Reload and Revert wait for that restart. On the
 next start the host validates the installed scene build, keeping the retained build
 if validation fails. Non-opt-in plugins retain restart-required behavior.
 
