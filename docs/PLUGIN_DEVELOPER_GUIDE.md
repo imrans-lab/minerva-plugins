@@ -252,7 +252,7 @@ dialect and nothing to migrate from. In particular:
 - `permissions.host_capabilities` (array, **nested under `permissions`**) is the
   capability **grant list**.
 - top-level `capabilities` (array) is a **separate opt-in contract list** whose only
-  legal values are `project_state`, `host_owned_save`, `project_export`.
+  legal values are `project_state`, `host_owned_save`, `project_export`, `live_reload`.
 
 These are two different fields with different meanings — *not* two dialects. A guide
 or example that places `host_capabilities` at the top level, or treats top-level
@@ -310,7 +310,7 @@ Legend: **R** = required, **O** = optional. "Strict→null" means a violation ma
 | `editor_items[].name` | O | string | — | Menu label (e.g. "New CAD Document"). |
 | `editor_items[].panel` | O | string | — | Must reference a declared `ui.panels` name if non-empty. |
 | `editor_items[].default_filename` | O | string | `"untitled"` | e.g. `untitled.mcad`. |
-| `capabilities` | O | string[] | `[]` | **Top-level opt-in contract list.** Only `project_state`, `host_owned_save`, `project_export` legal (unknown → strict→null). See §12. |
+| `capabilities` | O | string[] | `[]` | **Top-level opt-in contract list.** `project_state`, `host_owned_save`, `project_export`, `live_reload` (unknown → strict→null). See §12 and live reload below. |
 | `project_file` | O | object | — | `{serialize_channel, deserialize_channel}` — both must be non-empty AND in `ui.ipc_messages`. Required by `project_state`. |
 | `project_export` | O | object | — | `{collect_channel, apply_channel}` — same rules. Required by `project_export`. |
 | `permissions` | O | object | `{}` | `{host_capabilities[], network{}, filesystem{}}`. Unknown keys ignored. |
@@ -667,7 +667,7 @@ backend's tools.
 
 ### 7.1 Panel lifecycle hooks (full list)
 
-Every hook is **optional** and probed with `has_method` on your panel's scene root
+Unless an opt-in contract below requires it, every hook is **optional** and probed with `has_method` on your panel's scene root
 before it is called — omitting one is never an error, it just selects the platform's
 default behavior. Declare them on the root `Control` script.
 
@@ -687,6 +687,41 @@ default behavior. Declare them on the root `Control` script.
 | `_on_panel_render_for_llm(ctx) -> Array` | Your panel's content is being injected into a chat. | Return a canonical multimodal payload: an Array of `{"type":"text","text":String}` and/or `{"type":"image","image":Image,"alt":String}` parts. Return `[]` / omit the hook to fall back to the note's preview image. |
 | `_on_panel_inject_toggle_changed(enabled: bool)` | User toggles chat injection for this tab. | Fire-and-forget; the host's bookkeeping happens regardless. |
 | `get_annotation_host() -> RefCounted` | The editor is mounting the shared annotation toolbar/dock. | Return your `AnnotationHost` subclass — see [§18](#18-annotations). |
+
+### Opt-in scene live reload
+
+On hosts with the B1 live-reload substrate, add `"live_reload"` to the top-level
+`capabilities` array to opt native scene panels into generation swaps. Every
+`godot_scene` panel must declare `_on_panel_save_request() -> Dictionary` and
+`_on_panel_load_request(state: Dictionary)`. The save result must contain the
+complete transient state, including unsaved edits, undo history and view state;
+load must restore it exactly. Large integers survive the host's state envelope.
+
+Use relative resource paths and text `.gd`/`.tscn`/`.tres` files. Absolute plugin
+paths, UID-only references, computed resource loads, symlinks and cross-plugin
+preloads are refused. Host script references are limited to the public panel,
+document-buffer, annotation-schema/builtin-kind and responsive-container APIs.
+`ctx.data_directory` remains the original install directory. Read or write user
+data through that context or host services, rather than the disposable scene slot.
+
+An optional synchronous `_on_panel_self_check() -> bool` checks initialization and
+state import. Return `false` to refuse a candidate. Loaded/unload hooks must balance
+subscriptions. Validation can invoke the loaded lifecycle on a temporary panel
+with a private broker and no editor. Keep that path safe and tolerate a null editor.
+The host catches reported engine errors; some invalid calls are silent in release
+builds, so use self-checks and the retained previous version as well.
+
+Auto-reload watches nested scene sources. **Reload** / `minerva_plugin_reload`
+uses the same swap, preserving open documents; **Restart** restarts the backend.
+A refusal keeps the existing panels and selector and exposes a copyable reason.
+Changes to an open panel's `save_mode`, `chrome_suppress`, or `write_guidance`
+are refused for live activation; restart to adopt that policy in new tabs.
+**Revert to previous version** / `minerva_plugin_revert` selects the retained scene
+build while preserving current user data. Without a retained version it refuses.
+After a marketplace update, scene revert is a live-session escape: the backend
+remains installed, and the status asks for a restart to finish that update. On the
+next start the host validates the installed scene build, keeping the retained build
+if validation fails. Non-opt-in plugins retain restart-required behavior.
 
 **The `ctx` Dictionary** passed to `_on_panel_loaded` (and to the create-note /
 render-for-llm hooks):
