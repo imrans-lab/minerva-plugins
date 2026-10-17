@@ -515,3 +515,19 @@ def test_licence_directory_is_bundled_and_packed():
     assert "BUNDLE_LICENSE_DIR" in BUILD_TEXT
     assert 'cp -r licenses "$PACKDIR/"' in WORKFLOW_TEXT
     assert 'cp NOTICE.md "$PACKDIR/"' in WORKFLOW_TEXT
+
+def test_runtime_constraints_cover_census_and_all_dependency_installs() -> None:
+    """The committed census pins the complete resolve on every build path."""
+    constraints = CAD / LOCK.get("PIP_CONSTRAINTS", "missing-constraints")
+    assert constraints.is_file(), "lock must name the generated constraints file"
+    pins = dict(line.strip().split("==", 1)
+                for line in constraints.read_text(encoding="utf-8").splitlines()
+                if line.strip() and not line.startswith("#"))
+    assert pins == gn.read_manifest(), "regenerate constraints from the census"
+    assert 'CONSTRAINT_ARGS=( -c "$PLUGIN_DIR/$PIP_CONSTRAINTS" )' in BUILD_TEXT
+    commands = BUILD_TEXT.replace("\\\n", " ").splitlines()
+    dependency_installs = [line for line in commands
+                           if '"${DEPS[@]}"' in line and "pip install" in line]
+    assert len(dependency_installs) == 3
+    assert all('${CONSTRAINT_ARGS[@]+"${CONSTRAINT_ARGS[@]}"}' in line
+               for line in dependency_installs)

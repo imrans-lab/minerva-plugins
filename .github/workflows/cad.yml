@@ -173,10 +173,8 @@ jobs:
       # entry this platform lacks is a warning, since pexpect and ptyprocess
       # are POSIX-only and one census covers all three platforms.
       #
-      # Most transitives remain unpinned, so an upstream release turns this
-      # red. The few audited transitive pins in runtime-bundle.lock prevent
-      # known patch drift from changing identical source builds; any deliberate
-      # bump still requires the census and licence texts to move together.
+      # All distributions are constrained to the committed census. Deliberate
+      # refreshes move the census, constraints and licence texts together.
       - name: Verify the licence census still describes the built bundle
         # Both counters are load-bearing. A layout glob that matches nothing
         # expands to its own literal, so the candidate loop tests each path
@@ -517,6 +515,11 @@ jobs:
 
       - name: NOTICE gate (licence inventory drift check)
         run: python3 cad/scripts/gen_notice.py --check
+
+      - name: Report upstream runtime drift (Linux view)
+        if: github.event_name == 'schedule'
+        continue-on-error: true
+        run: python3 cad/scripts/runtime_drift.py
 
       # The suites that prove the gate can FAIL (and that the lock, the build
       # script and the workflow still agree about the pins), plus the

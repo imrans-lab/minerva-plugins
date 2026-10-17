@@ -71,6 +71,17 @@ for v in PBS_TAG CPYTHON WORKER_SOURCE_DIR WORKER_PACKAGES BUNDLE_OUT_DIR; do
   fi
 done
 : "${PIP_PKGS:=}"
+# Optional complete resolve, relative to the plugin directory. Constraints
+# limit versions without forcing platform-only packages to be installed.
+: "${PIP_CONSTRAINTS:=}"
+CONSTRAINT_ARGS=()
+if [ -n "$PIP_CONSTRAINTS" ]; then
+  if [ ! -f "$PLUGIN_DIR/$PIP_CONSTRAINTS" ]; then
+    echo "missing pip constraints: $PIP_CONSTRAINTS" >&2
+    exit 65
+  fi
+  CONSTRAINT_ARGS=( -c "$PLUGIN_DIR/$PIP_CONSTRAINTS" )
+fi
 # Wheels installed WITHOUT their declared dependencies — for a package whose
 # metadata pulls in more than the code path we ship ever imports. Each entry
 # must then be covered by LAYER1_IMPORTS, which is what proves the omission
@@ -442,10 +453,10 @@ if [ "$TRIPLE" = "$HOST_TRIPLE" ]; then
       LOCALAPPDATA="${LOCALAPPDATA}" \
       HOMEDRIVE="${HOMEDRIVE}" \
       HOMEPATH="${HOMEPATH}" \
-        "$STAGE_DIR/$PYTHON_BIN" -m pip install --no-cache-dir --no-input --no-compile --only-binary=:all: "${DEPS[@]}"
+        "$STAGE_DIR/$PYTHON_BIN" -m pip install --no-cache-dir --no-input --no-compile --only-binary=:all: ${CONSTRAINT_ARGS[@]+"${CONSTRAINT_ARGS[@]}"} "${DEPS[@]}"
     else
       PYTHONNOUSERSITE=1 \
-        "$STAGE_DIR/$PYTHON_BIN" -m pip install --no-cache-dir --no-input --no-compile --only-binary=:all: "${DEPS[@]}"
+        "$STAGE_DIR/$PYTHON_BIN" -m pip install --no-cache-dir --no-input --no-compile --only-binary=:all: ${CONSTRAINT_ARGS[@]+"${CONSTRAINT_ARGS[@]}"} "${DEPS[@]}"
     fi
   fi
   if [ ${#NODEPS_PYPI[@]} -gt 0 ]; then
@@ -490,7 +501,7 @@ else
       --python-version "$PY_MAJOR_MINOR" \
       --abi "$ABI" \
       --only-binary=:all: \
-      "${DEPS[@]}"
+      ${CONSTRAINT_ARGS[@]+"${CONSTRAINT_ARGS[@]}"} "${DEPS[@]}"
   fi
   if [ ${#NODEPS_PYPI[@]} -gt 0 ]; then
     "$HOST_PY" -m pip install --no-cache-dir --no-input \

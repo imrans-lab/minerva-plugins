@@ -16,11 +16,10 @@
 #
 #     python3 cad/scripts/gen_notice.py --census <stage>/lib/python3.12/site-packages
 #
-# Most entries are transitive and unconstrained, so an upstream release changes
-# these versions. A small set of audited transitive distributions is pinned in
-# runtime-bundle.lock because patch drift was making identical source builds
-# disagree with their committed licence texts. --verify-bundle still requires
-# every built distribution and version to match this census.
+# Every entry also constrains dependency resolution through the generated
+# runtime-bundle.constraints file named in the lock. Deliberate refreshes
+# update the census, constraints and reviewed licence texts together;
+# --verify-bundle still requires every built version to match this census.
 #
 # The census is the UNION over the three build platforms, so some entries are
 # absent from any one bundle: pexpect and ptyprocess are POSIX-only, colorama
