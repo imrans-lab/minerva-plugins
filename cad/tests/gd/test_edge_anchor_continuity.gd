@@ -4,6 +4,21 @@ const Host := preload("res://../../minerva-plugins/cad/ui/CadAnnotationHost.gd")
 const Tool := preload("res://../../minerva-plugins/cad/ui/tools/cad_edge_number_tool.gd")
 const Records := preload("res://../../minerva-plugins/cad/ui/scripts/object_records.gd")
 const LiveTools := preload("res://../../minerva-plugins/cad/ui/scripts/live_tools.gd")
+
+const Kind := preload("res://../../minerva-plugins/cad/ui/kinds/cad_edge_number_kind.gd")
+const Layout := preload("res://../../minerva-plugins/cad/ui/kinds/cad_edge_label_layout.gd")
+# Record draw commands, using the same render facade as test_source_annotations.
+class Drawing extends AnnotationRenderContext:
+	var labels: Array[String] = []
+	func draw_line(_a: Vector2, _b: Vector2, _color: Color, _width: float = 1.0) -> void:
+		pass
+	func draw_rect(_rect: Rect2, _color: Color, _filled: bool, _width: float = 1.0) -> void:
+		pass
+	func draw_polygon(_points: PackedVector2Array, _colors: PackedColorArray) -> void:
+		pass
+	func draw_string(_font: Font, _pos: Vector2, text: String, _color: Color, _size: int = 16) -> void:
+		labels.append(text)
+
 # Routing adapter only: the real tools and annotation host own all behavior.
 class TestPanel extends RefCounted:
 	var host: AnnotationHost
@@ -58,6 +73,7 @@ func _run() -> void:
 		and vec(labels[1].midpoint).distance_to(vec(data.consumed.midpoint)) < 0.0001)
 	var same: Dictionary = host._resolve_edge_anchor(survivor.anchor)
 	var stale: Dictionary = host._resolve_edge_anchor(consumed.anchor)
+	_check_label_presentation(host, tool, data)
 	var midpoint := vec(data.survivor.midpoint)
 	var remembered := vec(data.consumed.midpoint)
 	var legacy: Dictionary = host._resolve_edge_anchor({"plugin": "cad", "type": "edge", "id": data.after[0].id})
@@ -92,8 +108,53 @@ func _run() -> void:
 	check("surface arrow retains its stamped point on the same model",
 		anchor.has("geometry_stamp") and not attached.stale and attached.position.distance_to(point) < 0.0001)
 	tool._host = null
-	print("=== Results: %d passed, %d failed ===" % [3 - failed, failed])
+	print("=== Results: %d passed, %d failed ===" % [5 - failed, failed])
 	quit(1 if failed else 0)
+
+func _check_label_presentation(host: Host, tool: Tool, data: Dictionary) -> void:
+	var stored: Array = host.get_annotations()
+	var survivor: Dictionary = stored[0]
+	var consumed: Dictionary = stored[1]
+	# A live edge now owns the consumed edge's old evaluation-local number.
+	var replacement: Dictionary = tool._build_annotation(int(data.consumed.id), Vector3.ZERO)
+	assert(not host.add_annotation(replacement).is_empty())
+	stored = host.get_annotations()
+	var live_replacement: Dictionary = stored.back()
+	var viewport := SubViewport.new()
+	viewport.size = Vector2i(512, 512)
+	root.add_child(viewport)
+	var camera := Camera3D.new()
+	viewport.add_child(camera)
+	camera.position = Vector3(30, -30, 30)
+	camera.look_at(Vector3.ZERO, Vector3(0, 0, 1))
+	host.set_viewport_for("iso", viewport)
+	host.set_camera_for("iso", camera)
+	AnnotationHostRegistry.register("batch3_edge_labels", host)
+	var rect := Rect2(0, 0, 512, 512)
+	var positions: Dictionary = Layout.get_layout(host, camera, rect, stored)
+	var stale_key: String = str(consumed.id)
+	var replacement_key: String = str(live_replacement.id)
+	var drawing := Drawing.new()
+	drawing.host = host
+	var kind := Kind.new()
+	kind.render(drawing, consumed)
+	var stale_bounds: Rect2 = kind.bounds(consumed)
+	check("stale label draws ? and owns a layout slot apart from its reused old number",
+		drawing.labels == ["?"] and positions.has(stale_key) and positions.has(replacement_key)
+		and positions[stale_key].distance_to(positions[replacement_key]) > 1.0
+		and stale_bounds.get_center().distance_to(positions[stale_key]) < 0.01)
+	drawing.labels.clear()
+	kind.render(drawing, survivor)
+	var current_id: int = int(data.survivor_after.id)
+	var live_key: Variant = str(survivor.id) if positions.has(str(survivor.id)) else current_id
+	var live_bounds: Rect2 = kind.bounds(survivor)
+	check("renumbered live label keeps its current title and slot; stale hit target survives",
+		drawing.labels == [str(current_id)] and positions.has(live_key)
+		and live_bounds.get_center().distance_to(positions[live_key]) < 0.01
+		and stale_bounds.size.x > 0.0 and stale_bounds.size.y > 0.0
+		and kind.hit_test(consumed, stale_bounds.get_center(), 0.0))
+	AnnotationHostRegistry.deregister("batch3_edge_labels", host)
+	viewport.free()
 
 func vec(raw: Array) -> Vector3:
 	return Vector3(raw[0], raw[1], raw[2])

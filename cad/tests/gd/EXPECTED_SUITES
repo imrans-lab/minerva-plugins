@@ -964,4 +964,4 @@ test_live_tools_panel.gd assertions=17
 test_cad_panel_reload_integrity.gd assertions=6
 
 # Persistent edge geometry plus the independent surface-arrow point contract.
-test_edge_anchor_continuity.gd assertions=3
+test_edge_anchor_continuity.gd assertions=5

@@ -203,15 +203,16 @@ func render(ctx: AnnotationRenderContext, annotation: Dictionary) -> void:
 
 		# Ask the layout helper for a per-frame, per-pane non-overlapping
 		# screen position. Falls back to the legacy box_offset back-projection
-		# when the helper has no entry for this edge_id (e.g. anchor failed
+		# when the helper has no entry for this annotation id (e.g. anchor failed
 		# upstream or annotation list is being rebuilt).
 		var leader_end: Vector2 = camera.unproject_position(leader_end_world) + rect.position
 		if host.has_method("get_annotations"):
 			var all_anns: Array = host.get_annotations()
 			var layout: Dictionary = _LayoutHelper.get_layout(host, camera, rect, all_anns)
-			if layout.has(edge_id):
-				leader_end = layout[edge_id]
-		_Callout.draw(ctx, leader_start, leader_end, str(edge_id), text, is_stale)
+			var annotation_id: String = str(annotation.get("id", ""))
+			if layout.has(annotation_id):
+				leader_end = layout[annotation_id]
+		_Callout.draw(ctx, leader_start, leader_end, "?" if is_stale else str(edge_id), text, is_stale)
 
 
 func bounds(annotation: Dictionary) -> Rect2:
@@ -360,7 +361,6 @@ func _resolve_perspective_ctx_for_annotation(annotation: Dictionary) -> Dictiona
 		return {}
 	var resolved_d: Dictionary = resolved as Dictionary
 	var anchor_world: Vector3 = resolved_d.get("position", Vector3.ZERO)
-	var edge_id: int = int(resolved_d.get("edge_id", anchor.get("id", -1)))
 
 	var panes: Array = host.get_panes()
 	for pane in panes:
@@ -403,8 +403,8 @@ func _resolve_perspective_ctx_for_annotation(annotation: Dictionary) -> Dictiona
 			else:
 				var all_anns: Array = host.get_annotations() if host.has_method("get_annotations") else []
 				var layout: Dictionary = _LayoutHelper.get_layout(host, cam3, rect, all_anns)
-				if layout.has(edge_id):
-					box_screen = layout[edge_id]
+				if layout.has(ann_id_str):
+					box_screen = layout[ann_id_str]
 				else:
 					var box_offset2 := _vec3_from_payload(start_offset_arr)
 					box_screen = cam3.unproject_position(anchor_world + box_offset2) + rect.position

@@ -42,15 +42,15 @@ const _DEFAULT_RADIAL_PUSH_PX := 80.0
 
 
 # Per-camera cache. Keyed by camera instance id → {key: Array, layout: Dict}.
-# The layout dict is edge_id (int) → screen-space Vector2 (box center).
+# The layout dict is annotation id (String) → screen-space Vector2 (box center).
 static var _cache: Dictionary = {}
 
 
-## Returns Dictionary[int edge_id → Vector2 box_center_screen].
-## The keys are exactly the edge_ids of cad_edge_number annotations whose
+## Returns Dictionary[String annotation_id → Vector2 box_center_screen].
+## The keys are the saved ids of annotations whose
 ## anchors successfully resolve through host._resolve_edge_anchor.
 ##
-## Callers (the kind's render()) look up their own edge_id and use the result
+## Callers (the kind's render()) look up their own annotation id and use the result
 ## as the box center, falling back to the legacy box_offset path if the id is
 ## missing (e.g. anchor failed to resolve).
 static func get_layout(
@@ -87,7 +87,7 @@ static func get_layout(
 	# Build initial positions: project anchor + box_offset. Fan out anchors
 	# whose offset is effectively zero so the spread has working room.
 	var positions: Dictionary = {}
-	# Track which edge_ids are user-placed (drag-pinned). Their position is
+	# Track which annotation ids are user-placed (drag-pinned). Their position is
 	# canonical and the spread treats them as static obstacles — other labels
 	# move around them but they don't move themselves.
 	var user_placed_ids: Dictionary = {}
@@ -104,10 +104,9 @@ static func get_layout(
 		if kind not in ["cad_edge_number", "cad_source_annotation"]:
 			continue
 		var leader_start_world: Vector3
-		var edge_id: Variant
+		var annotation_id: String = str(ann_d.get("id", ""))
 		if kind == "cad_source_annotation":
 			leader_start_world = _vec3_from_payload(ann_d.get("anchor", {}).get("point", []))
-			edge_id = str(ann_d.get("id", ""))
 		else:
 			if camera.projection != Camera3D.PROJECTION_PERSPECTIVE:
 				continue
@@ -118,7 +117,7 @@ static func get_layout(
 			if not resolved is Dictionary:
 				continue
 			leader_start_world = resolved.get("position", Vector3.ZERO)
-			edge_id = int(resolved.get("edge_id", anchor.get("id", -1)))
+			var edge_id: int = int(resolved.get("edge_id", anchor.get("id", -1)))
 			if edge_id < 0:
 				continue
 		var payload: Dictionary = ann_d.get("kind_payload", ann_d.get("payload", {}))
@@ -144,9 +143,9 @@ static func get_layout(
 			box_center = anchor_screen + dir.normalized() * push_px
 			fan_index += 1
 
-		positions[edge_id] = box_center
+		positions[annotation_id] = box_center
 		if user_placed:
-			user_placed_ids[edge_id] = true
+			user_placed_ids[annotation_id] = true
 
 	# Spread overlapping boxes in screen space. Pairwise iteration: for each
 	# overlapping pair, push them apart along the dominant axis of their
