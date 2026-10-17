@@ -149,7 +149,7 @@ jobs:
           python3 ../scripts/verify-packed-manifest.py manifest.json "$PACKDIR/manifest.json"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: drive-${{ matrix.target }}
           path: drive/dist/drive-*-${{ matrix.target }}.tar.gz
