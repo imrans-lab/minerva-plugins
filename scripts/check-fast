@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+"""Local-only working-tree checks. Requires Python/PyYAML and the pinned Go toolchain."""
+import argparse
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+def main() -> int:
+    argparse.ArgumentParser(description=__doc__).parse_args()
+    root = Path(__file__).resolve().parents[1]
+    checks = [
+        ("push-lanes", root, [sys.executable, "scripts/ci/check_push_lanes.py"]),
+        ("dependency-coherence", root, [sys.executable, "scripts/ci/test_dependency_coherence.py"]),
+        ("packed-manifest", root, [sys.executable, "scripts/test_verify_packed_manifest.py"]),
+        ("cad-script-whitelist", root / "cad",
+         ["go", "test", "-run", "^TestPanelSceneScriptsAreWhitelisted$", "."]),
+        ("cad-notice", root, [sys.executable, "cad/scripts/gen_notice.py", "--check"]),
+        ("pcb-notice", root, [sys.executable, "pcb/scripts/gen_notice.py", "--check"]),
+    ]
+    started = time.monotonic()
+    failures = 0
+    for name, cwd, command in checks:
+        before = time.monotonic()
+        try:
+            result = subprocess.run(command, cwd=cwd, check=False)
+            passed = result.returncode == 0
+        except OSError as error:
+            print(f"{name}: {error}", file=sys.stderr)
+            passed = False
+        failures += not passed
+        print(f"{'PASS' if passed else 'FAIL'} {name} ({time.monotonic() - before:.2f}s)",
+              flush=True)
+    print(f"{'FAIL' if failures else 'PASS'} total ({time.monotonic() - started:.2f}s; "
+          f"{failures} failed checks)")
+    return int(failures > 0)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

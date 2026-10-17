@@ -35,6 +35,10 @@ _None yet — this repo is freshly initialized._
 
 ## Before pushing
 
+Before every commit run `scripts/check-fast` locally (Python/PyYAML and the pinned Go toolchain; no application builds, full suites or GATE-W).
+
+After publishing, fetch tags and run `python3 scripts/verify-release.py <plugin-id> <tag>` to verify every target's GitHub digest, internal checksums and packed manifest against the tagged source. Use `--download-dir <directory>` to retain inputs, or `--local-dir <directory>` to verify saved `source.json`, GitHub `release.json` and archives offline. The default download directory is temporary. Docket's separate repository, sidecars and manifest transform are out of scope for v1. This command does not change the registry or publish anything.
+
 Scan the exact outgoing commit range for credentials. This catches a secret that
 was committed and removed again inside the same range, which a working-tree scan
 cannot see:

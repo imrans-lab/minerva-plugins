@@ -4,6 +4,8 @@ import json
 import sys
 from pathlib import Path
 
+from packed_manifest import verify_packed_manifest
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -11,10 +13,11 @@ def main() -> int:
     parser.add_argument("packed", type=Path)
     args = parser.parse_args()
     source = json.loads(args.source.read_text(encoding="utf-8"))
-    source.pop("setup", None)
     packed = json.loads(args.packed.read_text(encoding="utf-8"))
-    if packed != source:
-        print(f"{args.packed}: packed manifest differs from source minus setup", file=sys.stderr)
+    try:
+        verify_packed_manifest(source, packed)
+    except ValueError as error:
+        print(f"{args.packed}: {error}", file=sys.stderr)
         return 1
     print(f"{args.packed}: packed manifest matches source minus setup")
     return 0
