@@ -19,3 +19,7 @@ Require exit zero, the expected assertion count, and no script errors. PNGs are
 written to the isolated Godot user directory. The test intentionally fails when
 no rendering driver is available. Syntax can be checked first using Godot's
 `--headless --check-only` flags with the same project/script paths.
+
+`test_pose_arguments.gd` uses the same command with its own script path. It
+requires 2 assertions: misplaced pose fields are refused, the documented nested
+pose writes a PNG, and the view-only anti-case still writes a PNG.
