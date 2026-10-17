@@ -4,14 +4,14 @@
     {
       "id": "cad",
       "name": "CAD",
-      "version": "0.3.21",
-      "manifest_version": "0.3.21",
-      "release_tag": "cad-v0.3.21",
-      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/cad-v0.3.21/cad/manifest.json",
+      "version": "0.3.22",
+      "manifest_version": "0.3.22",
+      "release_tag": "cad-v0.3.22",
+      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/cad-v0.3.22/cad/manifest.json",
       "downloads": {
-        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.3.21/cad-0.3.21-linux-x86_64.tar.gz",
-        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.3.21/cad-0.3.21-macos-universal.tar.gz",
-        "windows-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.3.21/cad-0.3.21-windows-x86_64.tar.gz"
+        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.3.22/cad-0.3.22-linux-x86_64.tar.gz",
+        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.3.22/cad-0.3.22-macos-universal.tar.gz",
+        "windows-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.3.22/cad-0.3.22-windows-x86_64.tar.gz"
       },
       "description": "Design 3D parts and assemblies by writing short scripts, and see them drawn as solid models you can orbit in a four-view editor. Your AI agent can build and edit designs with you and check them: measure holes and clearances, find collisions and fastener problems, and test that a part can slide in or out. Import STL or glTF meshes as references, and export your design as STEP, STL, 3MF, or glTF files. Models are saved in .mcad files. The plugin brings its own Python geometry engine, so there is nothing else to install.",
       "price": {
@@ -22,14 +22,14 @@
     {
       "id": "codetools",
       "name": "Code Tools",
-      "version": "0.3.6",
-      "manifest_version": "0.3.6",
-      "release_tag": "codetools-v0.3.6",
-      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/codetools-v0.3.6/codetools/manifest.json",
+      "version": "0.3.7",
+      "manifest_version": "0.3.7",
+      "release_tag": "codetools-v0.3.7",
+      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/codetools-v0.3.7/codetools/manifest.json",
       "downloads": {
-        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/codetools-v0.3.6/codetools-0.3.6-linux-x86_64.tar.gz",
-        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/codetools-v0.3.6/codetools-0.3.6-macos-universal.tar.gz",
-        "windows-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/codetools-v0.3.6/codetools-0.3.6-windows-x86_64.tar.gz"
+        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/codetools-v0.3.7/codetools-0.3.7-linux-x86_64.tar.gz",
+        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/codetools-v0.3.7/codetools-0.3.7-macos-universal.tar.gz",
+        "windows-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/codetools-v0.3.7/codetools-0.3.7-windows-x86_64.tar.gz"
       },
       "description": "Code-understanding tools for your AI agent and a code-graph panel for you. It indexes a repository's files and symbols, then lets you search them, see what calls what, spot dead code and duplication, and review git diffs side by side. It also gives the agent file read, write, edit, search, and shell tools. It brings its own Python runtime, so there is nothing else to install.",
       "price": {
@@ -110,13 +110,13 @@
     {
       "id": "multimeter",
       "name": "MultiMeter",
-      "version": "0.2.1",
-      "manifest_version": "0.2.1",
-      "release_tag": "multimeter-v0.2.1",
-      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/multimeter-v0.2.1/multimeter/manifest.json",
+      "version": "0.2.2",
+      "manifest_version": "0.2.2",
+      "release_tag": "multimeter-v0.2.2",
+      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/multimeter-v0.2.2/multimeter/manifest.json",
       "downloads": {
-        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/multimeter-v0.2.1/multimeter-0.2.1-linux-x86_64.tar.gz",
-        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/multimeter-v0.2.1/multimeter-0.2.1-macos-universal.tar.gz"
+        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/multimeter-v0.2.2/multimeter-0.2.2-linux-x86_64.tar.gz",
+        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/multimeter-v0.2.2/multimeter-0.2.2-macos-universal.tar.gz"
       },
       "description": "Read an OWON B41T+ Bluetooth digital multimeter live inside Minerva. Your AI agent can read the current measurement, watch trends, press the meter's buttons, and record readings to CSV; the panel shows the live value with a rolling graph. Needs the meter powered on with its Bluetooth enabled and a Bluetooth radio on this computer; nothing else to install.",
       "price": {
@@ -144,15 +144,15 @@
     {
       "id": "pcb",
       "name": "PCB Editor",
-      "version": "0.8.5",
-      "manifest_version": "0.8.5",
-      "release_tag": "pcb-v0.8.5",
-      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/pcb-v0.8.5/pcb/manifest.json",
+      "version": "0.8.6",
+      "manifest_version": "0.8.6",
+      "release_tag": "pcb-v0.8.6",
+      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/pcb-v0.8.6/pcb/manifest.json",
       "downloads": {
-        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/pcb-v0.8.5/pcb-0.8.5-linux-x86_64.tar.gz",
-        "linux-arm64": "https://github.com/imrans-lab/minerva-plugins/releases/download/pcb-v0.8.5/pcb-0.8.5-linux-arm64.tar.gz",
-        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/pcb-v0.8.5/pcb-0.8.5-macos-universal.tar.gz",
-        "windows-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/pcb-v0.8.5/pcb-0.8.5-windows-x86_64.tar.gz"
+        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/pcb-v0.8.6/pcb-0.8.6-linux-x86_64.tar.gz",
+        "linux-arm64": "https://github.com/imrans-lab/minerva-plugins/releases/download/pcb-v0.8.6/pcb-0.8.6-linux-arm64.tar.gz",
+        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/pcb-v0.8.6/pcb-0.8.6-macos-universal.tar.gz",
+        "windows-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/pcb-v0.8.6/pcb-0.8.6-windows-x86_64.tar.gz"
       },
       "description": "Design printed circuit boards in Minerva. Place and route components, manage nets and copper layers, and check your design. When the board is ready, export a manufacturing order package in JLCPCB's format or a 3D model of the assembled board. Your AI agent can read and edit the board with you. Adding official KiCad parts and fetching vendor 3D models needs an internet connection; nothing else to install.",
       "price": {
