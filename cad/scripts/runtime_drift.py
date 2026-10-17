@@ -1,13 +1,12 @@
-#!/usr/bin/env python3
 """Report a fresh Linux dependency resolve; never change the runtime lock."""
 from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 from gen_notice import canonical_name, read_lock_vars, read_manifest
 

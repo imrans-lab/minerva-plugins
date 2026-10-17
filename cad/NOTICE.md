@@ -568,7 +568,7 @@ Colour-name parsing; a build123d dependency.
 
 Files under `cad/licenses/` that are not a component's licence text but travel with the distribution. Declared in `DECLARED_SUPPORT_FILES`, so the gate demands them by name.
 
-- `cad/licenses/README.md` (sha256 3bbf805cc1a5e2beccd5cb00021ad404c40a19e3b4f3d5a019f349d93b78b1ae) — explains what the directory is, how it reaches the distribution, and what to do when adding a dependency
+- `cad/licenses/README.md` (sha256 2db407ab0d63abb93bd5d74fb42e581873ffceb98ab9cb0441e9aa9620b2b223) — explains what the directory is, how it reaches the distribution, and what to do when adding a dependency
 
 ## Excluded from the inventory
 
