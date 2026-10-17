@@ -99,6 +99,7 @@ jobs:
           fi
           tar -czf "${PACKDIR}.tar.gz" -C "$PACKDIR" .
           tar -tzf "${PACKDIR}.tar.gz"
+          python3 ../scripts/verify-packed-manifest.py manifest.json "$PACKDIR/manifest.json"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -128,6 +129,7 @@ jobs:
           pattern: smart_remote-*
           path: artifacts/
           merge-multiple: true
+
       - name: Compute tag and apply release guard
         id: tag
         shell: bash

@@ -164,7 +164,10 @@ jobs:
           go build -trimpath -o "build/council-plugin${{ matrix.ext }}" .
 
       - name: Pack release tarball
-        run: bash scripts/pack-release.sh "${{ matrix.target }}" "build/council-plugin${{ matrix.ext }}" dist
+        run: |
+          bash scripts/pack-release.sh "${{ matrix.target }}" "build/council-plugin${{ matrix.ext }}" dist
+          ARCHIVE=$(bash scripts/pack-release.sh --print-name "${{ matrix.target }}")
+          python3 ../scripts/verify-packed-manifest.py manifest.json "dist/${ARCHIVE%.tar.gz}/manifest.json"
 
       # The archive's only gate, and the one that decides the acceptance
       # criteria: the layout against the manifest's declared paths, `setup`

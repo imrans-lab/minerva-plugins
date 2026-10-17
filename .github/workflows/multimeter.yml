@@ -133,6 +133,7 @@ jobs:
           tar -czf "dist/multimeter-${VERSION}-${PLATFORM}.tar.gz" -C "$PACKDIR" .
           tar -tzf "dist/multimeter-${VERSION}-${PLATFORM}.tar.gz"
           ls -la "dist/multimeter-${VERSION}-${PLATFORM}.tar.gz"
+          python3 ../scripts/verify-packed-manifest.py manifest.json "$PACKDIR/manifest.json"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

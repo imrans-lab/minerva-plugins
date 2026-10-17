@@ -215,6 +215,7 @@ jobs:
           echo "Packed contents:"
           tar -tzf "dist/codetools-${VERSION}-${PLATFORM}.tar.gz"
           ls -la "dist/codetools-${VERSION}-${PLATFORM}.tar.gz"
+          python3 ../scripts/verify-packed-manifest.py manifest.json "$PACKDIR/manifest.json"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

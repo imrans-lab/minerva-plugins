@@ -81,7 +81,9 @@ jobs:
           go vet ./...
 
       - name: Build self-contained marketplace archive
-        run: python3 scripts/package.py --target '${{ matrix.target }}'
+        run: |
+          python3 scripts/package.py --target '${{ matrix.target }}'
+          python3 ../scripts/verify-packed-manifest.py manifest.json "build/package-${{ matrix.target }}/manifest.json"
 
       - name: Packaged MCP handshake (no USB access)
         run: python3 ../scripts/smoke/mcp_smoke.py "$PWD/build/package-${{ matrix.target }}/oscilloscope-plugin"

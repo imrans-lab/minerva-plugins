@@ -805,6 +805,7 @@ jobs:
               | xargs -0 shasum -a 256 | sed 's| \./| |' > SHA256SUMS)
           fi
           tar -czf "dist/pcb-${VERSION}-${PLATFORM}.tar.gz" -C "$PACKDIR" .
+          python3 ../scripts/verify-packed-manifest.py manifest.json "$PACKDIR/manifest.json"
 
       # Drive ONE worker method end-to-end through the PACKED layout — the
       # binary beside the library/ and manifest the tarball ships, its embedded
