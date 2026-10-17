@@ -33,7 +33,7 @@ import (
 const (
 	protocolVersion = "2024-11-05"
 	serverName      = "codetools"
-	serverVersion   = "0.3.5"
+	serverVersion   = "0.3.6"
 
 	// workerModule is the python package the Go shim spawns (`python -m <module>`).
 	workerModule = "codetools_worker"
