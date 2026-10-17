@@ -710,6 +710,8 @@ An optional synchronous `_on_panel_self_check() -> bool` checks initialization a
 state import. Return `false` to refuse a candidate. Loaded/unload hooks must balance
 subscriptions. Validation can invoke the loaded lifecycle on a temporary panel
 with a private broker and no editor. Keep that path safe and tolerate a null editor.
+`_on_panel_loaded` must be side-effect-safe: validation may call it on hidden
+probe instances with the plugin's real `data_directory`.
 The host catches reported engine errors; some invalid calls are silent in release
 builds, so use self-checks and the retained previous version as well.
 
