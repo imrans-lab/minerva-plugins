@@ -89,7 +89,7 @@ jobs:
         run: python3 ../scripts/smoke/mcp_smoke.py "$PWD/build/package-${{ matrix.target }}/oscilloscope-plugin"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: oscilloscope-${{ matrix.target }}
           path: oscilloscope/dist/oscilloscope-*-${{ matrix.target }}.tar.gz
@@ -116,7 +116,7 @@ jobs:
           fetch-depth: 0
 
       - name: Download all matrix tarballs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: oscilloscope-*
           path: artifacts/
@@ -142,7 +142,7 @@ jobs:
 
       - name: Publish GitHub Release
         if: steps.tag.outputs.publish == 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: ${{ steps.tag.outputs.tag }}

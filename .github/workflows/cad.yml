@@ -139,7 +139,7 @@ jobs:
           zstd --version
 
       - name: Cache PBS downloads
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           # Cache the python-build-standalone tarballs (~25-50MB each, ~5min
           # download cold). Key on the lock file so a version bump invalidates.
@@ -369,7 +369,7 @@ jobs:
           python3 ../scripts/verify-packed-manifest.py manifest.json "$PACKDIR/manifest.json"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cad-${{ matrix.target }}
           path: cad/dist/cad-*-${{ matrix.target }}.tar.gz
@@ -548,7 +548,7 @@ jobs:
           fetch-depth: 0
 
       - name: Download all matrix tarballs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: cad-*
           path: artifacts/
@@ -577,7 +577,7 @@ jobs:
 
       - name: Publish GitHub Release
         if: steps.tag.outputs.publish == 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: ${{ steps.tag.outputs.tag }}

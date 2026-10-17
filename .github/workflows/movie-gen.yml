@@ -147,7 +147,7 @@ jobs:
           python3 ../scripts/verify-packed-manifest.py manifest.json "$PACKDIR/manifest.json"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: movie_gen-${{ matrix.target }}
           path: movie-gen/dist/movie_gen-*-${{ matrix.target }}.tar.gz
@@ -173,7 +173,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Download all matrix tarballs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: movie_gen-*
           path: artifacts/
@@ -203,7 +203,7 @@ jobs:
           echo "Computed: tag=$TAG prerelease=$PRE"
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: ${{ steps.tag.outputs.tag }}
