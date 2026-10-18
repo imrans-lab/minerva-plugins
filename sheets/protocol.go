@@ -14,13 +14,37 @@ type rpcError struct {
 	Message string `json:"message"`
 }
 
-// One reader serves outer requests and their nested capability replies. The
-// host serializes backend requests; correlation also tolerates notifications.
+type queuedRequest struct {
+	packet []byte
+	id     json.RawMessage
+}
+
+// One reader preserves host requests that arrive during nested capability waits.
 type rpcStream struct {
-	scanner  *bufio.Scanner
-	encoder  *json.Encoder
-	sequence int
-	activeID json.RawMessage
+	scanner     *bufio.Scanner
+	encoder     *json.Encoder
+	sequence    int
+	activeID    json.RawMessage
+	queued      []queuedRequest
+	queuedBytes int
+	current     []byte
+}
+
+func (s *rpcStream) next(ctx context.Context) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	if len(s.queued) != 0 {
+		s.current = s.queued[0].packet
+		s.queuedBytes -= len(s.current)
+		s.queued = s.queued[1:]
+		return true
+	}
+	if !s.scan(ctx) {
+		return false
+	}
+	s.current = s.scanner.Bytes()
+	return true
 }
 
 func newStream(input io.Reader, output io.Writer) *rpcStream {
@@ -75,6 +99,30 @@ func (s *rpcStream) capability(ctx context.Context, capability string, args map[
 			if string(cancellation.RequestID) == string(s.activeID) {
 				return nil, context.Canceled
 			}
+			for index, queued := range s.queued {
+				if string(queued.id) == string(cancellation.RequestID) {
+					if err := s.write(ctx, map[string]any{"jsonrpc": "2.0", "id": queued.id,
+						"error": map[string]any{"code": -32800, "message": "Request cancelled before execution"}}); err != nil {
+						return nil, err
+					}
+					s.queuedBytes -= len(queued.packet)
+					s.queued = append(s.queued[:index], s.queued[index+1:]...)
+					break
+				}
+			}
+		}
+		if response.Method != "" && len(response.ID) != 0 && string(response.ID) != "null" {
+			if len(s.queued) >= 64 || s.queuedBytes+len(s.scanner.Bytes()) > 16<<20 {
+				if err := s.write(ctx, map[string]any{"jsonrpc": "2.0", "id": response.ID,
+					"error": map[string]any{"code": -32000, "message": "Sheets request queue is full; retry later"}}); err != nil {
+					return nil, err
+				}
+			} else {
+				packet := append([]byte(nil), s.scanner.Bytes()...)
+				s.queued = append(s.queued, queuedRequest{packet: packet, id: response.ID})
+				s.queuedBytes += len(packet)
+			}
+			continue
 		}
 		if string(response.ID) != fmt.Sprintf("%q", id) || response.Method != "" {
 			log.Printf("ignoring unrelated RPC while awaiting capability %s", id)

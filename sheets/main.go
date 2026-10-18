@@ -56,9 +56,9 @@ func serve(ctx context.Context, input io.ReadCloser, output io.WriteCloser) erro
 		"sheets.collect_export": `{"files":[]}`,
 		"sheets.apply_export":   `{"ok":true}`,
 	}
-	for stream.scan(ctx) {
+	for stream.next(ctx) {
 		var message request
-		if err := json.Unmarshal(stream.scanner.Bytes(), &message); err != nil {
+		if err := json.Unmarshal(stream.current, &message); err != nil {
 			if err := stream.write(ctx, map[string]any{"jsonrpc": "2.0", "id": nil, "error": map[string]any{"code": -32700, "message": "Invalid JSON"}}); err != nil {
 				return err
 			}
