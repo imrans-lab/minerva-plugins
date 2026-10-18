@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 )
 
 func failure(code, message string) map[string]any {
@@ -98,18 +99,20 @@ func createEditor(ctx context.Context, stream *rpcStream, raw json.RawMessage) m
 		result["note"] = "name was ignored for a file-backed spreadsheet; editor_name identifies the opened tab."
 	}
 	if args.FilePath != "" || args.CSVContent != "" {
-		data, readErr := stream.capability(ctx, "mcp.proxy:minerva_sheets_get_data", map[string]any{"editor_name": name, "format": "json"})
+		data, readErr := stream.capability(ctx, "mcp.proxy:minerva_sheets_get_data", map[string]any{"editor_name": name, "format": "json", "range": "A1"})
 		if readErr != nil || data["success"] != true {
 			refusal := failure("import_verification_failed", fmt.Sprintf("Spreadsheet tab %q remains open, but imported rows could not be verified.", name))
 			refusal["editor_name"] = name
 			return refusal
 		}
-		rows, ok := data["data"].([]any)
-		if !ok {
-			return failure("import_verification_failed", fmt.Sprintf("Spreadsheet tab %q returned invalid imported row data.", name))
+		rows, ok := data["used_row_count"].(float64)
+		if !ok || rows < 0 || rows != math.Trunc(rows) {
+			refusal := failure("import_verification_failed", fmt.Sprintf("Spreadsheet tab %q returned invalid imported row counts.", name))
+			refusal["editor_name"] = name
+			return refusal
 		}
-		result["rows_imported"] = len(rows)
-		if len(rows) == 0 {
+		result["rows_imported"] = rows
+		if rows == 0 {
 			result["warning"] = "Import produced 0 rows — the file/CSV had no usable data. Verify the source before continuing; do NOT proceed as if data were loaded."
 		}
 	}

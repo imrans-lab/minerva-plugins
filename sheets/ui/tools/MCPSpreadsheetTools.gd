@@ -108,32 +108,6 @@ func handle(tool_name: String, arguments: Dictionary) -> Dictionary:
 
 #region Helpers
 
-## Helper to generate CSV including empty rows from row 0
-func _to_csv_with_empty_rows(data) -> String:
-	var used_range: Rect2i = data.get_used_range()
-	if used_range.size == Vector2i.ZERO:
-		return ""
-
-	var lines := PackedStringArray()
-	var delimiter := ","
-
-	# Start from row 0, not from used_range.position.y
-	for row in range(0, used_range.end.y):
-		var values := PackedStringArray()
-		for col in range(used_range.position.x, used_range.end.x):
-			var cell = data.get_cell_if_exists(row, col)
-			var val := ""
-			if cell and not cell.is_empty():
-				val = str(cell.value)
-				# Escape delimiter and quotes
-				if delimiter in val or '"' in val or '\n' in val:
-					val = '"' + val.replace('"', '""') + '"'
-			values.append(val)
-		lines.append(delimiter.join(values))
-
-	return "\n".join(lines)
-
-
 ## Export spreadsheet as raw JSON data
 func _export_raw(data: SpreadsheetDataScript) -> Dictionary:
 	var bounds := data.get_used_range()
@@ -278,54 +252,110 @@ func _create_spreadsheet_editor(_args: Dictionary) -> Dictionary:
 
 func _get_spreadsheet_data(args: Dictionary) -> Dictionary:
 	var editor_name: String = args.get("editor_name", "")
-	var format_: String = args.get("format", "csv")
-	#var range_str: String = args.get("range", "")
-	var include_empty_rows: bool = args.get("include_empty_rows", false)
 
 	if editor_name.is_empty():
 		return ToolUtils.error("editor_name is required")
 
-	var editor = ToolUtils.find_spreadsheet(editor_name, _sheet, _matches_locator)
+	var editor: ToolUtils.EditorTarget = ToolUtils.find_spreadsheet(editor_name, _sheet, _matches_locator)
 	if not editor:
 		return ToolUtils.error("Spreadsheet editor not found: %s" % editor_name)
 
 	if not editor.spreadsheet_editor:
 		return ToolUtils.error("Spreadsheet editor not initialized")
 
-	var data = editor.spreadsheet_editor.spreadsheet_data
+	var data: SpreadsheetDataScript = editor.spreadsheet_editor.spreadsheet_data
 	if not data:
 		return ToolUtils.error("No spreadsheet data available")
 
-	# Get the used range to determine where data starts
-	var used_range: Rect2i = data.get_used_range()
-	var data_starts_at_row: int = used_range.position.y + 1  # Convert to 1-based
+	return read_data(data, args)
 
+
+# The browser-control JSON-RPC envelope is limited to 64 KiB. Capping the
+# application JSON at 30 KiB reserves its second JSON-escaping pass and framing.
+const READ_REPLY_BYTES: int = 30 * 1024
+
+static func _range_label(bounds: Rect2i) -> String:
+	var first: String = SpreadsheetDataScript.cell_to_reference(bounds.position.y, bounds.position.x)
+	var last: String = SpreadsheetDataScript.cell_to_reference(bounds.end.y - 1, bounds.end.x - 1)
+	return first if bounds.size == Vector2i.ONE else first + ":" + last
+
+static func _read_bounds(text: String, data: SpreadsheetDataScript) -> Rect2i:
+	var regex := RegEx.new()
+	regex.compile("^\\$?([A-Z]+)\\$?([1-9][0-9]*)(?::\\$?([A-Z]+)\\$?([1-9][0-9]*))?$")
+	var matched: RegExMatch = regex.search(text.to_upper().strip_edges())
+	if matched == null:
+		return Rect2i(-1, -1, -1, -1)
+	var positions: Array[Vector2i] = []
+	for index: int in [1, 3]:
+		var column: String = matched.get_string(index)
+		var row: String = matched.get_string(index + 1)
+		if column.is_empty():
+			positions.append(positions[0])
+			continue
+		# Check digit lengths before conversion so huge references cannot overflow.
+		if column.length() > SpreadsheetDataScript.get_column_label(data.column_count - 1).length() or row.length() > str(data.row_count).length():
+			return Rect2i(-1, -1, -1, -1)
+		var position := Vector2i(SpreadsheetDataScript.parse_column_label(column), row.to_int() - 1)
+		if position.x >= data.column_count or position.y >= data.row_count:
+			return Rect2i(-1, -1, -1, -1)
+		positions.append(position)
+	if positions[1].x < positions[0].x or positions[1].y < positions[0].y:
+		return Rect2i(-1, -1, -1, -1)
+	return Rect2i(positions[0], positions[1] - positions[0] + Vector2i.ONE)
+
+static func _read_reply(data: SpreadsheetDataScript, bounds: Rect2i, used: Rect2i,
+		format_: String, ranged: bool) -> Dictionary:
 	var content: Variant
 	match format_:
-		"csv":
-			if include_empty_rows:
-				content = _to_csv_with_empty_rows(data)
-			else:
-				content = data.to_csv(",")
-		"json":
-			content = data.to_json_array()
-		"markdown":
-			content = data.to_markdown()
-		_:
-			if include_empty_rows:
-				content = _to_csv_with_empty_rows(data)
-			else:
-				content = data.to_csv(",")
+		"json": content = data.to_json_array(bounds)
+		"markdown": content = data.to_markdown(false, bounds, false, not ranged)
+		_: content = data.to_csv(",", bounds)
+	var result := {"success": true, "format": format_, "data": content,
+		"row_count": data.row_count, "column_count": bounds.size.x if ranged else data.column_count,
+		"used_row_count": used.size.y, "used_column_count": used.size.x,
+		"data_starts_at_row": bounds.position.y + 1, "has_leading_empty_rows": used.position.y > 0}
+	if ranged:
+		result["range"] = _range_label(bounds) if bounds.has_area() else ""
+	return result
 
-	return {
-		"success": true,
-		"format": format_,
-		"data": content,
-		"row_count": data.row_count,
-		"column_count": data.column_count,
-		"data_starts_at_row": data_starts_at_row,
-		"has_leading_empty_rows": data_starts_at_row > 1
-	}
+static func read_data(data: SpreadsheetDataScript, args: Dictionary) -> Dictionary:
+	var used: Rect2i = data.get_used_range()
+	var bounds: Rect2i = used
+	var range_text: String = args.get("range", "")
+	var format_: String = args.get("format", "csv")
+	var ranged: bool = not range_text.is_empty()
+	if ranged:
+		bounds = _read_bounds(range_text, data)
+		if bounds.size.x < 0:
+			return {"success": false, "error_code": "invalid_range",
+				"error_message": "Use A1 or A1:C10 in ascending order within the allocated sheet grid.",
+				"row_count": data.row_count, "column_count": data.column_count}
+		bounds = bounds.intersection(used)
+	elif args.get("include_empty_rows", false) and format_ not in ["json", "markdown"]:
+		bounds = Rect2i(used.position.x, 0, used.size.x, used.end.y)
+	var result: Dictionary = _read_reply(data, bounds, used, format_, ranged)
+	# Keep the historical offset for full CSV reads that include leading blanks.
+	if not ranged:
+		result["data_starts_at_row"] = used.position.y + 1
+	var bytes: int = JSON.stringify(result).to_utf8_buffer().size()
+	if bytes <= READ_REPLY_BYTES:
+		return result
+	var refusal := {"success": false, "error_code": "payload_too_large",
+		"error_message": "Read a smaller range; no cell data was returned.",
+		"row_count": data.row_count, "column_count": data.column_count,
+		"used_row_count": used.size.y, "used_column_count": used.size.x,
+		"would_return_bytes": bytes, "budget_bytes": READ_REPLY_BYTES}
+	var first := Rect2i(bounds.position, Vector2i.ONE)
+	var sample: Dictionary = _read_reply(data, first, used, format_, true)
+	if JSON.stringify(sample).to_utf8_buffer().size() <= READ_REPLY_BYTES:
+		refusal["suggested_range"] = _range_label(first)
+	else:
+		refusal["error_code"] = "cell_too_large"
+		refusal["error_message"] = "This cell cannot fit in one read; no cell data was returned."
+		refusal["cell"] = _range_label(first)
+		var cell: SpreadsheetCellScript = data.get_cell_if_exists(first.position.y, first.position.x)
+		refusal["cell_bytes"] = str(cell.value).to_utf8_buffer().size() if cell != null else 0
+	return refusal
 
 
 func _update_spreadsheet_data(args: Dictionary) -> Dictionary:

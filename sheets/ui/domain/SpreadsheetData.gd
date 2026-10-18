@@ -817,8 +817,8 @@ func load_from_dict(data: Dictionary) -> void:
 
 
 ## Convert to CSV string
-func to_csv(delimiter: String = ",") -> String:
-	var used_range := get_used_range()
+func to_csv(delimiter: String = ",", bounds: Rect2i = Rect2i(-1, -1, -1, -1)) -> String:
+	var used_range: Rect2i = get_used_range() if bounds.size.x < 0 else bounds
 	if used_range.size == Vector2i.ZERO:
 		return ""
 
@@ -841,8 +841,8 @@ func to_csv(delimiter: String = ",") -> String:
 
 
 ## Convert to JSON array format
-func to_json_array() -> Array:
-	var used_range := get_used_range()
+func to_json_array(bounds: Rect2i = Rect2i(-1, -1, -1, -1)) -> Array:
+	var used_range: Rect2i = get_used_range() if bounds.size.x < 0 else bounds
 	if used_range.size == Vector2i.ZERO:
 		return []
 
@@ -1089,8 +1089,10 @@ func _topological_visit(key: String, visited: Dictionary, temp_visited: Dictiona
 
 
 ## Convert spreadsheet data to markdown table format
-func to_markdown(include_formulas: bool = false) -> String:
-	var bounds := get_used_range()
+func to_markdown(include_formulas: bool = false, bounds: Rect2i = Rect2i(-1, -1, -1, -1),
+		truncate_cells: bool = true, include_charts: bool = true) -> String:
+	if bounds.size.x < 0:
+		bounds = get_used_range()
 	if bounds.size.x == 0 or bounds.size.y == 0:
 		return ""
 
@@ -1111,7 +1113,7 @@ func to_markdown(include_formulas: bool = false) -> String:
 		var col := bounds.position.x + col_idx
 		var row := bounds.position.y
 		var text := _get_markdown_cell_text(row, col, include_formulas)
-		header_parts.append(_pad_cell(text, col_widths[col_idx]))
+		header_parts.append(_pad_cell(text, col_widths[col_idx], truncate_cells))
 
 	lines.append("| " + " | ".join(header_parts) + " |")
 
@@ -1127,11 +1129,11 @@ func to_markdown(include_formulas: bool = false) -> String:
 		for col_idx in range(bounds.size.x):
 			var col := bounds.position.x + col_idx
 			var text := _get_markdown_cell_text(row, col, include_formulas)
-			row_parts.append(_pad_cell(text, col_widths[col_idx]))
+			row_parts.append(_pad_cell(text, col_widths[col_idx], truncate_cells))
 		lines.append("| " + " | ".join(row_parts) + " |")
 
 	# Append chart definitions if any
-	if charts.size() > 0:
+	if include_charts and charts.size() > 0:
 		var charts_data: Array = []
 		for chart in charts:
 			charts_data.append(chart.to_dict())
@@ -1164,10 +1166,10 @@ func _get_markdown_cell_text(row: int, col: int, include_formulas: bool) -> Stri
 
 
 ## Pad cell text for aligned markdown table
-func _pad_cell(text: String, width: int) -> String:
-	if text.length() > width:
+func _pad_cell(text: String, width: int, truncate_cells: bool = true) -> String:
+	if truncate_cells and text.length() > width:
 		return text.substr(0, width - 1) + "…"
-	return text + " ".repeat(width - text.length())
+	return text + " ".repeat(maxi(0, width - text.length()))
 
 
 ## Parse markdown table and update spreadsheet data

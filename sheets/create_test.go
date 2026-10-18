@@ -72,7 +72,10 @@ func TestCreationWire(t *testing.T) {
 					}
 				}
 				if strings.HasSuffix(capability.Capability, "get_data") {
-					result["data"] = []any{[]any{"Item", "Value"}, []any{"Widget", 17}}
+					if capability.Args["range"] != "A1" {
+						t.Fatalf("import verification must be bounded: %#v", capability.Args)
+					}
+					result["used_row_count"] = 2
 				}
 				envelope := map[string]any{"success": true, "result": result}
 				if index == 4 || index == 5 || (index == 6 && len(capabilities) == 3) {

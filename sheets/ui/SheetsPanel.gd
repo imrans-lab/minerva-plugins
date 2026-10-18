@@ -77,7 +77,8 @@ func _on_panel_redo_request() -> bool:
 
 func _on_panel_render_for_llm(_context: Dictionary) -> Array:
 	var data: SpreadsheetDataScript = sheet.spreadsheet_data
-	return [{"type": "text", "text": data.to_markdown()}]
+	var result: Dictionary = Tools.read_data(data, {"format": "markdown"})
+	return [{"type": "text", "text": result.data if result.success else JSON.stringify(result)}]
 
 func _on_panel_create_note_request(_context: Dictionary) -> Dictionary:
 	var data: SpreadsheetDataScript = sheet.spreadsheet_data
