@@ -121,8 +121,11 @@ func _run() -> void:
 		await routes.call("run", check, pane, registry, source)
 		var reads: RefCounted = load(source.path_join("tests/helpers/read_contract.gd")).new()
 		await reads.call("run", check, pane, registry)
+		var consumers: RefCounted = load(source.path_join("tests/helpers/consumer_contract.gd")).new()
+		await consumers.call("run", check, pane, registry, source)
 		var creation: RefCounted = load(source.path_join("tests/helpers/creation_contract.gd")).new()
 		await creation.call("run", check, pane, manager, registry, broker, policy, source)
+
 
 		definition.class_names.assign(["WrongPrefix_Panel"])
 		check("wrong class prefix is refused explicitly", definition.validate_class_names({}, []).get("error") == "class_name_bad_prefix")

@@ -70,7 +70,7 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry, source
 		var record: Variant = JSON.parse_string(line)
 		if record is Dictionary and record.get("title") == "Spreadsheet Workflows":
 			workflow = record
-	check.call("actual master Spreadsheet Workflows has its complete canonical dependency list", workflow.get("tool_deps", []).size() == 20 and workflow.tool_deps.all(func(name: String) -> bool: return name.begins_with("minerva_sheets_")))
+	check.call("actual master Spreadsheet Workflows has its complete canonical dependency list", workflow.get("tool_deps", []).size() == 24 and workflow.tool_deps.all(func(name: String) -> bool: return name.begins_with("minerva_sheets_")))
 	var skill_module = null
 	for module in server._modules:
 		if module.get_script() == load("res://Scripts/Services/MCP/Modules/MCPSkillTools.gd"):
