@@ -55,7 +55,7 @@ static func export_xlsx(path: String, data: SpreadsheetDataScript) -> Error:
 					string_indices[val] = shared_strings.size()
 					shared_strings.append(val)
 
-	var parts := {
+	var parts: Dictionary[String, String] = {
 		"[Content_Types].xml": _generate_content_types(),
 		"_rels/.rels": _generate_rels(),
 		"xl/workbook.xml": _generate_workbook(),
@@ -76,16 +76,40 @@ static func export_xlsx(path: String, data: SpreadsheetDataScript) -> Error:
 	if err == OK:
 		err = closed
 	if err == OK:
-		var input := FileAccess.open(temporary, FileAccess.READ)
-		if input == null:
-			err = FileAccess.get_open_error()
-		else:
-			var bytes := input.get_buffer(input.get_length())
-			err = input.get_error()
-			input.close()
-			if err == OK and not Atomic.write_bytes(path, bytes):
-				err = ERR_CANT_CREATE
+		err = _publish_archive(path, temporary, parts)
 	DirAccess.remove_absolute(temporary)
+	return err
+
+
+## Godot's ZIP callbacks can report success after a failed write. Verify the
+## exact staged archive we will publish, including ZIPReader's CRC checks.
+static func _publish_archive(path: String, temporary: String, parts: Dictionary[String, String]) -> Error:
+	var input := FileAccess.open(temporary, FileAccess.READ)
+	if input == null:
+		return FileAccess.get_open_error()
+	var bytes := input.get_buffer(input.get_length())
+	var err := input.get_error()
+	input.close()
+	if err == OK and not Atomic.prepare_bytes(path, bytes):
+		err = ERR_CANT_CREATE
+	if err == OK:
+		var reader := ZIPReader.new()
+		if reader.open(path + ".tmp") != OK:
+			err = ERR_FILE_CORRUPT
+		else:
+			if reader.get_files().size() != parts.size():
+				err = ERR_FILE_CORRUPT
+			for name: String in parts:
+				if not reader.file_exists(name) or reader.read_file(name) != parts[name].to_utf8_buffer():
+					err = ERR_FILE_CORRUPT
+					break
+			var closed: Error = reader.close()
+			if err == OK:
+				err = closed
+	if err == OK and not Atomic.replace(path + ".tmp", path):
+		err = ERR_CANT_CREATE
+	if err != OK and FileAccess.file_exists(path + ".tmp"):
+		DirAccess.remove_absolute(path + ".tmp")
 	return err
 
 

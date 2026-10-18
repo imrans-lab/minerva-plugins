@@ -1929,7 +1929,7 @@ func _on_export_confirmed() -> void:
 func _write_export(path: String) -> void:
 	var err := SpreadsheetFileHandlerScript.export_file(path, spreadsheet_data)
 	if err != OK:
-		export_failed.emit("Couldn't export spreadsheet to %s (error %d). The original file is unchanged." % [path, err])
+		export_failed.emit("Couldn't export spreadsheet to %s: %s. The original file is unchanged." % [path, error_string(err)])
 
 
 ## Chart Methods

@@ -2,6 +2,7 @@ extends RefCounted
 const ValueDomain := preload("value_domain.gd")
 const Data := preload("../../ui/domain/SpreadsheetData.gd")
 const Files := preload("../../ui/domain/SpreadsheetFileHandler.gd")
+const Excel := preload("../../ui/domain/ExcelHandler.gd")
 const SaveErrors := preload("save_contract.gd").SaveErrors
 
 func _select_export(sheet: Node, path: String, tree: SceneTree) -> void:
@@ -73,6 +74,33 @@ func run(check: Callable, pane: EditorPane) -> void:
 		check.call(extension + " failed export is visible copyable logged and preserves files/model", status.visible and status.selection_enabled
 			and errors.contains(status.text) and FileAccess.get_file_as_string(marker) == "original" and editor.file == source
 			and editor._plugin_scene_modified == dirty and ValueDomain.equal_json(PluginScenePanelHost.invoke_save(panel, {}), model))
+	# Physical archives exercise the same staged publication phase as real export.
+	var expected_parts: Dictionary[String, String] = {"sheet.xml": "<sheet>expected</sheet>", "meta.xml": "<meta/>"}
+	var old_target_bytes := FileAccess.get_file_as_bytes(folder.path_join("copy.xlsx"))
+	var protected_path := folder.path_join("protected.xlsx")
+	for corruption: String in ["truncated", "missing", "changed"]:
+		var scratch := folder.path_join(corruption + ".zip.tmp")
+		var zip := ZIPPacker.new()
+		var prepared: bool = zip.open(scratch) == OK
+		for name: String in expected_parts:
+			if corruption == "missing" and name == "meta.xml":
+				continue
+			var text: String = "<sheet>changed</sheet>" if corruption == "changed" and name == "sheet.xml" else expected_parts[name]
+			prepared = (zip.start_file(name) == OK and zip.write_file(text.to_utf8_buffer()) == OK) and prepared
+		prepared = zip.close() == OK and prepared
+		if corruption == "truncated":
+			var archive_bytes := FileAccess.get_file_as_bytes(scratch)
+			var truncated := FileAccess.open(scratch, FileAccess.WRITE)
+			prepared = truncated.store_buffer(archive_bytes.slice(0, archive_bytes.size() >> 1)) and prepared
+			truncated.close()
+		var protected := FileAccess.open(protected_path, FileAccess.WRITE)
+		prepared = protected.store_buffer(old_target_bytes) and prepared
+		protected.close()
+		check.call(corruption + " ZIP publication fixture has an existing valid target", prepared and not old_target_bytes.is_empty())
+		check.call(corruption + " ZIP refuses before replacement and preserves existing target", Excel._publish_archive(protected_path, scratch, expected_parts) != OK
+			and FileAccess.get_file_as_bytes(protected_path) == old_target_bytes and not FileAccess.file_exists(protected_path + ".tmp")
+			and ValueDomain.equal_json(PluginScenePanelHost.invoke_save(panel, {}), model))
+		DirAccess.remove_absolute(scratch)
 	var fallback := folder.path_join("copy.unknown")
 	sheet.call("_on_export_file_selected", fallback)
 	var fallback_confirmation: ConfirmationDialog = sheet.get_node("ExportConfirmation")
