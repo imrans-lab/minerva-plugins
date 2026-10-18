@@ -37,6 +37,15 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry, source
 	check.call("real recording fixture contains a stopped three-measurement CSV", receipt.get("success") == true and receipt.get("rows") == 3 and not before.is_empty())
 	var collision: Editor = pane.add_plugin_scene_editor("sheets", "sheets_panel", null, path.get_file(), "create")
 	await tree.process_frame
+	var unrelated_path: String = ProjectSettings.globalize_path("user://unrelated-recording.csv")
+	var unrelated_bytes: PackedByteArray = "Unrelated\nKeep recording".to_utf8_buffer()
+	var unrelated_file := FileAccess.open(unrelated_path, FileAccess.WRITE)
+	unrelated_file.store_buffer(unrelated_bytes)
+	unrelated_file.close()
+	var unrelated_recording: Dictionary = await registry.handle_tool_call("minerva_sheets_create_editor", {"name": "Recording", "file_path": unrelated_path})
+	_editor(pane, str(unrelated_recording.get("editor_name", ""))).tab_title = "Recording"
+	unrelated_recording["editor_name"] = "Recording"
+	var recording_before: Dictionary = await registry.handle_tool_call("minerva_sheets_get_data", {"editor_name": unrelated_recording.get("editor_name", ""), "format": "json"})
 	var count: int = pane.Tabs.get_tab_count()
 	var args := {"name": "Recording", "file_path": path}
 	var first: Dictionary = await web.handle_ipc_message("multimeter_panel", "mcp.proxy:minerva_sheets_create_editor", args)
@@ -55,15 +64,36 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry, source
 		var image := Image.new()
 		check.call("recording chart returns an actual decodable PNG", chart.get("success") == true and png.get("success") == true
 			and image.load_png_from_buffer(Marshalls.base64_to_raw(str(png.get("image_data", "")))) == OK and image.get_size() == Vector2i(64, 32))
+	var recording_after: Dictionary = await registry.handle_tool_call("minerva_sheets_get_data", {"editor_name": unrelated_recording.get("editor_name", ""), "format": "json"})
+	check.call("file-backed Recording ignores an unrelated fixed title and preserves its cells", unrelated_recording.get("success") == true
+		and recording_after == recording_before and opened.get("editor_name") != unrelated_recording.get("editor_name")
+		and FileAccess.get_file_as_bytes(unrelated_path) == unrelated_bytes)
 	var native_callers: RefCounted = load(source.path_join("tests/helpers/native_caller_contract.gd")).new()
 	await native_callers.call("run", check, pane, registry, host, web, path)
 	var denied: Dictionary = await web.handle_ipc_message("multimeter_panel", "mcp.proxy:minerva_sheets_delete_row", {})
 	check.call("ungranted Sheets mutation is explicitly denied by the real panel broker", denied.get("success") == false and denied.get("error_code") == "capability_not_granted")
+	var unrelated_roster: Dictionary = await registry.handle_tool_call("minerva_sheets_create_editor", {"name": "Roster", "csv_content": "Unrelated\nKeep roster"})
+	var roster_before: Dictionary = await registry.handle_tool_call("minerva_sheets_get_data", {"editor_name": unrelated_roster.get("editor_name", ""), "format": "json"})
+	var roster_bytes: String = JSON.stringify(_editor(pane, str(unrelated_roster.get("editor_name", ""))).plugin_scene_root.call("get_sheet_data").call("to_dict"))
+	var reused: Dictionary = await registry.handle_tool_call("minerva_sheets_create_editor", {"name": "Roster", "csv_content": "Wrong\nDo not import"})
+	var refused_roster: Dictionary = await registry.handle_tool_call("minerva_sheets_get_data", {"editor_name": reused.get("editor_name", ""), "format": "json"})
+	check.call("actual already_existed collision leaves the unrelated roster unchanged", unrelated_roster.get("success") == true
+		and reused.get("success") == true and reused.get("already_existed") == true and refused_roster == roster_before)
+	# The skill's collision branch leaves that tab untouched and chooses a fresh name.
 	var roster: Dictionary = await registry.handle_tool_call("minerva_sheets_create_editor", {"name": "Nametag roster", "csv_content": "Name,Subtitle,ID\nZoë,,EMP-007\n李,Guide,EMP-008"})
 	var read: Dictionary = await registry.handle_tool_call("minerva_sheets_get_data", {"editor_name": roster.get("editor_name", ""), "format": "json", "range": "A1:C3"})
 	print("CONSUMER_ROSTER ", JSON.stringify([roster, read]))
 	var expected: Array = [["Name", "Subtitle", "ID"], ["Zoë", null, "EMP-007"], ["李", "Guide", "EMP-008"]]
 	check.call("canonical roster pipeline preserves blanks Unicode and text identifiers", read.get("success") == true and read.get("data") == expected)
+	var chat_roster: Dictionary = await registry.handle_tool_call("minerva_sheets_create_editor", {"name": "Nametag chat roster"})
+	var chat_written: Dictionary = await registry.handle_tool_call("minerva_sheets_update_data", {"editor_name": chat_roster.get("editor_name", ""), "csv_content": "Name\nChat person"})
+	var chat_read: Dictionary = await registry.handle_tool_call("minerva_sheets_get_data", {"editor_name": chat_roster.get("editor_name", ""), "format": "json"})
+	check.call("fresh chat roster population targets the returned new editor identity", chat_roster.get("success") == true and not chat_roster.get("already_existed", false)
+		and chat_written.get("success") == true and chat_read.get("data") == [["Name"], ["Chat person"]])
+	var roster_after: Dictionary = await registry.handle_tool_call("minerva_sheets_get_data", {"editor_name": unrelated_roster.get("editor_name", ""), "format": "json"})
+	check.call("fresh CSV and chat roster workflows preserve unrelated sheet bytes and cells", roster_after == roster_before
+		and roster.get("editor_name") != unrelated_roster.get("editor_name") and chat_roster.get("editor_name") != unrelated_roster.get("editor_name")
+		and JSON.stringify(_editor(pane, str(unrelated_roster.get("editor_name", ""))).plugin_scene_root.call("get_sheet_data").call("to_dict")) == roster_bytes)
 	var enabled: Dictionary = await registry.handle_tool_call("minerva_sheets_autofilter_enable", {"editor_name": roster.get("editor_name", ""), "range": "A1:C3"})
 	var filtered: Dictionary = await registry.handle_tool_call("minerva_sheets_autofilter_set", {"editor_name": roster.get("editor_name", ""), "column": 3, "values": ["EMP-008"]})
 	var visible: Dictionary = await registry.handle_tool_call("minerva_sheets_autofilter_get", {"editor_name": roster.get("editor_name", "")})
@@ -156,7 +186,7 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry, source
 	check.call("explicit retry after interrupted verification reuses its one file-backed tab", resumed.get("ok") == true and resumed_open.get("success") == true and pane.Tabs.get_tab_count() == interrupted_count + 1)
 	check.call("all consumer calls leave the original recording intact", FileAccess.get_file_as_bytes(path) == before)
 	for entry: Editor in pane.get_open_editors():
-		if entry == collision or entry == editor or entry.file == interrupted_path or entry.tab_title == roster.get("editor_name", ""):
+		if entry == collision or entry == editor or entry.file == interrupted_path or entry.tab_title in [roster.get("editor_name", ""), unrelated_roster.get("editor_name", ""), chat_roster.get("editor_name", ""), unrelated_recording.get("editor_name", "")]:
 			entry.free()
 	manager.get_db().remove(mm.id)
 	host.mcp_manager.minerva_server = previous_server
