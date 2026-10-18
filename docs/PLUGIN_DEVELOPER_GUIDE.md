@@ -294,6 +294,7 @@ Legend: **R** = required, **O** = optional. "Strict→null" means a violation ma
 | `ui.panels[].entry_scene` | R(scene) | string | — | godot_scene `.tscn` path. Sandboxed (must not escape plugin dir). |
 | `ui.panels[].scripts` | R(scene) | string[] | — | godot_scene `.gd` whitelist. Non-empty required. Audited against the scene. |
 | `ui.panels[].file_extensions` | O | string[] | `[]` | Each lowercased, **must start with `.`**. Maps an extension → this panel. |
+| `ui.panels[].file_actions` | O | string[] | `["open", "create"]` | Native panels: `open`, `import`, `create` only. Import is explicit opt-in; empty lists and unknown verbs refuse. |
 | `ui.panels[].ipc_channels` | O | string[] | `[]` | Per-panel subset of `ui.ipc_messages`. Every entry MUST be in `ui.ipc_messages`. |
 | `ui.panels[].save_mode` | O | string | `"host_owned"` | `host_owned` \| `plugin_owned` \| `none`. **Do not use `plugin_owned`** (unimplemented — see §7/§15). |
 | `ui.panels[].chrome.suppress` | O | string[] | `[]` | Subset of `save_all` \| `save` \| `create_note` \| `inject_toggle`. Hides editor-tab chrome buttons. |
@@ -664,6 +665,16 @@ A scene panel reaches host capabilities by emitting a `request` with channel
 `capability:<name>` (the broker validates it against `ui.ipc_messages`/policy and
 dispatches it just like the HTML path). Other declared channels route to your
 backend's tools.
+
+### File ownership and document actions
+
+Native `file_extensions` and `editor_items` use one host handoff. File opening uses `minerva_open_file({"path": "...", "action": "open"})`; `action: "import"` requests an explicitly declared import. Anonymous creation uses `minerva_create_plugin_editor` with the declared editor item. Existing manifests default to open/create.
+
+Required plugins take precedence over optional providers. Equal-rank conflicts refuse the new registration atomically, naming both providers. PluginDB preserves install order across restarts; that order breaks equal-rank ties. A refused update keeps its previously accepted claims. Refusals appear in `get_plugin_status().editor_registration`, the selectable Plugin Manager detail, and the log; backend tools remain available. A stopped or crashed installed provider keeps its claims and opening refuses with `plugin_not_running`, without text fallback. Existing tabs with another owner must be closed before reopening under a changed claim.
+
+Claims are reconciled in place on installed-DB changes. After a required provider is removed, an optional provider can regain the claim at its next registration during reconciliation. Unclaimed `.minsheet`, `.csv`, `.tsv`, and `.xlsx` retain the builtin spreadsheet fallback until the spreadsheet extraction.
+
+For anonymous creation, `_on_panel_loaded(ctx)` receives `ctx.document_action == "create"`. During a file load hook, panels extending `MinervaPluginPanel` can call `get_document_action()` to distinguish `open` from `import`; it returns an empty string outside that hook. Action context is host metadata and does not modify the opaque document Dictionary. Reopening an already open file focuses its existing editor without delivering another load/import.
 
 ### 7.1 Panel lifecycle hooks (full list)
 
