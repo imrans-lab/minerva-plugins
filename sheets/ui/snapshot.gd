@@ -4,6 +4,8 @@ extends RefCounted
 const MAX_INDEX: int = 2147483647
 const REQUIRED: Dictionary = {"model": ["version", "row_count", "column_count", "cells"],
 	"cell": ["type", "value"], "filter": ["range", "columns"], "criterion": ["col", "type"]}
+const DEPENDENCIES: Dictionary = {"chart": {"background_color_g": ["background_color_r"],
+	"background_color_b": ["background_color_r"], "background_color_a": ["background_color_r"]}}
 const FIELDS: Dictionary = {
 	"model": {
 		"version": ["integer_enum", [1]], "row_count": ["positive_integer"], "column_count": ["positive_integer"],
@@ -80,12 +82,16 @@ static func _object(value: Variant, schema_name: String) -> bool:
 	var fields: Dictionary = value
 	var schema: Dictionary = FIELDS[schema_name]
 	var required: Array = REQUIRED.get(schema_name, [])
+	var dependencies: Dictionary = DEPENDENCIES.get(schema_name, {})
 	for key: String in required:
 		if not fields.has(key):
 			return false
 	for key: Variant in fields:
 		if not key is String or not schema.has(key):
 			return false
+		var prerequisites: Array = dependencies.get(key, [])
+		for prerequisite: String in prerequisites:
+			if not fields.has(prerequisite): return false
 		var rule: Array = schema[key]
 		if not _value(fields[key], rule):
 			return false

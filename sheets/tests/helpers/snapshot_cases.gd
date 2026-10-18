@@ -49,6 +49,9 @@ func entries(native: Dictionary, check: Callable) -> Array[Dictionary]:
 			target = target[path[index]]
 		target[path[-1]] = case[2]
 		invalid.append(entry)
+	var orphan: Dictionary = valid.duplicate(true)
+	orphan.plugin_state.payload.__panel_state.charts[0].erase("background_color_r")
+	invalid.append(orphan)
 	var outer: Dictionary = valid.duplicate(true)
 	outer.plugin_state.version = 99
 	invalid.append(outer) # Only the outer version changes; inner model stays valid.
