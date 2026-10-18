@@ -695,6 +695,8 @@ GUI New/Item, file menu, drop and MCP open/import/create use asynchronous admiss
 
 Hosts without this contract reject the unknown `plugin_dependencies` capability. Publish the supporting host before publishing a dependent plugin.
 
+Legacy tool aliases belong to the host, not plugin manifests. The host resolves a legacy name once before policy and dispatch, logs the mapping, and adds `alias_of` naming the canonical target to the application result and public MCP result envelope. Policy refusals carry the same label. Plugins cannot shadow a builtin tool name; such registration refuses. The production compatibility map remains empty until canonical providers replace core tools.
+
 ### 7.1 Panel lifecycle hooks (full list)
 
 Unless an opt-in contract below requires it, every hook is **optional** and probed with `has_method` on your panel's scene root
