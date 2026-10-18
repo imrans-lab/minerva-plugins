@@ -1,6 +1,8 @@
 extends RefCounted
 ## One response budget on real chat, HTTP, browser-control and backend IPC.
 const Tools := preload("../../ui/tools/MCPSpreadsheetTools.gd")
+# Unmodified host serializer is the independent escaping/precision oracle.
+const WireJSON := preload("res://Scripts/Services/MCP/MCPJsonSerialization.gd")
 
 func _browser(tree: SceneTree, port: int, session: String, arguments: Dictionary) -> Dictionary:
 	var request := HTTPRequest.new()
@@ -38,7 +40,7 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry, chat_m
 		var low: int = 0
 		var high: int = 40000
 		# Quotes, backslashes, controls and Unicode exercise both escaping passes.
-		var unit: String = "\"\\\n\tΩ"
+		var unit: String = "\"\\\n\tΩ" + String.chr(1) + String.chr(11) + "\\v"
 		while high - low > 1:
 			var middle: int = int((low + high) * 0.5)
 			data.set_cell_value(0, 0, unit.repeat(middle))
@@ -55,11 +57,15 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry, chat_m
 			var browser: Dictionary = await _browser(tree, http.get_port(), client._http_transport.session, args)
 			var ipc: Dictionary = await connection.call_tool("probe", args) if connected == OK else {}
 			var responses: Array = [direct, chat, ordinary, browser.get("application", {}), ipc.get("result", ipc)]
-			check.call("every real path returns the same complete response %s over=%s" % [format_, over], responses.all(func(result: Dictionary) -> bool: return direct.keys().all(func(key: String) -> bool: return result.has(key) and JSON.parse_string(JSON.stringify(result[key])) == JSON.parse_string(JSON.stringify(direct[key])))))
+			check.call("every real path returns the same complete response %s over=%s" % [format_, over], responses.all(func(result: Dictionary) -> bool: return direct.keys().all(func(key: String) -> bool: return result.has(key) and JSON.parse_string(WireJSON.encode(result[key]).raw) == JSON.parse_string(WireJSON.encode(direct[key]).raw))))
 			check.call("browser framing fits without transport refusal %s over=%s" % [format_, over], browser.get("rpc_error", {"missing": true}).is_empty() and browser.get("bytes", 65537) <= 65536)
-			check.call("boundary result is full success or typed cell refusal %s over=%s" % [format_, over], (direct.get("error_code") == "cell_too_large" and not direct.has("data")) if over else (direct.get("success") == true and JSON.stringify(direct).to_utf8_buffer().size() >= Tools.READ_REPLY_BYTES - 30))
+			check.call("boundary result is full success or typed cell refusal %s over=%s" % [format_, over], (direct.get("error_code") == "cell_too_large" and not direct.has("data")) if over else (direct.get("success") == true and WireJSON.encode(direct).raw.to_utf8_buffer().size() >= Tools.READ_REPLY_BYTES - 128))
 			check.call("wire reads never mutate the full model %s over=%s" % [format_, over], JSON.stringify(editor.plugin_scene_root.call("_on_panel_save_request")) == before)
-			measurements.append({"format": format_, "over": over, "application_bytes": JSON.stringify(direct).to_utf8_buffer().size(), "chat_reply_bytes": JSON.stringify(chat).to_utf8_buffer().size(), "http_application_bytes": JSON.stringify(ordinary).to_utf8_buffer().size(), "browser_reply_bytes": browser.get("bytes"), "ipc_reply_bytes": JSON.stringify(ipc).to_utf8_buffer().size()})
+			measurements.append({"format": format_, "over": over, "application_bytes": WireJSON.encode(direct).raw.to_utf8_buffer().size(), "chat_reply_bytes": WireJSON.encode(chat).raw.to_utf8_buffer().size(), "http_application_bytes": WireJSON.encode(ordinary).raw.to_utf8_buffer().size(), "browser_reply_bytes": browser.get("bytes"), "ipc_reply_bytes": WireJSON.encode(ipc).raw.to_utf8_buffer().size()})
+	data.set_cell_value(0, 0, String.chr(1).repeat(10000))
+	for format_: String in ["csv", "json", "markdown"]:
+		var control: Dictionary = await _browser(tree, http.get_port(), client._http_transport.session, {"editor_name": editor.plugin_panel_key, "format": format_})
+		check.call("10k U+0001 values get cell metadata before browser frame limit " + format_, control.get("rpc_error", {"missing": true}).is_empty() and control.get("bytes", 65537) <= 65536 and control.get("application", {}).get("error_code") == "cell_too_large" and control.get("application", {}).get("cell") == "A1" and control.get("application", {}).get("cell_bytes") == 10000)
 	print("READ_WIRE_MEASUREMENTS " + JSON.stringify(measurements))
 	connection.disconnect_from_server()
 	editor.free()

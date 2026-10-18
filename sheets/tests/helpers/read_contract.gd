@@ -25,20 +25,21 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry) -> voi
 		check.call("invalid range visibly refuses: " + invalid, result.get("error_code") == "invalid_range" and not result.has("data"))
 	check.call("valid and refused reads leave both complete models unchanged", JSON.stringify(second.plugin_scene_root.call("_on_panel_save_request")) == original
 		and JSON.stringify(first.plugin_scene_root.call("_on_panel_save_request")) == witness)
+	var after: Array = [[11.0,12.0,13.0],[14.0,15.0,16.0],[17.0,18.0,19.0]]
 	var pending: Array[Dictionary] = []
 	_read_into(registry, second.plugin_panel_key, pending)
 	_read_into(registry, second.plugin_panel_key, pending)
-	var updated: Dictionary = await registry.handle_tool_call("minerva_sheets_update_data", {"editor_name": second.plugin_panel_key, "csv_content": "H1,H2,H3\n1,2,3\n4,5,6\n7,8,9"})
+	var updated: Dictionary = await registry.handle_tool_call("minerva_sheets_update_data", {"editor_name": second.plugin_panel_key, "csv_content": "\n11,12,13\n14,15,16\n17,18,19"})
 	var deadline: int = Time.get_ticks_msec() + 10000
 	while pending.size() < 2 and Time.get_ticks_msec() < deadline:
 		await tree.process_frame
-	check.call("concurrent reads beside an update return complete ranges", updated.get("success") == true and pending.size() == 2 and pending.all(func(result: Dictionary) -> bool: return result.get("data") == expected.json))
+	check.call("concurrent reads beside an update return complete ranges", updated.get("success") == true and pending.size() == 2 and pending.all(func(result: Dictionary) -> bool: return (result.get("data") == expected.json and result.get("used_row_count") == 5 and result.get("has_leading_empty_rows") == false) or (result.get("data") == after and result.get("used_row_count") == 3 and result.get("has_leading_empty_rows") == true)))
 	second.tab_title = first.tab_title
 	var identity: Dictionary = await registry.handle_tool_call("minerva_sheets_get_data", {"editor_name": second.plugin_panel_key, "format": "json", "range": "A2:C4"})
-	check.call("duplicate titles retain exact second-panel identity", identity.get("data") == expected.json and JSON.stringify(first.plugin_scene_root.call("_on_panel_save_request")) == witness)
+	check.call("duplicate titles retain exact second-panel identity", identity.get("data") == after and JSON.stringify(first.plugin_scene_root.call("_on_panel_save_request")) == witness)
 	second.tab_title = "Renamed read target"
 	var renamed: Dictionary = await registry.handle_tool_call("minerva_sheets_get_data", {"editor_name": second.tab_title, "format": "json", "range": "A2:C4"})
-	check.call("renamed target remains addressable", renamed.get("data") == expected.json)
+	check.call("renamed target remains addressable", renamed.get("data") == after)
 	var lines := PackedStringArray()
 	var full: Array = []
 	for row: int in range(10000):
@@ -53,6 +54,10 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry) -> voi
 	sheet.set_content("Header,Other\nvalue,tail")
 	var counts: Dictionary = await registry.handle_tool_call("minerva_sheets_get_data", {"editor_name": second.plugin_panel_key, "format": "json", "range": "A1"})
 	check.call("used counts exclude blank trailing allocated rows", counts.get("used_row_count") == 2 and counts.get("used_column_count") == 2 and counts.get("row_count") == 10000 and counts.get("data") == [["Header"]])
+	var clipped: Dictionary = await registry.handle_tool_call("minerva_sheets_get_data", {"editor_name": second.plugin_panel_key, "format": "json", "range": "A1:C4"})
+	check.call("partial overlap echoes requested and effective range", clipped.get("requested_range") == "A1:C4" and clipped.get("range") == "A1:B2" and clipped.get("column_count") == 2 and clipped.get("data") == [["Header", "Other"], ["value", "tail"]])
+	var outside: Dictionary = await registry.handle_tool_call("minerva_sheets_get_data", {"editor_name": second.plugin_panel_key, "format": "json", "range": "A50:B52"})
+	check.call("allocated range outside used bounds returns empty data and counts", outside.get("success") == true and outside.get("data") == [] and outside.get("requested_range") == "A50:B52" and outside.get("range") == "" and outside.get("data_starts_at_row") == 50 and outside.get("used_row_count") == 2)
 	var long_text: String = "abcdefghijklmnopqrstuvwxyz0123456789Júlia"
 	sheet.set_content("Header\n" + long_text)
 	for format_: String in ["json", "markdown"]:

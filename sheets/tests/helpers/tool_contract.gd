@@ -60,9 +60,10 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry,
 		var expected_success: bool = legacy != "minerva_get_chart_image"
 		if canonical == "minerva_sheets_get_data":
 			var used: Rect2i = sheet.spreadsheet_data.get_used_range()
-			check.call("additive read metadata reports actual used bounds", current.get("used_row_count") == used.size.y and current.get("used_column_count") == used.size.x)
+			check.call("additive read metadata reports actual used bounds", current.get("used_row_count") == used.size.y and current.get("used_column_count") == used.size.x and current.get("allocated_column_count") == sheet.spreadsheet_data.column_count)
 			current.erase("used_row_count")
 			current.erase("used_column_count")
+			current.erase("allocated_column_count")
 		var parity: bool = (historical.legacy == legacy and historical.arguments == _json(entry[1])
 			and current.get("success") == expected_success
 			and _json(_normalize(current, new_ids, names)) == historical.result

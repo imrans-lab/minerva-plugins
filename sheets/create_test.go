@@ -76,6 +76,10 @@ func TestCreationWire(t *testing.T) {
 						t.Fatalf("import verification must be bounded: %#v", capability.Args)
 					}
 					result["used_row_count"] = 2
+					result["used_column_count"] = 2
+					result["row_count"] = 100
+					result["column_count"] = 1
+					result["allocated_column_count"] = 26
 				}
 				envelope := map[string]any{"success": true, "result": result}
 				if index == 4 || index == 5 || (index == 6 && len(capabilities) == 3) {
@@ -167,5 +171,104 @@ func TestCancellationDuringCapabilityWait(t *testing.T) {
 	}
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestImportVerificationRefusals(t *testing.T) {
+	for _, name := range []string{"ordinary error", "schema failure", "cancelled", "missing count", "fractional rows", "negative rows", "rows exceed allocation", "negative columns", "inconsistent empty", "empty allocation"} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			host, plugin := net.Pipe()
+			defer host.Close()
+			done := make(chan error, 1)
+			go func() { done <- serve(ctx, plugin, plugin) }()
+			enc, dec := json.NewEncoder(host), newWireDecoder(host)
+			if err := enc.Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{
+				"name": "minerva_sheets_create_editor", "arguments": map[string]any{"name": "Import", "file_path": "fixture.csv"}}}); err != nil {
+				t.Fatal(err)
+			}
+			var calls []string
+			for {
+				var message request
+				if err := dec.Decode(&message); err != nil {
+					t.Fatal(err)
+				}
+				if message.Method == "" {
+					var result struct{ Content []struct{ Text string } }
+					if err := json.Unmarshal(message.Result, &result); err != nil {
+						t.Fatal(err)
+					}
+					if len(result.Content) != 1 {
+						t.Fatalf("missing refusal: %#v", message)
+					}
+					var body map[string]any
+					if err := json.Unmarshal([]byte(result.Content[0].Text), &body); err != nil {
+						t.Fatal(err)
+					}
+					if body["success"] != false || body["error_code"] != "import_verification_failed" || body["editor_name"] != "Surviving import" || len(calls) != 2 {
+						t.Fatalf("verification must refuse without retry and retain editor identity: %#v calls=%v", body, calls)
+					}
+					break
+				}
+				var capability struct {
+					Capability string         `json:"capability"`
+					Args       map[string]any `json:"args"`
+				}
+				if message.Method != "minerva/capability" {
+					t.Fatalf("unexpected method %s", message.Method)
+				}
+				if err := json.Unmarshal(message.Params, &capability); err != nil {
+					t.Fatal(err)
+				}
+				calls = append(calls, capability.Capability)
+				var envelope map[string]any
+				switch len(calls) {
+				case 1:
+					if capability.Capability != "mcp.proxy:minerva_open_file" {
+						t.Fatalf("unexpected first operation %s", capability.Capability)
+					}
+					envelope = map[string]any{"success": true, "result": map[string]any{"success": true, "editor_name": "Surviving import", "plugin_id": "sheets"}}
+				case 2:
+					if capability.Capability != "mcp.proxy:minerva_sheets_get_data" || capability.Args["range"] != "A1" {
+						t.Fatalf("unexpected verification %#v", capability)
+					}
+					envelope = map[string]any{"success": false, "error_code": "cell_too_large", "used_row_count": 2, "used_column_count": 2, "row_count": 100, "column_count": 26, "allocated_column_count": 26}
+					switch name {
+					case "ordinary error":
+						envelope["error_code"] = "read_failed"
+					case "schema failure":
+						envelope["error_code"] = "schema_mismatch"
+					case "cancelled":
+						envelope["error_code"] = "cancelled"
+					case "missing count":
+						delete(envelope, "used_column_count")
+					case "fractional rows":
+						envelope["used_row_count"] = 2.5
+					case "negative rows":
+						envelope["used_row_count"] = -1
+					case "rows exceed allocation":
+						envelope["used_row_count"] = 101
+					case "negative columns":
+						envelope["used_column_count"] = -1
+					case "inconsistent empty":
+						envelope["used_row_count"] = 0
+					case "empty allocation":
+						envelope["used_row_count"], envelope["used_column_count"], envelope["row_count"] = 0, 0, 0
+					}
+				default:
+					t.Fatalf("verification retried a mutation: %v", calls)
+				}
+				if err := enc.Encode(map[string]any{"jsonrpc": "2.0", "id": message.ID, "result": envelope}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := host.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

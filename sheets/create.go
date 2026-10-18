@@ -19,6 +19,11 @@ func transportFailure(code, message string, err error) map[string]any {
 	return failure(code, message+err.Error())
 }
 
+func importCount(data map[string]any, key string) (float64, bool) {
+	value, ok := data[key].(float64)
+	return value, ok && value >= 0 && value == math.Trunc(value)
+}
+
 func createEditor(ctx context.Context, stream *rpcStream, raw json.RawMessage) map[string]any {
 	args := struct {
 		Name       *string `json:"name"`
@@ -107,8 +112,12 @@ func createEditor(ctx context.Context, stream *rpcStream, raw json.RawMessage) m
 			refusal["editor_name"] = name
 			return refusal
 		}
-		rows, ok := data["used_row_count"].(float64)
-		if !ok || rows < 0 || rows != math.Trunc(rows) {
+		rows, rowsOK := importCount(data, "used_row_count")
+		columns, columnsOK := importCount(data, "used_column_count")
+		allocatedRows, allocatedRowsOK := importCount(data, "row_count")
+		allocatedColumns, allocatedColumnsOK := importCount(data, "allocated_column_count")
+		if !rowsOK || !columnsOK || !allocatedRowsOK || !allocatedColumnsOK || allocatedRows < 1 || allocatedColumns < 1 ||
+			rows > allocatedRows || columns > allocatedColumns || (rows == 0) != (columns == 0) {
 			refusal := failure("import_verification_failed", fmt.Sprintf("Spreadsheet tab %q returned invalid imported row counts.", name))
 			refusal["editor_name"] = name
 			return refusal

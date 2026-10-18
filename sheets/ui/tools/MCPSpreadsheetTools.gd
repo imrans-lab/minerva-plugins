@@ -274,6 +274,21 @@ func _get_spreadsheet_data(args: Dictionary) -> Dictionary:
 # application JSON at 30 KiB reserves its second JSON-escaping pass and framing.
 const READ_REPLY_BYTES: int = 30 * 1024
 
+# Wire accounting follows MCPJsonSerialization.gd:11-13,21-40: full float
+# precision and strict JSON C0 escapes. Consume escape pairs so literal
+# backslash-v text is distinct from Godot's vertical-tab spelling.
+static func _read_reply_bytes(value: Dictionary) -> int:
+	var raw: String = JSON.stringify(value, "", true, true)
+	var bytes: int = raw.to_utf8_buffer().size()
+	var pattern := RegEx.create_from_string(r"[\x00-\x1f]|\\.")
+	for matched: RegExMatch in pattern.search_all(raw):
+		var token: String = matched.get_string()
+		if token == "\\v":
+			bytes += 4
+		elif token.unicode_at(0) < 0x20:
+			bytes += 1 if token.unicode_at(0) in [8, 9, 10, 12, 13] else 5
+	return bytes
+
 static func _range_label(bounds: Rect2i) -> String:
 	var first: String = SpreadsheetDataScript.cell_to_reference(bounds.position.y, bounds.position.x)
 	var last: String = SpreadsheetDataScript.cell_to_reference(bounds.end.y - 1, bounds.end.x - 1)
@@ -312,7 +327,7 @@ static func _read_reply(data: SpreadsheetDataScript, bounds: Rect2i, used: Rect2
 		_: content = data.to_csv(",", bounds)
 	var result := {"success": true, "format": format_, "data": content,
 		"row_count": data.row_count, "column_count": bounds.size.x if ranged else data.column_count,
-		"used_row_count": used.size.y, "used_column_count": used.size.x,
+		"used_row_count": used.size.y, "used_column_count": used.size.x, "allocated_column_count": data.column_count,
 		"data_starts_at_row": bounds.position.y + 1, "has_leading_empty_rows": used.position.y > 0}
 	if ranged:
 		result["range"] = _range_label(bounds) if bounds.has_area() else ""
@@ -324,30 +339,38 @@ static func read_data(data: SpreadsheetDataScript, args: Dictionary) -> Dictiona
 	var range_text: String = args.get("range", "")
 	var format_: String = args.get("format", "csv")
 	var ranged: bool = not range_text.is_empty()
+	var requested_range: String = ""
 	if ranged:
 		bounds = _read_bounds(range_text, data)
 		if bounds.size.x < 0:
 			return {"success": false, "error_code": "invalid_range",
 				"error_message": "Use A1 or A1:C10 in ascending order within the allocated sheet grid.",
 				"row_count": data.row_count, "column_count": data.column_count}
+		requested_range = _range_label(bounds)
+		var requested_start: Vector2i = bounds.position
 		bounds = bounds.intersection(used)
+		if not bounds.has_area():
+			bounds = Rect2i(requested_start, Vector2i.ZERO)
 	elif args.get("include_empty_rows", false) and format_ not in ["json", "markdown"]:
 		bounds = Rect2i(used.position.x, 0, used.size.x, used.end.y)
 	var result: Dictionary = _read_reply(data, bounds, used, format_, ranged)
+	if ranged:
+		result["requested_range"] = requested_range
 	# Keep the historical offset for full CSV reads that include leading blanks.
 	if not ranged:
 		result["data_starts_at_row"] = used.position.y + 1
-	var bytes: int = JSON.stringify(result).to_utf8_buffer().size()
+	var bytes: int = _read_reply_bytes(result)
 	if bytes <= READ_REPLY_BYTES:
 		return result
 	var refusal := {"success": false, "error_code": "payload_too_large",
 		"error_message": "Read a smaller range; no cell data was returned.",
 		"row_count": data.row_count, "column_count": data.column_count,
-		"used_row_count": used.size.y, "used_column_count": used.size.x,
+		"used_row_count": used.size.y, "used_column_count": used.size.x, "allocated_column_count": data.column_count,
 		"would_return_bytes": bytes, "budget_bytes": READ_REPLY_BYTES}
 	var first := Rect2i(bounds.position, Vector2i.ONE)
 	var sample: Dictionary = _read_reply(data, first, used, format_, true)
-	if JSON.stringify(sample).to_utf8_buffer().size() <= READ_REPLY_BYTES:
+	sample["requested_range"] = _range_label(first)
+	if _read_reply_bytes(sample) <= READ_REPLY_BYTES:
 		refusal["suggested_range"] = _range_label(first)
 	else:
 		refusal["error_code"] = "cell_too_large"
