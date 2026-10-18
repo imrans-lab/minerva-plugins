@@ -12,10 +12,10 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry, client
 	var connection = registry.plugin_manager.get_connection("sheets")
 	var forward: Callable = connection.capability_request_handler
 	var gate := Gate.new()
-	connection.capability_request_handler = func(id: String, capability: String, args: Dictionary, context: MCPExecutionContext = null) -> Dictionary:
-		var reply: Dictionary = await forward.call(id, capability, args, context)
+	connection.capability_request_handler = func(id: String, capability: String, args: Dictionary, parent_context: MCPExecutionContext = null) -> Dictionary:
+		var reply: Dictionary = await forward.call(id, capability, args, parent_context)
 		if capability == "host.documents.list_open" and gate.context == null:
-			gate.context = context
+			gate.context = parent_context
 			await gate.released
 		return reply
 	var count: int = pane.Tabs.get_tab_count()

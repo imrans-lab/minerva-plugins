@@ -47,6 +47,9 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry, host: 
 	registry.plugin_policy.grant_capability("parent_fixture", "tool_call")
 	var started: Dictionary = await registry.plugin_manager.start_plugin("parent_fixture")
 	check.call("settlement peer starts and owns a real connection", started.get("ok") == true and registry.plugin_manager.get_connection("parent_fixture") != null)
+	registry.plugin_policy.grant_capability("parent_fixture", "mcp.proxy:minerva_parent_fixture_parent")
+	for tool: Dictionary in registry.get_plugin_tools("parent_fixture"):
+		server.tool_budget_manager.activate_tool(tool.name, tool)
 	for mode: String in ["preflight", "raw", "nested", "private", "registry_schema", "external_schema", "rpc_error", "disconnect"]:
 		var connection: MCPServerConnection = registry.plugin_manager.get_connection("parent_fixture")
 		var gate := AdmissionGate.new()
@@ -74,6 +77,8 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry, host: 
 			external.tool_registry["parent"] = definition
 			external._tool_connection_owners["parent"] = connection
 			_into(external.execute_tool.bind("parent", arguments, "", context), replies)
+		elif mode == "rpc_error":
+			_into(registry.capability_broker.dispatch.bind("parent_fixture", "mcp.proxy:minerva_parent_fixture_parent", arguments, context), replies)
 		elif mode == "private":
 			_into(connection.request_method.bind("private/write", arguments), replies)
 		else:
