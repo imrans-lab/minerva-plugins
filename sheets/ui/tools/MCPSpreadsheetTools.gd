@@ -11,6 +11,7 @@ const SpreadsheetDataScript := preload("../domain/SpreadsheetData.gd")
 const SpreadsheetChartScript := preload("../domain/SpreadsheetChart.gd")
 const SpreadsheetFileHandlerScript := preload("../domain/SpreadsheetFileHandler.gd")
 const SpreadsheetCellScript := preload("../domain/SpreadsheetCell.gd")
+const ChartCanvasScript := preload("../domain/ChartCanvas.gd")
 
 
 func _init(sheet: SpreadsheetEditorScript = null, matches_locator: Callable = Callable()) -> void:
@@ -931,14 +932,16 @@ func _get_chart_image(args: Dictionary) -> Dictionary:
 	if chart_index < 0 or chart_index >= charts.size():
 		return ToolUtils.error("Chart index out of range (have %d charts)" % charts.size())
 
-	var chart_canvas = editor.spreadsheet_editor._chart_canvas
+	var canvases: Array = editor.spreadsheet_editor.chart_canvases
+	var chart_canvas: ChartCanvasScript = canvases[chart_index] if chart_index < canvases.size() else null
 	if not chart_canvas:
 		return ToolUtils.error("Chart canvas not available")
 
 	# Make sure the chart canvas has the right chart selected
-	var target_chart = charts[chart_index]
+	var target_chart: SpreadsheetChartScript = charts[chart_index]
+	var chart_data: SpreadsheetDataScript = editor.spreadsheet_editor.spreadsheet_data
 	chart_canvas.set_chart(target_chart)
-	chart_canvas.update_from_spreadsheet(editor.spreadsheet_editor.spreadsheet_data)
+	chart_canvas.update_from_spreadsheet(chart_data)
 
 	# Capture the chart as base64 PNG
 	var base64_png: String = await chart_canvas.capture_to_base64_png(width, height)

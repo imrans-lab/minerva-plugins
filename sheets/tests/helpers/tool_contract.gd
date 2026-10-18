@@ -1,6 +1,6 @@
 extends RefCounted
-## Full-host comparison with the unchanged builtin. Only editor locators and
-## generated chart IDs are normalized; no response or model fields are dropped.
+## Compare complete results/models with the historical builtin capture.
+## Only editor locators and generated chart IDs are normalized.
 
 func _normalize(value: Variant, ids: Dictionary, names: Dictionary) -> Variant:
 	if value is String:
@@ -37,62 +37,44 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry,
 	var names: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(source.path_join("scripts/legacy-tools.json")))
 	names["Legacy contract"] = "contract editor"
 	names["Canonical contract"] = "contract editor"
-	var builtin: Editor = Editor.create(Editor.Type.SPREADSHEET, null, "Legacy contract", null, false)
-	pane.Tabs.add_child(builtin)
 	var plugin: Editor = pane.add_plugin_scene_editor("sheets", "sheets_panel", null, "Canonical contract", "create")
 	await pane.Tabs.get_tree().process_frame
 	var panel: Control = plugin.plugin_scene_root
 	var sheet = panel.get("sheet")
-	builtin.spreadsheet_editor.deserialize(baseline)
 	PluginScenePanelHost.invoke_load(panel, baseline)
-	# Autoload-dependent builtin modules are intentionally loaded at runtime.
-	var old_tools = load("res://Scripts/Services/MCP/Modules/MCPSpreadsheetTools.gd").new(null)
-	var old_filters = load("res://Scripts/Services/MCP/Modules/MCPSpreadsheetFilterTools.gd").new(null)
 	var generated: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(source.path_join("tests/fixtures/tool-cases.json")))
+	var frozen: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(source.path_join("tests/fixtures/builtin-tool-oracle.json")))
 	var cases: Array = generated.parity
-	var old_ids: Dictionary = {}
 	var new_ids: Dictionary = {}
 	var called: Dictionary = {}
-	for entry: Array in cases:
+	for index: int in range(cases.size()):
+		var entry: Array = cases[index]
+		var historical: Dictionary = frozen.cases[index]
 		var legacy: String = entry[0]
 		var canonical: String = names[legacy]
-		var old_args: Dictionary = _json(entry[1])
-		old_args["editor_name"] = "Legacy contract"
-		var new_args: Dictionary = old_args.duplicate(true)
+		var new_args: Dictionary = _json(entry[1])
 		new_args["editor_name"] = "Canonical contract"
-		var previous: Dictionary
-		if legacy.begins_with("minerva_spreadsheet_autofilter_"):
-			previous = await old_filters.handle(legacy, old_args)
-		else:
-			previous = await old_tools.handle(legacy, old_args)
 		var current: Dictionary = await registry.handle_tool_call(canonical, new_args)
-		_chart_ids(builtin.spreadsheet_editor.charts, old_ids)
 		_chart_ids(sheet.charts, new_ids)
 		called[canonical] = true
 		var expected_success: bool = legacy != "minerva_get_chart_image"
-		var parity: bool = (current.get("success") == expected_success
-			and _json(_normalize(current, new_ids, names)) == _json(_normalize(previous, old_ids, names))
+		var parity: bool = (historical.legacy == legacy and historical.arguments == _json(entry[1])
+			and current.get("success") == expected_success
+			and _json(_normalize(current, new_ids, names)) == historical.result
 			and _json(_normalize(panel.call("_on_panel_save_request"), new_ids, names))
-			== _json(_normalize(builtin.spreadsheet_editor.serialize(), old_ids, names)))
-		check.call(canonical + " complete result and model match builtin", parity)
+			== historical.model)
+		check.call(canonical + " complete result and model match frozen builtin", parity)
 		if not parity:
-			print("PARITY old=" + JSON.stringify(previous).left(1200) + " new=" + JSON.stringify(current).left(1200))
+			print("PARITY old=" + JSON.stringify(historical.result).left(1200) + " new=" + JSON.stringify(current).left(1200))
 		if legacy == "minerva_set_cell_formula":
 			check.call("canonical formula independent result is5", sheet.spreadsheet_data.get_cell_value(1, 1) == 5)
 		if legacy == "minerva_get_chart_image":
-			var old_source: String = old_tools.get_script().get("source_code")
-			var new_source: String = panel.get("_tools").get_script().get("source_code")
-			check.call("XFAIL valid MCP chart image still references missing canvas on both sides",
-				"_chart_canvas" not in builtin.spreadsheet_editor and "_chart_canvas" not in sheet
-				and old_source.contains("var chart_canvas = editor.spreadsheet_editor._chart_canvas")
-				and new_source.contains("var chart_canvas = editor.spreadsheet_editor._chart_canvas")
-				and builtin.spreadsheet_editor.chart_canvases.size() == 1 and sheet.chart_canvases.size() == 1)
-			# Raw domain capture is a separate proof, not a claim that MCP export works.
-			var old_png: String = await builtin.spreadsheet_editor.chart_canvases[0].capture_to_base64_png(64, 32)
 			var new_png: String = await sheet.chart_canvases[0].capture_to_base64_png(64, 32)
 			var image := Image.new()
-			check.call("raw domain chart capture yields a real64x32PNG", old_png == new_png
+			check.call("raw chart still matches the historical64x32PNG", frozen.raw_chart_png == new_png
 				and image.load_png_from_buffer(Marshalls.base64_to_raw(new_png)) == OK and image.get_size() == Vector2i(64, 32))
+			var charts: RefCounted = load(source.path_join("tests/helpers/chart_contract.gd")).new()
+			await charts.call("run", check, pane, registry, broker, plugin, source, entry, new_png)
 	var unchanged: Variant = _json(panel.call("_on_panel_save_request"))
 	var second: Editor = pane.add_plugin_scene_editor("sheets", "sheets_panel", null, "Second contract", "create")
 	await pane.Tabs.get_tree().process_frame
@@ -135,5 +117,4 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry,
 	var stopped: Dictionary = await registry.handle_tool_call("minerva_sheets_update_data", {"editor_name": plugin.plugin_panel_key, "csv_content": "bad"})
 	check.call("unloaded panel refuses without mutation", stopped.get("success") == false
 		and _json(panel.call("_on_panel_save_request")) == unchanged)
-	builtin.free()
 	plugin.free()

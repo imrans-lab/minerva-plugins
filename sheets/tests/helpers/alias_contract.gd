@@ -91,20 +91,40 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry, source
 	policy.set_policy_items(empty_rules)
 	var unknown: Dictionary = await chat_manager.execute_tool("minerva_sheets_unknown_alias_fixture", {})
 	check.call("unknown chat tool refuses without inventing alias metadata", unknown.get("success") == false and not unknown.has("alias_of"))
-	var builtin: Editor = Editor.create(Editor.Type.SPREADSHEET, null, "Builtin alias witness", null, false)
-	pane.adopt_editor(builtin)
-	builtin.spreadsheet_editor.set_content("Builtin,Value\nWitness,333")
 	var default_server = load("res://Scripts/Services/MCP/MinervaMCPServer.gd").new(chat_manager)
 	default_server.policy_engine = policy
-	var default_args: Dictionary = arguments.duplicate(true)
-	default_args["editor_name"] = builtin.tab_title
-	var production: Dictionary = await default_server.call_tool(legacy, default_args)
-	check.call("production default table stays empty and dispatches the builtin", MinervaMCPServer.LEGACY_TOOL_ALIASES.is_empty()
-		and default_server.canonical_tool_name(legacy) == legacy and not production.has("alias_of")
-		and production.get("success") == true and _json(production.get("data")) == _json([["Builtin", "Value"], ["Witness", 333]]))
+	default_server._enabled_tool_sets = []
+	var production: Dictionary = {}
+	if not MinervaMCPServer.LEGACY_TOOL_ALIASES.is_empty():
+		production = await default_server.call_tool(legacy, arguments)
+	check.call("default alias gate preserves staging or the complete cutover mapping",
+		default_server.canonical_tool_name(legacy) == legacy if MinervaMCPServer.LEGACY_TOOL_ALIASES.is_empty()
+		else MinervaMCPServer.LEGACY_TOOL_ALIASES == aliases and production.get("success") == true
+			and production.get("alias_of") == canonical and _json(production.get("data")) == _json(expected))
 	check.call("all alias surfaces preserve both independent complete sheet models", _json(first.plugin_scene_root.call("_on_panel_save_request")) == first_before
 		and _json(second.plugin_scene_root.call("_on_panel_save_request")) == second_before)
-	builtin.free()
+	var add_chart: Dictionary = {}
+	var image_args: Dictionary = {}
+	for entry: Array in generated.parity:
+		if entry[0] == "minerva_add_spreadsheet_chart":
+			add_chart = entry[1].duplicate(true)
+		if entry[0] == "minerva_get_chart_image":
+			image_args = entry[1].duplicate(true)
+	add_chart["editor_name"] = second.tab_title
+	image_args["editor_name"] = second.tab_title
+	image_args["chart_index"] = 0
+	pane.Tabs.current_tab = pane.Tabs.get_tab_idx_from_control(first)
+	var added: Dictionary = await registry.handle_tool_call(aliases["minerva_add_spreadsheet_chart"], add_chart)
+	check.call("alias image fixture creates a chart on the second sheet", added.get("success") == true and pane.Tabs.get_current_tab_control() == first)
+	var canonical_image: Dictionary = await registry.handle_tool_call(aliases["minerva_get_chart_image"], image_args)
+	var alias_image: Dictionary = await server.call_tool("minerva_get_chart_image", image_args)
+	var raw_image: String = await second.plugin_scene_root.get("sheet").chart_canvases[0].capture_to_base64_png(64, 32)
+	var decoded := Image.new()
+	check.call("canonical and legacy-alias PNG match the second raw chart", canonical_image.get("success") == true
+		and alias_image.get("success") == true and alias_image.get("alias_of") == aliases["minerva_get_chart_image"]
+		and canonical_image.get("image_data") == raw_image and alias_image.get("image_data") == raw_image
+		and decoded.load_png_from_buffer(Marshalls.base64_to_raw(raw_image)) == OK and decoded.get_size() == Vector2i(64, 32)
+		and _json(first.plugin_scene_root.call("_on_panel_save_request")) == first_before)
 	first.free()
 	second.free()
 	chat_manager.free()

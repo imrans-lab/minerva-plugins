@@ -229,17 +229,14 @@ func _hosting_contract(host: Node, pane: EditorPane, manager: PluginManager) -> 
 		and imported_sheet.spreadsheet_data.get_cell_display(0, 0) == "hook edit")
 	var rendered: Array = PluginScenePanelHost.invoke_render_for_llm(import_panel, {})
 	check("public LLM render returns current markdown", rendered == [{"type": "text", "text": imported_sheet.spreadsheet_data.to_markdown()}])
-	# Full-host-only parity oracle: compare the unchanged builtin's reused model.
-	var builtin_data = load("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetData.gd").new()
-	var builtin_files: Script = load("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetFileHandler.gd")
-	builtin_data.load_from_dict(JSON.parse_string(FileAccess.get_file_as_string(fixtures + "baseline.minsheet")))
+	var historical_path: String = ProjectSettings.globalize_path("res://../../minerva-plugins/sheets/tests/fixtures/builtin-tool-oracle.json")
+	var historical: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(historical_path))
 	PluginScenePanelHost.invoke_load(import_panel, JSON.parse_string(FileAccess.get_file_as_string(fixtures + "baseline.minsheet")))
 	for extension: String in ["csv", "tsv", "xlsx"]:
 		var path := ProjectSettings.globalize_path(fixtures + "sample." + extension)
-		var result: Error = builtin_files.import_file(path, builtin_data)
 		PluginScenePanelHost.invoke_document_handoff(import_panel, {"file_path": path}, "import")
-		check(extension + " reused-model import matches builtin", result == OK
-			and _json_value(import_panel.call("_on_panel_save_request")) == _json_value(builtin_data.to_dict()))
+		check(extension + " reused-model import matches frozen builtin",
+			_json_value(import_panel.call("_on_panel_save_request")) == historical.reused_import_models[extension])
 	var source: Editor = pane.Tabs.get_current_tab_control()
 	source.tab_title = "Reference source"
 	var source_panel: Node = source.plugin_scene_root

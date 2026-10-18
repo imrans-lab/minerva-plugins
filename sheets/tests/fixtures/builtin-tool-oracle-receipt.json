@@ -1,0 +1,40 @@
+{
+  "host": "fa2424ea0dcb5964c86447a30840286b21f712a4",
+  "plugins": "261cbe076d1c925a54c0fda8181d8d563c932406",
+  "capture_job": "j20261018t114825-153c0c",
+  "capture_runtime_result": "FAILED: existing builtin+plugin XLSX formula import ScriptError; regular369 assertions allpassed. This is observational baseline, not qualification pass.",
+  "oracle_sha256": "b191a49c8f146bd39fe23bfc77efd0c143786d4c8e135287fd41b77a8fe5879d",
+  "oracle_bytes": 103901,
+  "cases": 27,
+  "excluded": 10,
+  "reuse_imports": 3,
+  "exports": 4,
+  "png_size": [
+    64,
+    32
+  ],
+  "known_gap": "minerva:01a14edadda1756aa6978a21db9503ca XLSX formula omitted; raw oracle unchanged",
+  "packages": {
+    "sheets-csv.minpackage": {
+      "sha256": "13bb2890cd492944e53512110a797fc7ae85580ca4ce40bf1a2657239637beae",
+      "bytes": 658
+    },
+    "sheets-minsheet.minpackage": {
+      "sha256": "3c88d04138bc6e4df93f0b49e9aca9ff668685d85fdba35493ff14e49922d55f",
+      "bytes": 1266
+    },
+    "sheets-tsv.minpackage": {
+      "sha256": "9175f710942e707525db597f1b3f82d362fc8880b3dad4d1971aa611a3104bb5",
+      "bytes": 658
+    },
+    "sheets-xlsx.minpackage": {
+      "sha256": "72f3964c108c657f842d59120e70b201ef458dbb1d5da591e2f813f28fd9f74b",
+      "bytes": 5247
+    }
+  },
+  "disposition": "c4855: raw baseline byte-frozen; repin unaffected27 cases and3 reused imports; plugin formula XLSX fix mandatory S5b/B4 DONE WHEN; no oracle regeneration.",
+  "diagnostics": [
+    "SCRIPT ERROR: Invalid call. Nonexistent function 'set_cell_formula' in base 'RefCounted (SpreadsheetData)'. @@ at: _set_cell_from_excel (res://Scripts/UI/Controls/SpreadsheetEditor/ExcelHandler.gd:190)",
+    "SCRIPT ERROR: Invalid call. Nonexistent function 'set_cell_formula' in base 'RefCounted (Sheets_SpreadsheetData)'. @@ at: _set_cell_from_excel (/tmp/job/minerva-plugins/sheets/ui/domain/ExcelHandler.gd:190)"
+  ]
+}

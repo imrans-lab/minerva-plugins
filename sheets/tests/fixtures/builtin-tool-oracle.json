@@ -1,0 +1,6005 @@
+{
+	"cases": [
+		{
+			"arguments": {
+				"editor_name": "schema fixture",
+				"format": "json"
+			},
+			"legacy": "minerva_get_spreadsheet_data",
+			"model": {
+				"autofilter": {
+					"columns": [
+						{
+							"col": 0,
+							"type": "values",
+							"values": [
+								"keep"
+							]
+						}
+					],
+					"range": [
+						0,
+						0,
+						3,
+						4
+					]
+				},
+				"cells": {
+					"0,0": {
+						"bold": true,
+						"type": 1,
+						"value": "Name"
+					},
+					"0,1": {
+						"type": 1,
+						"value": "Amount"
+					},
+					"1,0": {
+						"alignment": 2,
+						"bg_color": "0000ffff",
+						"italic": true,
+						"text_color": "ff0000ff",
+						"type": 1,
+						"value": "keep",
+						"wrap_text": true
+					},
+					"1,1": {
+						"number_format": "currency",
+						"type": 2,
+						"value": 2.0
+					},
+					"1,2": {
+						"date_format": "DD/MM/YYYY",
+						"type": 3,
+						"value": 1751328000.0
+					},
+					"2,0": {
+						"type": 1,
+						"value": "hide"
+					},
+					"2,1": {
+						"type": 2,
+						"value": 3.0
+					},
+					"3,1": {
+						"formula": "=SUM(B2:B3)",
+						"type": 4,
+						"value": 5.0
+					}
+				},
+				"charts": [],
+				"column_count": 3,
+				"columns": [
+					{
+						"header_name": "Item",
+						"is_date_column": false,
+						"width": 140.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": true,
+						"width": 100.0
+					}
+				],
+				"frozen_cols": 1,
+				"frozen_rows": 1,
+				"header_row_count": 1,
+				"row_count": 4,
+				"rows": [
+					{
+						"height": 30.0,
+						"is_header": true
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					}
+				],
+				"version": 1
+			},
+			"result": {
+				"column_count": 3,
+				"data": [
+					[
+						"Name",
+						"Amount",
+						null
+					],
+					[
+						"keep",
+						2.0,
+						1751328000.0
+					],
+					[
+						"hide",
+						3.0,
+						null
+					],
+					[
+						null,
+						5.0,
+						null
+					]
+				],
+				"data_starts_at_row": 1,
+				"format": "json",
+				"has_leading_empty_rows": false,
+				"row_count": 4,
+				"success": true
+			}
+		},
+		{
+			"arguments": {
+				"cells": [
+					{
+						"cell": "A2",
+						"value": "changed"
+					}
+				],
+				"editor_name": "schema fixture"
+			},
+			"legacy": "minerva_update_spreadsheet_data",
+			"model": {
+				"autofilter": {
+					"columns": [
+						{
+							"col": 0,
+							"type": "values",
+							"values": [
+								"keep"
+							]
+						}
+					],
+					"range": [
+						0,
+						0,
+						3,
+						4
+					]
+				},
+				"cells": {
+					"0,0": {
+						"bold": true,
+						"type": 1,
+						"value": "Name"
+					},
+					"0,1": {
+						"type": 1,
+						"value": "Amount"
+					},
+					"1,0": {
+						"alignment": 2,
+						"bg_color": "0000ffff",
+						"italic": true,
+						"text_color": "ff0000ff",
+						"type": 1,
+						"value": "changed",
+						"wrap_text": true
+					},
+					"1,1": {
+						"number_format": "currency",
+						"type": 2,
+						"value": 2.0
+					},
+					"1,2": {
+						"date_format": "DD/MM/YYYY",
+						"type": 3,
+						"value": 1751328000.0
+					},
+					"2,0": {
+						"type": 1,
+						"value": "hide"
+					},
+					"2,1": {
+						"type": 2,
+						"value": 3.0
+					},
+					"3,1": {
+						"formula": "=SUM(B2:B3)",
+						"type": 4,
+						"value": 5.0
+					}
+				},
+				"charts": [],
+				"column_count": 3,
+				"columns": [
+					{
+						"header_name": "Item",
+						"is_date_column": false,
+						"width": 140.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": true,
+						"width": 100.0
+					}
+				],
+				"frozen_cols": 1,
+				"frozen_rows": 1,
+				"header_row_count": 1,
+				"row_count": 4,
+				"rows": [
+					{
+						"height": 30.0,
+						"is_header": true
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					}
+				],
+				"version": 1
+			},
+			"result": {
+				"message": "Updated 1 cells",
+				"success": true
+			}
+		},
+		{
+			"arguments": {
+				"at_row": 4.0,
+				"editor_name": "schema fixture",
+				"values": [
+					"new",
+					"9"
+				]
+			},
+			"legacy": "minerva_add_spreadsheet_row",
+			"model": {
+				"autofilter": {
+					"columns": [
+						{
+							"col": 0,
+							"type": "values",
+							"values": [
+								"keep"
+							]
+						}
+					],
+					"range": [
+						0,
+						0,
+						3,
+						4
+					]
+				},
+				"cells": {
+					"0,0": {
+						"bold": true,
+						"type": 1,
+						"value": "Name"
+					},
+					"0,1": {
+						"type": 1,
+						"value": "Amount"
+					},
+					"1,0": {
+						"alignment": 2,
+						"bg_color": "0000ffff",
+						"italic": true,
+						"text_color": "ff0000ff",
+						"type": 1,
+						"value": "changed",
+						"wrap_text": true
+					},
+					"1,1": {
+						"number_format": "currency",
+						"type": 2,
+						"value": 2.0
+					},
+					"1,2": {
+						"date_format": "DD/MM/YYYY",
+						"type": 3,
+						"value": 1751328000.0
+					},
+					"2,0": {
+						"type": 1,
+						"value": "hide"
+					},
+					"2,1": {
+						"type": 2,
+						"value": 3.0
+					},
+					"3,1": {
+						"formula": "=SUM(B2:B3)",
+						"type": 4,
+						"value": 5.0
+					},
+					"4,0": {
+						"type": 1,
+						"value": "new"
+					},
+					"4,1": {
+						"type": 2,
+						"value": 9.0
+					}
+				},
+				"charts": [],
+				"column_count": 3,
+				"columns": [
+					{
+						"header_name": "Item",
+						"is_date_column": false,
+						"width": 140.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": true,
+						"width": 100.0
+					}
+				],
+				"frozen_cols": 1,
+				"frozen_rows": 1,
+				"header_row_count": 1,
+				"row_count": 5,
+				"rows": [
+					{
+						"height": 30.0,
+						"is_header": true
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					}
+				],
+				"version": 1
+			},
+			"result": {
+				"message": "Row added at index 4",
+				"row_index": 4,
+				"success": true
+			}
+		},
+		{
+			"arguments": {
+				"at_col": 3.0,
+				"editor_name": "schema fixture",
+				"header": "Extra",
+				"values": [
+					"x",
+					"y"
+				]
+			},
+			"legacy": "minerva_add_spreadsheet_column",
+			"model": {
+				"autofilter": {
+					"columns": [
+						{
+							"col": 0,
+							"type": "values",
+							"values": [
+								"keep"
+							]
+						}
+					],
+					"range": [
+						0,
+						0,
+						3,
+						4
+					]
+				},
+				"cells": {
+					"0,0": {
+						"bold": true,
+						"type": 1,
+						"value": "Name"
+					},
+					"0,1": {
+						"type": 1,
+						"value": "Amount"
+					},
+					"0,3": {
+						"type": 1,
+						"value": "Extra"
+					},
+					"1,0": {
+						"alignment": 2,
+						"bg_color": "0000ffff",
+						"italic": true,
+						"text_color": "ff0000ff",
+						"type": 1,
+						"value": "changed",
+						"wrap_text": true
+					},
+					"1,1": {
+						"number_format": "currency",
+						"type": 2,
+						"value": 2.0
+					},
+					"1,2": {
+						"date_format": "DD/MM/YYYY",
+						"type": 3,
+						"value": 1751328000.0
+					},
+					"1,3": {
+						"type": 1,
+						"value": "x"
+					},
+					"2,0": {
+						"type": 1,
+						"value": "hide"
+					},
+					"2,1": {
+						"type": 2,
+						"value": 3.0
+					},
+					"2,3": {
+						"type": 1,
+						"value": "y"
+					},
+					"3,1": {
+						"formula": "=SUM(B2:B3)",
+						"type": 4,
+						"value": 5.0
+					},
+					"4,0": {
+						"type": 1,
+						"value": "new"
+					},
+					"4,1": {
+						"type": 2,
+						"value": 9.0
+					}
+				},
+				"charts": [],
+				"column_count": 4,
+				"columns": [
+					{
+						"header_name": "Item",
+						"is_date_column": false,
+						"width": 140.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": true,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					}
+				],
+				"frozen_cols": 1,
+				"frozen_rows": 1,
+				"header_row_count": 1,
+				"row_count": 5,
+				"rows": [
+					{
+						"height": 30.0,
+						"is_header": true
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					}
+				],
+				"version": 1
+			},
+			"result": {
+				"column_index": 3,
+				"column_label": "D",
+				"message": "Column added at index 3",
+				"success": true
+			}
+		},
+		{
+			"arguments": {
+				"editor_name": "schema fixture",
+				"row": 5.0
+			},
+			"legacy": "minerva_delete_spreadsheet_row",
+			"model": {
+				"autofilter": {
+					"columns": [
+						{
+							"col": 0,
+							"type": "values",
+							"values": [
+								"keep"
+							]
+						}
+					],
+					"range": [
+						0,
+						0,
+						3,
+						4
+					]
+				},
+				"cells": {
+					"0,0": {
+						"bold": true,
+						"type": 1,
+						"value": "Name"
+					},
+					"0,1": {
+						"type": 1,
+						"value": "Amount"
+					},
+					"0,3": {
+						"type": 1,
+						"value": "Extra"
+					},
+					"1,0": {
+						"alignment": 2,
+						"bg_color": "0000ffff",
+						"italic": true,
+						"text_color": "ff0000ff",
+						"type": 1,
+						"value": "changed",
+						"wrap_text": true
+					},
+					"1,1": {
+						"number_format": "currency",
+						"type": 2,
+						"value": 2.0
+					},
+					"1,2": {
+						"date_format": "DD/MM/YYYY",
+						"type": 3,
+						"value": 1751328000.0
+					},
+					"1,3": {
+						"type": 1,
+						"value": "x"
+					},
+					"2,0": {
+						"type": 1,
+						"value": "hide"
+					},
+					"2,1": {
+						"type": 2,
+						"value": 3.0
+					},
+					"2,3": {
+						"type": 1,
+						"value": "y"
+					},
+					"3,1": {
+						"formula": "=SUM(B2:B3)",
+						"type": 4,
+						"value": 5.0
+					}
+				},
+				"charts": [],
+				"column_count": 4,
+				"columns": [
+					{
+						"header_name": "Item",
+						"is_date_column": false,
+						"width": 140.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": true,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					}
+				],
+				"frozen_cols": 1,
+				"frozen_rows": 1,
+				"header_row_count": 1,
+				"row_count": 4,
+				"rows": [
+					{
+						"height": 30.0,
+						"is_header": true
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					}
+				],
+				"version": 1
+			},
+			"result": {
+				"deleted_row": 5,
+				"message": "Row 5 deleted (can be undone with Ctrl+Z)",
+				"success": true
+			}
+		},
+		{
+			"arguments": {
+				"column": 4.0,
+				"editor_name": "schema fixture"
+			},
+			"legacy": "minerva_delete_spreadsheet_column",
+			"model": {
+				"autofilter": {
+					"columns": [
+						{
+							"col": 0,
+							"type": "values",
+							"values": [
+								"keep"
+							]
+						}
+					],
+					"range": [
+						0,
+						0,
+						3,
+						4
+					]
+				},
+				"cells": {
+					"0,0": {
+						"bold": true,
+						"type": 1,
+						"value": "Name"
+					},
+					"0,1": {
+						"type": 1,
+						"value": "Amount"
+					},
+					"1,0": {
+						"alignment": 2,
+						"bg_color": "0000ffff",
+						"italic": true,
+						"text_color": "ff0000ff",
+						"type": 1,
+						"value": "changed",
+						"wrap_text": true
+					},
+					"1,1": {
+						"number_format": "currency",
+						"type": 2,
+						"value": 2.0
+					},
+					"1,2": {
+						"date_format": "DD/MM/YYYY",
+						"type": 3,
+						"value": 1751328000.0
+					},
+					"2,0": {
+						"type": 1,
+						"value": "hide"
+					},
+					"2,1": {
+						"type": 2,
+						"value": 3.0
+					},
+					"3,1": {
+						"formula": "=SUM(B2:B3)",
+						"type": 4,
+						"value": 5.0
+					}
+				},
+				"charts": [],
+				"column_count": 3,
+				"columns": [
+					{
+						"header_name": "Item",
+						"is_date_column": false,
+						"width": 140.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": true,
+						"width": 100.0
+					}
+				],
+				"frozen_cols": 1,
+				"frozen_rows": 1,
+				"header_row_count": 1,
+				"row_count": 4,
+				"rows": [
+					{
+						"height": 30.0,
+						"is_header": true
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					}
+				],
+				"version": 1
+			},
+			"result": {
+				"deleted_column": 4,
+				"deleted_column_label": "D",
+				"message": "Column D deleted (can be undone with Ctrl+Z)",
+				"success": true
+			}
+		},
+		{
+			"arguments": {
+				"at_row": 2.0,
+				"editor_name": "schema fixture"
+			},
+			"legacy": "minerva_insert_spreadsheet_row",
+			"model": {
+				"autofilter": {
+					"columns": [
+						{
+							"col": 0,
+							"type": "values",
+							"values": [
+								"keep"
+							]
+						}
+					],
+					"range": [
+						0,
+						0,
+						3,
+						5
+					]
+				},
+				"cells": {
+					"0,0": {
+						"bold": true,
+						"type": 1,
+						"value": "Name"
+					},
+					"0,1": {
+						"type": 1,
+						"value": "Amount"
+					},
+					"1,0": {
+						"alignment": 2,
+						"bg_color": "0000ffff",
+						"italic": true,
+						"text_color": "ff0000ff",
+						"type": 1,
+						"value": "changed",
+						"wrap_text": true
+					},
+					"1,1": {
+						"number_format": "currency",
+						"type": 2,
+						"value": 2.0
+					},
+					"1,2": {
+						"date_format": "DD/MM/YYYY",
+						"type": 3,
+						"value": 1751328000.0
+					},
+					"3,0": {
+						"type": 1,
+						"value": "hide"
+					},
+					"3,1": {
+						"type": 2,
+						"value": 3.0
+					},
+					"4,1": {
+						"formula": "=SUM(B2:B4)",
+						"type": 4,
+						"value": 5.0
+					}
+				},
+				"charts": [],
+				"column_count": 3,
+				"columns": [
+					{
+						"header_name": "Item",
+						"is_date_column": false,
+						"width": 140.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": true,
+						"width": 100.0
+					}
+				],
+				"frozen_cols": 1,
+				"frozen_rows": 1,
+				"header_row_count": 1,
+				"row_count": 5,
+				"rows": [
+					{
+						"height": 30.0,
+						"is_header": true
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					}
+				],
+				"version": 1
+			},
+			"result": {
+				"inserted_at_row": 2,
+				"message": "Empty row inserted at index 2",
+				"success": true
+			}
+		},
+		{
+			"arguments": {
+				"at_column": 2.0,
+				"editor_name": "schema fixture"
+			},
+			"legacy": "minerva_insert_spreadsheet_column",
+			"model": {
+				"autofilter": {
+					"columns": [
+						{
+							"col": 0,
+							"type": "values",
+							"values": [
+								"keep"
+							]
+						}
+					],
+					"range": [
+						0,
+						0,
+						4,
+						5
+					]
+				},
+				"cells": {
+					"0,0": {
+						"bold": true,
+						"type": 1,
+						"value": "Name"
+					},
+					"0,1": {
+						"type": 1,
+						"value": "Amount"
+					},
+					"1,0": {
+						"alignment": 2,
+						"bg_color": "0000ffff",
+						"italic": true,
+						"text_color": "ff0000ff",
+						"type": 1,
+						"value": "changed",
+						"wrap_text": true
+					},
+					"1,1": {
+						"number_format": "currency",
+						"type": 2,
+						"value": 2.0
+					},
+					"1,3": {
+						"date_format": "DD/MM/YYYY",
+						"type": 3,
+						"value": 1751328000.0
+					},
+					"3,0": {
+						"type": 1,
+						"value": "hide"
+					},
+					"3,1": {
+						"type": 2,
+						"value": 3.0
+					},
+					"4,1": {
+						"formula": "=SUM(B2:B4)",
+						"type": 4,
+						"value": 5.0
+					}
+				},
+				"charts": [],
+				"column_count": 4,
+				"columns": [
+					{
+						"header_name": "Item",
+						"is_date_column": false,
+						"width": 140.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": true,
+						"width": 100.0
+					}
+				],
+				"frozen_cols": 1,
+				"frozen_rows": 1,
+				"header_row_count": 1,
+				"row_count": 5,
+				"rows": [
+					{
+						"height": 30.0,
+						"is_header": true
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					}
+				],
+				"version": 1
+			},
+			"result": {
+				"inserted_at_column": 2,
+				"inserted_column_label": "C",
+				"message": "Empty column inserted at C (index 2)",
+				"success": true
+			}
+		},
+		{
+			"arguments": {
+				"bold": true,
+				"editor_name": "schema fixture",
+				"range": "A1:B2"
+			},
+			"legacy": "minerva_format_cells",
+			"model": {
+				"autofilter": {
+					"columns": [
+						{
+							"col": 0,
+							"type": "values",
+							"values": [
+								"keep"
+							]
+						}
+					],
+					"range": [
+						0,
+						0,
+						4,
+						5
+					]
+				},
+				"cells": {
+					"0,0": {
+						"bold": true,
+						"type": 1,
+						"value": "Name"
+					},
+					"0,1": {
+						"bold": true,
+						"type": 1,
+						"value": "Amount"
+					},
+					"1,0": {
+						"alignment": 2,
+						"bg_color": "0000ffff",
+						"bold": true,
+						"italic": true,
+						"text_color": "ff0000ff",
+						"type": 1,
+						"value": "changed",
+						"wrap_text": true
+					},
+					"1,1": {
+						"bold": true,
+						"number_format": "currency",
+						"type": 2,
+						"value": 2.0
+					},
+					"1,3": {
+						"date_format": "DD/MM/YYYY",
+						"type": 3,
+						"value": 1751328000.0
+					},
+					"3,0": {
+						"type": 1,
+						"value": "hide"
+					},
+					"3,1": {
+						"type": 2,
+						"value": 3.0
+					},
+					"4,1": {
+						"formula": "=SUM(B2:B4)",
+						"type": 4,
+						"value": 5.0
+					}
+				},
+				"charts": [],
+				"column_count": 4,
+				"columns": [
+					{
+						"header_name": "Item",
+						"is_date_column": false,
+						"width": 140.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": true,
+						"width": 100.0
+					}
+				],
+				"frozen_cols": 1,
+				"frozen_rows": 1,
+				"header_row_count": 1,
+				"row_count": 5,
+				"rows": [
+					{
+						"height": 30.0,
+						"is_header": true
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					}
+				],
+				"version": 1
+			},
+			"result": {
+				"cells_formatted": 4,
+				"message": "Formatted 4 cells",
+				"success": true
+			}
+		},
+		{
+			"arguments": {
+				"editor_name": "schema fixture",
+				"rows": [
+					{
+						"height": 32.0,
+						"row": 2.0
+					}
+				]
+			},
+			"legacy": "minerva_set_row_height",
+			"model": {
+				"autofilter": {
+					"columns": [
+						{
+							"col": 0,
+							"type": "values",
+							"values": [
+								"keep"
+							]
+						}
+					],
+					"range": [
+						0,
+						0,
+						4,
+						5
+					]
+				},
+				"cells": {
+					"0,0": {
+						"bold": true,
+						"type": 1,
+						"value": "Name"
+					},
+					"0,1": {
+						"bold": true,
+						"type": 1,
+						"value": "Amount"
+					},
+					"1,0": {
+						"alignment": 2,
+						"bg_color": "0000ffff",
+						"bold": true,
+						"italic": true,
+						"text_color": "ff0000ff",
+						"type": 1,
+						"value": "changed",
+						"wrap_text": true
+					},
+					"1,1": {
+						"bold": true,
+						"number_format": "currency",
+						"type": 2,
+						"value": 2.0
+					},
+					"1,3": {
+						"date_format": "DD/MM/YYYY",
+						"type": 3,
+						"value": 1751328000.0
+					},
+					"3,0": {
+						"type": 1,
+						"value": "hide"
+					},
+					"3,1": {
+						"type": 2,
+						"value": 3.0
+					},
+					"4,1": {
+						"formula": "=SUM(B2:B4)",
+						"type": 4,
+						"value": 5.0
+					}
+				},
+				"charts": [],
+				"column_count": 4,
+				"columns": [
+					{
+						"header_name": "Item",
+						"is_date_column": false,
+						"width": 140.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": true,
+						"width": 100.0
+					}
+				],
+				"frozen_cols": 1,
+				"frozen_rows": 1,
+				"header_row_count": 1,
+				"row_count": 5,
+				"rows": [
+					{
+						"height": 30.0,
+						"is_header": true
+					},
+					{
+						"height": 32.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					}
+				],
+				"version": 1
+			},
+			"result": {
+				"message": "Updated height for 1 rows",
+				"rows_updated": 1,
+				"success": true
+			}
+		},
+		{
+			"arguments": {
+				"columns": [
+					{
+						"column": "A",
+						"width": 180.0
+					}
+				],
+				"editor_name": "schema fixture"
+			},
+			"legacy": "minerva_set_column_width",
+			"model": {
+				"autofilter": {
+					"columns": [
+						{
+							"col": 0,
+							"type": "values",
+							"values": [
+								"keep"
+							]
+						}
+					],
+					"range": [
+						0,
+						0,
+						4,
+						5
+					]
+				},
+				"cells": {
+					"0,0": {
+						"bold": true,
+						"type": 1,
+						"value": "Name"
+					},
+					"0,1": {
+						"bold": true,
+						"type": 1,
+						"value": "Amount"
+					},
+					"1,0": {
+						"alignment": 2,
+						"bg_color": "0000ffff",
+						"bold": true,
+						"italic": true,
+						"text_color": "ff0000ff",
+						"type": 1,
+						"value": "changed",
+						"wrap_text": true
+					},
+					"1,1": {
+						"bold": true,
+						"number_format": "currency",
+						"type": 2,
+						"value": 2.0
+					},
+					"1,3": {
+						"date_format": "DD/MM/YYYY",
+						"type": 3,
+						"value": 1751328000.0
+					},
+					"3,0": {
+						"type": 1,
+						"value": "hide"
+					},
+					"3,1": {
+						"type": 2,
+						"value": 3.0
+					},
+					"4,1": {
+						"formula": "=SUM(B2:B4)",
+						"type": 4,
+						"value": 5.0
+					}
+				},
+				"charts": [],
+				"column_count": 4,
+				"columns": [
+					{
+						"header_name": "Item",
+						"is_date_column": false,
+						"width": 180.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": true,
+						"width": 100.0
+					}
+				],
+				"frozen_cols": 1,
+				"frozen_rows": 1,
+				"header_row_count": 1,
+				"row_count": 5,
+				"rows": [
+					{
+						"height": 30.0,
+						"is_header": true
+					},
+					{
+						"height": 32.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					}
+				],
+				"version": 1
+			},
+			"result": {
+				"columns_updated": 1,
+				"message": "Updated width for 1 columns",
+				"success": true
+			}
+		},
+		{
+			"arguments": {
+				"cell": "B2",
+				"editor_name": "schema fixture",
+				"formula": "=2+3"
+			},
+			"legacy": "minerva_set_cell_formula",
+			"model": {
+				"autofilter": {
+					"columns": [
+						{
+							"col": 0,
+							"type": "values",
+							"values": [
+								"keep"
+							]
+						}
+					],
+					"range": [
+						0,
+						0,
+						4,
+						5
+					]
+				},
+				"cells": {
+					"0,0": {
+						"bold": true,
+						"type": 1,
+						"value": "Name"
+					},
+					"0,1": {
+						"bold": true,
+						"type": 1,
+						"value": "Amount"
+					},
+					"1,0": {
+						"alignment": 2,
+						"bg_color": "0000ffff",
+						"bold": true,
+						"italic": true,
+						"text_color": "ff0000ff",
+						"type": 1,
+						"value": "changed",
+						"wrap_text": true
+					},
+					"1,1": {
+						"bold": true,
+						"formula": "=2+3",
+						"number_format": "currency",
+						"type": 4,
+						"value": 5.0
+					},
+					"1,3": {
+						"date_format": "DD/MM/YYYY",
+						"type": 3,
+						"value": 1751328000.0
+					},
+					"3,0": {
+						"type": 1,
+						"value": "hide"
+					},
+					"3,1": {
+						"type": 2,
+						"value": 3.0
+					},
+					"4,1": {
+						"formula": "=SUM(B2:B4)",
+						"type": 4,
+						"value": 5.0
+					}
+				},
+				"charts": [],
+				"column_count": 4,
+				"columns": [
+					{
+						"header_name": "Item",
+						"is_date_column": false,
+						"width": 180.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": true,
+						"width": 100.0
+					}
+				],
+				"frozen_cols": 1,
+				"frozen_rows": 1,
+				"header_row_count": 1,
+				"row_count": 5,
+				"rows": [
+					{
+						"height": 30.0,
+						"is_header": true
+					},
+					{
+						"height": 32.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					}
+				],
+				"version": 1
+			},
+			"result": {
+				"cell": "B2",
+				"formula": "=2+3",
+				"result": "$5.00",
+				"success": true
+			}
+		},
+		{
+			"arguments": {
+				"columns": [
+					"B"
+				],
+				"editor_name": "schema fixture",
+				"source_row": 2.0,
+				"target_rows": [
+					3.0
+				]
+			},
+			"legacy": "minerva_fill_down",
+			"model": {
+				"autofilter": {
+					"columns": [
+						{
+							"col": 0,
+							"type": "values",
+							"values": [
+								"keep"
+							]
+						}
+					],
+					"range": [
+						0,
+						0,
+						4,
+						5
+					]
+				},
+				"cells": {
+					"0,0": {
+						"bold": true,
+						"type": 1,
+						"value": "Name"
+					},
+					"0,1": {
+						"bold": true,
+						"type": 1,
+						"value": "Amount"
+					},
+					"1,0": {
+						"alignment": 2,
+						"bg_color": "0000ffff",
+						"bold": true,
+						"italic": true,
+						"text_color": "ff0000ff",
+						"type": 1,
+						"value": "changed",
+						"wrap_text": true
+					},
+					"1,1": {
+						"bold": true,
+						"formula": "=2+3",
+						"number_format": "currency",
+						"type": 4,
+						"value": 5.0
+					},
+					"1,3": {
+						"date_format": "DD/MM/YYYY",
+						"type": 3,
+						"value": 1751328000.0
+					},
+					"2,1": {
+						"formula": "=2+3",
+						"type": 4,
+						"value": 5.0
+					},
+					"3,0": {
+						"type": 1,
+						"value": "hide"
+					},
+					"3,1": {
+						"type": 2,
+						"value": 3.0
+					},
+					"4,1": {
+						"formula": "=SUM(B2:B4)",
+						"type": 4,
+						"value": 5.0
+					}
+				},
+				"charts": [],
+				"column_count": 4,
+				"columns": [
+					{
+						"header_name": "Item",
+						"is_date_column": false,
+						"width": 180.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": true,
+						"width": 100.0
+					}
+				],
+				"frozen_cols": 1,
+				"frozen_rows": 1,
+				"header_row_count": 1,
+				"row_count": 5,
+				"rows": [
+					{
+						"height": 30.0,
+						"is_header": true
+					},
+					{
+						"height": 32.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					}
+				],
+				"version": 1
+			},
+			"result": {
+				"columns": [
+					"B"
+				],
+				"filled_cells": 1,
+				"message": "Filled 1 cells from row 2 to rows [3.0] in columns B",
+				"source_row": 2,
+				"success": true,
+				"target_rows": [
+					3.0
+				]
+			}
+		},
+		{
+			"arguments": {
+				"editor_name": "schema fixture"
+			},
+			"legacy": "minerva_recalculate",
+			"model": {
+				"autofilter": {
+					"columns": [
+						{
+							"col": 0,
+							"type": "values",
+							"values": [
+								"keep"
+							]
+						}
+					],
+					"range": [
+						0,
+						0,
+						4,
+						5
+					]
+				},
+				"cells": {
+					"0,0": {
+						"bold": true,
+						"type": 1,
+						"value": "Name"
+					},
+					"0,1": {
+						"bold": true,
+						"type": 1,
+						"value": "Amount"
+					},
+					"1,0": {
+						"alignment": 2,
+						"bg_color": "0000ffff",
+						"bold": true,
+						"italic": true,
+						"text_color": "ff0000ff",
+						"type": 1,
+						"value": "changed",
+						"wrap_text": true
+					},
+					"1,1": {
+						"bold": true,
+						"formula": "=2+3",
+						"number_format": "currency",
+						"type": 4,
+						"value": 5.0
+					},
+					"1,3": {
+						"date_format": "DD/MM/YYYY",
+						"type": 3,
+						"value": 1751328000.0
+					},
+					"2,1": {
+						"formula": "=2+3",
+						"type": 4,
+						"value": 5.0
+					},
+					"3,0": {
+						"type": 1,
+						"value": "hide"
+					},
+					"3,1": {
+						"type": 2,
+						"value": 3.0
+					},
+					"4,1": {
+						"formula": "=SUM(B2:B4)",
+						"type": 4,
+						"value": 13.0
+					}
+				},
+				"charts": [],
+				"column_count": 4,
+				"columns": [
+					{
+						"header_name": "Item",
+						"is_date_column": false,
+						"width": 180.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": true,
+						"width": 100.0
+					}
+				],
+				"frozen_cols": 1,
+				"frozen_rows": 1,
+				"header_row_count": 1,
+				"row_count": 5,
+				"rows": [
+					{
+						"height": 30.0,
+						"is_header": true
+					},
+					{
+						"height": 32.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					}
+				],
+				"version": 1
+			},
+			"result": {
+				"message": "Recalculated all formulas in contract editor",
+				"success": true
+			}
+		},
+		{
+			"arguments": {
+				"editor_name": "schema fixture"
+			},
+			"legacy": "minerva_get_spreadsheet_history",
+			"model": {
+				"autofilter": {
+					"columns": [
+						{
+							"col": 0,
+							"type": "values",
+							"values": [
+								"keep"
+							]
+						}
+					],
+					"range": [
+						0,
+						0,
+						4,
+						5
+					]
+				},
+				"cells": {
+					"0,0": {
+						"bold": true,
+						"type": 1,
+						"value": "Name"
+					},
+					"0,1": {
+						"bold": true,
+						"type": 1,
+						"value": "Amount"
+					},
+					"1,0": {
+						"alignment": 2,
+						"bg_color": "0000ffff",
+						"bold": true,
+						"italic": true,
+						"text_color": "ff0000ff",
+						"type": 1,
+						"value": "changed",
+						"wrap_text": true
+					},
+					"1,1": {
+						"bold": true,
+						"formula": "=2+3",
+						"number_format": "currency",
+						"type": 4,
+						"value": 5.0
+					},
+					"1,3": {
+						"date_format": "DD/MM/YYYY",
+						"type": 3,
+						"value": 1751328000.0
+					},
+					"2,1": {
+						"formula": "=2+3",
+						"type": 4,
+						"value": 5.0
+					},
+					"3,0": {
+						"type": 1,
+						"value": "hide"
+					},
+					"3,1": {
+						"type": 2,
+						"value": 3.0
+					},
+					"4,1": {
+						"formula": "=SUM(B2:B4)",
+						"type": 4,
+						"value": 13.0
+					}
+				},
+				"charts": [],
+				"column_count": 4,
+				"columns": [
+					{
+						"header_name": "Item",
+						"is_date_column": false,
+						"width": 180.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": true,
+						"width": 100.0
+					}
+				],
+				"frozen_cols": 1,
+				"frozen_rows": 1,
+				"header_row_count": 1,
+				"row_count": 5,
+				"rows": [
+					{
+						"height": 30.0,
+						"is_header": true
+					},
+					{
+						"height": 32.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					}
+				],
+				"version": 1
+			},
+			"result": {
+				"can_redo": false,
+				"can_undo": true,
+				"redo_count": 0,
+				"success": true,
+				"undo_count": 16
+			}
+		},
+		{
+			"arguments": {
+				"count": 1.0,
+				"editor_name": "schema fixture"
+			},
+			"legacy": "minerva_undo_spreadsheet",
+			"model": {
+				"autofilter": {
+					"columns": [
+						{
+							"col": 0,
+							"type": "values",
+							"values": [
+								"keep"
+							]
+						}
+					],
+					"range": [
+						0,
+						0,
+						4,
+						5
+					]
+				},
+				"cells": {
+					"0,0": {
+						"bold": true,
+						"type": 1,
+						"value": "Name"
+					},
+					"0,1": {
+						"bold": true,
+						"type": 1,
+						"value": "Amount"
+					},
+					"1,0": {
+						"alignment": 2,
+						"bg_color": "0000ffff",
+						"bold": true,
+						"italic": true,
+						"text_color": "ff0000ff",
+						"type": 1,
+						"value": "changed",
+						"wrap_text": true
+					},
+					"1,1": {
+						"bold": true,
+						"formula": "=2+3",
+						"number_format": "currency",
+						"type": 4,
+						"value": 5.0
+					},
+					"1,3": {
+						"date_format": "DD/MM/YYYY",
+						"type": 3,
+						"value": 1751328000.0
+					},
+					"3,0": {
+						"type": 1,
+						"value": "hide"
+					},
+					"3,1": {
+						"type": 2,
+						"value": 3.0
+					},
+					"4,1": {
+						"formula": "=SUM(B2:B4)",
+						"type": 4,
+						"value": 13.0
+					}
+				},
+				"charts": [],
+				"column_count": 4,
+				"columns": [
+					{
+						"header_name": "Item",
+						"is_date_column": false,
+						"width": 180.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": true,
+						"width": 100.0
+					}
+				],
+				"frozen_cols": 1,
+				"frozen_rows": 1,
+				"header_row_count": 1,
+				"row_count": 5,
+				"rows": [
+					{
+						"height": 30.0,
+						"is_header": true
+					},
+					{
+						"height": 32.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					}
+				],
+				"version": 1
+			},
+			"result": {
+				"message": "Undid 1 action(s)",
+				"redo_count": 1,
+				"remaining_undo_count": 15,
+				"success": true,
+				"undone_count": 1
+			}
+		},
+		{
+			"arguments": {
+				"count": 1.0,
+				"editor_name": "schema fixture"
+			},
+			"legacy": "minerva_redo_spreadsheet",
+			"model": {
+				"autofilter": {
+					"columns": [
+						{
+							"col": 0,
+							"type": "values",
+							"values": [
+								"keep"
+							]
+						}
+					],
+					"range": [
+						0,
+						0,
+						4,
+						5
+					]
+				},
+				"cells": {
+					"0,0": {
+						"bold": true,
+						"type": 1,
+						"value": "Name"
+					},
+					"0,1": {
+						"bold": true,
+						"type": 1,
+						"value": "Amount"
+					},
+					"1,0": {
+						"alignment": 2,
+						"bg_color": "0000ffff",
+						"bold": true,
+						"italic": true,
+						"text_color": "ff0000ff",
+						"type": 1,
+						"value": "changed",
+						"wrap_text": true
+					},
+					"1,1": {
+						"bold": true,
+						"formula": "=2+3",
+						"number_format": "currency",
+						"type": 4,
+						"value": 5.0
+					},
+					"1,3": {
+						"date_format": "DD/MM/YYYY",
+						"type": 3,
+						"value": 1751328000.0
+					},
+					"2,1": {
+						"formula": "=2+3",
+						"type": 4,
+						"value": 5.0
+					},
+					"3,0": {
+						"type": 1,
+						"value": "hide"
+					},
+					"3,1": {
+						"type": 2,
+						"value": 3.0
+					},
+					"4,1": {
+						"formula": "=SUM(B2:B4)",
+						"type": 4,
+						"value": 13.0
+					}
+				},
+				"charts": [],
+				"column_count": 4,
+				"columns": [
+					{
+						"header_name": "Item",
+						"is_date_column": false,
+						"width": 180.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": true,
+						"width": 100.0
+					}
+				],
+				"frozen_cols": 1,
+				"frozen_rows": 1,
+				"header_row_count": 1,
+				"row_count": 5,
+				"rows": [
+					{
+						"height": 30.0,
+						"is_header": true
+					},
+					{
+						"height": 32.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					}
+				],
+				"version": 1
+			},
+			"result": {
+				"message": "Redid 1 action(s)",
+				"redone_count": 1,
+				"remaining_redo_count": 0,
+				"success": true,
+				"undo_count": 16
+			}
+		},
+		{
+			"arguments": {
+				"editor_name": "schema fixture",
+				"range": "A1:C4"
+			},
+			"legacy": "minerva_spreadsheet_autofilter_enable",
+			"model": {
+				"autofilter": {
+					"columns": [
+						{
+							"col": 0,
+							"type": "values",
+							"values": [
+								"keep"
+							]
+						}
+					],
+					"range": [
+						0,
+						0,
+						3,
+						4
+					]
+				},
+				"cells": {
+					"0,0": {
+						"bold": true,
+						"type": 1,
+						"value": "Name"
+					},
+					"0,1": {
+						"bold": true,
+						"type": 1,
+						"value": "Amount"
+					},
+					"1,0": {
+						"alignment": 2,
+						"bg_color": "0000ffff",
+						"bold": true,
+						"italic": true,
+						"text_color": "ff0000ff",
+						"type": 1,
+						"value": "changed",
+						"wrap_text": true
+					},
+					"1,1": {
+						"bold": true,
+						"formula": "=2+3",
+						"number_format": "currency",
+						"type": 4,
+						"value": 5.0
+					},
+					"1,3": {
+						"date_format": "DD/MM/YYYY",
+						"type": 3,
+						"value": 1751328000.0
+					},
+					"2,1": {
+						"formula": "=2+3",
+						"type": 4,
+						"value": 5.0
+					},
+					"3,0": {
+						"type": 1,
+						"value": "hide"
+					},
+					"3,1": {
+						"type": 2,
+						"value": 3.0
+					},
+					"4,1": {
+						"formula": "=SUM(B2:B4)",
+						"type": 4,
+						"value": 13.0
+					}
+				},
+				"charts": [],
+				"column_count": 4,
+				"columns": [
+					{
+						"header_name": "Item",
+						"is_date_column": false,
+						"width": 180.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": true,
+						"width": 100.0
+					}
+				],
+				"frozen_cols": 1,
+				"frozen_rows": 1,
+				"header_row_count": 1,
+				"row_count": 5,
+				"rows": [
+					{
+						"height": 30.0,
+						"is_header": true
+					},
+					{
+						"height": 32.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					}
+				],
+				"version": 1
+			},
+			"result": {
+				"changed": true,
+				"criteria": [
+					{
+						"column": 1,
+						"column_label": "A",
+						"type": "values",
+						"values": [
+							"keep"
+						]
+					}
+				],
+				"editor_name": "contract editor",
+				"enabled": true,
+				"filter_range": "A1:C4",
+				"header_row": 1,
+				"scope": "visible",
+				"success": true,
+				"total_rows": 3,
+				"visible_count": 0,
+				"visible_rows": [],
+				"visible_rows_truncated": false
+			}
+		},
+		{
+			"arguments": {
+				"column": 1.0,
+				"editor_name": "schema fixture",
+				"values": [
+					"keep",
+					"changed"
+				]
+			},
+			"legacy": "minerva_spreadsheet_autofilter_set",
+			"model": {
+				"autofilter": {
+					"columns": [
+						{
+							"col": 0,
+							"type": "values",
+							"values": [
+								"keep",
+								"changed"
+							]
+						}
+					],
+					"range": [
+						0,
+						0,
+						3,
+						4
+					]
+				},
+				"cells": {
+					"0,0": {
+						"bold": true,
+						"type": 1,
+						"value": "Name"
+					},
+					"0,1": {
+						"bold": true,
+						"type": 1,
+						"value": "Amount"
+					},
+					"1,0": {
+						"alignment": 2,
+						"bg_color": "0000ffff",
+						"bold": true,
+						"italic": true,
+						"text_color": "ff0000ff",
+						"type": 1,
+						"value": "changed",
+						"wrap_text": true
+					},
+					"1,1": {
+						"bold": true,
+						"formula": "=2+3",
+						"number_format": "currency",
+						"type": 4,
+						"value": 5.0
+					},
+					"1,3": {
+						"date_format": "DD/MM/YYYY",
+						"type": 3,
+						"value": 1751328000.0
+					},
+					"2,1": {
+						"formula": "=2+3",
+						"type": 4,
+						"value": 5.0
+					},
+					"3,0": {
+						"type": 1,
+						"value": "hide"
+					},
+					"3,1": {
+						"type": 2,
+						"value": 3.0
+					},
+					"4,1": {
+						"formula": "=SUM(B2:B4)",
+						"type": 4,
+						"value": 13.0
+					}
+				},
+				"charts": [],
+				"column_count": 4,
+				"columns": [
+					{
+						"header_name": "Item",
+						"is_date_column": false,
+						"width": 180.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": true,
+						"width": 100.0
+					}
+				],
+				"frozen_cols": 1,
+				"frozen_rows": 1,
+				"header_row_count": 1,
+				"row_count": 5,
+				"rows": [
+					{
+						"height": 30.0,
+						"is_header": true
+					},
+					{
+						"height": 32.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					}
+				],
+				"version": 1
+			},
+			"result": {
+				"changed": true,
+				"criteria": [
+					{
+						"column": 1,
+						"column_label": "A",
+						"type": "values",
+						"values": [
+							"keep",
+							"changed"
+						]
+					}
+				],
+				"editor_name": "contract editor",
+				"enabled": true,
+				"filter_range": "A1:C4",
+				"header_row": 1,
+				"scope": "visible",
+				"success": true,
+				"total_rows": 3,
+				"visible_count": 1,
+				"visible_rows": [
+					2
+				],
+				"visible_rows_truncated": false
+			}
+		},
+		{
+			"arguments": {
+				"editor_name": "schema fixture"
+			},
+			"legacy": "minerva_spreadsheet_autofilter_get",
+			"model": {
+				"autofilter": {
+					"columns": [
+						{
+							"col": 0,
+							"type": "values",
+							"values": [
+								"keep",
+								"changed"
+							]
+						}
+					],
+					"range": [
+						0,
+						0,
+						3,
+						4
+					]
+				},
+				"cells": {
+					"0,0": {
+						"bold": true,
+						"type": 1,
+						"value": "Name"
+					},
+					"0,1": {
+						"bold": true,
+						"type": 1,
+						"value": "Amount"
+					},
+					"1,0": {
+						"alignment": 2,
+						"bg_color": "0000ffff",
+						"bold": true,
+						"italic": true,
+						"text_color": "ff0000ff",
+						"type": 1,
+						"value": "changed",
+						"wrap_text": true
+					},
+					"1,1": {
+						"bold": true,
+						"formula": "=2+3",
+						"number_format": "currency",
+						"type": 4,
+						"value": 5.0
+					},
+					"1,3": {
+						"date_format": "DD/MM/YYYY",
+						"type": 3,
+						"value": 1751328000.0
+					},
+					"2,1": {
+						"formula": "=2+3",
+						"type": 4,
+						"value": 5.0
+					},
+					"3,0": {
+						"type": 1,
+						"value": "hide"
+					},
+					"3,1": {
+						"type": 2,
+						"value": 3.0
+					},
+					"4,1": {
+						"formula": "=SUM(B2:B4)",
+						"type": 4,
+						"value": 13.0
+					}
+				},
+				"charts": [],
+				"column_count": 4,
+				"columns": [
+					{
+						"header_name": "Item",
+						"is_date_column": false,
+						"width": 180.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": true,
+						"width": 100.0
+					}
+				],
+				"frozen_cols": 1,
+				"frozen_rows": 1,
+				"header_row_count": 1,
+				"row_count": 5,
+				"rows": [
+					{
+						"height": 30.0,
+						"is_header": true
+					},
+					{
+						"height": 32.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					}
+				],
+				"version": 1
+			},
+			"result": {
+				"criteria": [
+					{
+						"column": 1,
+						"column_label": "A",
+						"type": "values",
+						"values": [
+							"keep",
+							"changed"
+						]
+					}
+				],
+				"editor_name": "contract editor",
+				"enabled": true,
+				"filter_range": "A1:C4",
+				"header_row": 1,
+				"scope": "visible",
+				"success": true,
+				"total_rows": 3,
+				"visible_count": 1,
+				"visible_rows": [
+					2
+				],
+				"visible_rows_truncated": false
+			}
+		},
+		{
+			"arguments": {
+				"editor_name": "schema fixture",
+				"remove": true
+			},
+			"legacy": "minerva_spreadsheet_autofilter_clear",
+			"model": {
+				"cells": {
+					"0,0": {
+						"bold": true,
+						"type": 1,
+						"value": "Name"
+					},
+					"0,1": {
+						"bold": true,
+						"type": 1,
+						"value": "Amount"
+					},
+					"1,0": {
+						"alignment": 2,
+						"bg_color": "0000ffff",
+						"bold": true,
+						"italic": true,
+						"text_color": "ff0000ff",
+						"type": 1,
+						"value": "changed",
+						"wrap_text": true
+					},
+					"1,1": {
+						"bold": true,
+						"formula": "=2+3",
+						"number_format": "currency",
+						"type": 4,
+						"value": 5.0
+					},
+					"1,3": {
+						"date_format": "DD/MM/YYYY",
+						"type": 3,
+						"value": 1751328000.0
+					},
+					"2,1": {
+						"formula": "=2+3",
+						"type": 4,
+						"value": 5.0
+					},
+					"3,0": {
+						"type": 1,
+						"value": "hide"
+					},
+					"3,1": {
+						"type": 2,
+						"value": 3.0
+					},
+					"4,1": {
+						"formula": "=SUM(B2:B4)",
+						"type": 4,
+						"value": 13.0
+					}
+				},
+				"charts": [],
+				"column_count": 4,
+				"columns": [
+					{
+						"header_name": "Item",
+						"is_date_column": false,
+						"width": 180.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": true,
+						"width": 100.0
+					}
+				],
+				"frozen_cols": 1,
+				"frozen_rows": 1,
+				"header_row_count": 1,
+				"row_count": 5,
+				"rows": [
+					{
+						"height": 30.0,
+						"is_header": true
+					},
+					{
+						"height": 32.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					}
+				],
+				"version": 1
+			},
+			"result": {
+				"changed": true,
+				"criteria": [],
+				"editor_name": "contract editor",
+				"enabled": false,
+				"filter_range": "",
+				"header_row": 1,
+				"scope": "all",
+				"success": true,
+				"total_rows": 4,
+				"visible_count": 4,
+				"visible_rows": [
+					2,
+					3,
+					4,
+					5
+				],
+				"visible_rows_truncated": false
+			}
+		},
+		{
+			"arguments": {
+				"editor_name": "schema fixture",
+				"series": [
+					"B1:B4"
+				],
+				"title": "Contract",
+				"x_range": "A1:A4"
+			},
+			"legacy": "minerva_add_spreadsheet_chart",
+			"model": {
+				"cells": {
+					"0,0": {
+						"bold": true,
+						"type": 1,
+						"value": "Name"
+					},
+					"0,1": {
+						"bold": true,
+						"type": 1,
+						"value": "Amount"
+					},
+					"1,0": {
+						"alignment": 2,
+						"bg_color": "0000ffff",
+						"bold": true,
+						"italic": true,
+						"text_color": "ff0000ff",
+						"type": 1,
+						"value": "changed",
+						"wrap_text": true
+					},
+					"1,1": {
+						"bold": true,
+						"formula": "=2+3",
+						"number_format": "currency",
+						"type": 4,
+						"value": 5.0
+					},
+					"1,3": {
+						"date_format": "DD/MM/YYYY",
+						"type": 3,
+						"value": 1751328000.0
+					},
+					"2,1": {
+						"formula": "=2+3",
+						"type": 4,
+						"value": 5.0
+					},
+					"3,0": {
+						"type": 1,
+						"value": "hide"
+					},
+					"3,1": {
+						"type": 2,
+						"value": 3.0
+					},
+					"4,1": {
+						"formula": "=SUM(B2:B4)",
+						"type": 4,
+						"value": 13.0
+					}
+				},
+				"charts": [
+					{
+						"background_color_a": 1.0,
+						"background_color_b": 0.180000007152557,
+						"background_color_g": 0.150000005960464,
+						"background_color_r": 0.150000005960464,
+						"date_format": "YYYY-MM-DD",
+						"first_row_is_header": true,
+						"height": 300.0,
+						"id": "chart:0",
+						"series": [
+							{
+								"color_a": 1.0,
+								"color_b": 0.899999976158142,
+								"color_g": 0.600000023841858,
+								"color_r": 0.300000011920929,
+								"name": "Series 1",
+								"range": "B1:B4"
+							}
+						],
+						"show_grid": true,
+						"show_legend": true,
+						"title": "Contract",
+						"type": 0,
+						"width": 600.0,
+						"x_axis_label": "",
+						"x_is_date": false,
+						"x_range": "A1:A4",
+						"y_auto_scale": true,
+						"y_axis_label": "",
+						"y_max": 100.0,
+						"y_min": 0.0
+					}
+				],
+				"column_count": 4,
+				"columns": [
+					{
+						"header_name": "Item",
+						"is_date_column": false,
+						"width": 180.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": true,
+						"width": 100.0
+					}
+				],
+				"frozen_cols": 1,
+				"frozen_rows": 1,
+				"header_row_count": 1,
+				"row_count": 5,
+				"rows": [
+					{
+						"height": 30.0,
+						"is_header": true
+					},
+					{
+						"height": 32.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					}
+				],
+				"version": 1
+			},
+			"result": {
+				"chart_count": 1,
+				"chart_id": "chart:0",
+				"message": "Chart created successfully",
+				"success": true
+			}
+		},
+		{
+			"arguments": {
+				"chart_index": 99.0,
+				"editor_name": "schema fixture",
+				"height": 32.0,
+				"width": 64.0
+			},
+			"legacy": "minerva_get_chart_image",
+			"model": {
+				"cells": {
+					"0,0": {
+						"bold": true,
+						"type": 1,
+						"value": "Name"
+					},
+					"0,1": {
+						"bold": true,
+						"type": 1,
+						"value": "Amount"
+					},
+					"1,0": {
+						"alignment": 2,
+						"bg_color": "0000ffff",
+						"bold": true,
+						"italic": true,
+						"text_color": "ff0000ff",
+						"type": 1,
+						"value": "changed",
+						"wrap_text": true
+					},
+					"1,1": {
+						"bold": true,
+						"formula": "=2+3",
+						"number_format": "currency",
+						"type": 4,
+						"value": 5.0
+					},
+					"1,3": {
+						"date_format": "DD/MM/YYYY",
+						"type": 3,
+						"value": 1751328000.0
+					},
+					"2,1": {
+						"formula": "=2+3",
+						"type": 4,
+						"value": 5.0
+					},
+					"3,0": {
+						"type": 1,
+						"value": "hide"
+					},
+					"3,1": {
+						"type": 2,
+						"value": 3.0
+					},
+					"4,1": {
+						"formula": "=SUM(B2:B4)",
+						"type": 4,
+						"value": 13.0
+					}
+				},
+				"charts": [
+					{
+						"background_color_a": 1.0,
+						"background_color_b": 0.180000007152557,
+						"background_color_g": 0.150000005960464,
+						"background_color_r": 0.150000005960464,
+						"date_format": "YYYY-MM-DD",
+						"first_row_is_header": true,
+						"height": 300.0,
+						"id": "chart:0",
+						"series": [
+							{
+								"color_a": 1.0,
+								"color_b": 0.899999976158142,
+								"color_g": 0.600000023841858,
+								"color_r": 0.300000011920929,
+								"name": "Series 1",
+								"range": "B1:B4"
+							}
+						],
+						"show_grid": true,
+						"show_legend": true,
+						"title": "Contract",
+						"type": 0,
+						"width": 600.0,
+						"x_axis_label": "",
+						"x_is_date": false,
+						"x_range": "A1:A4",
+						"y_auto_scale": true,
+						"y_axis_label": "",
+						"y_max": 100.0,
+						"y_min": 0.0
+					}
+				],
+				"column_count": 4,
+				"columns": [
+					{
+						"header_name": "Item",
+						"is_date_column": false,
+						"width": 180.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": true,
+						"width": 100.0
+					}
+				],
+				"frozen_cols": 1,
+				"frozen_rows": 1,
+				"header_row_count": 1,
+				"row_count": 5,
+				"rows": [
+					{
+						"height": 30.0,
+						"is_header": true
+					},
+					{
+						"height": 32.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					}
+				],
+				"version": 1
+			},
+			"result": {
+				"error": "Chart index out of range (have 1 charts)",
+				"success": false
+			}
+		},
+		{
+			"arguments": {
+				"editor_name": "schema fixture"
+			},
+			"legacy": "minerva_list_charts",
+			"model": {
+				"cells": {
+					"0,0": {
+						"bold": true,
+						"type": 1,
+						"value": "Name"
+					},
+					"0,1": {
+						"bold": true,
+						"type": 1,
+						"value": "Amount"
+					},
+					"1,0": {
+						"alignment": 2,
+						"bg_color": "0000ffff",
+						"bold": true,
+						"italic": true,
+						"text_color": "ff0000ff",
+						"type": 1,
+						"value": "changed",
+						"wrap_text": true
+					},
+					"1,1": {
+						"bold": true,
+						"formula": "=2+3",
+						"number_format": "currency",
+						"type": 4,
+						"value": 5.0
+					},
+					"1,3": {
+						"date_format": "DD/MM/YYYY",
+						"type": 3,
+						"value": 1751328000.0
+					},
+					"2,1": {
+						"formula": "=2+3",
+						"type": 4,
+						"value": 5.0
+					},
+					"3,0": {
+						"type": 1,
+						"value": "hide"
+					},
+					"3,1": {
+						"type": 2,
+						"value": 3.0
+					},
+					"4,1": {
+						"formula": "=SUM(B2:B4)",
+						"type": 4,
+						"value": 13.0
+					}
+				},
+				"charts": [
+					{
+						"background_color_a": 1.0,
+						"background_color_b": 0.180000007152557,
+						"background_color_g": 0.150000005960464,
+						"background_color_r": 0.150000005960464,
+						"date_format": "YYYY-MM-DD",
+						"first_row_is_header": true,
+						"height": 300.0,
+						"id": "chart:0",
+						"series": [
+							{
+								"color_a": 1.0,
+								"color_b": 0.899999976158142,
+								"color_g": 0.600000023841858,
+								"color_r": 0.300000011920929,
+								"name": "Series 1",
+								"range": "B1:B4"
+							}
+						],
+						"show_grid": true,
+						"show_legend": true,
+						"title": "Contract",
+						"type": 0,
+						"width": 600.0,
+						"x_axis_label": "",
+						"x_is_date": false,
+						"x_range": "A1:A4",
+						"y_auto_scale": true,
+						"y_axis_label": "",
+						"y_max": 100.0,
+						"y_min": 0.0
+					}
+				],
+				"column_count": 4,
+				"columns": [
+					{
+						"header_name": "Item",
+						"is_date_column": false,
+						"width": 180.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": true,
+						"width": 100.0
+					}
+				],
+				"frozen_cols": 1,
+				"frozen_rows": 1,
+				"header_row_count": 1,
+				"row_count": 5,
+				"rows": [
+					{
+						"height": 30.0,
+						"is_header": true
+					},
+					{
+						"height": 32.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					}
+				],
+				"version": 1
+			},
+			"result": {
+				"chart_count": 1,
+				"charts": [
+					{
+						"first_row_is_header": true,
+						"id": "chart:0",
+						"index": 0,
+						"series": [
+							{
+								"name": "Series 1",
+								"range": "B1:B4"
+							}
+						],
+						"title": "Contract",
+						"type": "line",
+						"x_is_date": false,
+						"x_range": "A1:A4"
+					}
+				],
+				"success": true
+			}
+		},
+		{
+			"arguments": {
+				"chart_index": 0.0,
+				"editor_name": "schema fixture",
+				"title": "Edited"
+			},
+			"legacy": "minerva_update_chart",
+			"model": {
+				"cells": {
+					"0,0": {
+						"bold": true,
+						"type": 1,
+						"value": "Name"
+					},
+					"0,1": {
+						"bold": true,
+						"type": 1,
+						"value": "Amount"
+					},
+					"1,0": {
+						"alignment": 2,
+						"bg_color": "0000ffff",
+						"bold": true,
+						"italic": true,
+						"text_color": "ff0000ff",
+						"type": 1,
+						"value": "changed",
+						"wrap_text": true
+					},
+					"1,1": {
+						"bold": true,
+						"formula": "=2+3",
+						"number_format": "currency",
+						"type": 4,
+						"value": 5.0
+					},
+					"1,3": {
+						"date_format": "DD/MM/YYYY",
+						"type": 3,
+						"value": 1751328000.0
+					},
+					"2,1": {
+						"formula": "=2+3",
+						"type": 4,
+						"value": 5.0
+					},
+					"3,0": {
+						"type": 1,
+						"value": "hide"
+					},
+					"3,1": {
+						"type": 2,
+						"value": 3.0
+					},
+					"4,1": {
+						"formula": "=SUM(B2:B4)",
+						"type": 4,
+						"value": 13.0
+					}
+				},
+				"charts": [
+					{
+						"background_color_a": 1.0,
+						"background_color_b": 0.180000007152557,
+						"background_color_g": 0.150000005960464,
+						"background_color_r": 0.150000005960464,
+						"date_format": "YYYY-MM-DD",
+						"first_row_is_header": true,
+						"height": 300.0,
+						"id": "chart:0",
+						"series": [
+							{
+								"color_a": 1.0,
+								"color_b": 0.899999976158142,
+								"color_g": 0.600000023841858,
+								"color_r": 0.300000011920929,
+								"name": "Series 1",
+								"range": "B1:B4"
+							}
+						],
+						"show_grid": true,
+						"show_legend": true,
+						"title": "Edited",
+						"type": 0,
+						"width": 600.0,
+						"x_axis_label": "",
+						"x_is_date": false,
+						"x_range": "A1:A4",
+						"y_auto_scale": true,
+						"y_axis_label": "",
+						"y_max": 100.0,
+						"y_min": 0.0
+					}
+				],
+				"column_count": 4,
+				"columns": [
+					{
+						"header_name": "Item",
+						"is_date_column": false,
+						"width": 180.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": true,
+						"width": 100.0
+					}
+				],
+				"frozen_cols": 1,
+				"frozen_rows": 1,
+				"header_row_count": 1,
+				"row_count": 5,
+				"rows": [
+					{
+						"height": 30.0,
+						"is_header": true
+					},
+					{
+						"height": 32.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					}
+				],
+				"version": 1
+			},
+			"result": {
+				"chart_id": "chart:0",
+				"chart_index": 0,
+				"message": "Chart updated successfully",
+				"success": true,
+				"updated_properties": [
+					"title"
+				]
+			}
+		},
+		{
+			"arguments": {
+				"editor_name": "schema fixture"
+			},
+			"legacy": "minerva_refresh_charts",
+			"model": {
+				"cells": {
+					"0,0": {
+						"bold": true,
+						"type": 1,
+						"value": "Name"
+					},
+					"0,1": {
+						"bold": true,
+						"type": 1,
+						"value": "Amount"
+					},
+					"1,0": {
+						"alignment": 2,
+						"bg_color": "0000ffff",
+						"bold": true,
+						"italic": true,
+						"text_color": "ff0000ff",
+						"type": 1,
+						"value": "changed",
+						"wrap_text": true
+					},
+					"1,1": {
+						"bold": true,
+						"formula": "=2+3",
+						"number_format": "currency",
+						"type": 4,
+						"value": 5.0
+					},
+					"1,3": {
+						"date_format": "DD/MM/YYYY",
+						"type": 3,
+						"value": 1751328000.0
+					},
+					"2,1": {
+						"formula": "=2+3",
+						"type": 4,
+						"value": 5.0
+					},
+					"3,0": {
+						"type": 1,
+						"value": "hide"
+					},
+					"3,1": {
+						"type": 2,
+						"value": 3.0
+					},
+					"4,1": {
+						"formula": "=SUM(B2:B4)",
+						"type": 4,
+						"value": 13.0
+					}
+				},
+				"charts": [
+					{
+						"background_color_a": 1.0,
+						"background_color_b": 0.180000007152557,
+						"background_color_g": 0.150000005960464,
+						"background_color_r": 0.150000005960464,
+						"date_format": "YYYY-MM-DD",
+						"first_row_is_header": true,
+						"height": 300.0,
+						"id": "chart:0",
+						"series": [
+							{
+								"color_a": 1.0,
+								"color_b": 0.899999976158142,
+								"color_g": 0.600000023841858,
+								"color_r": 0.300000011920929,
+								"name": "Series 1",
+								"range": "B1:B4"
+							}
+						],
+						"show_grid": true,
+						"show_legend": true,
+						"title": "Edited",
+						"type": 0,
+						"width": 600.0,
+						"x_axis_label": "",
+						"x_is_date": false,
+						"x_range": "A1:A4",
+						"y_auto_scale": true,
+						"y_axis_label": "",
+						"y_max": 100.0,
+						"y_min": 0.0
+					}
+				],
+				"column_count": 4,
+				"columns": [
+					{
+						"header_name": "Item",
+						"is_date_column": false,
+						"width": 180.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": true,
+						"width": 100.0
+					}
+				],
+				"frozen_cols": 1,
+				"frozen_rows": 1,
+				"header_row_count": 1,
+				"row_count": 5,
+				"rows": [
+					{
+						"height": 30.0,
+						"is_header": true
+					},
+					{
+						"height": 32.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					}
+				],
+				"version": 1
+			},
+			"result": {
+				"charts_refreshed": 1,
+				"message": "All charts refreshed",
+				"success": true
+			}
+		},
+		{
+			"arguments": {
+				"chart_index": 0.0,
+				"editor_name": "schema fixture"
+			},
+			"legacy": "minerva_delete_chart",
+			"model": {
+				"cells": {
+					"0,0": {
+						"bold": true,
+						"type": 1,
+						"value": "Name"
+					},
+					"0,1": {
+						"bold": true,
+						"type": 1,
+						"value": "Amount"
+					},
+					"1,0": {
+						"alignment": 2,
+						"bg_color": "0000ffff",
+						"bold": true,
+						"italic": true,
+						"text_color": "ff0000ff",
+						"type": 1,
+						"value": "changed",
+						"wrap_text": true
+					},
+					"1,1": {
+						"bold": true,
+						"formula": "=2+3",
+						"number_format": "currency",
+						"type": 4,
+						"value": 5.0
+					},
+					"1,3": {
+						"date_format": "DD/MM/YYYY",
+						"type": 3,
+						"value": 1751328000.0
+					},
+					"2,1": {
+						"formula": "=2+3",
+						"type": 4,
+						"value": 5.0
+					},
+					"3,0": {
+						"type": 1,
+						"value": "hide"
+					},
+					"3,1": {
+						"type": 2,
+						"value": 3.0
+					},
+					"4,1": {
+						"formula": "=SUM(B2:B4)",
+						"type": 4,
+						"value": 13.0
+					}
+				},
+				"charts": [],
+				"column_count": 4,
+				"columns": [
+					{
+						"header_name": "Item",
+						"is_date_column": false,
+						"width": 180.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": false,
+						"width": 100.0
+					},
+					{
+						"header_name": "",
+						"is_date_column": true,
+						"width": 100.0
+					}
+				],
+				"frozen_cols": 1,
+				"frozen_rows": 1,
+				"header_row_count": 1,
+				"row_count": 5,
+				"rows": [
+					{
+						"height": 30.0,
+						"is_header": true
+					},
+					{
+						"height": 32.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					},
+					{
+						"height": 24.0,
+						"is_header": false
+					}
+				],
+				"version": 1
+			},
+			"result": {
+				"deleted_chart_id": "chart:0",
+				"message": "Chart deleted successfully",
+				"remaining_charts": 0,
+				"success": true
+			}
+		}
+	],
+	"catalog_sha256": "c2e363937f739230a294e4b629bf2eb5feef3f21882b930eabd48097b6740046",
+	"excluded_cases": [
+		{
+			"arguments": {
+				"editor_name": "schema fixture"
+			},
+			"group": "staged",
+			"legacy": "minerva_link_spreadsheet_to_note",
+			"reason": "B3 snapshot note replaces the old live link; runtime snapshot contract retained."
+		},
+		{
+			"arguments": {
+				"component": "contract",
+				"editor_name": "schema fixture",
+				"key": "snapshot"
+			},
+			"group": "staged",
+			"legacy": "minerva_export_to_nudge",
+			"reason": "B3 explicit Nudge refusal replaces external export; runtime refusal contract retained."
+		},
+		{
+			"arguments": {
+				"name": "Created name only"
+			},
+			"group": "creation",
+			"legacy": "minerva_create_spreadsheet_editor",
+			"reason": "B3 Go generic creation replaces builtin orchestration; real runtime creation contract retained."
+		},
+		{
+			"arguments": {
+				"csv_content": "Item,Value\nWidget,17",
+				"name": "Created CSV"
+			},
+			"group": "creation",
+			"legacy": "minerva_create_spreadsheet_editor",
+			"reason": "B3 Go generic creation replaces builtin orchestration; real runtime creation contract retained."
+		},
+		{
+			"arguments": {
+				"file_path": "$csv_path",
+				"name": "schema fixture"
+			},
+			"group": "creation",
+			"legacy": "minerva_create_spreadsheet_editor",
+			"reason": "B3 Go generic creation replaces builtin orchestration; real runtime creation contract retained."
+		},
+		{
+			"arguments": {
+				"file_path": "$minsheet_path",
+				"name": "schema fixture"
+			},
+			"group": "creation",
+			"legacy": "minerva_create_spreadsheet_editor",
+			"reason": "B3 Go generic creation replaces builtin orchestration; real runtime creation contract retained."
+		},
+		{
+			"arguments": {
+				"file_path": "$missing_path",
+				"name": "schema fixture"
+			},
+			"group": "creation",
+			"legacy": "minerva_create_spreadsheet_editor",
+			"reason": "B3 Go generic creation replaces builtin orchestration; real runtime creation contract retained."
+		},
+		{
+			"arguments": {
+				"name": "Provider unavailable"
+			},
+			"group": "creation",
+			"legacy": "minerva_create_spreadsheet_editor",
+			"reason": "B3 Go generic creation replaces builtin orchestration; real runtime creation contract retained."
+		},
+		{
+			"arguments": {
+				"csv_content": "Item,Value\nWidget,17",
+				"name": "Initial content failure"
+			},
+			"group": "creation",
+			"legacy": "minerva_create_spreadsheet_editor",
+			"reason": "B3 Go generic creation replaces builtin orchestration; real runtime creation contract retained."
+		},
+		{
+			"arguments": {
+				"csv_content": "Different,Content\nMust,NotApply",
+				"name": "Created CSV"
+			},
+			"group": "creation",
+			"legacy": "minerva_create_spreadsheet_editor",
+			"reason": "B3 Go generic creation replaces builtin orchestration; real runtime creation contract retained."
+		}
+	],
+	"export_models": {
+		"csv": {
+			"cells": {
+				"0,0": {
+					"type": 1.0,
+					"value": "Name"
+				},
+				"0,1": {
+					"type": 1.0,
+					"value": "Amount"
+				},
+				"1,0": {
+					"type": 1.0,
+					"value": "keep"
+				},
+				"1,1": {
+					"type": 2.0,
+					"value": 2.0
+				},
+				"1,2": {
+					"type": 2.0,
+					"value": 1751328000.0
+				},
+				"2,0": {
+					"type": 1.0,
+					"value": "hide"
+				},
+				"2,1": {
+					"type": 2.0,
+					"value": 3.0
+				},
+				"3,1": {
+					"type": 2.0,
+					"value": 5.0
+				}
+			},
+			"charts": [],
+			"column_count": 26.0,
+			"columns": [
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				}
+			],
+			"frozen_cols": 0.0,
+			"frozen_rows": 0.0,
+			"header_row_count": 1.0,
+			"row_count": 100.0,
+			"rows": [
+				{
+					"height": 24.0,
+					"is_header": true
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				}
+			],
+			"version": 1.0
+		},
+		"minsheet": {
+			"autofilter": {
+				"columns": [
+					{
+						"col": 0.0,
+						"type": "values",
+						"values": [
+							"keep"
+						]
+					}
+				],
+				"range": [
+					0.0,
+					0.0,
+					3.0,
+					4.0
+				]
+			},
+			"cells": {
+				"0,0": {
+					"bold": true,
+					"type": 1.0,
+					"value": "Name"
+				},
+				"0,1": {
+					"type": 1.0,
+					"value": "Amount"
+				},
+				"1,0": {
+					"alignment": 2.0,
+					"bg_color": "0000ffff",
+					"italic": true,
+					"text_color": "ff0000ff",
+					"type": 1.0,
+					"value": "keep",
+					"wrap_text": true
+				},
+				"1,1": {
+					"number_format": "currency",
+					"type": 2.0,
+					"value": 2.0
+				},
+				"1,2": {
+					"date_format": "DD/MM/YYYY",
+					"type": 3.0,
+					"value": 1751328000.0
+				},
+				"2,0": {
+					"type": 1.0,
+					"value": "hide"
+				},
+				"2,1": {
+					"type": 2.0,
+					"value": 3.0
+				},
+				"3,1": {
+					"formula": "=SUM(B2:B3)",
+					"type": 4.0,
+					"value": 5.0
+				}
+			},
+			"charts": [],
+			"column_count": 3.0,
+			"columns": [
+				{
+					"header_name": "Item",
+					"is_date_column": false,
+					"width": 140.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": true,
+					"width": 100.0
+				}
+			],
+			"frozen_cols": 1.0,
+			"frozen_rows": 1.0,
+			"header_row_count": 1.0,
+			"row_count": 4.0,
+			"rows": [
+				{
+					"height": 30.0,
+					"is_header": true
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				}
+			],
+			"version": 1.0
+		},
+		"tsv": {
+			"cells": {
+				"0,0": {
+					"type": 1.0,
+					"value": "Name"
+				},
+				"0,1": {
+					"type": 1.0,
+					"value": "Amount"
+				},
+				"1,0": {
+					"type": 1.0,
+					"value": "keep"
+				},
+				"1,1": {
+					"type": 2.0,
+					"value": 2.0
+				},
+				"1,2": {
+					"type": 2.0,
+					"value": 1751328000.0
+				},
+				"2,0": {
+					"type": 1.0,
+					"value": "hide"
+				},
+				"2,1": {
+					"type": 2.0,
+					"value": 3.0
+				},
+				"3,0": {
+					"type": 2.0,
+					"value": 5.0
+				}
+			},
+			"charts": [],
+			"column_count": 26.0,
+			"columns": [
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				}
+			],
+			"frozen_cols": 0.0,
+			"frozen_rows": 0.0,
+			"header_row_count": 1.0,
+			"row_count": 100.0,
+			"rows": [
+				{
+					"height": 24.0,
+					"is_header": true
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				}
+			],
+			"version": 1.0
+		},
+		"xlsx": {
+			"cells": {
+				"0,0": {
+					"type": 1.0,
+					"value": "Name"
+				},
+				"0,1": {
+					"type": 1.0,
+					"value": "Amount"
+				},
+				"1,0": {
+					"type": 1.0,
+					"value": "keep"
+				},
+				"1,1": {
+					"type": 2.0,
+					"value": 2.0
+				},
+				"1,2": {
+					"type": 2.0,
+					"value": 1751328000.0
+				},
+				"2,0": {
+					"type": 1.0,
+					"value": "hide"
+				},
+				"2,1": {
+					"type": 2.0,
+					"value": 3.0
+				}
+			},
+			"charts": [],
+			"column_count": 26.0,
+			"columns": [
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				}
+			],
+			"frozen_cols": 0.0,
+			"frozen_rows": 0.0,
+			"header_row_count": 1.0,
+			"row_count": 100.0,
+			"rows": [
+				{
+					"height": 24.0,
+					"is_header": true
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				}
+			],
+			"version": 1.0
+		}
+	},
+	"host_commit": "fa2424ea0dcb5964c86447a30840286b21f712a4",
+	"known_gap": "Valid builtin MCP chart export references missing _chart_canvas; invalid-index refusal and raw PNG captured.",
+	"plugins_commit": "261cbe076d1c925a54c0fda8181d8d563c932406",
+	"raw_chart_png": "iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAYAAACinX6EAAAAAXNSR0IArs4c6QAAB/tJREFUaIHVmX1QlNcVxn+7fK0oC8uyCyho0xk0iGSiBcH9SEPQiMWOE42EYGwMo41j7ZBIjYwIWil+BHXyMVWbSEqlYEVHS8wYC2qUqAgbpKkikrAz4RtWV2EBWWF36R8MqysiiKuGZ+b94z3vfZ9779lzz3vOs4LJk1/oZQhMSTwx1BAbVO2MGnLMjh0fcefOHcxmE6mpycPilUrl6PU6nJ2d2bnzYxoa6snPP0pERCQvvjiDtLRN1NXVDPp+YmISADt3brPaHIc1s53x3HO/xMfHl40bk9m8eQtyuRydTgdATEwsPj6+GI1dKBRqWltb2bdvL2Fhs1CrX8JgMJCZ+TkZGdtYvvz3JCVtwGw2IxQKWbt2HYcPH6So6CwAW7dmUFlZwf79WQD4+voik3kBMG1aMKtW/RHhs3CASqWmouIyWm01Wu2PKBQqm+dhYbMwGu+wfftfMBq7WLcuGQcHIbt3/5WbN/UsWxZPbW0NaWmbaGtrparqGhkZWykpKWHlytUEBk4d1jo8PCRP3wECgYDwcAUaTSkikYjS0hKUSrXNmJ6eHnJzs6msrOTChXMIhUKys/+BVqvl7NkzyOXeCAQCAgIm4+UlIzv771RUXOHEia+pr69Drf71sNfz1I9AUNA0JBJP4uNXEB+/wmqfNOkX1NT8BEBbWysmkwnoc4bR2EVXVxeurm709HQjEAjIycmzvrtjx8cA7N+fhV5/A3d3jwfOLRAIBtieugOUSjXV1T+Qk5Ntta1YsRKlUmV1gMVisXmn9wFpOiNjKxMnTuKNN+I4ceI4c+fOo7a2hsjI2VRWXgXAbDbj6Hh3i05OTgN4nqoDnJycCA0N48iRQ1RVXbPaNZpSVCo1Bw78c0iOcePEADQ0NNLY2MScOVEoFErq6moJDQ1jwgQ/8vIOIpXKuXnzJmr1y/j6TsDJyQmJRILFYrbhe6o5YPr0Gbi6ulJWprGxl5VpkEq9eP75wCE5OjoMAOj1Olpamtiz5xPc3MSMHz+B6dOns3v3J2g0F9HrdeTm7qeurpaAgAAcHBxoamoawCd4VnXASNBfB9yL2Ng4FAoVCQl/wNNTNuD5vRhxHfCkNvS4cHZ25pVXZnPs2Jf0PihRDAPPpA6wF1Sql3BxEXHmzKkRc4xqB0RF/Ybi4vO0t7ePmGPUOmDatGD8/PwpLHy0/HQ/nkkvYA9cuXKZuLjFj80zaiPAXhi1ERASEsrixbHIZHIaGurJyztAY2PzI/OMygiQSCS8996fKC29SEpKEo2NDSQkrEEoHFjrD4UnEgFjxozh1VfnoVAokcnkmEw9NDc3o9GUcPz4Mcxmy9Akg0AqlePtLUcoFFJdrcVo7EGr1aJQqBg71g2LxbYeWLYs/qF8DlKp96YRr+YBEIvdSUnZhFKpwmw2U1Fxmc7OTvz9/ZFIPDl1qnDE3K6uY9HrdVy/rsPHx5fIyNlYLGaio+dTVXUNDw8PSksv0NXVab2Ki89Zr37dobj4nJXT7hHwzjvLmThxEkVFZ9i372/Wtra/GbEXTp78DyEhoSxcuIimpiakUi8aGhofmceuDvDykhEWFk5HRztZWZnWzUNfX98ve0Ffbx4d/VsiIiKRyeS0txsoKSkmL+9fGI1GoE8j2Lo1g08//Qhvb2/GjXNn9uxIWlqa8fEZzxdffM61a1fZvHkLbm5i6urqyM09BMCuXR/y3XcaEhM/QC73Ji1to3XuJUuWkpOTTUDAZPsmweDgFwAoLb1o3cRgePvteOLiliIQCCgq+oaWlmaioqJZvz4VBwfbZb311u+YO3ceOl0z33//X/z9J+Ho6Eh5+SVu375Nfv5RoO+IZGVlkpWVSW3tXXHU29uHNWvWWu/7u0JfX1/7RoCnpxTA5pd+ELy8vJgzZy43blxn/foPrM5avToBhUJFeLiC8+fvnlOx2J3ExATM5l4KCr4mOTmVoKBgXnttIYWFBYhEIgBu3bpFQcHAytDZ2RmRaAydnV0AnD59EoDz58/ZNwL6P0NDdWZTpgQiEAjQaEptIuXbb/vU3KCgYJvxWm01Ol2L9b68/BLQpy5t27aDWbOUANy+3TnonIcOHRxgM5vN9o2A1tZWoC8XPAyurq4AGAwGG7vB0AaAWCy+j/eWzX1/bjl8OM/6i/ef/cGg0w0skmbM+JV9I6Bf5goJCbXR4u5He3vfxt3dbTfaL2Z2dHTY2B+nbujH/UE5dWoQiYnr7OuA2toaqqt/RCLxJCYmdoAK6+LiAsDVq1exWCyEhMy02gDU6pcBrKLmUFi0KIasrBySkpIxm004Og4UPQdDYOBUBAKB/euAzz7bw4YNm5g/fwEzZ4aj1WpxdnbCx8eXpqZGdu3KwGBo49ixf7NgwULS07dTUXEFPz8/AgODqKn5iQsXzj10Dpms74hVV//AV199yeuvx2AymRCJRLz//lr0+uuUl1/i8uX/DcpRX18PPIFeoL6+jpSUJE6eLAAEhISEEhg4le7ubmvyAjh48ABZWZn09vYSERHJ+PETOH26kPT0P9PT0zMov1QqRyz2oLu7m7Nni9DpbnD06BFcXEQ0NzdjMLQDDlgsfWNBSFlZGW++udSGp6SkmPz8I8MTRX8u6BdFVSo17767itTU9dTX1zNvXjSxsUvYu3c3RUXfDPr+z+bP0cfFxYvFKJVq0tM/pLe31/pdv7fyHC5GpQNMJhPbt29BLHYHepHLvYmMnGP9DD8K/g9dJSEY9C4PDwAAAABJRU5ErkJggg==",
+	"reused_import_models": {
+		"csv": {
+			"autofilter": {
+				"columns": [
+					{
+						"col": 0.0,
+						"type": "values",
+						"values": [
+							"keep"
+						]
+					}
+				],
+				"range": [
+					0.0,
+					0.0,
+					3.0,
+					4.0
+				]
+			},
+			"cells": {
+				"0,0": {
+					"type": 1.0,
+					"value": "Name"
+				},
+				"0,1": {
+					"type": 1.0,
+					"value": "Amount"
+				},
+				"1,0": {
+					"type": 1.0,
+					"value": "Ada, A"
+				},
+				"1,1": {
+					"type": 2.0,
+					"value": 2.0
+				},
+				"2,0": {
+					"type": 1.0,
+					"value": "Bob"
+				},
+				"2,1": {
+					"type": 2.0,
+					"value": 3.0
+				}
+			},
+			"charts": [],
+			"column_count": 3.0,
+			"columns": [
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				}
+			],
+			"frozen_cols": 1.0,
+			"frozen_rows": 1.0,
+			"header_row_count": 1.0,
+			"row_count": 4.0,
+			"rows": [
+				{
+					"height": 24.0,
+					"is_header": true
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				}
+			],
+			"version": 1.0
+		},
+		"tsv": {
+			"autofilter": {
+				"columns": [
+					{
+						"col": 0.0,
+						"type": "values",
+						"values": [
+							"keep"
+						]
+					}
+				],
+				"range": [
+					0.0,
+					0.0,
+					3.0,
+					4.0
+				]
+			},
+			"cells": {
+				"0,0": {
+					"type": 1.0,
+					"value": "Name"
+				},
+				"0,1": {
+					"type": 1.0,
+					"value": "Amount"
+				},
+				"1,0": {
+					"type": 1.0,
+					"value": "Ada, A"
+				},
+				"1,1": {
+					"type": 2.0,
+					"value": 2.0
+				},
+				"2,0": {
+					"type": 1.0,
+					"value": "Bob"
+				},
+				"2,1": {
+					"type": 2.0,
+					"value": 3.0
+				}
+			},
+			"charts": [],
+			"column_count": 3.0,
+			"columns": [
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				}
+			],
+			"frozen_cols": 1.0,
+			"frozen_rows": 1.0,
+			"header_row_count": 1.0,
+			"row_count": 4.0,
+			"rows": [
+				{
+					"height": 24.0,
+					"is_header": true
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				}
+			],
+			"version": 1.0
+		},
+		"xlsx": {
+			"autofilter": {
+				"columns": [
+					{
+						"col": 0.0,
+						"type": "values",
+						"values": [
+							"keep"
+						]
+					}
+				],
+				"range": [
+					0.0,
+					0.0,
+					3.0,
+					4.0
+				]
+			},
+			"cells": {
+				"1,2": {
+					"type": 2.0,
+					"value": 1.0
+				},
+				"2,2": {
+					"type": 2.0,
+					"value": 2.0
+				},
+				"3,2": {
+					"type": 2.0,
+					"value": 3.0
+				},
+				"4,2": {
+					"type": 2.0,
+					"value": 1.0
+				},
+				"5,2": {
+					"type": 2.0,
+					"value": 2.0
+				},
+				"6,2": {
+					"type": 2.0,
+					"value": 3.0
+				},
+				"7,2": {
+					"type": 2.0,
+					"value": 1.0
+				},
+				"8,2": {
+					"type": 2.0,
+					"value": 2.0
+				}
+			},
+			"charts": [],
+			"column_count": 8.0,
+			"columns": [
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				},
+				{
+					"header_name": "",
+					"is_date_column": false,
+					"width": 100.0
+				}
+			],
+			"frozen_cols": 1.0,
+			"frozen_rows": 1.0,
+			"header_row_count": 1.0,
+			"row_count": 14.0,
+			"rows": [
+				{
+					"height": 24.0,
+					"is_header": true
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				},
+				{
+					"height": 24.0,
+					"is_header": false
+				}
+			],
+			"version": 1.0
+		}
+	}
+}
