@@ -959,6 +959,7 @@
         "scripts": [
           "ui/SheetsPanel.gd",
           "ui/sheet_registry.gd",
+          "ui/snapshot.gd",
           "ui/domain/CellsCanvas.gd",
           "ui/domain/ChartCanvas.gd",
           "ui/domain/ChartRenderer.gd",
