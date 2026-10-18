@@ -2,7 +2,7 @@
   "id": "sheets",
   "name": "Sheets",
   "version": "0.1.0",
-  "description": "Spreadsheet editor with formulas, charts and filters. Staging extraction.",
+  "description": "Staging spreadsheet editor for Minerva, extracted alongside the builtin. This skeleton opens an empty panel for development; spreadsheet editing, imports and persistence arrive in later slices. Source installs require Go 1.25 or newer; archives include the backend.",
   "host_api_version": "2",
   "release_targets": [
     "linux-x86_64",
@@ -93,5 +93,9 @@
     }
   },
   "autostart": false,
-  "auto_reload": false
+  "auto_reload": false,
+  "price": {
+    "amount_minor": 0,
+    "currency": "USD"
+  }
 }
