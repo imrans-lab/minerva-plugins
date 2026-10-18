@@ -116,3 +116,20 @@ func run_editor(check: Callable, sheet: Control) -> void:
 		check.call("undo restores freeze and header metadata " + str(columns), restored.frozen_rows == 3 and restored.frozen_cols == 3 and restored.header_row_count == 3)
 		check.call("delete redo succeeds " + str(columns), sheet.call("redo"))
 		check.call("redo reclamps bound " + str(columns), restored.get("frozen_cols" if columns else "frozen_rows") == 2)
+
+func check_model_roundtrip(check: Callable, model: Dictionary, label: String) -> void:
+	var parser := JSON.new()
+	var result: Error = parser.parse(JSON.stringify(model))
+	check.call(label + " JSON snapshot parses", result == OK)
+	if result != OK:
+		return
+	var payload: Dictionary = parser.data
+	check.call(label + " complete JSON snapshot accepts", Snapshot.validate(payload))
+	var restored: Data = Data.new()
+	restored.load_from_dict(payload)
+	check.call(label + " cells retain all values and formatting on reopen", equal_json(restored.to_dict().cells, payload.cells))
+
+static func equal_json(left: Variant, right: Variant) -> bool:
+	var expected := JSON.new()
+	var observed := JSON.new()
+	return expected.parse(JSON.stringify(right)) == OK and observed.parse(JSON.stringify(left)) == OK and observed.data == expected.data

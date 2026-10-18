@@ -84,6 +84,9 @@ func _on_panel_create_note_request(_context: Dictionary) -> Dictionary:
 		"preview_alt_text": data.to_markdown()}
 
 func _on_panel_restore_from_note(payload: Dictionary) -> bool:
+	if payload.size() == 2 and payload.get("version") == 1 and payload.get("legacy_markdown") is String:
+		var markdown: String = payload.legacy_markdown
+		return _restore_legacy_note(markdown)
 	if not Snapshot.validate(payload):
 		return false
 	sheet.deserialize(payload)
@@ -125,3 +128,59 @@ func handle_tool(tool_name: String, arguments: Dictionary) -> Dictionary:
 	if tool_name.begins_with("minerva_sheets_autofilter_"):
 		return _filters.handle(tool_name, arguments)
 	return await _tools.handle(tool_name, arguments)
+
+func _restore_legacy_note(markdown: String) -> bool:
+	var prepared: Dictionary = _prepare_legacy_note(markdown)
+	var data: SpreadsheetDataScript = sheet.spreadsheet_data
+	var text: String = prepared.text
+	data.from_markdown(text)
+	sheet.sync_charts_from_data()
+	var canvas: Control = sheet.cells_canvas
+	canvas.queue_redraw()
+	_snapshot_restored = true
+	if prepared.partial:
+		status.text = "Couldn't fully read this note's table. The original note is unchanged."
+		status.show()
+		push_warning(status.text)
+	else:
+		status.hide()
+	return true
+
+static func _prepare_legacy_note(markdown: String) -> Dictionary:
+	var accepted := PackedStringArray()
+	var chart_lines := PackedStringArray()
+	var in_chart: bool = false
+	var partial: bool = false
+	var rows: int = 0
+	var columns: int = -1
+	for line: String in markdown.split("\n"):
+		var trimmed: String = line.strip_edges()
+		if trimmed == "<!-- SPREADSHEET_CHARTS" and not in_chart:
+			in_chart = true
+			continue
+		if in_chart:
+			if trimmed != "-->":
+				chart_lines.append(line)
+				continue
+			in_chart = false
+			var parser := JSON.new()
+			if parser.parse("\n".join(chart_lines)) == OK and Snapshot.validate_charts(parser.data):
+				accepted.append("<!-- SPREADSHEET_CHARTS\n" + JSON.stringify(parser.data) + "\n-->")
+			else:
+				partial = true
+			chart_lines.clear()
+			continue
+		if trimmed.is_empty():
+			continue
+		if not trimmed.begins_with("|") or not trimmed.ends_with("|"):
+			partial = true
+			continue
+		var separator: String = trimmed.replace("|", "").replace("-", "").replace(":", "").replace(" ", "")
+		if not (separator.is_empty() and trimmed.contains("-")):
+			rows += 1
+			var width: int = trimmed.count("|") - 1
+			if columns != -1 and width != columns:
+				partial = true
+			columns = width
+		accepted.append(line)
+	return {"text": "\n".join(accepted), "partial": partial or in_chart or rows < 2}
