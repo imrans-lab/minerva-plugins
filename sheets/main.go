@@ -87,7 +87,15 @@ func serve(ctx context.Context, input io.ReadCloser, output io.WriteCloser) erro
 			} else if call.Name != "minerva_sheets_create_editor" {
 				reply["error"] = map[string]any{"code": -32602, "message": "Unknown tool"}
 			} else {
-				reply["result"] = map[string]any{"isError": true, "content": []map[string]any{{"type": "text", "text": `{"success":false,"error_code":"sheets_staging","error_message":"Spreadsheet creation is not available in this staging build."}`}}}
+				stream.activeID = message.ID
+				body := createEditor(ctx, stream, call.Arguments)
+				stream.activeID = nil
+				encoded, err := json.Marshal(body)
+				if err != nil {
+					return fmt.Errorf("encode creation result: %w", err)
+				}
+				reply["result"] = map[string]any{"isError": body["success"] != true,
+					"content": []map[string]any{{"type": "text", "text": string(encoded)}}}
 			}
 		default:
 			reply["error"] = map[string]any{"code": -32601, "message": "Method not found"}
