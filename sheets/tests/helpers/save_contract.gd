@@ -93,7 +93,9 @@ func run(check: Callable, pane: EditorPane, host: Node) -> void:
 		failure.hide()
 		editor.free()
 	OS.remove_logger(errors)
-	definition.ui_panels.assign(original_panels)
+	manifest.ui.panels[0].erase("native_save_extensions")
+	parsed = PluginDefinition.from_dict(manifest)
+	definition.ui_panels.assign(parsed.ui_panels)
 	# Existing undeclared panels keep saving to their own imported extension.
 	var legacy: Editor = pane.add_plugin_scene_editor("sheets", "sheets_panel", "", "Undeclared", "")
 	var legacy_path := directory.path_join("legacy.csv")

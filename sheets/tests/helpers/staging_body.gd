@@ -108,6 +108,8 @@ func _run() -> void:
 		await legacy_notes.call("run", check, pane, manager, _project_container)
 		var saves: RefCounted = load(source.path_join("tests/helpers/save_contract.gd")).new()
 		await saves.call("run", check, pane, host)
+		var exports: RefCounted = load(source.path_join("tests/helpers/export_contract.gd")).new()
+		await exports.call("run", check, pane)
 		var capture_path: String = OS.get_environment("SHEETS_CAPTURE_BUILTIN_ORACLE")
 		if not capture_path.is_empty():
 			var generator: RefCounted = load(source.path_join("scripts/capture-builtin-oracle.gd")).new()

@@ -13,7 +13,7 @@
     64,
     32
   ],
-  "known_gap": "minerva:01a14edadda1756aa6978a21db9503ca XLSX formula omitted; raw oracle unchanged",
+  "known_gap": "Historical capture: builtin+plugin XLSX formula omission at B0. Plugin gap fixed by S5b actual ZIP export and fresh import; raw oracle unchanged.",
   "packages": {
     "sheets-csv.minpackage": {
       "sha256": "13bb2890cd492944e53512110a797fc7ae85580ca4ce40bf1a2657239637beae",
@@ -36,5 +36,12 @@
   "diagnostics": [
     "SCRIPT ERROR: Invalid call. Nonexistent function 'set_cell_formula' in base 'RefCounted (SpreadsheetData)'. @@ at: _set_cell_from_excel (res://Scripts/UI/Controls/SpreadsheetEditor/ExcelHandler.gd:190)",
     "SCRIPT ERROR: Invalid call. Nonexistent function 'set_cell_formula' in base 'RefCounted (Sheets_SpreadsheetData)'. @@ at: _set_cell_from_excel (/tmp/job/minerva-plugins/sheets/ui/domain/ExcelHandler.gd:190)"
-  ]
+  ],
+  "plugin_xlsx_formula_repair": {
+    "status": "verified in scoped draft before initial source review",
+    "job": "j20261018t160547-1de9e0",
+    "witness": "baseline SUM(B2:B3) at B4 survives actual XLSX ZIP export/fresh model import, recalculates5, passes shared value_domain JSON/model roundtrip",
+    "source": "plugin ExcelHandler set_cell_value formula path",
+    "historical_capture": "raw capture and recorded diagnostics remain byte-frozen; no generator rerun"
+  }
 }
