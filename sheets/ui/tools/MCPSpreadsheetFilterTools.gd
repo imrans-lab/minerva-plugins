@@ -1,6 +1,6 @@
 class_name Sheets_MCPSpreadsheetFilterTools
-extends MCPToolModule
-## MCP tool module for spreadsheet AutoFilter: enable a filter range, set a
+extends RefCounted
+## Plugin-local tool module for spreadsheet AutoFilter: enable a filter range, set a
 ## column criterion, read the criteria and visible rows, clear one column or
 ## all criteria, or remove the filter.
 ##
@@ -11,7 +11,12 @@ extends MCPToolModule
 ## Rows and columns are 1-based at the API. Every result that lists rows
 ## carries `scope`: "visible" when a criterion hides rows from the list,
 ## "all" when the list covers every data row. Filtering only hides rows;
-## minerva_get_spreadsheet_data always returns every row, hidden ones included.
+## minerva_sheets_get_data always returns every row, hidden ones included.
+
+const ToolUtils := preload("tool_utils.gd")
+const SpreadsheetEditorScript := preload("../domain/SpreadsheetEditor.gd")
+var _sheet: SpreadsheetEditorScript
+var _matches_locator: Callable
 
 const SpreadsheetDataScript := preload("../domain/SpreadsheetData.gd")
 const SpreadsheetHistoryScript := preload("../domain/SpreadsheetHistory.gd")
@@ -33,38 +38,39 @@ class SheetTarget:
 var find_sheet: Callable
 
 
-func _init(mcp_server = null) -> void:
-	super(mcp_server)
+func _init(sheet: SpreadsheetEditorScript = null, matches_locator: Callable = Callable()) -> void:
+	_sheet = sheet
+	_matches_locator = matches_locator
 	find_sheet = _find_editor_sheet
 
 
 func get_tool_names() -> Array[String]:
 	return [
-		"minerva_spreadsheet_autofilter_enable",
-		"minerva_spreadsheet_autofilter_set",
-		"minerva_spreadsheet_autofilter_get",
-		"minerva_spreadsheet_autofilter_clear",
+		"minerva_sheets_autofilter_enable",
+		"minerva_sheets_autofilter_set",
+		"minerva_sheets_autofilter_get",
+		"minerva_sheets_autofilter_clear",
 	]
 
 
 func handle(tool_name: String, arguments: Dictionary) -> Dictionary:
 	var editor_name: String = str(arguments.get("editor_name", ""))
 	if editor_name.is_empty():
-		return MCPToolUtils.error("editor_name is required")
+		return ToolUtils.error("editor_name is required")
 	var target: SheetTarget = find_sheet.call(editor_name)
 	if not target.error.is_empty():
-		return MCPToolUtils.error(target.error)
+		return ToolUtils.error(target.error)
 
 	match tool_name:
-		"minerva_spreadsheet_autofilter_enable":
+		"minerva_sheets_autofilter_enable":
 			return _enable_filter(target, editor_name, arguments)
-		"minerva_spreadsheet_autofilter_set":
+		"minerva_sheets_autofilter_set":
 			return _set_criterion(target, editor_name, arguments)
-		"minerva_spreadsheet_autofilter_get":
+		"minerva_sheets_autofilter_get":
 			return _state(target, editor_name, arguments)
-		"minerva_spreadsheet_autofilter_clear":
+		"minerva_sheets_autofilter_clear":
 			return _clear_filter(target, editor_name, arguments)
-	return MCPToolUtils.error("Unknown spreadsheet filter tool: %s" % tool_name)
+	return ToolUtils.error("Unknown spreadsheet filter tool: %s" % tool_name)
 
 
 #region Verbs
@@ -77,16 +83,16 @@ func _enable_filter(target: SheetTarget, editor_name: String, args: Dictionary) 
 		var no_selection: Array[Rect2i] = []
 		filter_range = Actions.range_for_enable(data, no_selection, data.get_used_range().position.x)
 		if filter_range.size.y < 2:
-			return MCPToolUtils.error("No data rows to filter in %s" % editor_name)
+			return ToolUtils.error("No data rows to filter in %s" % editor_name)
 	else:
 		filter_range = _parse_range(range_str)
 		if filter_range.size.x <= 0:
-			return MCPToolUtils.error("Invalid range: %s" % range_str)
+			return ToolUtils.error("Invalid range: %s" % range_str)
 		if filter_range.end.x > data.column_count or filter_range.end.y > data.row_count:
-			return MCPToolUtils.error("Range %s is outside the sheet (%d rows, %d columns)"
+			return ToolUtils.error("Range %s is outside the sheet (%d rows, %d columns)"
 				% [range_str, data.row_count, data.column_count])
 		if filter_range.size.y < 2:
-			return MCPToolUtils.error("Range %s needs a header row and at least one data row" % range_str)
+			return ToolUtils.error("Range %s needs a header row and at least one data row" % range_str)
 	return _after_change(target, editor_name, Actions.enable(data, target.history, filter_range))
 
 
@@ -96,40 +102,40 @@ func _set_criterion(target: SheetTarget, editor_name: String, args: Dictionary) 
 		return _not_enabled_error(editor_name)
 	var col_result: Variant = _column_arg(data, args)
 	if col_result is String:
-		return MCPToolUtils.error(col_result)
+		return ToolUtils.error(col_result)
 	var col: int = col_result
 
 	var has_values := args.has("values") and args["values"] != null
 	var has_contains := args.has("contains") and args["contains"] != null
 	if has_values == has_contains:
-		return MCPToolUtils.error("Provide exactly one of values or contains")
+		return ToolUtils.error("Provide exactly one of values or contains")
 	if has_contains:
 		if not args["contains"] is String:
-			return MCPToolUtils.error("contains must be a string")
+			return ToolUtils.error("contains must be a string")
 		var needle: String = args["contains"]
 		if needle.is_empty():
-			return MCPToolUtils.error("contains must not be empty; use minerva_spreadsheet_autofilter_clear to drop the criterion")
+			return ToolUtils.error("contains must not be empty; use minerva_sheets_autofilter_clear to drop the criterion")
 		return _after_change(target, editor_name, Actions.set_text(data, target.history, col, needle))
 	if not args["values"] is Array:
-		return MCPToolUtils.error("values must be an array of strings")
+		return ToolUtils.error("values must be an array of strings")
 	var allowed := PackedStringArray()
 	for v: Variant in args["values"]:
 		if not v is String:
-			return MCPToolUtils.error("values must be an array of strings")
+			return ToolUtils.error("values must be an array of strings")
 		allowed.append(v)
 	return _after_change(target, editor_name, Actions.set_values(data, target.history, col, allowed))
 
 
 func _clear_filter(target: SheetTarget, editor_name: String, args: Dictionary) -> Dictionary:
 	var data := target.data
-	if MCPToolUtils.coerce_bool(args.get("remove", false)):
+	if ToolUtils.coerce_bool(args.get("remove", false)):
 		return _after_change(target, editor_name, Actions.remove(data, target.history))
 	if not data.autofilter.is_active():
 		return _not_enabled_error(editor_name)
 	if args.has("column") and args["column"] != null:
 		var col_result: Variant = _column_arg(data, args)
 		if col_result is String:
-			return MCPToolUtils.error(col_result)
+			return ToolUtils.error(col_result)
 		return _after_change(target, editor_name, Actions.clear_column(data, target.history, int(col_result)))
 	return _after_change(target, editor_name, Actions.clear_all(data, target.history))
 
@@ -158,8 +164,8 @@ func _state(target: SheetTarget, editor_name: String, args: Dictionary = {}) -> 
 		if filter.is_row_visible(row):
 			visible.append(row + 1)
 
-	var offset := maxi(0, MCPToolUtils.coerce_int(args.get("offset", 0)))
-	var limit := maxi(0, MCPToolUtils.coerce_int(args.get("limit", DEFAULT_ROW_LIMIT), DEFAULT_ROW_LIMIT))
+	var offset := maxi(0, ToolUtils.coerce_int(args.get("offset", 0)))
+	var limit := maxi(0, ToolUtils.coerce_int(args.get("limit", DEFAULT_ROW_LIMIT), DEFAULT_ROW_LIMIT))
 	var page := visible.slice(offset, offset + limit)
 
 	var criteria: Array = []
@@ -170,7 +176,7 @@ func _state(target: SheetTarget, editor_name: String, args: Dictionary = {}) -> 
 		criteria.append(entry)
 
 	var fr := filter.filter_range
-	return MCPToolUtils.success({
+	return ToolUtils.success({
 		"editor_name": editor_name,
 		"enabled": active,
 		"filter_range": _range_label(fr) if active else "",
@@ -199,7 +205,7 @@ func _after_change(target: SheetTarget, editor_name: String, changed: bool) -> D
 
 ## 0-based column from the 1-based `column` argument, or an error message.
 func _column_arg(data: SpreadsheetDataScript, args: Dictionary) -> Variant:
-	var column := MCPToolUtils.coerce_int(args.get("column", 0))
+	var column := ToolUtils.coerce_int(args.get("column", 0))
 	if column < 1:
 		return "column number is required and must be >= 1 (1-based indexing)"
 	var fr := data.autofilter.filter_range
@@ -230,12 +236,12 @@ func _range_label(r: Rect2i) -> String:
 
 
 func _not_enabled_error(editor_name: String) -> Dictionary:
-	return MCPToolUtils.error("AutoFilter is not enabled on %s; call minerva_spreadsheet_autofilter_enable first" % editor_name)
+	return ToolUtils.error("AutoFilter is not enabled on %s; call minerva_sheets_autofilter_enable first" % editor_name)
 
 
 func _find_editor_sheet(editor_name: String) -> SheetTarget:
 	var target := SheetTarget.new()
-	var editor = MCPToolUtils.find_spreadsheet(editor_name)
+	var editor = ToolUtils.find_spreadsheet(editor_name, _sheet, _matches_locator)
 	if not editor:
 		target.error = "Spreadsheet editor not found: %s" % editor_name
 	elif not editor.spreadsheet_editor:

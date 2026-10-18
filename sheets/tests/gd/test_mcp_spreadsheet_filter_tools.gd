@@ -18,9 +18,8 @@ extends SceneTree
 const SpreadsheetDataScript := preload("../../ui/domain/SpreadsheetData.gd")
 const SpreadsheetHistoryScript := preload("../../ui/domain/SpreadsheetHistory.gd")
 const Actions := preload("../../ui/domain/SpreadsheetAutoFilterActions.gd")
-## The module calls MCPToolUtils, which names the SingletonObject autoload, so
-## it is load()ed at runtime: a --script test compiles before autoloads
-## register, and a compile-time reference would leave MCPToolUtils broken.
+## Runtime loading preserves the copied --script fixture boundary. The module
+## now uses its plugin-local helpers and does not require an autoload.
 const MODULE_PATH := "../../ui/tools/MCPSpreadsheetFilterTools.gd"
 
 const EDITOR := "Tasks"
@@ -132,7 +131,7 @@ func _step(label: String, result: Dictionary, ui: SpreadsheetDataScript,
 
 
 func _read(tools) -> Dictionary:
-	return tools.handle("minerva_spreadsheet_autofilter_get", {"editor_name": EDITOR})
+	return tools.handle("minerva_sheets_autofilter_get", {"editor_name": EDITOR})
 
 
 func test_set_read_clear_round_trip() -> void:
@@ -157,19 +156,19 @@ func test_set_read_clear_round_trip() -> void:
 	_step("no filter", _read(tools), ui, false, false)
 	_check("no filter: enabled is false", _read(tools).get("enabled", true) == false)
 
-	var r: Dictionary = tools.handle("minerva_spreadsheet_autofilter_enable", {"editor_name": EDITOR, "range": "A1:C10"})
+	var r: Dictionary = tools.handle("minerva_sheets_autofilter_enable", {"editor_name": EDITOR, "range": "A1:C10"})
 	Actions.enable(ui, ui_history, Rect2i(0, 0, 3, FIXTURE.size()))
 	_step("enabled", r, ui, false, false)
 	_check("enabled: filter_range A1:C10", r.get("filter_range", "") == "A1:C10")
 
 	# A value set that keeps blanks; column B is 2 at the API.
-	r = tools.handle("minerva_spreadsheet_autofilter_set",
+	r = tools.handle("minerva_sheets_autofilter_set",
 		{"editor_name": EDITOR, "column": STATUS_COL + 1, "values": ALLOWED_STATUS})
 	Actions.set_values(ui, ui_history, STATUS_COL, PackedStringArray(ALLOWED_STATUS))
 	_step("status values", r, ui, true, false)
 	_step("status values (read)", _read(tools), ui, true, false)
 
-	r = tools.handle("minerva_spreadsheet_autofilter_set",
+	r = tools.handle("minerva_sheets_autofilter_set",
 		{"editor_name": EDITOR, "column": NOTE_COL + 1, "contains": NOTE_NEEDLE})
 	Actions.set_text(ui, ui_history, NOTE_COL, NOTE_NEEDLE)
 	_step("status + note", r, ui, true, true)
@@ -182,25 +181,25 @@ func test_set_read_clear_round_trip() -> void:
 	Actions.replay(data, history.redo(), false)
 	_step("after redo (read)", _read(tools), ui, true, true)
 
-	r = tools.handle("minerva_spreadsheet_autofilter_clear", {"editor_name": EDITOR, "column": STATUS_COL + 1})
+	r = tools.handle("minerva_sheets_autofilter_clear", {"editor_name": EDITOR, "column": STATUS_COL + 1})
 	Actions.clear_column(ui, ui_history, STATUS_COL)
 	_step("status cleared", r, ui, false, true)
 
-	r = tools.handle("minerva_spreadsheet_autofilter_clear", {"editor_name": EDITOR})
+	r = tools.handle("minerva_sheets_autofilter_clear", {"editor_name": EDITOR})
 	Actions.clear_all(ui, ui_history)
 	_step("all cleared", r, ui, false, false)
 	_check("all cleared: range kept", r.get("filter_range", "") == "A1:C10")
 
-	r = tools.handle("minerva_spreadsheet_autofilter_clear", {"editor_name": EDITOR, "remove": true})
+	r = tools.handle("minerva_sheets_autofilter_clear", {"editor_name": EDITOR, "remove": true})
 	Actions.remove(ui, ui_history)
 	_step("removed", r, ui, false, false)
 	_check("removed: enabled is false", r.get("enabled", true) == false)
 
 	# Errors use the shared error shape.
-	var err: Dictionary = tools.handle("minerva_spreadsheet_autofilter_set",
+	var err: Dictionary = tools.handle("minerva_sheets_autofilter_set",
 		{"editor_name": EDITOR, "column": 2, "contains": "x"})
 	_check("set without a filter is an error", err.get("success", true) == false and err.has("error"))
-	err = tools.handle("minerva_spreadsheet_autofilter_get", {"editor_name": "Nope"})
+	err = tools.handle("minerva_sheets_autofilter_get", {"editor_name": "Nope"})
 	_check("unknown editor is an error",
 		err.get("error", "") == "Spreadsheet editor not found: Nope")
 
@@ -208,23 +207,23 @@ func test_set_read_clear_round_trip() -> void:
 	# inputs must be strings. Each rejection leaves the filter unchanged.
 	var outside_col := SpreadsheetDataScript.get_column_label(COLS) + "1:" \
 		+ SpreadsheetDataScript.get_column_label(COLS) + "10"
-	err = tools.handle("minerva_spreadsheet_autofilter_enable", {"editor_name": EDITOR, "range": outside_col})
+	err = tools.handle("minerva_sheets_autofilter_enable", {"editor_name": EDITOR, "range": outside_col})
 	_check("range %s past the last column is an error: %s" % [outside_col, err.get("error", "")],
 		err.get("error", "") == "Range %s is outside the sheet (%d rows, %d columns)" % [outside_col, ROWS, COLS])
 	var outside_row := "A1:C%d" % (ROWS + 1)
-	err = tools.handle("minerva_spreadsheet_autofilter_enable", {"editor_name": EDITOR, "range": outside_row})
+	err = tools.handle("minerva_sheets_autofilter_enable", {"editor_name": EDITOR, "range": outside_row})
 	_check("range %s past the last row is an error" % outside_row,
 		err.get("error", "") == "Range %s is outside the sheet (%d rows, %d columns)" % [outside_row, ROWS, COLS])
 	_check("rejected ranges left the filter off", not data.autofilter.is_active())
-	tools.handle("minerva_spreadsheet_autofilter_enable", {"editor_name": EDITOR, "range": "A1:C10"})
-	err = tools.handle("minerva_spreadsheet_autofilter_set",
+	tools.handle("minerva_sheets_autofilter_enable", {"editor_name": EDITOR, "range": "A1:C10"})
+	err = tools.handle("minerva_sheets_autofilter_set",
 		{"editor_name": EDITOR, "column": STATUS_COL + 1, "values": [null]})
 	_check("values [null] is an error", err.get("error", "") == "values must be an array of strings")
-	err = tools.handle("minerva_spreadsheet_autofilter_set",
+	err = tools.handle("minerva_sheets_autofilter_set",
 		{"editor_name": EDITOR, "column": NOTE_COL + 1, "contains": 123})
 	_check("contains 123 is an error", err.get("error", "") == "contains must be a string")
 	_check("rejected criteria added none", data.autofilter.filtered_columns().is_empty())
-	tools.handle("minerva_spreadsheet_autofilter_clear", {"editor_name": EDITOR, "remove": true})
+	tools.handle("minerva_sheets_autofilter_clear", {"editor_name": EDITOR, "remove": true})
 
 	# Cell values are untouched by every step.
 	var intact := true
