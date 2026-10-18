@@ -1,0 +1,27 @@
+{
+	"agents": [
+		{
+			"core_action_name": "",
+			"core_service_id": "",
+			"drawer_tab_name": "",
+			"enabled_tools": [],
+			"frequency_penalty": 0.0,
+			"id": "b6-genuine-old-spreadsheet-agent",
+			"max_tool_call_rounds": 10,
+			"memory_tab_name": "",
+			"name": "Saved spreadsheet analysis",
+			"presence_penalty": 0.0,
+			"provider_enum_id": 0,
+			"skill_names": [],
+			"skills": [
+				"data_analysis"
+			],
+			"system_prompt": "",
+			"temperature": 1.0,
+			"tool_sets": [
+				"spreadsheet"
+			],
+			"top_p": 1.0
+		}
+	]
+}

@@ -41,20 +41,25 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry, source
 	var host = tree.root.get_node("SingletonObject")
 	var previous_manager: MCPManager = host.mcp_manager
 	host.mcp_manager = chat_manager
-	# Exercise the existing production wiring, including universal membership.
+	# Exercise the existing production wiring, including declared membership.
 	var prior_registered: Array[Dictionary] = []
 	prior_registered.assign(registry.tools_registered.get_connections())
 	var prior_unregistered: Array[Dictionary] = []
 	prior_unregistered.assign(registry.tools_unregistered.get_connections())
 	host._wire_plugin_tools_to_mcp()
 	registry.register_plugin_tools("sheets", registry.plugin_manager.get_db().get_by_id("sheets").tools)
-	var profile = load("res://Scripts/Services/Agents/AgentDefinition.gd").deserialize(_json({"id": "sheet_profile", "tool_sets": ["spreadsheet"]}))
+	var old_profile: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(source.path_join("tests/fixtures/genuine-old-agent.json")))
+	var profile = load("res://Scripts/Services/Agents/AgentDefinition.gd").deserialize(old_profile.agents[0])
+	check.call("genuine old-build agent retains its spreadsheet preset unchanged", profile.id == "b6-genuine-old-spreadsheet-agent"
+		and profile.tool_sets == ["spreadsheet"] and profile.skills == ["data_analysis"])
+	var membership: RefCounted = load(source.path_join("tests/helpers/tool_set_contract.gd")).new()
+	await membership.call("run", check, registry, chat_manager, server, manifest)
 	server._enabled_tool_sets = profile.tool_sets
 	var found_all := true
 	for tool: Dictionary in manifest.tools:
 		var found: Dictionary = server._tool_search({"query": str(tool.name), "limit": 1})
 		found_all = found_all and tool.name in found.get("activated", [])
-	check.call("saved spreadsheet tool-set filter discovers every universal Sheets tool", profile.tool_sets == ["spreadsheet"] and found_all)
+	check.call("saved spreadsheet tool-set filter discovers every declared Sheets tool", profile.tool_sets == ["spreadsheet"] and found_all)
 	var preset_history = load("res://Scripts/Models/ChatHistory.gd").new(null)
 	preset_history.StaticToolMode = true
 	preset_history.ActiveSkills.assign(["data_analysis"])
@@ -115,6 +120,7 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry, source
 	var internal: Dictionary = await server.call_tool(canonical, arguments)
 	check.call("internal canonical read selects the second sheet and labels its canonical name", internal.get("success") == true
 		and not internal.has("alias_of") and _json(internal.get("data")) == _json(expected))
+	server._enabled_tool_sets = profile.tool_sets
 	var http := MinervaMCPHttpServer.new()
 	tree.root.add_child(http)
 	http._mcp_manager = chat_manager
@@ -124,16 +130,19 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry, source
 	var discovered: Array = []
 	if connected == OK:
 		discovered = await client.list_tools()
-	check.call("real Sheets canonical HTTP client discovers the canonical tool", connected == OK and discovered.any(func(tool: MCPToolDefinition) -> bool: return tool.name == canonical))
+	check.call("real Sheets canonical HTTP client discovers the canonical tool", connected == OK and manifest.tools.all(func(tool: Dictionary) -> bool:
+		return discovered.any(func(found: MCPToolDefinition) -> bool: return found.name == tool.name)))
 	if connected == OK:
 		var wire: MCPToolCallOutcome = await client.call_tool_outcome(canonical, arguments)
 		check.call("HTTP canonical read selects the second sheet and has no alias metadata on the wire", wire.application.get("success") == true
 			and _json(wire.application.get("data")) == _json(expected)
 			and wire.envelope != null and not wire.envelope.to_mcp_format().has("alias_of"))
+	await membership.call("http_anti", check, client)
 	var read_wire: RefCounted = load(source.path_join("tests/helpers/read_transport_contract.gd")).new()
 	await read_wire.call("run", check, pane, registry, chat_manager, http, client, source)
 	var http_cancel: RefCounted = load(source.path_join("tests/helpers/http_cancellation_contract.gd")).new()
 	await http_cancel.call("run", check, pane, registry, client)
+	registry.unregister_plugin_tools("setprobe")
 	client.disconnect_from_server()
 	http.stop_server()
 	http.free()
