@@ -167,7 +167,7 @@ Column meaning:
 | MarketplaceClient install pipeline | runtime | yes | no | cad, scansort, presentation | MarketplaceClient.gd |
 | Release tag + tarball naming | registry | no (repo-side) | no | cad, scansort, presentation | presentation.yml; regen_registry.py |
 | save_mode=plugin_owned (UNIMPLEMENTED) | lifecycle | **no (stub)** | yes | — | Editor.gd (TODO, push_warning only) |
-| minerva.getSpreadsheet/updateSpreadsheet/createNote | ipc | yes | no | — (host tools confirmed) | minerva_bridge.gd; cef_bridge.gd; MCPSpreadsheetTools.gd, MCPNotesTools.gd |
+| minerva.call / minerva.createNote | ipc | yes | no | MultiMeter (canonical Sheets create) | minerva_bridge.gd; cef_bridge.gd; PluginWebviewBroker.gd |
 | localhost:9315 MCP HTTP server (no auth) | runtime | yes | no | obs_controller (via minerva.call) | MinervaMCPHttpServer.gd |
 | elgato Stream Deck companion (separate substrate) | language | no (external) | no | elgato | plugins/elgato/manifest.json; src/index.ts |
 | host.settings.get **(2026-08)** | host_api | yes | yes | — | CapabilityBroker `_handle_host_settings_get`; PluginSettingsStore.gd |
@@ -272,9 +272,8 @@ seventh language. `pcb` is the reference consumer. See the developer guide §17.
   only in a TODO comment; NOT a real dispatch path** (see requirement bug #3).
 - JSON Pointer / JSON Patch / blob walker engines — host machinery (only presentation
   drives them, only via patch_state).
-- `minerva.getSpreadsheet`/`updateSpreadsheet`/`createNote` bridge convenience methods
-  (→ `minerva_get_spreadsheet_data` / `minerva_update_spreadsheet_data` /
-  `minerva_create_note`) — present in both bridges; no shipped plugin uses them.
+- `minerva.createNote` bridge convenience method (→ `minerva_create_note`).
+  Sheets tools use generic `minerva.call` with canonical `minerva_sheets_*` names.
 
 ### 4b. Orphan declarations (consumer references the host can't / doesn't satisfy)
 
@@ -462,10 +461,9 @@ seventh language. `pcb` is the reference consumer. See the developer guide §17.
    (CapabilityBroker.gd.)
 8. **Windows SubProcess fd/stdin inheritance** was not verified (Windows
    `subprocess.cpp` not read).
-9. **CEF bridge convenience-method parity (resolved):** confirmed — `cef_bridge.gd`
-   exposes the same `getSpreadsheet`/`updateSpreadsheet`/`createNote` methods as the WRY
-   bridge, and `minerva_get_spreadsheet_data` / `minerva_update_spreadsheet_data` /
-   `minerva_create_note` are real host tools (MCPSpreadsheetTools.gd / MCPNotesTools.gd).
+9. **CEF bridge parity:** `cef_bridge.gd` uses the same `MinervaBridge.BRIDGE_JS`.
+   Both expose generic `call`, `pluginIPC` and `createNote`. Plugin MCP calls use
+   the native broker and the exact tool capability grant.
 10. **`presentation` (godot_scene, `tools:[]`) reaches `host.documents.*` how —**
     via the Go backend's `minerva/capability` upstream calls (confirmed: presentation/main.go
     issues `minerva/capability`), so the panel's host-document access flows through the

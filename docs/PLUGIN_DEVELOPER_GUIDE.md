@@ -595,28 +595,24 @@ manifest declared (manifest `tools[]` is install-time review metadata). `cad` an
 
 The host injects `window.minerva` before the panel is shown. Methods:
 
-- **`minerva.call(toolName, args) -> Promise`** — invokes an MCP tool. **This path
-  POSTs directly to the Minerva MCP HTTP server at `http://localhost:9315`** (a
-  JSON-RPC `tools/call`), unwraps `result.content[0].text`, and throws on
-  `json.error` / `result.isError`. **It does NOT go through the per-message
-  `ui.ipc_messages` allowlist.** See the security note in §13.
+- **`minerva.call(toolName, args) -> Promise`** — invokes an MCP tool through
+  native IPC. Plugin panels require the exact `mcp.proxy:<toolName>` host capability;
+  backend tools owned by the panel's plugin route to that backend. Rejected calls
+  preserve the native failure message and expose its typed `Error.code`.
 - **`minerva.pluginIPC(messageType, payload) -> Promise`** — routes through the host
-  webview broker (WRY: `window.ipc.postMessage`; CEF: `window.sendIpcMessage`). This
-  path **is** gated by `ui.ipc_messages` (and, for `capability:*`, by the capability
-  policy). The host replies asynchronously by calling `window.minerva._ipcReply(...)`.
+  webview broker and its `ui.ipc_messages` and capability checks. The host replies
+  asynchronously through `window.minerva._ipcReply(...)`.
 - **`minerva.onPluginEvent(cb)` / `minerva.onPluginState(cb)`** — register handlers;
   the host pushes events/state to them.
-- **Convenience wrappers** (both WRY and CEF bridges expose them — they are thin
-  `minerva.call()` shims over host tools): `minerva.getSpreadsheet(name)` →
-  `minerva_get_spreadsheet_data`, `minerva.updateSpreadsheet(name, updates)` →
-  `minerva_update_spreadsheet_data`, `minerva.createNote(title, content, thread)` →
-  `minerva_create_note`. (These host tools are confirmed to exist.)
+- **`minerva.createNote(title, content, thread)`** — a convenience wrapper over
+  `minerva.call('minerva_create_note', ...)`. Use generic `minerva.call` for Sheets
+  tools, such as `minerva_sheets_get_data` with `editor_name` and a targeted `range`.
 
 ### 6.3 Message shape & direction
 
 - **Panel → backend tool:** `minerva.pluginIPC('<minerva_<id>_tool>', payload)` — the
   message type is used verbatim as the MCP tool name on your backend. Or use
-  `minerva.call('<minerva_<id>_tool>', args)` (direct HTTP, ungated).
+  `minerva.call('<minerva_<id>_tool>', args)` (native IPC with the panel's authority).
 - **Panel → host capability:** `minerva.pluginIPC('capability:<name>', payload)` — the
   channel must be listed in `ui.ipc_messages`.
 - **Host → panel:** events via `onPluginEvent(name, payload)`; state via

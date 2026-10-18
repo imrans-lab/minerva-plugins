@@ -20,11 +20,11 @@ type sheetMapping struct {
 
 // buildFromSheetArgs is the input for nametag_build_from_sheet. The sheet rows
 // arrive as a JSON STRING (rows_json) — the LLM reads the sheet via
-// minerva_get_spreadsheet_data and passes the array verbatim. A string is immune
+// minerva_sheets_get_data and passes the array verbatim. A string is immune
 // to the host's nested-arg coercion, and the columns are arbitrary per use case.
 type buildFromSheetArgs struct {
-	RowsJSON  string       `json:"rows_json"`
-	Mapping   sheetMapping `json:"mapping"`
+	RowsJSON string       `json:"rows_json"`
+	Mapping  sheetMapping `json:"mapping"`
 	// BackMapping (optional) builds a DISTINCT per-row back face from columns —
 	// same shape as Mapping. Each tag's back is derived from its own row (e.g.
 	// the parent electives on the back of a student tag).
@@ -44,14 +44,14 @@ type buildFromSheetArgs struct {
 	// front into an explicit face carrying the placements.
 	FrontImages      json.RawMessage `json:"front_images"`
 	Layout           string          `json:"layout"`
-	ImageSide        string    `json:"image_side"`
-	BackMode         string    `json:"back_mode"`
-	FullGuides       bool      `json:"full_guides"`
-	IconWidthIn      float64   `json:"icon_width_in"`
-	OutPath          string    `json:"out_path"`
-	Title            string    `json:"title"`
-	SheetRef         string    `json:"sheet_ref"`
-	PreviewFirstOnly bool      `json:"preview_first_only"`
+	ImageSide        string          `json:"image_side"`
+	BackMode         string          `json:"back_mode"`
+	FullGuides       bool            `json:"full_guides"`
+	IconWidthIn      float64         `json:"icon_width_in"`
+	OutPath          string          `json:"out_path"`
+	Title            string          `json:"title"`
+	SheetRef         string          `json:"sheet_ref"`
+	PreviewFirstOnly bool            `json:"preview_first_only"`
 }
 
 // mapRowToFace builds a structured face (title/subtitle + a single column of
@@ -149,7 +149,7 @@ func sheetCell(row map[string]interface{}, col string) string {
 }
 
 // toolNametagBuildFromSheet is the deterministic "spreadsheet → .mtags" tool.
-// The LLM reads the sheet (minerva_get_spreadsheet_data), passes the rows as
+// The LLM reads the sheet (minerva_sheets_get_data), passes the rows as
 // rows_json plus a column mapping; this builds the generic-faces rows, renders a
 // preview PDF (the first tag only when preview_first_only — the single-draft
 // review; the .mtags still stores ALL rows), writes the preview PDF and the

@@ -295,6 +295,8 @@
   var state = { connected: false, recording: { recording: false } };
   var lastEventAt = 0;
   var lastPath = '';
+  var openingSheet = false;
+  var sheetError = '';
 
   // ---------- bridge ----------
   function bridgeReady() { return typeof window.minerva !== 'undefined' && window.minerva && typeof window.minerva.call === 'function'; }
@@ -342,7 +344,7 @@
     state = st || state;
     $('dot').className = state.connected ? 'on' : '';
     $('connText').textContent = state.connected ? 'Meter connected' : 'Meter not connected';
-    $('err').textContent = state.error || '';
+    $('err').textContent = [sheetError, state.error].filter(Boolean).join('; ');
     var rec = state.recording || {};
     $('rec').className = 'rec' + (rec.recording ? ' on' : '');
     $('rec').textContent = rec.recording ? '■ Stop' : '● Record';
@@ -350,7 +352,7 @@
       ? ('Recording: ' + rec.rows + ' rows, ' + Math.round(rec.seconds) + ' s')
       : (lastPath ? 'Last recording: ' + lastPath.split('/').pop() : 'Not recording');
     if (rec.recording) lastPath = rec.path;
-    $('openSheet').disabled = !lastPath;
+    $('openSheet').disabled = openingSheet || !lastPath;
     $('saveCopy').disabled = !lastPath;
     document.querySelectorAll('#buttons button').forEach(function (b) { b.disabled = !state.connected; });
   }
@@ -423,10 +425,22 @@
      .then(renderState)
      .catch(function (e) { $('err').textContent = String(e.message || e); });
   });
-  $('openSheet').addEventListener('click', function () {
-    if (!lastPath) return;
-    window.minerva.call('minerva_create_spreadsheet_editor', { file_path: lastPath })
-      .catch(function (e) { $('err').textContent = String(e.message || e); });
+  $('openSheet').addEventListener('click', async function () {
+    if (openingSheet || !lastPath) return;
+    var button = $('openSheet');
+    openingSheet = true;
+    sheetError = '';
+    button.disabled = true;
+    $('err').textContent = state.error || '';
+    try {
+      await window.minerva.call('minerva_sheets_create_editor', { name: 'Recording', file_path: lastPath });
+    } catch (e) {
+      sheetError = '[' + ((e && e.code) || 'open_failed') + '] ' + String((e && e.message) || e);
+      if (button.isConnected) $('err').textContent = [sheetError, state.error].filter(Boolean).join('; ');
+    } finally {
+      openingSheet = false;
+      if (button.isConnected) button.disabled = !lastPath;
+    }
   });
   $('saveCopy').addEventListener('click', function () {
     call('record_export', {}).then(function (res) {

@@ -221,7 +221,7 @@ var toolList = []map[string]interface{}{
 	},
 	{
 		"name":        "record_stop",
-		"description": "Read minerva_plugin_help id=multimeter first. Stop the running recording and return {path, rows, seconds}. Open the CSV with minerva_create_spreadsheet_editor to chart it.",
+		"description": "Read minerva_plugin_help id=multimeter first. Stop the running recording and return {path, rows, seconds}. Open the CSV with minerva_sheets_create_editor to chart it.",
 		"inputSchema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
 	},
 }

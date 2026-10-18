@@ -237,6 +237,7 @@
   "permissions": {
     "host_capabilities": [
       "host.dialogs.file_picker",
+      "mcp.proxy:minerva_sheets_create_editor",
       "mcp.proxy:minerva_terminal_list",
       "mcp.proxy:minerva_terminal_notify"
     ],

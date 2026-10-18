@@ -353,7 +353,7 @@ func buildFromSheetInputSchema() map[string]interface{} {
 	return map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
-			"rows_json":          map[string]interface{}{"type": "string", "description": "JSON array of sheet row objects ({column: value}) — e.g. from minerva_get_spreadsheet_data. Passed as a STRING (columns are arbitrary per use case)."},
+			"rows_json":          map[string]interface{}{"type": "string", "description": "JSON array of sheet row objects ({column: value}) — e.g. from minerva_sheets_get_data. Passed as a STRING (columns are arbitrary per use case)."},
 			"mapping":            mappingSchema("Which spreadsheet columns map onto each tag's FRONT face."),
 			"back_mapping":       mappingSchema("Optional: columns → a DISTINCT per-row BACK face (same shape as mapping). Each tag's back is built from its own row."),
 			"shared_back":        faceSchema("Optional: one CONSTANT back face drawn behind EVERY tag (e.g. a schedule — use columns with per-day headings), aligned for duplex. A per-row back_mapping overrides it. May carry placed images[] (referencing icon/images ids)"),
@@ -397,7 +397,7 @@ var toolList = []map[string]interface{}{
 	},
 	{
 		"name":        "nametag_build_from_sheet",
-		"description": "Build a .mtags nametag document from spreadsheet rows. The caller reads the sheet (minerva_get_spreadsheet_data) and passes rows_json + a column mapping; this deterministically maps columns → tag rows, renders a preview PDF (the first tag only when preview_first_only — the single-draft review), writes the preview + the .mtags to disk, and returns the .mtags path to open. For a two-sided tag, add a `shared_back` face (one constant back behind every tag, e.g. a schedule) and/or a `back_mapping` (a distinct per-row back built from columns). The standard columns are just a suggestion — the mapping makes it work for any sheet.",
+		"description": "Build a .mtags nametag document from spreadsheet rows. The caller reads the sheet (minerva_sheets_get_data) and passes rows_json + a column mapping; this deterministically maps columns → tag rows, renders a preview PDF (the first tag only when preview_first_only — the single-draft review), writes the preview + the .mtags to disk, and returns the .mtags path to open. For a two-sided tag, add a `shared_back` face (one constant back behind every tag, e.g. a schedule) and/or a `back_mapping` (a distinct per-row back built from columns). The standard columns are just a suggestion — the mapping makes it work for any sheet.",
 		"inputSchema": buildFromSheetInputSchema(),
 	},
 }
