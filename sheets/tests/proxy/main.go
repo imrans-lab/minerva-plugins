@@ -1,4 +1,5 @@
 // This test-only Go backend probes the real host-to-panel capability route.
+// GO-4 exception: test-only process-scoped stdio probe; lifetime bounded by host disconnect + suite deadline (c4719)
 package main
 
 import (
