@@ -5,10 +5,18 @@ marketplace or required-plugin list. The builtin remains active until the
 separate cutover batch.
 
 The source install uses Go to build `sheets-plugin`. Release archives carry the
-backend and scene assets. The creation backend and empty panel are stubs in this
-first slice and refuse spreadsheet operations with `sheets_staging`. The panel
-claims no file formats and cannot save files. Persistence and imports arrive
-with the spreadsheet domain.
+backend and scene assets. An explicit source install opens `.minsheet`, CSV,
+TSV and XLSX documents through the public panel SDK. Native saves and project
+snapshots retain the spreadsheet model; project packages include source files.
+Creation and panel MCP tools still refuse with `sheets_staging` until their
+separate implementation slices. Imported-path Save retains the frozen builtin
+hazard until B4; do not overwrite an imported source file during staging.
+
+Run `scripts/check-private-imports.py HOST --self-test` for the shipped-resource
+census. In an isolated container, `scripts/run-model-oracle.py HOST NEW_DIRECTORY`
+builds a project with only the exact public panel SDK and checks frozen B0
+spreadsheet models. The full-host source-install fixture separately covers host
+services and project persistence, including fresh-profile package transfer.
 
 The completed plugin will create initial content in two steps. A failure after opening
 the tab leaves that tab visible and identifies it in the error.

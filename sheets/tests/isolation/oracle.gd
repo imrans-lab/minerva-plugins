@@ -37,6 +37,8 @@ func run() -> void:
 	root.add_child(panel)
 	await process_frame
 	var expected: Dictionary = oracle("baseline.minsheet")
+	panel._on_panel_load_request({"file_path": fixtures.path_join("baseline.minsheet")})
+	check("actionless no-snapshot fallback loads complete model", json_value(panel._on_panel_save_request()) == expected)
 	for extension: String in ["minsheet", "csv", "tsv", "xlsx"]:
 		panel.free()
 		panel = scene.instantiate()
@@ -73,13 +75,14 @@ func run() -> void:
 	panel._on_panel_load_request({"file_path": ProjectSettings.globalize_path(native_path)})
 	panel.remove_meta(SDK.DOCUMENT_ACTION_META)
 	check("native file reopens complete model", json_value(panel._on_panel_save_request()) == expected)
-	for invalid: String in ["malformed.minsheet", "not-an-object.minsheet"]:
-		var before := FileAccess.get_file_as_bytes(fixtures.path_join(invalid))
+	for invalid: String in ["malformed.minsheet", "not-an-object.minsheet", "missing.minsheet"]:
+		var path := fixtures.path_join(invalid)
+		var before := FileAccess.get_file_as_bytes(path) if FileAccess.file_exists(path) else PackedByteArray()
 		import_document(panel, invalid)
-		var status: Label = panel.get_node("Status")
-		check(invalid + " visibly refuses and preserves model/input", status.visible and not status.text.is_empty()
+		var status: RichTextLabel = panel.get_node("Status")
+		check(invalid + " visibly refuses and preserves model/input", status.visible and status.selection_enabled and not status.text.is_empty()
 			and json_value(panel._on_panel_save_request()) == expected
-			and before == FileAccess.get_file_as_bytes(fixtures.path_join(invalid)))
+			and (before == FileAccess.get_file_as_bytes(path) if FileAccess.file_exists(path) else before.is_empty()))
 	var future_bytes := FileAccess.get_file_as_bytes(fixtures.path_join("future.minsheet"))
 	import_document(panel, "future.minsheet")
 	check("XFAIL B0 future version accepted and downgraded", json_value(panel._on_panel_save_request()) == expected)

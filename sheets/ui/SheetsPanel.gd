@@ -7,8 +7,9 @@ const SpreadsheetDataScript := preload("domain/SpreadsheetData.gd")
 const SheetRegistry := preload("sheet_registry.gd")
 
 @onready var sheet: SpreadsheetEditorScript = $Sheet
-@onready var status: Label = $Status
+@onready var status: RichTextLabel = $Status
 var _editor: WeakRef
+var _snapshot_restored: bool = false
 
 func _ready() -> void:
 	sheet.sheet_resolver = SheetRegistry.resolve
@@ -38,14 +39,17 @@ func _on_panel_save_request() -> Dictionary:
 
 func _on_panel_load_request(document: Dictionary) -> void:
 	status.hide()
-	if get_document_action() in ["open", "import"]:
+	if get_document_action() in ["open", "import"] or (document.has("file_path") and not _snapshot_restored):
 		var path: String = str(document.get("file_path", ""))
 		var result: Error = sheet.load_file(path)
 		if result != OK:
 			status.text = "Couldn't open spreadsheet: %s (error %d)" % [path.get_file(), result]
 			status.show()
-	else:
+			push_error(status.text)
+	elif not document.has("file_path"):
+		# Restored snapshots win over the parent Editor backing-file replay.
 		sheet.deserialize(document)
+		_snapshot_restored = true
 
 func _on_panel_undo_request() -> bool:
 	return sheet.undo()

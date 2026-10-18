@@ -2,7 +2,7 @@
   "id": "sheets",
   "name": "Sheets",
   "version": "0.1.0",
-  "description": "Staging spreadsheet editor for Minerva, extracted alongside the builtin. This skeleton opens an empty panel for development; spreadsheet editing, imports and persistence arrive in later slices. Source installs require Go 1.25 or newer; archives include the backend.",
+  "description": "Staging spreadsheet editor for Minerva, extracted alongside the builtin. Explicit source installs open native, CSV, TSV and XLSX sheets with native saves and portable project snapshots. MCP tools remain staged for later slices. Source installs require Go 1.25 or newer; archives include the backend.",
   "host_api_version": "2",
   "release_targets": [
     "linux-x86_64",

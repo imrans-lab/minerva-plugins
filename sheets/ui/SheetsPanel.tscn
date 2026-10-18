@@ -16,7 +16,11 @@ script = ExtResource("1")
 layout_mode = 2
 size_flags_vertical = 3
 
-[node name="Status" type="Label" parent="."]
+[node name="Status" type="RichTextLabel" parent="."]
 visible = false
 layout_mode = 2
 autowrap_mode = 2
+fit_content = true
+scroll_active = false
+selection_enabled = true
+context_menu_enabled = true

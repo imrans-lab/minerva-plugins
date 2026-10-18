@@ -3,6 +3,7 @@ signal completed(code: int)
 var passed: int = 0
 var failed: int = 0
 var _project_container: Node
+var _project_replies: Dictionary = {}
 
 func check(label: String, condition: bool) -> void:
 	if condition:
@@ -67,6 +68,7 @@ func _run() -> void:
 	if definition != null:
 		var started: Dictionary = await manager.start_plugin("sheets")
 		check("actual Sheets backend initializes", started.get("ok", false) == true)
+		manager.get_connection("sheets").tool_result_received.connect(_project_reply)
 		check("Sheets backend reports running", manager.get_plugin_status("sheets").get("running", false) == true)
 		host._register_plugin_editor_items("sheets")
 		var item: CreatableItemRegistry.CreatableItem = host.creatable_item_registry.get_item("new_minsheet")
@@ -152,6 +154,11 @@ func _proxy_probe(host, source: String, registry: PluginToolRegistry, policy: Pl
 	registry.register_plugin_tools("sheets", definition.tools)
 
 
+func _project_reply(tool_name: String, result: Dictionary) -> void:
+	if tool_name.begins_with("sheets."):
+		print("R17 channel " + tool_name + ": " + JSON.stringify(result))
+		_project_replies[tool_name] = result.duplicate(true)
+
 func _json_value(value: Variant) -> Variant:
 	return JSON.parse_string(JSON.stringify(value))
 
@@ -173,21 +180,49 @@ func _hosting_contract(host: Node, pane: EditorPane, manager: PluginManager) -> 
 		check(extension + " import leaves original bytes intact", FileAccess.get_file_as_bytes(path) == before)
 	var import_editor: Editor = pane.Tabs.get_current_tab_control()
 	var import_panel: Node = import_editor.plugin_scene_root
+	var fallback: Editor = pane.add_plugin_scene_editor("sheets", "sheets_panel",
+		ProjectSettings.globalize_path(fixtures + "sample.csv"), "No snapshot", "")
+	await get_tree().process_frame
+	check("actionless no-snapshot backing file loads its complete model", _json_value(fallback.plugin_scene_root.call("_on_panel_save_request"))
+		== JSON.parse_string(FileAccess.get_file_as_string(fixtures + "csv-expected.json")))
+	fallback.free()
 	var stable_snapshot: Dictionary = import_panel.call("_on_panel_save_request")
-	for invalid: String in ["malformed.minsheet", "not-an-object.minsheet"]:
+	for invalid: String in ["malformed.minsheet", "not-an-object.minsheet", "missing.minsheet"]:
 		var invalid_path := ProjectSettings.globalize_path(fixtures + invalid)
-		var invalid_bytes := FileAccess.get_file_as_bytes(invalid_path)
+		var invalid_bytes := FileAccess.get_file_as_bytes(invalid_path) if FileAccess.file_exists(invalid_path) else PackedByteArray()
 		PluginScenePanelHost.invoke_document_handoff(import_panel, {"file_path": invalid_path}, "import")
-		var notice: Label = import_panel.get_node("Status")
-		check(invalid + " visibly refuses without clearing model or changing input", notice.visible
+		var notice: RichTextLabel = import_panel.get_node("Status")
+		check(invalid + " visibly refuses without clearing model or changing input", notice.visible and notice.selection_enabled and not notice.text.is_empty()
 			and _json_value(import_panel.call("_on_panel_save_request")) == _json_value(stable_snapshot)
-			and invalid_bytes == FileAccess.get_file_as_bytes(invalid_path))
+			and (invalid_bytes == FileAccess.get_file_as_bytes(invalid_path) if FileAccess.file_exists(invalid_path) else invalid_bytes.is_empty()))
 	var future_path := ProjectSettings.globalize_path(fixtures + "future.minsheet")
 	var future_bytes := FileAccess.get_file_as_bytes(future_path)
 	PluginScenePanelHost.invoke_document_handoff(import_panel, {"file_path": future_path}, "open")
 	check("XFAIL future native version keeps the frozen accepted-and-downgraded behavior", _json_value(import_panel.call("_on_panel_save_request"))
 		== JSON.parse_string(FileAccess.get_file_as_string(fixtures + "baseline.minsheet"))
 		and FileAccess.get_file_as_bytes(future_path) == future_bytes)
+	var imported_sheet = import_panel.get("sheet")
+	imported_sheet.history.clear()
+	check("public undo and redo refuse empty history", not PluginScenePanelHost.invoke_undo(import_panel)
+		and not PluginScenePanelHost.invoke_redo(import_panel))
+	imported_sheet.set_cell_value_with_history(0, 0, "hook edit")
+	check("public undo reverts the model", PluginScenePanelHost.invoke_undo(import_panel)
+		and imported_sheet.spreadsheet_data.get_cell_display(0, 0) == "Name")
+	check("public redo reapplies the model", PluginScenePanelHost.invoke_redo(import_panel)
+		and imported_sheet.spreadsheet_data.get_cell_display(0, 0) == "hook edit")
+	var rendered: Array = PluginScenePanelHost.invoke_render_for_llm(import_panel, {})
+	check("public LLM render returns current markdown", rendered == [{"type": "text", "text": imported_sheet.spreadsheet_data.to_markdown()}])
+	# Full-host-only parity oracle: compare the unchanged builtin's reused model.
+	var builtin_data = load("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetData.gd").new()
+	var builtin_files: Script = load("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetFileHandler.gd")
+	builtin_data.load_from_dict(JSON.parse_string(FileAccess.get_file_as_string(fixtures + "baseline.minsheet")))
+	PluginScenePanelHost.invoke_load(import_panel, JSON.parse_string(FileAccess.get_file_as_string(fixtures + "baseline.minsheet")))
+	for extension: String in ["csv", "tsv", "xlsx"]:
+		var path := ProjectSettings.globalize_path(fixtures + "sample." + extension)
+		var result: Error = builtin_files.import_file(path, builtin_data)
+		PluginScenePanelHost.invoke_document_handoff(import_panel, {"file_path": path}, "import")
+		check(extension + " reused-model import matches builtin", result == OK
+			and _json_value(import_panel.call("_on_panel_save_request")) == _json_value(builtin_data.to_dict()))
 	var source: Editor = pane.Tabs.get_current_tab_control()
 	source.tab_title = "Reference source"
 	var source_panel: Node = source.plugin_scene_root
@@ -206,6 +241,11 @@ func _hosting_contract(host: Node, pane: EditorPane, manager: PluginManager) -> 
 	target_data.set_cell_value(0, 0, "='Reference renamed'!A1+1")
 	target_data.recalculate_all()
 	check("renamed target resolves through its current title", target_data.get_cell_value(0, 0) == 8)
+	PluginScenePanelHost.invoke_load(source_panel, JSON.parse_string(FileAccess.get_file_as_string(fixtures + "baseline.minsheet")))
+	var replacement_data = source_panel.call("get_sheet_data")
+	replacement_data.set_cell_value(0, 0, 11)
+	target_data.recalculate_all()
+	check("registered title resolves a replaced model", replacement_data != source_data and target_data.get_cell_value(0, 0) == 12)
 	var duplicate_editor: Editor = pane.add_plugin_scene_editor("sheets", "sheets_panel", null, "Duplicate", "create")
 	await get_tree().process_frame
 	duplicate_editor.tab_title = source.tab_title
@@ -213,30 +253,50 @@ func _hosting_contract(host: Node, pane: EditorPane, manager: PluginManager) -> 
 	check("ambiguous sheet titles show the existing reference error", target_data.get_cell_display(0, 0) == "#ERROR" and target_data.get_cell(0, 0).error == "#REF!")
 	duplicate_editor.free()
 	target_data.recalculate_all()
-	check("closing the duplicate restores unambiguous lookup", target_data.get_cell_value(0, 0) == 8)
+	check("closing the duplicate restores unambiguous lookup", target_data.get_cell_value(0, 0) == 12)
+	PluginScenePanelHost.invoke_unload(source_panel)
+	target_data.recalculate_all()
+	check("unloading a live panel removes lookup", is_instance_valid(source_panel) and target_data.get_cell(0, 0).error == "#REF!")
 	source.free()
 	target_data.recalculate_all()
 	check("closed target produces a reference error", target_data.get_cell_display(0, 0) == "#ERROR" and target_data.get_cell(0, 0).error == "#REF!")
 	for child: Control in pane.Tabs.get_children():
 		child.free()
-	await _project_roundtrip(host, pane, manager, fixtures)
+	for extension: String in ["minsheet", "csv", "tsv", "xlsx"]:
+		await _project_roundtrip(host, pane, manager, fixtures, extension)
 
-func _project_roundtrip(host: Node, pane: EditorPane, manager: PluginManager, fixtures: String) -> void:
+func _project_roundtrip(host: Node, pane: EditorPane, manager: PluginManager, fixtures: String, extension: String) -> void:
+	_project_replies.clear()
+	if _project_container != null:
+		_project_container.free()
 	var container_script = load("res://Scripts/UI/Controls/vboxEditor.gd")
 	_project_container = container_script.new()
 	_project_container.set("editor_pane", pane)
 	get_tree().root.add_child(_project_container)
 	host.editor_container = _project_container
-	var workspace := ProjectSettings.globalize_path("user://sheets-project-contract")
+	var workspace := ProjectSettings.globalize_path("user://sheets-project-contract-" + extension)
 	check("project workspace starts clean", not DirAccess.dir_exists_absolute(workspace))
 	DirAccess.make_dir_recursive_absolute(workspace)
-	var source := workspace.path_join("sheet.minsheet")
-	check("stage independent native project source", DirAccess.copy_absolute(fixtures + "baseline.minsheet", source) == OK)
-	var expected: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(fixtures + "baseline.minsheet"))
+	var source_name := "sheet." + extension
+	var fixture_name := "baseline.minsheet" if extension == "minsheet" else "sample." + extension
+	var oracle_name := fixture_name if extension == "minsheet" else extension + "-expected.json"
+	var source := workspace.path_join(source_name)
+	check("stage independent project source " + extension, DirAccess.copy_absolute(fixtures + fixture_name, source) == OK)
+	var expected: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(fixtures + oracle_name))
 	var opened: Dictionary = host.open_file_at_path(source)
 	check("project source opens as Sheets", opened.get("ok") == true and pane.Tabs.get_tab_count() == 1)
 	await get_tree().process_frame
+	var current: Editor = pane.Tabs.get_current_tab_control()
+	var data = current.plugin_scene_root.call("get_sheet_data")
+	if extension == "xlsx":
+		data.set_cell_value(1, 2, 99)
+		expected.cells["1,2"].value = 99
+	else:
+		data.set_cell_value(0, 0, "unsaved snapshot")
+		expected.cells["0,0"].value = "unsaved snapshot"
+	expected = _json_value(expected) # Normalize the edited numeric oracle across JSON.
 	var entries: Array = await _project_container.call("serialize")
+	check("real serialize channel succeeded", _project_replies.get("sheets.serialize") == {"tab_state": {}, "sidecar_paths": [], "success": true})
 	check("real project serialization captures opaque complete panel state", entries.size() == 1
 		and _json_value(entries[0].plugin_state.payload.__panel_state) == expected)
 	var project := {"Editors": entries}
@@ -254,22 +314,26 @@ func _project_roundtrip(host: Node, pane: EditorPane, manager: PluginManager, fi
 	for view: Control in views:
 		pane.Tabs.add_child(view)
 	await get_tree().process_frame
+	check("real deserialize channel succeeded", _project_replies.get("sheets.deserialize") == {"ok": true, "success": true})
 	check("minproj reopens an identical complete plugin model", views.size() == 1
 		and _json_value(views[0].plugin_scene_root.call("_on_panel_save_request")) == expected)
 	for view: Control in views:
 		view.free()
 	var package = load("res://Scripts/Models/ProjectPackage.gd").new()
 	var extras: Array = await package.collect_plugin_exports(project, manager, workspace)
-	check("real plugin export channel declares no sidecars", extras.is_empty())
+	check("real export channel succeeded with no sidecars", extras.is_empty() and _project_replies.get("sheets.collect_export") == {"files": [], "success": true})
 	var archive := OS.get_environment("SHEETS_PACKAGE_OUT")
 	if archive.is_empty():
 		archive = workspace.path_join("sheets.minpackage")
+	archive = archive.get_basename() + "-" + extension + ".minpackage"
 	DirAccess.make_dir_recursive_absolute(archive.get_base_dir())
 	check("real minpackage stores the plugin project and native file", package.save_package(project,
-		PackedStringArray([source]), PackedStringArray(["sheet.minsheet"]), archive) == OK)
+		PackedStringArray([source]), PackedStringArray([source_name]), archive) == OK)
 	var package_input := OS.get_environment("SHEETS_PACKAGE_IN")
 	if package_input.is_empty():
 		package_input = archive
+	else:
+		package_input = package_input.get_basename() + "-" + extension + ".minpackage"
 	check("R17 package input exists", FileAccess.file_exists(package_input))
 	var open_result: int = package.open_package(package_input)
 	check("real package reader accepts the archive", open_result == OK)
@@ -282,8 +346,9 @@ func _project_roundtrip(host: Node, pane: EditorPane, manager: PluginManager, fi
 	package.close()
 	var unpacked: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(unpacked_path))
 	await package.apply_plugin_exports(unpacked, destination, manager)
-	check("unpacked native bytes match the frozen independent source", FileAccess.get_sha256(destination.path_join("sheet.minsheet"))
-		== FileAccess.get_sha256(fixtures + "baseline.minsheet"))
+	check("real apply export channel succeeded", _project_replies.get("sheets.apply_export") == {"ok": true, "success": true})
+	check("unpacked bytes match frozen independent source", FileAccess.get_sha256(destination.path_join(source_name))
+		== FileAccess.get_sha256(fixtures + fixture_name))
 	var restored: Array = await container_script.deserialize(unpacked.Editors)
 	for view: Control in restored:
 		pane.Tabs.add_child(view)
@@ -292,3 +357,5 @@ func _project_roundtrip(host: Node, pane: EditorPane, manager: PluginManager, fi
 		and _json_value(restored[0].plugin_scene_root.call("_on_panel_save_request")) == expected)
 	if not OS.get_environment("SHEETS_PACKAGE_IN").is_empty():
 		print("R17 fresh-profile import used external package: " + package_input)
+	for view: Control in restored:
+		view.free()

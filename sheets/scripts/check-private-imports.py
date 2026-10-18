@@ -10,30 +10,43 @@ import argparse
 import posixpath
 import re
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from package import interface_files
 
 
-def violations(name: str, text: str, private: set[str], public: set[str]) -> list[str]:
-    """Check paths plus host-class identifiers outside strings and comments."""
+def violations(name: str, text: str, private: set[str], public: set[str],
+               shipped: set[str] | None = None) -> list[str]:
+    """Refuse nonliteral script dependencies and imports outside the shipped closure."""
     result = []
     local = set(re.findall(r"(?m)^\s*(?:const|class|class_name)\s+(\w+)", text))
     lexer = r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|#[^\n]*|\b[A-Za-z_]\w*\b'
+    literal = r'["\']([^"\']+)["\']'
     for number, line in enumerate(text.splitlines(), 1):
-        for path in re.findall(r"(?:res|user|uid)://[^\s\"')]+", line):
-            if path not in public:
+        paths = re.findall(r"(?:res|user|uid)://[^\s\"')]+", line)
+        paths += re.findall(r'(?:\bextends\s+|\bpath\s*=\s*)' + literal, line)
+        for call in re.finditer(r'\b(?:preload|load)\s*\(([^)]*)\)', line):
+            quoted = re.fullmatch(r'\s*' + literal + r'\s*', call[1])
+            if quoted is None:
+                result.append(f"{name}:{number}: nonliteral resource dependency {call[0]}")
+            else:
+                paths.append(quoted[1])
+        if re.search(r'\b(?:preload|load)\s*\(', line) and not re.search(r'\b(?:preload|load)\s*\([^)]*\)', line):
+            result.append(f"{name}:{number}: unsupported multiline resource dependency")
+        for path in set(paths):
+            if path in public:
+                continue
+            resolved = posixpath.normpath(posixpath.join(posixpath.dirname(name), path.replace("\\", "/")))
+            if "://" in path or PureWindowsPath(path).drive or PureWindowsPath(path).root or path.startswith("/"):
                 result.append(f"{name}:{number}: non-public resource {path}")
-        for path in re.findall(r'(?:\b(?:preload|load)\(\s*|\bpath\s*=\s*)[\"\']([^\"\']+)', line):
-            if "://" in path:
-                continue # Already checked above, including the public SDK exception.
-            resolved = posixpath.normpath(posixpath.join(posixpath.dirname(name), path))
-            if path.startswith("/") or resolved == ".." or resolved.startswith("../"):
+            elif resolved == ".." or resolved.startswith("../"):
                 result.append(f"{name}:{number}: resource escapes plugin {path}")
+            elif shipped is None or resolved not in shipped:
+                result.append(f"{name}:{number}: resource is not shipped {path}")
         if name.endswith(".gd"):
             for token in re.findall(lexer, line):
                 if token in private and token not in local:
-                    result.append(f"{name}:{number}: private host class {token}")
+                    result.append(f"{name}:{number}: private host symbol {token}")
     return result
 
 
@@ -50,7 +63,12 @@ def host_contract(host: Path) -> tuple[set[str], set[str]]:
     symbols = set()
     for path in (host / "src").rglob("*.gd"):
         symbols.update(re.findall(r"(?m)^class_name (\w+)", path.read_text()))
-    if "Editor" not in symbols or not public:
+    project = (host / "src/project.godot").read_text()
+    autoloads = re.search(r"(?ms)^\[autoload\]\s*(.*?)(?=^\[|\Z)", project)
+    if autoloads is None:
+        raise ValueError("Cannot read host autoload inventory")
+    symbols.update(re.findall(r"(?m)^(\w+)\s*=", autoloads[1]))
+    if "SingletonObject" not in symbols or "Editor" not in symbols or not public:
         raise ValueError("The census requires a full Minerva checkout for its private-class inventory")
     return symbols - public_symbols, public
 
@@ -65,15 +83,22 @@ def main() -> None:
     if args.self_test:
         for planted in ['const Bad := preload("res://Scripts/UI/Controls/Note.gd")',
                         'const Bad := preload("uid://private-probe")',
-                        'var bad: Editor']:
+                        'var bad: Editor',
+                        'extends "../../../Minerva/src/Scripts/UI/Controls/Note.gd"',
+                        'var bad = SingletonObject.editor_container',
+                        'var bad = load("C:/Minerva/src/Scripts/UI/Controls/Note.gd")',
+                        'var bad = load("tools/MCPSpreadsheetTools.gd")',
+                        'var bad = load(resource_path)',
+                        'var bad = load("domain/" + resource_name)']:
             negative = violations("ui/planted.gd", planted, private, public)
             if not negative or not all("ui/planted.gd:1:" in finding for finding in negative):
                 raise ValueError("Census failed to refuse planted private dependency: " + planted)
             print("PASS refused: " + "; ".join(negative))
     findings = []
     files = [path for path in interface_files(root) if path.suffix in (".gd", ".tscn")]
+    shipped = {path.relative_to(root).as_posix() for path in interface_files(root)}
     for path in files:
-        findings.extend(violations(path.relative_to(root).as_posix(), path.read_text(), private, public))
+        findings.extend(violations(path.relative_to(root).as_posix(), path.read_text(), private, public, shipped))
     for finding in findings:
         print(finding, file=sys.stderr)
     if findings:
