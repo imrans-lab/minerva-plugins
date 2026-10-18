@@ -34,7 +34,7 @@
     {
       "name": "minerva_sheets_create_editor",
       "executor": "backend",
-      "description": "Staging creation stub. Returns sheets_staging until the spreadsheet domain is installed.",
+      "description": "Staging creation stub. Returns sheets_staging until creation orchestration is implemented.",
       "input_schema": {
         "properties": {
           "csv_content": {
