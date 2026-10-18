@@ -8,8 +8,11 @@ The source install uses Go to build `sheets-plugin`. Release archives carry the
 backend and scene assets. An explicit source install opens `.minsheet`, CSV,
 TSV and XLSX documents through the public panel SDK. Native saves and project
 snapshots retain the spreadsheet model; project packages include source files.
-Creation and panel MCP tools still refuse with `sheets_staging` until their
-separate implementation slices. Imported-path Save retains the frozen builtin
+Panel MCP tools now edit data, styling, charts, filters and undo history. Editor
+creation, snapshot notes and Nudge export still refuse with explicit staging errors
+until their separate host-service slice. Valid MCP chart image capture retains the
+builtin missing-canvas defect (`minerva:01a14e24b4c6`), targeted for the plugin in B4.
+Raw canvas PNG capture is tested separately; MCP image export is not claimed. Imported-path Save retains the frozen builtin
 hazard until B4; do not overwrite an imported source file during staging.
 
 Run `scripts/check-private-imports.py HOST --self-test` for the shipped-resource

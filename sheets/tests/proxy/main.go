@@ -35,7 +35,7 @@ func run(input io.Reader, output io.Writer) error {
 		case "tools/list":
 			result = map[string]any{"tools": []map[string]any{{"name": "probe", "description": "Test the host capability route", "inputSchema": map[string]any{"type": "object"}}}}
 		case "tools/call":
-			if err := encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": "sheets-capability", "method": "minerva/capability", "params": map[string]any{"capability": "mcp.proxy:minerva_sheets_probe", "args": message.Params.Arguments}}); err != nil {
+			if err := encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": "sheets-capability", "method": "minerva/capability", "params": map[string]any{"capability": "mcp.proxy:minerva_sheets_get_data", "args": message.Params.Arguments}}); err != nil {
 				return err
 			}
 			if !scanner.Scan() {

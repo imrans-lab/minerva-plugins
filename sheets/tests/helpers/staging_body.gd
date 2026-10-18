@@ -100,6 +100,8 @@ func _run() -> void:
 			var planted := domain_source + '\nconst ForbiddenProbe := preload("' + forbidden + '")\n'
 			check("private resource injection is refused: " + forbidden, guard.normalize_resource("ui/domain/SpreadsheetEditor.gd", planted).get("ok") == false)
 		await _hosting_contract(host, pane, manager)
+		var contract: RefCounted = load(source.path_join("tests/helpers/tool_contract.gd")).new()
+		await contract.call("run", check, pane, registry, broker, source)
 
 		definition.class_names.assign(["WrongPrefix_Panel"])
 		check("wrong class prefix is refused explicitly", definition.validate_class_names({}, []).get("error") == "class_name_bad_prefix")
@@ -126,16 +128,18 @@ func _run() -> void:
 
 func _proxy_probe(host, source: String, registry: PluginToolRegistry, policy: PluginPolicy,
 		capabilities: CapabilityBroker, definition: PluginDefinition, editor_name: String) -> void:
-	# Register an ephemeral probe tool on the real source panel, never the shipped catalog.
-	var tool := {"name": "minerva_sheets_probe", "executor": "panel", "description": "Staging transport probe",
-		"input_schema": {"type": "object", "properties": {"editor_name": {"type": "string"}}, "required": ["editor_name"]}}
-	var registration := registry.register_plugin_tools("sheets", [tool])
-	check("proxy probe registers a real panel tool", registration.get("ok") == true)
+	# Use the real generated catalog and a real read tool on the mounted panel.
+	var tool: Dictionary = {}
+	for candidate: Dictionary in definition.tools:
+		if candidate.get("name") == "minerva_sheets_get_data":
+			tool = candidate
+	var registration := registry.register_plugin_tools("sheets", definition.tools)
+	check("proxy probe registers the real panel catalog", registration.get("ok") == true and not tool.is_empty())
 	var saved_server = host.mcp_manager.minerva_server
 	var server = load("res://Scripts/Services/MCP/MinervaMCPServer.gd").new()
 	host.mcp_manager.minerva_server = server
-	server.tool_budget_manager.activate_tool("minerva_sheets_probe", tool)
-	policy.grant_capability("sheets", "mcp.proxy:minerva_sheets_probe")
+	server.tool_budget_manager.activate_tool("minerva_sheets_get_data", tool)
+	policy.grant_capability("sheets", "mcp.proxy:minerva_sheets_get_data")
 	var connection = load("res://Scripts/Services/MCP/MCPServerConnection.gd").new("sheets-probe", "", MCPServerConnection.TransportType.STDIO)
 	connection.plugin_id = "sheets"
 	connection.configure_stdio(source.path_join("tests/proxy/sheets-proxy"))
@@ -147,8 +151,9 @@ func _proxy_probe(host, source: String, registry: PluginToolRegistry, policy: Pl
 		# call_tool deliberately returns the decoded application result, not wire content.
 		var body: Dictionary = await connection.call_tool("probe", {"editor_name": editor_name})
 		print("Proxy capability reply: " + JSON.stringify(body))
-		check("Go backend mcp.proxy reaches its own source panel", body.get("success") == false and body.get("error_code") == "sheets_staging"
-			and str(body.get("error_message", "")).begins_with("Spreadsheet tools"))
+		var value: Dictionary = body.get("result", {})
+		check("Go backend mcp.proxy reaches its own source panel", body.get("success") == true and value.get("format") == "csv"
+			and value.get("row_count") == 4 and value.get("column_count") == 3)
 	connection.disconnect_from_server()
 	host.mcp_manager.minerva_server = saved_server
 	registry.register_plugin_tools("sheets", definition.tools)

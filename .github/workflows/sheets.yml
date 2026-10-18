@@ -24,6 +24,8 @@ jobs:
         with:
           go-version-file: .go-version
           cache: false
+      - name: Verify generated catalog
+        run: python3 sheets/scripts/gen-tools.py --check
       - name: Compile and vet
         working-directory: sheets
         run: |

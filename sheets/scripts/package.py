@@ -16,9 +16,6 @@ def interface_files(root: Path) -> list[Path]:
     files = []
     for directory in ("ui", "icons"):
         for path in sorted((root / directory).rglob("*")):
-            # Tool modules stay inert until S4 adapts their host interfaces.
-            if path.is_relative_to(root / "ui/tools"):
-                continue
             if path.is_file() and path.suffix in (".gd", ".tscn", ".png"):
                 if path.is_symlink():
                     raise ValueError(f"Symlink refused: {path}")
