@@ -30,8 +30,8 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry, chat_m
 	var connection = load("res://Scripts/Services/MCP/MCPServerConnection.gd").new("sheets-read-wire", "", MCPServerConnection.TransportType.STDIO)
 	connection.plugin_id = "sheets"
 	connection.configure_stdio(source.path_join("tests/proxy/sheets-proxy"))
-	connection.capability_request_handler = func(id: String, capability: String, args: Dictionary) -> Dictionary:
-		return await registry.capability_broker.dispatch(id, capability, args)
+	connection.capability_request_handler = func(id: String, capability: String, args: Dictionary, context: MCPExecutionContext = null) -> Dictionary:
+		return await registry.capability_broker.dispatch(id, capability, args, context)
 	var connected: int = await connection.connect_to_server()
 	check.call("read budget Go IPC probe connects", connected == OK)
 	var measurements: Array[Dictionary] = []

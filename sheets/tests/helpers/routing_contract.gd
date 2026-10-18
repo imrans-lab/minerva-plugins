@@ -132,6 +132,8 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry, source
 			and wire.envelope != null and not wire.envelope.to_mcp_format().has("alias_of"))
 	var read_wire: RefCounted = load(source.path_join("tests/helpers/read_transport_contract.gd")).new()
 	await read_wire.call("run", check, pane, registry, chat_manager, http, client, source)
+	var http_cancel: RefCounted = load(source.path_join("tests/helpers/http_cancellation_contract.gd")).new()
+	await http_cancel.call("run", check, pane, registry, client)
 	client.disconnect_from_server()
 	http.stop_server()
 	http.free()
