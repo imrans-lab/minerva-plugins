@@ -57,7 +57,14 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry, host: 
 		var second_replies: Array[bool] = []
 		var count: int = pane.Tabs.get_tab_count()
 		var first: Control = _view(tree, html, first_replies)
-		var second: Control = _view(tree, html, second_replies)
+		check.call("native %s first document owns the held operation" % mode, await _wait(tree, func() -> bool: return gate.hits == 1 and first.get("_pending_ipc").size() == 1, 8.0))
+		var survivor_path: String = path
+		var survivor_html: String = html
+		if before_open:
+			survivor_path = path.get_basename() + "-survivor.csv"
+			check.call("native %s gives the survivor a distinct real file" % mode, DirAccess.copy_absolute(recording_path, survivor_path) == OK and survivor_path != path)
+			survivor_html = html.replace(JSON.stringify(path), JSON.stringify(survivor_path))
+		var second: Control = _view(tree, survivor_html, second_replies)
 		var pending: bool = await _wait(tree, func() -> bool: return gate.hits == 1 and first.get("_pending_ipc").size() == 1 and second.get("_pending_ipc").size() == 1 and connection._pending.size() == 2, 8.0)
 		check.call("native %s holds real verification while both native caller RPCs are pending" % mode, pending
 			and first.get("_pending_ipc").size() == 1 and second.get("_pending_ipc").size() == 1
@@ -99,11 +106,13 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry, host: 
 			check.call("replacement native document receives only its own generation acknowledgement", await _wait(tree, func() -> bool: return not first_replies.is_empty()) and first_replies == [true])
 		var matching: Array[Editor] = []
 		for editor: Editor in pane.get_open_editors():
-			if editor.file == path:
+			if editor.file == survivor_path:
 				matching.append(editor)
 		check.call("native %s reuses one file-backed identity without reimporting and preserves source bytes" % mode, pending and matching.size() == 1 and (before_open or matching[0] == held_editor) and pane.Tabs.get_tab_count() == count + 1
 			and (before_open or matching[0].plugin_scene_root.call("get_sheet_data").call("get_cell_value", 1, 1) == "native-edit-" + mode)
 			and FileAccess.get_file_as_bytes(path) == original_bytes and FileAccess.get_file_as_bytes(recording_path) == original_bytes)
+		if before_open:
+			check.call("native %s never imports the retired caller file" % mode, pane.get_open_editors().all(func(editor: Editor) -> bool: return editor.file != path))
 		connection.capability_request_handler = forward
 		if is_instance_valid(first):
 			first.queue_free()
