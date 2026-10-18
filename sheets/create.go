@@ -100,7 +100,9 @@ func createEditor(ctx context.Context, stream *rpcStream, raw json.RawMessage) m
 	}
 	if args.FilePath != "" || args.CSVContent != "" {
 		data, readErr := stream.capability(ctx, "mcp.proxy:minerva_sheets_get_data", map[string]any{"editor_name": name, "format": "json", "range": "A1"})
-		if readErr != nil || data["success"] != true {
+		// A data-size refusal still carries independently computed import counts.
+		countsOnly := data["error_code"] == "cell_too_large" || data["error_code"] == "payload_too_large"
+		if readErr != nil || (data["success"] != true && !countsOnly) {
 			refusal := failure("import_verification_failed", fmt.Sprintf("Spreadsheet tab %q remains open, but imported rows could not be verified.", name))
 			refusal["editor_name"] = name
 			return refusal
