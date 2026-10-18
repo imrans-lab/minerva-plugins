@@ -26,6 +26,16 @@ func _open(entries: Array, pane: EditorPane) -> Array:
 	await pane.Tabs.get_tree().process_frame
 	return views
 
+func _opaque(check: Callable, original: Array, pane: EditorPane, container: Node) -> Array:
+	var entries: Array = _json(original)
+	var views: Array = []
+	for pass_index: int in 2:
+		_close(pane)
+		views = await _open(entries, pane)
+		entries = _json(await container.call("serialize"))
+		check.call("opaque complete entries survive save/reopen%d" % pass_index, entries == _json(original))
+	return views
+
 func run(check: Callable, pane: EditorPane, manager: PluginManager, container: Node) -> void:
 	var compatibility: Script = load("res://Scripts/Services/Plugins/SpreadsheetSession.gd")
 	var fixture: Dictionary = JSON.parse_string(FileAccess.get_file_as_string("res://test/fixtures/spreadsheet_contract/session.minproj"))
@@ -79,7 +89,7 @@ func run(check: Callable, pane: EditorPane, manager: PluginManager, container: N
 	# A missing declaration is the actual absent-provider branch; restore it
 	# before Retry so the same editor/key can remount a real installed panel.
 	manager.get_db()._plugins.erase("sheets")
-	var opaque: Array = await _open([legacy, native], pane)
+	var opaque: Array = await _opaque(check, [legacy, native], pane, container)
 	check.call("absent provider retains complete legacy and native raw entries", _json(await container.call("serialize")) == [legacy, native])
 	check.call("opaque second tab has selectable Retry diagnosis", opaque[1].plugin_scene_root.find_children("*", "RichTextLabel", true, false).size() == 1
 		and opaque[1].plugin_scene_root.find_children("*", "Button", true, false).size() == 1)
@@ -92,22 +102,23 @@ func run(check: Callable, pane: EditorPane, manager: PluginManager, container: N
 		and opaque[0].pending_plugin_entry == legacy and manager.get_live_panels("sheets").size() == 1
 		and _json(PluginScenePanelHost.invoke_save(opaque[1].plugin_scene_root, {})) == second.content)
 	_close(pane)
-	for invalid: Variant in [null, {"version": 99}, {"version": 1, "cells": ["malformed"]}, {"version": 1, "row_count": 1, "column_count": 1, "cells": {"0,0": {"value": "KEEP"}}}, {"version": 1, "row_count": 1, "column_count": 1, "cells": {}, "autofilter": {"range": [0], "columns": []}}, {"version": 1, "row_count": 1, "column_count": 1, "cells": {}, "autofilter": {"range": [0, 0, 1], "columns": []}}, {"version": 1, "row_count": 2, "column_count": 2, "cells": {"0,0": {"formula": []}}}]:
-		var refused: Dictionary = native.duplicate(true)
-		refused.plugin_state.payload.__panel_state = invalid
-		var refused_views: Array = await _open([refused], pane)
+	var cases: RefCounted = load(ProjectSettings.globalize_path("res://../../minerva-plugins/sheets/tests/helpers/snapshot_cases.gd")).new()
+	var invalid_entries: Array = cases.entries(native, check)
+	for entry: Dictionary in invalid_entries:
+		var refused_views: Array = await _opaque(check, [entry], pane, container)
 		var refusal: Control = refused_views[0].plugin_scene_root
 		var labels: Array[Node] = refusal.find_children("*", "RichTextLabel", true, false)
 		check.call("refusal is mounted selectable with Retry before Save", refusal.is_inside_tree() and refusal.is_visible_in_tree()
 			and labels.size() == 1 and labels[0].get("selection_enabled") == true
 			and refusal.find_children("*", "Button", true, false).size() == 1)
-		check.call("malformed/future snapshot remains opaque with no file write", _json(await container.call("serialize")) == [refused]
+		check.call("malformed/future snapshot remains opaque with no file write", _json(await container.call("serialize")) == [entry]
 			and not await refused_views[0].save_file_to_disc("user://refused-session.minsheet")
 			and not FileAccess.file_exists("user://refused-session.minsheet"))
 		_close(pane)
+
 	var panels: Array = definition.ui_panels.duplicate(true)
 	definition.ui_panels[0]["kind"] = "html"
-	var failed_mount: Array = await _open([legacy], pane)
+	var failed_mount: Array = await _opaque(check, [legacy], pane, container)
 	check.call("installed but unmountable provider preserves complete entry", _json(await container.call("serialize")) == [legacy]
 		and not failed_mount[0].plugin_scene_root.get_meta("_minerva_plugin_panel_load_ok", true))
 	definition.ui_panels = panels

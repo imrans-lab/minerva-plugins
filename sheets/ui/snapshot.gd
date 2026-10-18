@@ -107,7 +107,9 @@ static func _value(value: Variant, rule: Array) -> bool:
 		"positive_integer": return _number(value, true) and value != 0
 		"integer_enum":
 			var options: Array = rule[1]
-			return _number(value, true) and options.has(value)
+			if not _number(value, true): return false
+			var number: float = value
+			return options.has(int(number))
 		"string_enum":
 			var options: Array = rule[1]
 			return value is String and options.has(value)
