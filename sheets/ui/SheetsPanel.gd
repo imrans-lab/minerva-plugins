@@ -4,6 +4,7 @@ extends "res://Scripts/Services/Plugins/MinervaPluginPanel.gd"
 
 const SpreadsheetEditorScript := preload("domain/SpreadsheetEditor.gd")
 const SpreadsheetDataScript := preload("domain/SpreadsheetData.gd")
+const Snapshot := preload("snapshot.gd")
 const SheetRegistry := preload("sheet_registry.gd")
 const Tools := preload("tools/MCPSpreadsheetTools.gd")
 const FilterTools := preload("tools/MCPSpreadsheetFilterTools.gd")
@@ -83,7 +84,7 @@ func _on_panel_create_note_request(_context: Dictionary) -> Dictionary:
 		"preview_alt_text": data.to_markdown()}
 
 func _on_panel_restore_from_note(payload: Dictionary) -> bool:
-	if not _valid_snapshot(payload):
+	if not Snapshot.validate(payload):
 		return false
 	sheet.deserialize(payload)
 	_snapshot_restored = true
@@ -124,100 +125,3 @@ func handle_tool(tool_name: String, arguments: Dictionary) -> Dictionary:
 	if tool_name.begins_with("minerva_sheets_autofilter_"):
 		return _filters.handle(tool_name, arguments)
 	return await _tools.handle(tool_name, arguments)
-
-## Session and note snapshots are opaque until the provider accepts the whole
-## current format. Never partially load a malformed/future model.
-static func _valid_snapshot(model: Dictionary) -> bool:
-	if model.get("version") != 1 or not model.get("cells") is Dictionary:
-		return false
-	for key: String in ["row_count", "column_count"]:
-		var count: Variant = model.get(key)
-		if not (count is int or count is float):
-			return false
-		var number: float = count
-		if not is_finite(number) or number != floor(number) or number < 1:
-			return false
-	var schema: Dictionary = SpreadsheetDataScript.new(1, 1).to_dict()
-	schema["charts"] = [preload("domain/SpreadsheetChart.gd").new().to_dict()]
-	schema.charts[0].series = [{"range": "", "name": "", "color_r": 0.0, "color_g": 0.0, "color_b": 0.0, "color_a": 1.0}]
-	schema["autofilter"] = {"range": [0], "columns": [{"col": 0, "type": "", "text": "", "values": [""]}]}
-	var fields: Dictionary = model.duplicate()
-	fields.erase("cells")
-	if not _snapshot_shape(fields, schema):
-		return false
-	var cell_schema: Dictionary = {"type": 0, "formula": "", "bold": false, "italic": false, "alignment": 0,
-		"text_color": "", "bg_color": "", "date_format": "", "number_format": "", "wrap_text": false}
-	var cells: Dictionary = model.cells
-	if model.has("autofilter"):
-		var filter: Dictionary = model.autofilter
-		var region: Array = filter.get("range", [])
-		if region.size() != 4 or not filter.has("columns"):
-			return false
-		var x: float = region[0]
-		var y: float = region[1]
-		var width: float = region[2]
-		var height: float = region[3]
-		if x < 0 or y < 0 or width <= 0 or height <= 0:
-			return false
-		var seen_columns: Dictionary = {}
-		var criteria: Array = filter.get("columns", [])
-		for criterion: Dictionary in criteria:
-			if not criterion.has("col") or criterion.get("type") not in ["text", "values"]:
-				return false
-			if criterion.size() != 3 or seen_columns.has(criterion.col):
-				return false
-			seen_columns[criterion.col] = true
-			var column: float = criterion.col
-			if column < x or column >= x + width:
-				return false
-			if not criterion.has("text" if criterion.type == "text" else "values"):
-				return false
-	for key: String in cells:
-		var parts: PackedStringArray = key.split(",")
-		if parts.size() != 2 or not parts[0].is_valid_int() or not parts[1].is_valid_int():
-			return false
-		var row_limit: int = model.row_count
-		var col_limit: int = model.column_count
-		if int(parts[0]) < 0 or int(parts[1]) < 0 or int(parts[0]) >= row_limit or int(parts[1]) >= col_limit:
-			return false
-		if not cells[key] is Dictionary:
-			return false
-		var record: Dictionary = cells[key]
-		var cell: Dictionary = record.duplicate()
-		if not cell.has("type") or not cell.has("value") or cell.type not in [1, 2, 3, 4]:
-			return false
-		if cell.type == 4 and (not cell.has("formula") or str(cell.formula).is_empty()):
-			return false
-		var value: Variant = cell.get("value")
-		if value != null and not (value is String or value is int or value is float or value is bool):
-			return false
-		cell.erase("value")
-		if not _snapshot_shape(cell, cell_schema):
-			return false
-	return true
-
-static func _snapshot_shape(value: Variant, example: Variant) -> bool:
-	if example is Dictionary:
-		if not value is Dictionary:
-			return false
-		var fields: Dictionary = value
-		var schema: Dictionary = example
-		for key: Variant in fields:
-			if not schema.has(key) or not _snapshot_shape(fields[key], schema[key]):
-				return false
-		return true
-	if example is Array:
-		if not value is Array:
-			return false
-		var items: Array = value
-		var schema: Array = example
-		for item: Variant in items:
-			if schema.is_empty() or not _snapshot_shape(item, schema[0]):
-				return false
-		return true
-	if example is int or example is float:
-		if not (value is int or value is float):
-			return false
-		var number: float = value
-		return is_finite(number) and (not example is int or number == floor(number))
-	return typeof(value) == typeof(example)
