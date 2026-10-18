@@ -4,3 +4,4 @@
 __pycache__/
 *.gd.uid
 *.png.import
+/tests/proxy/sheets-proxy

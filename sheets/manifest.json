@@ -34,7 +34,7 @@
     {
       "name": "minerva_sheets_create_editor",
       "executor": "backend",
-      "description": "Create a new spreadsheet. Use this when asked to 'make a spreadsheet', 'create a table', or organize data into rows and columns. Returns an editor_name for subsequent operations. Next steps: use minerva_update_spreadsheet_data to populate cells, minerva_format_cells for styling, minerva_link_spreadsheet_to_note to save as a note.",
+      "description": "Staging creation stub. Returns sheets_staging until the spreadsheet domain is installed.",
       "input_schema": {
         "properties": {
           "csv_content": {
@@ -66,27 +66,12 @@
         "scripts": [
           "ui/SheetsPanel.gd"
         ],
-        "file_extensions": [
-          ".minsheet",
-          ".csv",
-          ".tsv",
-          ".xlsx"
-        ],
-        "save_mode": "host_owned",
-        "ipc_channels": [
-          "sheets.serialize",
-          "sheets.deserialize",
-          "sheets.collect_export",
-          "sheets.apply_export"
-        ]
+        "file_extensions": [],
+        "save_mode": "none",
+        "ipc_channels": []
       }
     ],
-    "ipc_messages": [
-      "sheets.serialize",
-      "sheets.deserialize",
-      "sheets.collect_export",
-      "sheets.apply_export"
-    ]
+    "ipc_messages": []
   },
   "editor_items": [
     {
@@ -96,25 +81,9 @@
       "default_filename": "untitled.minsheet"
     }
   ],
-  "capabilities": [
-    "project_state",
-    "host_owned_save",
-    "project_export"
-  ],
-  "project_file": {
-    "serialize_channel": "sheets.serialize",
-    "deserialize_channel": "sheets.deserialize"
-  },
-  "project_export": {
-    "collect_channel": "sheets.collect_export",
-    "apply_channel": "sheets.apply_export"
-  },
+  "capabilities": [],
   "permissions": {
-    "host_capabilities": [
-      "mcp.proxy:minerva_create_plugin_editor",
-      "mcp.proxy:minerva_open_file",
-      "mcp.proxy:minerva_sheets_update_data"
-    ],
+    "host_capabilities": [],
     "filesystem": {
       "mode": "none",
       "paths": []

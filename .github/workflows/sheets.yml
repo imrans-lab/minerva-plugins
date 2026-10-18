@@ -84,6 +84,38 @@ jobs:
             GOOS="$SHEETS_GOOS" GOARCH="$SHEETS_GOARCH" go build -trimpath -o "$RUNNER_TEMP/sheets-plugin" .
           fi
           python3 scripts/package.py '${{ matrix.target }}' "$RUNNER_TEMP/sheets-plugin" dist
+      - name: Verify packaged manifest and checksums
+        working-directory: sheets
+        env:
+          SHEETS_TARGET: ${{ matrix.target }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, importlib.util, json, os, pathlib, sys, tarfile
+          scripts = pathlib.Path.cwd().parent / "scripts"
+          sys.path.insert(0, str(scripts))
+          spec = importlib.util.spec_from_file_location("release_verifier", scripts / "verify-release.py")
+          verifier = importlib.util.module_from_spec(spec)
+          sys.modules[spec.name] = verifier
+          spec.loader.exec_module(verifier)
+          source = json.loads(pathlib.Path("manifest.json").read_text())
+          path = pathlib.Path("dist") / f"sheets-{source['version']}-{os.environ['SHEETS_TARGET']}.tar.gz"
+          data = path.read_bytes()
+          asset = verifier.Asset(path.name, len(data), "sha256:" + hashlib.sha256(data).hexdigest())
+          receipt = verifier.verify_archive(path, asset, source)
+          print(receipt)
+          destination = pathlib.Path(os.environ["RUNNER_TEMP"]) / "sheets-packed"
+          destination.mkdir()
+          with tarfile.open(path) as archive:
+              for name in ("manifest.json", "sheets-plugin"):
+                  (destination / name).write_bytes(archive.extractfile(name).read())
+          (destination / "sheets-plugin").chmod(0o755)
+          PY
+          python3 ../scripts/verify-packed-manifest.py manifest.json "$RUNNER_TEMP/sheets-packed/manifest.json"
+          file "$RUNNER_TEMP/sheets-packed/sheets-plugin"
+      - name: Packaged native handshake
+        if: matrix.target == 'linux-x86_64' || matrix.target == 'macos-universal'
+        working-directory: sheets
+        run: python3 ../scripts/smoke/mcp_smoke.py "$RUNNER_TEMP/sheets-packed/sheets-plugin"
       - uses: actions/upload-artifact@v7
         with:
           name: sheets-${{ matrix.target }}
