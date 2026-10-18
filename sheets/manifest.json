@@ -2,7 +2,7 @@
   "id": "sheets",
   "name": "Sheets",
   "version": "0.1.0",
-  "description": "Staging spreadsheet editor for Minerva, extracted alongside the builtin. It edits native, CSV, TSV and XLSX sheets with data, styling, charts, AutoFilter, undo and portable project snapshots. Editor creation and host-service tools are staged for later slices. Source installs require Go 1.25 or newer; archives include the backend.",
+  "description": "Staging spreadsheet editor for Minerva, extracted alongside the builtin. It creates and edits native, CSV, TSV and XLSX sheets with data, styling, charts, AutoFilter, undo, snapshot notes and portable projects. Initial CSV creation uses two steps. Nudge export reports unavailable. Source installs require Go 1.25 or newer; archives include the backend.",
   "host_api_version": "2",
   "release_targets": [
     "linux-x86_64",
@@ -1002,6 +1002,7 @@
       }
     ],
     "ipc_messages": [
+      "capability:host.notes.create_from_editor",
       "sheets.serialize",
       "sheets.deserialize",
       "sheets.collect_export",
@@ -1022,7 +1023,14 @@
     "project_export"
   ],
   "permissions": {
-    "host_capabilities": [],
+    "host_capabilities": [
+      "host.notes.create_from_editor",
+      "host.documents.list_open",
+      "mcp.proxy:minerva_create_plugin_editor",
+      "mcp.proxy:minerva_open_file",
+      "mcp.proxy:minerva_sheets_update_data",
+      "mcp.proxy:minerva_sheets_get_data"
+    ],
     "filesystem": {
       "mode": "none",
       "paths": []

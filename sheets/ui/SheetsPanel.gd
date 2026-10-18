@@ -11,6 +11,7 @@ var _tools: Tools
 var _filters: FilterTools
 var _loaded: bool = false
 var _panel_key: String = ""
+var _note_sequence: int = 0
 
 @onready var sheet: SpreadsheetEditorScript = $Sheet
 @onready var status: RichTextLabel = $Status
@@ -76,15 +77,50 @@ func _on_panel_render_for_llm(_context: Dictionary) -> Array:
 	var data: SpreadsheetDataScript = sheet.spreadsheet_data
 	return [{"type": "text", "text": data.to_markdown()}]
 
+func _on_panel_create_note_request(_context: Dictionary) -> Dictionary:
+	var data: SpreadsheetDataScript = sheet.spreadsheet_data
+	return {"kind": "plugin_data", "payload": sheet.serialize(),
+		"preview_alt_text": data.to_markdown()}
+
+func _on_panel_restore_from_note(payload: Dictionary) -> bool:
+	if payload.get("version") != 1:
+		return false
+	sheet.deserialize(payload)
+	_snapshot_restored = true
+	return true
+
+func _create_snapshot_note(arguments: Dictionary) -> Dictionary:
+	_note_sequence += 1
+	var reply_id := "sheets-note:%d" % _note_sequence
+	var ipc: Node = get_node("_MinervaIPC")
+	request.emit("capability:host.notes.create_from_editor", {"editor_name": _panel_key,
+		"thread": arguments.get("thread_name", "Spreadsheets"),
+		"title": arguments.get("note_title", get_sheet_name())}, reply_id)
+	var response: Dictionary = await ipc.call("await_reply", reply_id)
+	if not _loaded or not is_inside_tree():
+		return {"success": false, "error_code": "panel_unavailable", "error_message": "Spreadsheet panel closed during note creation."}
+	if not response.get("success", false):
+		status.text = str(response.get("error_message", "Snapshot note creation failed"))
+		status.show()
+		push_error(status.text)
+		return response
+	var result: Dictionary = response.get("result", {})
+	result = result.duplicate(true)
+	result["success"] = true
+	result["linked_spreadsheet"] = get_sheet_name()
+	result["message"] = "Created a snapshot note. Edit reopens this spreadsheet snapshot; later edits are not synchronized."
+	return result
+
 func handle_tool(tool_name: String, arguments: Dictionary) -> Dictionary:
 	if not _loaded or not is_inside_tree():
 		return {"success": false, "error_code": "panel_unavailable", "error_message": "Spreadsheet panel is not available."}
-	if tool_name in ["minerva_sheets_link_to_note", "minerva_sheets_export_to_nudge"]:
-		var operation := "Snapshot note creation" if tool_name == "minerva_sheets_link_to_note" else "Nudge export"
-		status.text = operation + " is unavailable in this staging build; it will be available in a later build."
+	if tool_name == "minerva_sheets_link_to_note":
+		return await _create_snapshot_note(arguments)
+	if tool_name == "minerva_sheets_export_to_nudge":
+		status.text = "Nudge is unavailable through the plugin host. The spreadsheet has not changed."
 		status.show()
 		push_error(status.text)
-		return {"success": false, "error_code": "sheets_staging", "error_message": status.text}
+		return {"success": false, "error_code": "nudge_unavailable", "error_message": status.text}
 	if tool_name.begins_with("minerva_sheets_autofilter_"):
 		return _filters.handle(tool_name, arguments)
 	return await _tools.handle(tool_name, arguments)
