@@ -123,6 +123,8 @@ func run(check: Callable, pane: EditorPane, manager: PluginManager, registry: Pl
 		existing_editor.free()
 	var foreign: RefCounted = load(source.path_join("tests/helpers/foreign_creation_contract.gd")).new()
 	await foreign.run(check, pane, manager, server)
+	var large_import: RefCounted = load(source.path_join("tests/helpers/large_import_contract.gd")).new()
+	await large_import.call("run", check, pane, registry)
 	manager.stop_plugin("sheets")
 	var stopped_count: int = pane.Tabs.get_tab_count()
 	var stopped: Dictionary = await registry.handle_tool_call("minerva_sheets_create_editor", fixtures.creation[5][1])

@@ -130,6 +130,8 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry, source
 		check.call("HTTP canonical read selects the second sheet and has no alias metadata on the wire", wire.application.get("success") == true
 			and _json(wire.application.get("data")) == _json(expected)
 			and wire.envelope != null and not wire.envelope.to_mcp_format().has("alias_of"))
+	var read_wire: RefCounted = load(source.path_join("tests/helpers/read_transport_contract.gd")).new()
+	await read_wire.call("run", check, pane, registry, chat_manager, http, client, source)
 	client.disconnect_from_server()
 	http.stop_server()
 	http.free()

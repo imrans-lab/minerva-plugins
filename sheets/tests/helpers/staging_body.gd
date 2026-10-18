@@ -119,6 +119,8 @@ func _run() -> void:
 		await contract.call("run", check, pane, registry, broker, source, capabilities, policy)
 		var routes: RefCounted = load(source.path_join("tests/helpers/routing_contract.gd")).new()
 		await routes.call("run", check, pane, registry, source)
+		var reads: RefCounted = load(source.path_join("tests/helpers/read_contract.gd")).new()
+		await reads.call("run", check, pane, registry)
 		var creation: RefCounted = load(source.path_join("tests/helpers/creation_contract.gd")).new()
 		await creation.call("run", check, pane, manager, registry, broker, policy, source)
 
