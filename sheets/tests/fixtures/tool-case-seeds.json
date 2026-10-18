@@ -208,5 +208,58 @@
         "key": "snapshot"
       }
     ]
+  ],
+  "creation": [
+    [
+      "minerva_create_spreadsheet_editor",
+      {
+        "name": "Created name only"
+      }
+    ],
+    [
+      "minerva_create_spreadsheet_editor",
+      {
+        "name": "Created CSV",
+        "csv_content": "Item,Value\nWidget,17"
+      }
+    ],
+    [
+      "minerva_create_spreadsheet_editor",
+      {
+        "file_path": "$csv_path"
+      }
+    ],
+    [
+      "minerva_create_spreadsheet_editor",
+      {
+        "file_path": "$minsheet_path"
+      }
+    ],
+    [
+      "minerva_create_spreadsheet_editor",
+      {
+        "file_path": "$missing_path"
+      }
+    ],
+    [
+      "minerva_create_spreadsheet_editor",
+      {
+        "name": "Provider unavailable"
+      }
+    ],
+    [
+      "minerva_create_spreadsheet_editor",
+      {
+        "name": "Initial content failure",
+        "csv_content": "Item,Value\nWidget,17"
+      }
+    ],
+    [
+      "minerva_create_spreadsheet_editor",
+      {
+        "name": "Created CSV",
+        "csv_content": "Different,Content\nMust,NotApply"
+      }
+    ]
   ]
 }
