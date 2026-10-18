@@ -19,6 +19,13 @@ mkdir -p "$log_directory"
 export MINERVA_TEST_LOG_DIR="$log_directory"
 (
   cd "$host_root"
+  expected_go_version="go$(cat "$plugin_root/../.go-version")"
+  actual_go_version="$(go env GOVERSION)"
+  if [[ "$actual_go_version" != "$expected_go_version" ]]; then
+    echo "Pinned toolchain required: $expected_go_version; found $actual_go_version" >&2
+    exit 2
+  fi
+  echo "Qualification toolchain: $actual_go_version"
   python3 -B scripts/container-build/dev-natives.py &&
     godot --headless --path src --import &&
     cd "$plugin_root" &&

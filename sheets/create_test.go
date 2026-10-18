@@ -28,7 +28,7 @@ func TestCreationWire(t *testing.T) {
 			defer host.Close()
 			done := make(chan error, 1)
 			go func() { done <- serve(ctx, plugin, plugin) }()
-			enc, dec := json.NewEncoder(host), json.NewDecoder(host)
+			enc, dec := json.NewEncoder(host), newWireDecoder(host)
 			if err := enc.Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call",
 				"params": map[string]any{"name": "minerva_sheets_create_editor", "arguments": cases.Creation[index][1]}}); err != nil {
 				t.Fatal(err)
@@ -137,7 +137,7 @@ func TestCancellationDuringCapabilityWait(t *testing.T) {
 	defer host.Close()
 	done := make(chan error, 1)
 	go func() { done <- serve(ctx, plugin, plugin) }()
-	enc, dec := json.NewEncoder(host), json.NewDecoder(host)
+	enc, dec := json.NewEncoder(host), newWireDecoder(host)
 	if err := enc.Encode(map[string]any{"jsonrpc": "2.0", "id": 7, "method": "tools/call",
 		"params": map[string]any{"name": "minerva_sheets_create_editor", "arguments": map[string]any{}}}); err != nil {
 		t.Fatal(err)

@@ -17,7 +17,7 @@ func TestRequestsSurviveCapabilityWaitFIFO(t *testing.T) {
 	defer host.Close()
 	done := make(chan error, 1)
 	go func() { done <- serve(ctx, plugin, plugin) }()
-	enc, dec := json.NewEncoder(host), json.NewDecoder(host)
+	enc, dec := json.NewEncoder(host), newWireDecoder(host)
 	send := func(value any) {
 		t.Helper()
 		if err := enc.Encode(value); err != nil {
