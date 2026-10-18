@@ -1,4 +1,4 @@
-class_name SpreadsheetCell
+class_name Sheets_SpreadsheetCell
 extends RefCounted
 ## Represents a single cell in the spreadsheet with value, type, and formatting.
 

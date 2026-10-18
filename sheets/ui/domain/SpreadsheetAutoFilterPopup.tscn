@@ -1,6 +1,6 @@
 [gd_scene load_steps=2 format=3]
 
-[ext_resource type="Script" path="res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetAutoFilterPopup.gd" id="1_popup"]
+[ext_resource type="Script" path="SpreadsheetAutoFilterPopup.gd" id="1_popup"]
 
 [node name="SpreadsheetAutoFilterPopup" type="PopupPanel"]
 size = Vector2i(260, 360)

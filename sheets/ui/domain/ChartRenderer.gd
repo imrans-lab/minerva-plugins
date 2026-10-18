@@ -1,9 +1,9 @@
-class_name ChartRenderer
+class_name Sheets_ChartRenderer
 extends RefCounted
 ## Processes spreadsheet data for chart rendering.
 
-const SpreadsheetDataScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetData.gd")
-const SpreadsheetChartScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetChart.gd")
+const SpreadsheetDataScript := preload("SpreadsheetData.gd")
+const SpreadsheetChartScript := preload("SpreadsheetChart.gd")
 
 ## Processed chart data ready for rendering
 class ChartData:

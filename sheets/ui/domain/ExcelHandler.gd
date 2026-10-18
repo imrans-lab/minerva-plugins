@@ -1,10 +1,10 @@
-class_name ExcelHandler
+class_name Sheets_ExcelHandler
 extends RefCounted
 ## Handles Excel .xlsx file import/export.
 ## Excel files are ZIP archives containing XML files.
 
-const SpreadsheetDataScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetData.gd")
-const SpreadsheetCellScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetCell.gd")
+const SpreadsheetDataScript := preload("SpreadsheetData.gd")
+const SpreadsheetCellScript := preload("SpreadsheetCell.gd")
 
 
 ## Import Excel .xlsx file into SpreadsheetData

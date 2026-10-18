@@ -13,9 +13,9 @@ extends SceneTree
 ## Run:
 ##   godot --headless --path ~/github/Minerva/src --script test/test_spreadsheet_autofilter_undo.gd
 
-const SpreadsheetDataScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetData.gd")
-const SpreadsheetHistoryScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetHistory.gd")
-const Actions := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetAutoFilterActions.gd")
+const SpreadsheetDataScript := preload("../../ui/domain/SpreadsheetData.gd")
+const SpreadsheetHistoryScript := preload("../../ui/domain/SpreadsheetHistory.gd")
+const Actions := preload("../../ui/domain/SpreadsheetAutoFilterActions.gd")
 
 const ROWS := 15
 const COLS := 4

@@ -1,4 +1,4 @@
-class_name SpreadsheetRowGeometry
+class_name Sheets_SpreadsheetRowGeometry
 extends RefCounted
 ## The single source of vertical row geometry for the cells canvas and the
 ## row headers. Rows hidden by the sheet's AutoFilter are skipped: they take
@@ -9,7 +9,7 @@ extends RefCounted
 ##
 ## All y values are in content space (before scroll offset is subtracted).
 
-const SpreadsheetDataScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetData.gd")
+const SpreadsheetDataScript := preload("SpreadsheetData.gd")
 
 
 static func is_row_shown(data: SpreadsheetDataScript, row: int) -> bool:

@@ -1,9 +1,9 @@
-class_name SpreadsheetRowHeaders
+class_name Sheets_SpreadsheetRowHeaders
 extends Control
 ## Renders the row headers (1, 2, 3, ...) for the spreadsheet.
 
-const SpreadsheetDataScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetData.gd")
-const RowGeometry := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetRowGeometry.gd")
+const SpreadsheetDataScript := preload("SpreadsheetData.gd")
+const RowGeometry := preload("SpreadsheetRowGeometry.gd")
 
 signal row_clicked(row: int)
 signal row_resize_started(row: int)

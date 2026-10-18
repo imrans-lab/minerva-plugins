@@ -1,4 +1,4 @@
-class_name SpreadsheetAutoFilterUI
+class_name Sheets_SpreadsheetAutoFilterUI
 extends Node
 ## Connects the AutoFilter pieces of the spreadsheet editor: the header
 ## dropdown glyph (drawn by SpreadsheetColumnHeaders), the per-column popup
@@ -9,12 +9,13 @@ extends Node
 ## The editor creates one with attach() while building its UI and calls
 ## bind() whenever it replaces its SpreadsheetData.
 
-const SpreadsheetDataScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetData.gd")
-const SpreadsheetHistoryScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetHistory.gd")
-const ColumnHeadersScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/ColumnHeaders.gd")
-const CellsCanvasScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/CellsCanvas.gd")
-const Actions := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetAutoFilterActions.gd")
-const PopupScene := preload("res://Scenes/SpreadsheetAutoFilterPopup.tscn")
+const SpreadsheetDataScript := preload("SpreadsheetData.gd")
+const SpreadsheetHistoryScript := preload("SpreadsheetHistory.gd")
+const ColumnHeadersScript := preload("ColumnHeaders.gd")
+const CellsCanvasScript := preload("CellsCanvas.gd")
+const Actions := preload("SpreadsheetAutoFilterActions.gd")
+const PopupScript := preload("SpreadsheetAutoFilterPopup.gd")
+const PopupScene := preload("SpreadsheetAutoFilterPopup.tscn")
 
 ## Context-menu item ids; clear of the editor's own ids (0, 1).
 const MENU_ENABLE := 100
@@ -25,7 +26,7 @@ var _data: SpreadsheetDataScript = null
 var _history: SpreadsheetHistoryScript = null
 var _headers: ColumnHeadersScript = null
 var _canvas: CellsCanvasScript = null
-var _popup: SpreadsheetAutoFilterPopup = null
+var _popup: PopupScript = null
 var _count_label: Label = null
 ## Called after the set of shown rows may have changed (scrollbar ranges).
 var _on_rows_changed: Callable
@@ -41,10 +42,10 @@ var _menu_col: int = -1
 ## Create the controller under `parent`. Must run before the editor connects
 ## its own column_context_menu_requested handler, so the selection is captured
 ## before the editor selects the whole column.
-static func attach(parent: Node, data: SpreadsheetDataScript, history: SpreadsheetHistoryScript,
+func attach(parent: Node, data: SpreadsheetDataScript, history: SpreadsheetHistoryScript,
 		headers: ColumnHeadersScript, canvas: CellsCanvasScript, count_parent: Container,
-		on_rows_changed: Callable, on_user_change: Callable) -> SpreadsheetAutoFilterUI:
-	var ui := SpreadsheetAutoFilterUI.new()
+		on_rows_changed: Callable, on_user_change: Callable) -> Sheets_SpreadsheetAutoFilterUI:
+	var ui := self
 	ui.name = "AutoFilterUI"
 	ui._history = history
 	ui._headers = headers
@@ -53,7 +54,7 @@ static func attach(parent: Node, data: SpreadsheetDataScript, history: Spreadshe
 	ui._on_user_change = on_user_change
 	parent.add_child(ui)
 
-	ui._popup = PopupScene.instantiate() as SpreadsheetAutoFilterPopup
+	ui._popup = PopupScene.instantiate() as PopupScript
 	ui.add_child(ui._popup)
 	ui._popup.values_requested.connect(ui._on_values_requested)
 	ui._popup.text_requested.connect(ui._on_text_requested)

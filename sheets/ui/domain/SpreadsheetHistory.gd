@@ -1,4 +1,4 @@
-class_name SpreadsheetHistory
+class_name Sheets_SpreadsheetHistory
 extends RefCounted
 ## Manages undo/redo history for spreadsheet operations.
 

@@ -1,9 +1,9 @@
-class_name SpreadsheetCellsCanvas
+class_name Sheets_SpreadsheetCellsCanvas
 extends Control
 ## Renders the spreadsheet grid with cells, selection, and handles input.
 
-const SpreadsheetDataScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetData.gd")
-const RowGeometry := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetRowGeometry.gd")
+const SpreadsheetDataScript := preload("SpreadsheetData.gd")
+const RowGeometry := preload("SpreadsheetRowGeometry.gd")
 
 signal cell_selected(row: int, col: int)
 signal cell_double_clicked(row: int, col: int)

@@ -1,0 +1,203 @@
+{
+  "base_host": "59d73887a10b1dd92e7e5c6b0aaee728f335c24d",
+  "files": [
+    {
+      "source": "src/Scripts/UI/Controls/SpreadsheetEditor/CellsCanvas.gd",
+      "destination": "ui/domain/CellsCanvas.gd",
+      "git_blob": "6e4d60207d8ee3ab3fcbace14cb5725e930e3da9"
+    },
+    {
+      "source": "src/Scripts/UI/Controls/SpreadsheetEditor/ChartCanvas.gd",
+      "destination": "ui/domain/ChartCanvas.gd",
+      "git_blob": "3954e8ee0e54b287c7dfc69e9c70e20959e70893"
+    },
+    {
+      "source": "src/Scripts/UI/Controls/SpreadsheetEditor/ChartRenderer.gd",
+      "destination": "ui/domain/ChartRenderer.gd",
+      "git_blob": "c07689aa74bcc7a1bc75b67c394d01f98e0b0bf1"
+    },
+    {
+      "source": "src/Scripts/UI/Controls/SpreadsheetEditor/ColumnHeaders.gd",
+      "destination": "ui/domain/ColumnHeaders.gd",
+      "git_blob": "53b5e5786f6bd60f2b0dd048abdff04ff56708d0"
+    },
+    {
+      "source": "src/Scripts/UI/Controls/SpreadsheetEditor/ExcelHandler.gd",
+      "destination": "ui/domain/ExcelHandler.gd",
+      "git_blob": "0c110ca75f993ded7cec4098e9f5054989e84db2"
+    },
+    {
+      "source": "src/Scripts/UI/Controls/SpreadsheetEditor/FormulaEngine.gd",
+      "destination": "ui/domain/FormulaEngine.gd",
+      "git_blob": "1c633503416a1ab4d86e7b759188355205523453"
+    },
+    {
+      "source": "src/Scripts/UI/Controls/SpreadsheetEditor/RowHeaders.gd",
+      "destination": "ui/domain/RowHeaders.gd",
+      "git_blob": "bb899b83c41a1a1291df019a2eb6911db3dfb38d"
+    },
+    {
+      "source": "src/Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetAutoFilter.gd",
+      "destination": "ui/domain/SpreadsheetAutoFilter.gd",
+      "git_blob": "9df2e66cf25fa27563c6ee3558ad0ae4898e843c"
+    },
+    {
+      "source": "src/Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetAutoFilterActions.gd",
+      "destination": "ui/domain/SpreadsheetAutoFilterActions.gd",
+      "git_blob": "fcd3a410f6374ed4cdb326f9564167893721ac35"
+    },
+    {
+      "source": "src/Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetAutoFilterPopup.gd",
+      "destination": "ui/domain/SpreadsheetAutoFilterPopup.gd",
+      "git_blob": "5842d594e8527e266f3a258eda099b6c7688c71e"
+    },
+    {
+      "source": "src/Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetAutoFilterUI.gd",
+      "destination": "ui/domain/SpreadsheetAutoFilterUI.gd",
+      "git_blob": "8fffe800c74ac7cdda1955776d0b889664f4c74b"
+    },
+    {
+      "source": "src/Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetCell.gd",
+      "destination": "ui/domain/SpreadsheetCell.gd",
+      "git_blob": "2f7787e2f426e60af48bb058ac144dbb61d07fe4"
+    },
+    {
+      "source": "src/Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetChart.gd",
+      "destination": "ui/domain/SpreadsheetChart.gd",
+      "git_blob": "5af4b9169ae6385e55721eb1531496a45247569b"
+    },
+    {
+      "source": "src/Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetData.gd",
+      "destination": "ui/domain/SpreadsheetData.gd",
+      "git_blob": "8fd77b7d69c9ecab14bf8848cefdc5d74a1e16ac"
+    },
+    {
+      "source": "src/Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetEditor.gd",
+      "destination": "ui/domain/SpreadsheetEditor.gd",
+      "git_blob": "978cbe7d52cf952e277884ce239ec4d2744d76c3"
+    },
+    {
+      "source": "src/Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetFileHandler.gd",
+      "destination": "ui/domain/SpreadsheetFileHandler.gd",
+      "git_blob": "97519c00c93898d8d566c8f638a41f4b37616f57"
+    },
+    {
+      "source": "src/Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetHistory.gd",
+      "destination": "ui/domain/SpreadsheetHistory.gd",
+      "git_blob": "b7927d6b08b3a6591c7e6ef8ec31717e7e29732a"
+    },
+    {
+      "source": "src/Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetRowGeometry.gd",
+      "destination": "ui/domain/SpreadsheetRowGeometry.gd",
+      "git_blob": "89664302d51ea03bccf970131610ff92a08e0050"
+    },
+    {
+      "source": "src/Scenes/SpreadsheetEditor.tscn",
+      "destination": "ui/domain/SpreadsheetEditor.tscn",
+      "git_blob": "b6c3ac39e08aab53dcc577b9daa557a32c77f671"
+    },
+    {
+      "source": "src/Scenes/SpreadsheetAutoFilterPopup.tscn",
+      "destination": "ui/domain/SpreadsheetAutoFilterPopup.tscn",
+      "git_blob": "928170f19c7abb46301a6118db74acf9ef6c96f8"
+    },
+    {
+      "source": "src/Scripts/Services/MCP/Modules/MCPSpreadsheetTools.gd",
+      "destination": "ui/tools/MCPSpreadsheetTools.gd",
+      "git_blob": "db76c7fb993f32417eaa426704d360b23a6f6cdf"
+    },
+    {
+      "source": "src/Scripts/Services/MCP/Modules/MCPSpreadsheetFilterTools.gd",
+      "destination": "ui/tools/MCPSpreadsheetFilterTools.gd",
+      "git_blob": "e71ca9aca26190c18e1d4ae81c5ab17095f7d969"
+    },
+    {
+      "source": "src/test/test_spreadsheet_autofilter.gd",
+      "destination": "tests/gd/test_spreadsheet_autofilter.gd",
+      "git_blob": "426b4b0e5ef70879f208411dff04dfc13fc94a07"
+    },
+    {
+      "source": "src/test/test_spreadsheet_autofilter_undo.gd",
+      "destination": "tests/gd/test_spreadsheet_autofilter_undo.gd",
+      "git_blob": "0252bce69f3b2469f755563cd7d18f39b6c32532"
+    },
+    {
+      "source": "src/test/test_mcp_spreadsheet_filter_tools.gd",
+      "destination": "tests/gd/test_mcp_spreadsheet_filter_tools.gd",
+      "git_blob": "08f09ff360cfb250fc4238523ae2fd6cf636dbc0"
+    },
+    {
+      "source": "src/assets/icons/spreadsheet/bold_icon_24.png",
+      "destination": "icons/bold_icon_24.png",
+      "git_blob": "fbf52346c21090b231c05f880ca61e72231b1e0c",
+      "uid": "uid://cfu0tc5nslwku"
+    },
+    {
+      "source": "src/assets/icons/spreadsheet/italics_icon_24.png",
+      "destination": "icons/italics_icon_24.png",
+      "git_blob": "641befc2f00e94bd4fc3c323060f839ab189aa81",
+      "uid": "uid://c2x042or4icqh"
+    },
+    {
+      "source": "src/assets/icons/spreadsheet/align_left_24.png",
+      "destination": "icons/align_left_24.png",
+      "git_blob": "fda1ecfd2b31479277fb9cc3374e71f8161d4767",
+      "uid": "uid://8pfda6vkqgcu"
+    },
+    {
+      "source": "src/assets/icons/spreadsheet/align_center.png",
+      "destination": "icons/align_center.png",
+      "git_blob": "eb16b1767dfbe61eabebb2ae6cdb75ea4e70ff22",
+      "uid": "uid://by4euhg5vcb2u"
+    },
+    {
+      "source": "src/assets/icons/spreadsheet/align_right_24.png",
+      "destination": "icons/align_right_24.png",
+      "git_blob": "90f26731e18e0cb1906824a9b62354f1cafa45d1",
+      "uid": "uid://cn3cyqlwp73k3"
+    },
+    {
+      "source": "src/assets/icons/spreadsheet/header_icon_24.png",
+      "destination": "icons/header_icon_24.png",
+      "git_blob": "49db379782f43d814bbd2747ae3a4eee58a089b8",
+      "uid": "uid://cgsv4ad8o0ond"
+    },
+    {
+      "source": "src/assets/icons/spreadsheet/freeze_rows_24.png",
+      "destination": "icons/freeze_rows_24.png",
+      "git_blob": "992c874665df29667f103c92362be28c1ac263cd",
+      "uid": "uid://bq6kasw1po25h"
+    },
+    {
+      "source": "src/assets/icons/spreadsheet/import_icon_24.png",
+      "destination": "icons/import_icon_24.png",
+      "git_blob": "a35339ede5506222412244b5ad8113347e27959c",
+      "uid": "uid://ccei0hhyfti1b"
+    },
+    {
+      "source": "src/assets/icons/spreadsheet/export_icon_24.png",
+      "destination": "icons/export_icon_24.png",
+      "git_blob": "35c118418a5ab91b305f92e7e27dc9844695477a",
+      "uid": "uid://c4xecwxribs4s"
+    },
+    {
+      "source": "src/assets/icons/spreadsheet/fill_down_icon_24.png",
+      "destination": "icons/fill_down_icon_24.png",
+      "git_blob": "45465d73f27f68b45420402625b066e3735083bd",
+      "uid": "uid://gy2ltu20y33"
+    },
+    {
+      "source": "src/assets/icons/spreadsheet/recalc_icon_24.png",
+      "destination": "icons/recalc_icon_24.png",
+      "git_blob": "1852cb502bda656c6ae25eca8684df63c28f3f26",
+      "uid": "uid://bdmixrtkjm1dv"
+    },
+    {
+      "source": "src/assets/icons/spreadsheet/chart_icon_24.png",
+      "destination": "icons/chart_icon_24.png",
+      "git_blob": "18c893f08b24ed64bed0164c936289b6cf33d38c",
+      "uid": "uid://b62g6uuuv3ad1"
+    }
+  ],
+  "copy_commit": "265774dcd4f99c0717d38de6933602978f5e2669"
+}

@@ -1,11 +1,11 @@
-class_name MCPSpreadsheetTools
+class_name Sheets_MCPSpreadsheetTools
 extends MCPToolModule
 ## MCP tool module for Spreadsheet and Chart domain tools.
 
-const SpreadsheetDataScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetData.gd")
-const SpreadsheetChartScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetChart.gd")
-const SpreadsheetFileHandlerScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetFileHandler.gd")
-const SpreadsheetCellScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetCell.gd")
+const SpreadsheetDataScript := preload("../domain/SpreadsheetData.gd")
+const SpreadsheetChartScript := preload("../domain/SpreadsheetChart.gd")
+const SpreadsheetFileHandlerScript := preload("../domain/SpreadsheetFileHandler.gd")
+const SpreadsheetCellScript := preload("../domain/SpreadsheetCell.gd")
 const NoteScript := preload("res://Scripts/UI/Controls/Note.gd")
 
 

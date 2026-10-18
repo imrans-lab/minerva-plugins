@@ -1,9 +1,9 @@
-class_name SpreadsheetFileHandler
+class_name Sheets_SpreadsheetFileHandler
 extends RefCounted
 ## Handles file import/export for spreadsheets (CSV, TSV, native format).
 
-const SpreadsheetDataScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetData.gd")
-const ExcelHandlerScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/ExcelHandler.gd")
+const SpreadsheetDataScript := preload("SpreadsheetData.gd")
+const ExcelHandlerScript := preload("ExcelHandler.gd")
 
 
 ## Import CSV file into SpreadsheetData

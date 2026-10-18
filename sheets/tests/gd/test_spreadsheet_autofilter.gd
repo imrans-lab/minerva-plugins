@@ -20,13 +20,13 @@ extends SceneTree
 ## Run:
 ##   godot --headless --path ~/github/Minerva/src --script test/test_spreadsheet_autofilter.gd
 
-const SpreadsheetDataScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetData.gd")
-const RowGeometry := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetRowGeometry.gd")
-const CellsCanvasScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/CellsCanvas.gd")
-const RowHeadersScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/RowHeaders.gd")
+const SpreadsheetDataScript := preload("../../ui/domain/SpreadsheetData.gd")
+const RowGeometry := preload("../../ui/domain/SpreadsheetRowGeometry.gd")
+const CellsCanvasScript := preload("../../ui/domain/CellsCanvas.gd")
+const RowHeadersScript := preload("../../ui/domain/RowHeaders.gd")
 ## SpreadsheetEditor names the SingletonObject autoload, so it is load()ed at
 ## runtime: a --script test compiles before autoloads register.
-const SPREADSHEET_EDITOR_PATH := "res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetEditor.gd"
+const SPREADSHEET_EDITOR_PATH := "../../ui/domain/SpreadsheetEditor.gd"
 
 const ROWS := 20
 const COLS := 4
@@ -303,7 +303,7 @@ func test_bulk_edits_skip_hidden_rows() -> void:
 	var data := _build_sheet()
 	_apply_filters(data)
 	var hidden := _expected_hidden(FIXTURE)
-	var editor = load(SPREADSHEET_EDITOR_PATH).new()
+	var editor = load(get_script().resource_path.get_base_dir().path_join(SPREADSHEET_EDITOR_PATH)).new()
 	editor.spreadsheet_data = data
 	root.add_child(editor)
 	await process_frame

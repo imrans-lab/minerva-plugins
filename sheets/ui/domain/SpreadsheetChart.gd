@@ -1,4 +1,4 @@
-class_name SpreadsheetChart
+class_name Sheets_SpreadsheetChart
 extends RefCounted
 ## Data structure representing a chart in a spreadsheet.
 

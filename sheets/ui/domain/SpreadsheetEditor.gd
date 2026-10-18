@@ -1,21 +1,21 @@
-class_name SpreadsheetEditor
+class_name Sheets_SpreadsheetEditor
 extends PanelContainer
 ## Main spreadsheet editor control combining grid, headers, and editing functionality.
 
-const SpreadsheetDataScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetData.gd")
-const SpreadsheetCellScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetCell.gd")
-const SpreadsheetCellsCanvasScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/CellsCanvas.gd")
-const SpreadsheetColumnHeadersScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/ColumnHeaders.gd")
-const SpreadsheetRowHeadersScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/RowHeaders.gd")
-const SpreadsheetHistoryScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetHistory.gd")
-const SpreadsheetFileHandlerScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetFileHandler.gd")
-const SpreadsheetChartScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetChart.gd")
-const ChartRendererScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/ChartRenderer.gd")
-const ChartCanvasScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/ChartCanvas.gd")
+const SpreadsheetDataScript := preload("SpreadsheetData.gd")
+const SpreadsheetCellScript := preload("SpreadsheetCell.gd")
+const SpreadsheetCellsCanvasScript := preload("CellsCanvas.gd")
+const SpreadsheetColumnHeadersScript := preload("ColumnHeaders.gd")
+const SpreadsheetRowHeadersScript := preload("RowHeaders.gd")
+const SpreadsheetHistoryScript := preload("SpreadsheetHistory.gd")
+const SpreadsheetFileHandlerScript := preload("SpreadsheetFileHandler.gd")
+const SpreadsheetChartScript := preload("SpreadsheetChart.gd")
+const ChartRendererScript := preload("ChartRenderer.gd")
+const ChartCanvasScript := preload("ChartCanvas.gd")
 const NoteScript := preload("res://Scripts/UI/Controls/Note.gd")
-const AutoFilterUIScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetAutoFilterUI.gd")
-const AutoFilterActionsScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetAutoFilterActions.gd")
-const RowGeometry := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetRowGeometry.gd")
+const AutoFilterUIScript := preload("SpreadsheetAutoFilterUI.gd")
+const AutoFilterActionsScript := preload("SpreadsheetAutoFilterActions.gd")
+const RowGeometry := preload("SpreadsheetRowGeometry.gd")
 
 signal content_changed()
 signal selection_changed(start_row: int, start_col: int, end_row: int, end_col: int)
@@ -197,7 +197,7 @@ func _build_ui() -> void:
 	_build_chart_panel()
 
 	# Before _connect_signals: it must see column-menu requests first.
-	autofilter_ui = AutoFilterUIScript.attach(self, spreadsheet_data, history, column_headers, cells_canvas,
+	autofilter_ui = AutoFilterUIScript.new().attach(self, spreadsheet_data, history, column_headers, cells_canvas,
 		formula_bar, _update_scrollbar_ranges, content_changed.emit)
 
 
@@ -208,7 +208,7 @@ func _build_toolbar() -> void:
 
 	# Bold button
 	_bold_btn = Button.new()
-	_bold_btn.icon = preload("uid://cfu0tc5nslwku")
+	_bold_btn.icon = _load_icon("bold_icon_24.png")
 	_bold_btn.tooltip_text = "Bold (Ctrl+B)"
 	_bold_btn.custom_minimum_size = Vector2(30, 28)
 	_bold_btn.toggle_mode = true
@@ -217,7 +217,7 @@ func _build_toolbar() -> void:
 
 	# Italic button
 	_italic_btn = Button.new()
-	_italic_btn.icon = preload("uid://c2x042or4icqh")
+	_italic_btn.icon = _load_icon("italics_icon_24.png")
 	_italic_btn.tooltip_text = "Italic (Ctrl+I)"
 	_italic_btn.custom_minimum_size = Vector2(30, 28)
 	_italic_btn.toggle_mode = true
@@ -230,21 +230,21 @@ func _build_toolbar() -> void:
 
 	# Alignment buttons
 	var align_left := Button.new()
-	align_left.icon = preload("uid://8pfda6vkqgcu")
+	align_left.icon = _load_icon("align_left_24.png")
 	align_left.tooltip_text = "Align Left"
 	align_left.custom_minimum_size = Vector2(30, 28)
 	align_left.pressed.connect(_on_align_left_pressed)
 	toolbar.add_child(align_left)
 
 	var align_center := Button.new()
-	align_center.icon = preload("uid://by4euhg5vcb2u")
+	align_center.icon = _load_icon("align_center.png")
 	align_center.tooltip_text = "Align Center"
 	align_center.custom_minimum_size = Vector2(30, 28)
 	align_center.pressed.connect(_on_align_center_pressed)
 	toolbar.add_child(align_center)
 
 	var align_right := Button.new()
-	align_right.icon = preload("uid://cn3cyqlwp73k3")
+	align_right.icon = _load_icon("align_right_24.png")
 	align_right.tooltip_text = "Align Right"
 	align_right.custom_minimum_size = Vector2(30, 28)
 	align_right.pressed.connect(_on_align_right_pressed)
@@ -256,7 +256,7 @@ func _build_toolbar() -> void:
 
 	# Header row button
 	var header_btn := Button.new()
-	header_btn.icon = preload("uid://cgsv4ad8o0ond")
+	header_btn.icon = _load_icon("header_icon_24.png")
 	header_btn.tooltip_text = "Toggle Header Row"
 	header_btn.pressed.connect(_on_header_row_pressed)
 	toolbar.add_child(header_btn)
@@ -267,7 +267,7 @@ func _build_toolbar() -> void:
 
 	# Freeze pane button with dropdown
 	var freeze_btn := MenuButton.new()
-	freeze_btn.icon = preload("uid://bq6kasw1po25h")
+	freeze_btn.icon = _load_icon("freeze_rows_24.png")
 	freeze_btn.tooltip_text = "Freeze Rows/Columns"
 	var freeze_popup := freeze_btn.get_popup()
 	freeze_popup.add_item("No Freeze", 0)
@@ -286,14 +286,14 @@ func _build_toolbar() -> void:
 
 	# Import button
 	var import_btn := Button.new()
-	import_btn.icon = preload("uid://ccei0hhyfti1b")
+	import_btn.icon = _load_icon("import_icon_24.png")
 	import_btn.tooltip_text = "Import from CSV/TSV/Excel"
 	import_btn.pressed.connect(_on_import_pressed)
 	toolbar.add_child(import_btn)
 
 	# Export button
 	var export_btn := Button.new()
-	export_btn.icon = preload("uid://c4xecwxribs4s")
+	export_btn.icon = _load_icon("export_icon_24.png")
 	export_btn.tooltip_text = "Export to CSV/TSV/Excel"
 	export_btn.pressed.connect(_on_export_pressed)
 	toolbar.add_child(export_btn)
@@ -304,14 +304,14 @@ func _build_toolbar() -> void:
 
 	# Fill Down button
 	var fill_down_btn := Button.new()
-	fill_down_btn.icon = preload("uid://gy2ltu20y33")
+	fill_down_btn.icon = _load_icon("fill_down_icon_24.png")
 	fill_down_btn.tooltip_text = "Fill Down (Ctrl+D) - Copy top row formulas to selected rows"
 	fill_down_btn.pressed.connect(_fill_down)
 	toolbar.add_child(fill_down_btn)
 
 	# Recalculate button
 	var recalc_btn := Button.new()
-	recalc_btn.icon = preload("uid://bdmixrtkjm1dv")
+	recalc_btn.icon = _load_icon("recalc_icon_24.png")
 	recalc_btn.tooltip_text = "Recalculate all formulas (F9)"
 	recalc_btn.pressed.connect(_recalculate_all)
 	toolbar.add_child(recalc_btn)
@@ -322,7 +322,7 @@ func _build_toolbar() -> void:
 
 	# Chart button
 	var chart_btn := Button.new()
-	chart_btn.icon = preload("uid://b62g6uuuv3ad1")
+	chart_btn.icon = _load_icon("chart_icon_24.png")
 	chart_btn.tooltip_text = "Create Chart from Selection"
 	chart_btn.pressed.connect(_on_chart_pressed)
 	toolbar.add_child(chart_btn)
@@ -2354,3 +2354,11 @@ func sync_linked_notes(editor_name: String) -> void:
 					controls.set_content(markdown_content)
 				elif controls and "content" in controls:
 					controls.content = markdown_content
+
+
+## Raw PNG loading works outside the host's imported resource database.
+func _load_icon(filename: String) -> Texture2D:
+	var script: Script = get_script()
+	var path := script.resource_path.get_base_dir().path_join("../../icons/" + filename)
+	var image := Image.load_from_file(ProjectSettings.globalize_path(path))
+	return ImageTexture.create_from_image(image) if image != null else null

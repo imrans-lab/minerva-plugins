@@ -1,8 +1,8 @@
-class_name SpreadsheetColumnHeaders
+class_name Sheets_SpreadsheetColumnHeaders
 extends Control
 ## Renders the column headers (A, B, C, ...) for the spreadsheet.
 
-const SpreadsheetDataScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetData.gd")
+const SpreadsheetDataScript := preload("SpreadsheetData.gd")
 
 signal column_clicked(col: int)
 signal column_resize_started(col: int)

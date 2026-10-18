@@ -1,4 +1,4 @@
-class_name FormulaEngine
+class_name Sheets_FormulaEngine
 extends RefCounted
 ## Formula parser and evaluator for spreadsheet formulas.
 ## Supports cell references, ranges, operators, and functions.

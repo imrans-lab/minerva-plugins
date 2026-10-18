@@ -1,4 +1,4 @@
-class_name SpreadsheetAutoFilter
+class_name Sheets_SpreadsheetAutoFilter
 extends RefCounted
 ## Per-column filter criteria over a filter range whose first row is the
 ## header. Rows inside the range that fail any column's criterion are hidden;

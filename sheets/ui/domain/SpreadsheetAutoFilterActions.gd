@@ -1,4 +1,4 @@
-class_name SpreadsheetAutoFilterActions
+class_name Sheets_SpreadsheetAutoFilterActions
 extends RefCounted
 ## Undoable AutoFilter changes and the queries the filter popup needs.
 ##
@@ -9,8 +9,8 @@ extends RefCounted
 ## differ; replay() restores a snapshot on undo/redo. The filter model itself
 ## is SpreadsheetAutoFilter; hidden rows follow from its criteria.
 
-const SpreadsheetDataScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetData.gd")
-const SpreadsheetHistoryScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetHistory.gd")
+const SpreadsheetDataScript := preload("SpreadsheetData.gd")
+const SpreadsheetHistoryScript := preload("SpreadsheetHistory.gd")
 
 
 # --- Undoable changes ---------------------------------------------------------

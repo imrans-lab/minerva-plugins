@@ -1,11 +1,11 @@
-class_name SpreadsheetData
+class_name Sheets_SpreadsheetData
 extends RefCounted
 ## Main data model for spreadsheet containing cells, metadata, and charts.
 
-const SpreadsheetCellScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetCell.gd")
-const FormulaEngineScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/FormulaEngine.gd")
-const SpreadsheetChartScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetChart.gd")
-const SpreadsheetAutoFilterScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetAutoFilter.gd")
+const SpreadsheetCellScript := preload("SpreadsheetCell.gd")
+const FormulaEngineScript := preload("FormulaEngine.gd")
+const SpreadsheetChartScript := preload("SpreadsheetChart.gd")
+const SpreadsheetAutoFilterScript := preload("SpreadsheetAutoFilter.gd")
 
 signal data_changed()
 signal cell_changed(row: int, col: int)

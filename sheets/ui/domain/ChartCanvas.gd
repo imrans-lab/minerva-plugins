@@ -1,9 +1,9 @@
-class_name ChartCanvas
+class_name Sheets_ChartCanvas
 extends Control
 ## Renders charts (line and bar) for spreadsheet data.
 
-const SpreadsheetChartScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetChart.gd")
-const ChartRendererScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/ChartRenderer.gd")
+const SpreadsheetChartScript := preload("SpreadsheetChart.gd")
+const ChartRendererScript := preload("ChartRenderer.gd")
 
 ## The chart definition to render
 var chart: SpreadsheetChartScript = null

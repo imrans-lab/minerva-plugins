@@ -1,4 +1,4 @@
-class_name MCPSpreadsheetFilterTools
+class_name Sheets_MCPSpreadsheetFilterTools
 extends MCPToolModule
 ## MCP tool module for spreadsheet AutoFilter: enable a filter range, set a
 ## column criterion, read the criteria and visible rows, clear one column or
@@ -13,9 +13,9 @@ extends MCPToolModule
 ## "all" when the list covers every data row. Filtering only hides rows;
 ## minerva_get_spreadsheet_data always returns every row, hidden ones included.
 
-const SpreadsheetDataScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetData.gd")
-const SpreadsheetHistoryScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetHistory.gd")
-const Actions := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetAutoFilterActions.gd")
+const SpreadsheetDataScript := preload("../domain/SpreadsheetData.gd")
+const SpreadsheetHistoryScript := preload("../domain/SpreadsheetHistory.gd")
+const Actions := preload("../domain/SpreadsheetAutoFilterActions.gd")
 
 const DEFAULT_ROW_LIMIT := 2000
 

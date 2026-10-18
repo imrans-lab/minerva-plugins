@@ -15,13 +15,13 @@ extends SceneTree
 ## Run:
 ##   godot --headless --path ~/github/Minerva/src --script test/test_mcp_spreadsheet_filter_tools.gd
 
-const SpreadsheetDataScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetData.gd")
-const SpreadsheetHistoryScript := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetHistory.gd")
-const Actions := preload("res://Scripts/UI/Controls/SpreadsheetEditor/SpreadsheetAutoFilterActions.gd")
+const SpreadsheetDataScript := preload("../../ui/domain/SpreadsheetData.gd")
+const SpreadsheetHistoryScript := preload("../../ui/domain/SpreadsheetHistory.gd")
+const Actions := preload("../../ui/domain/SpreadsheetAutoFilterActions.gd")
 ## The module calls MCPToolUtils, which names the SingletonObject autoload, so
 ## it is load()ed at runtime: a --script test compiles before autoloads
 ## register, and a compile-time reference would leave MCPToolUtils broken.
-const MODULE_PATH := "res://Scripts/Services/MCP/Modules/MCPSpreadsheetFilterTools.gd"
+const MODULE_PATH := "../../ui/tools/MCPSpreadsheetFilterTools.gd"
 
 const EDITOR := "Tasks"
 const ROWS := 14
@@ -142,7 +142,7 @@ func test_set_read_clear_round_trip() -> void:
 	var ui := _make_sheet()
 	var ui_history := SpreadsheetHistoryScript.new()
 
-	var module_script: GDScript = load(MODULE_PATH)
+	var module_script: GDScript = load(get_script().resource_path.get_base_dir().path_join(MODULE_PATH))
 	var tools = module_script.new(null)
 	tools.find_sheet = func(name: String) -> Object:
 		var target: Object = module_script.SheetTarget.new()

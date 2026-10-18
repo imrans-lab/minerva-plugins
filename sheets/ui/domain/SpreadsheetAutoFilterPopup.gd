@@ -1,4 +1,4 @@
-class_name SpreadsheetAutoFilterPopup
+class_name Sheets_SpreadsheetAutoFilterPopup
 extends PopupPanel
 ## The AutoFilter dropdown for one column (Scenes/SpreadsheetAutoFilterPopup.tscn).
 ##
