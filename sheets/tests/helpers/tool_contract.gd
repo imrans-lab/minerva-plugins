@@ -32,7 +32,7 @@ func _chart_ids(charts: Array, ids: Dictionary) -> void:
 			ids[id] = "chart:%d" % ids.size()
 
 func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry,
-		broker: PluginScenePanelBroker, source: String) -> void:
+		broker: PluginScenePanelBroker, source: String, capabilities: CapabilityBroker, policy: PluginPolicy) -> void:
 	var baseline: Dictionary = JSON.parse_string(FileAccess.get_file_as_string("res://test/fixtures/spreadsheet_contract/baseline.minsheet"))
 	var names: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(source.path_join("scripts/legacy-tools.json")))
 	names["Legacy contract"] = "contract editor"
@@ -110,16 +110,8 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry,
 		and second_panel.get("sheet").spreadsheet_data.get_cell_value(1, 0) == "changed"
 		and _json(panel.call("_on_panel_save_request")) == unchanged)
 	second.free()
-	for entry: Array in generated.staged:
-		var canonical: String = names[entry[0]]
-		var arguments: Dictionary = _json(entry[1])
-		arguments["editor_name"] = "Canonical contract"
-		var result: Dictionary = await registry.handle_tool_call(canonical, arguments)
-		called[canonical] = true
-		var status: RichTextLabel = panel.get_node("Status")
-		check.call(canonical + " visibly stages its host service", result.get("success") == false
-			and result.get("error_code") == "sheets_staging" and str(result.get("error_message", "")).contains("available in a later build")
-			and status.visible and status.selection_enabled and _json(panel.call("_on_panel_save_request")) == unchanged)
+	var snapshots: RefCounted = load(source.path_join("tests/helpers/snapshot_contract.gd")).new()
+	called.merge(await snapshots.call("run", check, pane, registry, broker, capabilities, policy, panel, generated.staged, names))
 	var manifest: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(source.path_join("manifest.json")))
 	var expected: Dictionary = {}
 	for tool: Dictionary in manifest.tools:

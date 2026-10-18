@@ -23,7 +23,7 @@ func _run() -> void:
 	var ui := preload("res://test/helpers/chat_host_render_fixture.gd").new()
 	ui.install(host)
 	var old: Array = [host.plugin_manager, host.plugin_scene_panel_broker, host.editor_pane,
-		host.plugin_editor_registry, host.creatable_item_registry, host.plugin_tool_registry, host.editor_container]
+		host.plugin_editor_registry, host.creatable_item_registry, host.plugin_tool_registry, host.editor_container, host.plugin_capability_broker]
 	var manager := PluginManager.new()
 	manager._db = PluginDB.new()
 	var database: PluginDB = manager.get_db()
@@ -32,6 +32,8 @@ func _run() -> void:
 	manager.configure_dependency_tools(registry)
 	manager._policy_ref = policy
 	var capabilities := CapabilityBroker.new(policy)
+	host.plugin_capability_broker = capabilities
+	registry.capability_broker = capabilities
 	var broker := PluginScenePanelBroker.new(manager, policy, capabilities)
 	registry.scene_panel_broker = broker
 	host.plugin_manager = manager
@@ -101,7 +103,9 @@ func _run() -> void:
 			check("private resource injection is refused: " + forbidden, guard.normalize_resource("ui/domain/SpreadsheetEditor.gd", planted).get("ok") == false)
 		await _hosting_contract(host, pane, manager)
 		var contract: RefCounted = load(source.path_join("tests/helpers/tool_contract.gd")).new()
-		await contract.call("run", check, pane, registry, broker, source)
+		await contract.call("run", check, pane, registry, broker, source, capabilities, policy)
+		var creation: RefCounted = load(source.path_join("tests/helpers/creation_contract.gd")).new()
+		await creation.call("run", check, pane, manager, registry, broker, policy, source)
 
 		definition.class_names.assign(["WrongPrefix_Panel"])
 		check("wrong class prefix is refused explicitly", definition.validate_class_names({}, []).get("error") == "class_name_bad_prefix")
@@ -119,6 +123,7 @@ func _run() -> void:
 	host.creatable_item_registry = old[4]
 	host.plugin_tool_registry = old[5]
 	host.editor_container = old[6]
+	host.plugin_capability_broker = old[7]
 	if _project_container != null:
 		_project_container.free()
 	manager.free()
