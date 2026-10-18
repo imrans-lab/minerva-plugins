@@ -1,0 +1,3 @@
+src/Scripts/Services/Plugins/MinervaPluginPanel.gd
+src/Scripts/Services/Plugins/PluginScenePanelHost.gd
+src/test/helpers/chat_host_render_fixture.gd

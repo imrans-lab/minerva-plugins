@@ -1,0 +1,6 @@
+/sheets-plugin
+/build/
+/dist/
+__pycache__/
+*.gd.uid
+*.png.import

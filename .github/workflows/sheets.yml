@@ -1,0 +1,92 @@
+name: sheets
+
+on:
+  push:
+    branches: [main]
+    paths: ["sheets/**", ".github/workflows/sheets.yml", ".go-version"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Staging only; publishing is refused in B3
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  source-build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: .go-version
+          cache: false
+      - name: Compile and vet
+        working-directory: sheets
+        run: |
+          go vet ./...
+          go build -o "$RUNNER_TEMP/sheets-plugin" .
+
+  build:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            runner: ubuntu-22.04
+            goos: linux
+            goarch: amd64
+          - target: linux-arm64
+            runner: ubuntu-22.04
+            goos: linux
+            goarch: arm64
+          - target: windows-x86_64
+            runner: ubuntu-22.04
+            goos: windows
+            goarch: amd64
+          - target: macos-universal
+            runner: macos-15
+            goos: darwin
+            goarch: universal
+    steps:
+      - uses: actions/checkout@v4
+      - name: Refuse publication
+        if: inputs.publish
+        run: exit 1
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: .go-version
+          cache: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Backend tests
+        working-directory: sheets
+        run: go test ./...
+      - name: Build archive
+        working-directory: sheets
+        env:
+          CGO_ENABLED: "0"
+          SHEETS_GOOS: ${{ matrix.goos }}
+          SHEETS_GOARCH: ${{ matrix.goarch }}
+        run: |
+          if [ "$SHEETS_GOARCH" = universal ]; then
+            GOOS=darwin GOARCH=amd64 go build -trimpath -o "$RUNNER_TEMP/sheets-amd64" .
+            GOOS=darwin GOARCH=arm64 go build -trimpath -o "$RUNNER_TEMP/sheets-arm64" .
+            lipo -create "$RUNNER_TEMP/sheets-amd64" "$RUNNER_TEMP/sheets-arm64" -output "$RUNNER_TEMP/sheets-plugin"
+          else
+            GOOS="$SHEETS_GOOS" GOARCH="$SHEETS_GOARCH" go build -trimpath -o "$RUNNER_TEMP/sheets-plugin" .
+          fi
+          python3 scripts/package.py '${{ matrix.target }}' "$RUNNER_TEMP/sheets-plugin" dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sheets-${{ matrix.target }}
+          path: sheets/dist/sheets-*.tar.gz
+          if-no-files-found: error
+          retention-days: 14

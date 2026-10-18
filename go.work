@@ -12,4 +12,5 @@ use (
 	./pcb
 	./presentation
 	./shared
+	./sheets
 )

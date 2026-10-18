@@ -1,0 +1,2 @@
+# No script-error allowances. This pattern cannot match a fatal record.
+^SHEETS_NO_EXPECTED_FATAL_DIAGNOSTICS$
