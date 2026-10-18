@@ -4,6 +4,7 @@ extends RefCounted
 
 const SpreadsheetDataScript := preload("SpreadsheetData.gd")
 const ExcelHandlerScript := preload("ExcelHandler.gd")
+const Atomic := preload("res://Scripts/Services/Plugins/AtomicFile.gd")
 
 
 ## Import CSV file into SpreadsheetData
@@ -21,14 +22,7 @@ static func import_csv(path: String, data: SpreadsheetDataScript) -> Error:
 
 ## Export SpreadsheetData to CSV file
 static func export_csv(path: String, data: SpreadsheetDataScript) -> Error:
-	var file := FileAccess.open(path, FileAccess.WRITE)
-	if not file:
-		return FileAccess.get_open_error()
-
-	var content := data.to_csv(",")
-	file.store_string(content)
-	file.close()
-	return OK
+	return OK if Atomic.write(path, data.to_csv(",")) else ERR_CANT_CREATE
 
 
 ## Import TSV file into SpreadsheetData
@@ -46,14 +40,7 @@ static func import_tsv(path: String, data: SpreadsheetDataScript) -> Error:
 
 ## Export SpreadsheetData to TSV file
 static func export_tsv(path: String, data: SpreadsheetDataScript) -> Error:
-	var file := FileAccess.open(path, FileAccess.WRITE)
-	if not file:
-		return FileAccess.get_open_error()
-
-	var content := data.to_csv("\t")
-	file.store_string(content)
-	file.close()
-	return OK
+	return OK if Atomic.write(path, data.to_csv("\t")) else ERR_CANT_CREATE
 
 
 ## Import native JSON format (.minsheet)
@@ -80,15 +67,7 @@ static func import_minsheet(path: String, data: SpreadsheetDataScript) -> Error:
 
 ## Export SpreadsheetData to native JSON format (.minsheet)
 static func export_minsheet(path: String, data: SpreadsheetDataScript) -> Error:
-	var file := FileAccess.open(path, FileAccess.WRITE)
-	if not file:
-		return FileAccess.get_open_error()
-
-	var dict := data.to_dict()
-	var content := JSON.stringify(dict, "\t")
-	file.store_string(content)
-	file.close()
-	return OK
+	return OK if Atomic.write(path, JSON.stringify(data.to_dict(), "\t")) else ERR_CANT_CREATE
 
 
 ## Detect file type from extension and import
@@ -145,3 +124,14 @@ static func get_export_filters() -> PackedStringArray:
 		"*.xlsx ; Excel Files",
 		"*.minsheet ; Minerva Spreadsheet",
 	])
+
+
+## Confirm the information discarded by the copied interchange serializers.
+static func export_loss_notice(extension: String) -> String:
+	if extension == "minsheet":
+		return ""
+	if extension == "xlsx":
+		return "XLSX keeps cell values and formulas. Formatting, charts and filters are dropped. Export a copy?"
+	# export_file's existing unknown-extension fallback is CSV too.
+	var format_name := "TSV" if extension == "tsv" else "CSV"
+	return format_name + " keeps cell values only. Formulas, formatting, charts and filters are dropped. Export a copy?"

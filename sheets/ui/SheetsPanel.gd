@@ -22,6 +22,7 @@ var _snapshot_restored: bool = false
 func _ready() -> void:
 	sheet.sheet_resolver = SheetRegistry.resolve
 	sheet.content_changed.connect(content_changed.emit)
+	sheet.export_failed.connect(_show_export_error)
 	_tools = Tools.new(sheet, _matches_locator)
 	_filters = FilterTools.new(sheet, _matches_locator)
 
@@ -184,3 +185,9 @@ static func _prepare_legacy_note(markdown: String) -> Dictionary:
 			columns = width
 		accepted.append(line)
 	return {"text": "\n".join(accepted), "partial": partial or in_chart or rows < 2}
+
+
+func _show_export_error(message: String) -> void:
+	status.text = message
+	status.show()
+	push_error(message)

@@ -871,7 +871,7 @@ func from_csv(csv_text: String, delimiter: String = ",") -> void:
 	var actual_rows := 0
 
 	for row_idx in range(lines.size()):
-		var line := lines[row_idx].strip_edges()
+		var line := lines[row_idx].trim_suffix("\r")
 		if line.is_empty():
 			continue
 

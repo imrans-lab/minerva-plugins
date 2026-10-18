@@ -983,6 +983,7 @@
           "ui/tools/MCPSpreadsheetFilterTools.gd",
           "ui/tools/tool_utils.gd"
         ],
+        "native_save_extensions": [".minsheet"],
         "file_extensions": [
           ".minsheet",
           ".csv",

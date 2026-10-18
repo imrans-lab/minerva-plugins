@@ -16,6 +16,7 @@ const AutoFilterUIScript := preload("SpreadsheetAutoFilterUI.gd")
 const AutoFilterActionsScript := preload("SpreadsheetAutoFilterActions.gd")
 const RowGeometry := preload("SpreadsheetRowGeometry.gd")
 
+signal export_failed(message: String)
 signal content_changed()
 signal selection_changed(start_row: int, start_col: int, end_row: int, end_col: int)
 
@@ -42,6 +43,8 @@ var v_scrollbar: VScrollBar
 var inline_editor: LineEdit
 var import_dialog: FileDialog
 var export_dialog: FileDialog
+var _pending_export_path: String = ""
+@onready var export_confirmation: ConfirmationDialog = $ExportConfirmation
 var autofilter_ui: AutoFilterUIScript  # header dropdowns, filter popup, row count
 
 ## Chart components
@@ -1847,6 +1850,8 @@ func _on_import_pressed() -> void:
 
 
 func _on_export_pressed() -> void:
+	if export_confirmation.visible or (export_dialog != null and export_dialog.visible):
+		return
 	if not export_dialog:
 		_create_export_dialog()
 	export_dialog.popup_centered(Vector2(800, 600))
@@ -1899,9 +1904,32 @@ func _on_import_file_selected(path: String) -> void:
 
 
 func _on_export_file_selected(path: String) -> void:
+	if not _pending_export_path.is_empty():
+		return
+	var warning: String = SpreadsheetFileHandlerScript.export_loss_notice(path.get_extension().to_lower())
+	if warning.is_empty():
+		_write_export(path)
+		return
+	_pending_export_path = path
+	export_confirmation.dialog_text = warning
+	export_confirmation.popup_centered(Vector2i(560, 180))
+
+
+func _on_export_canceled() -> void:
+	_pending_export_path = ""
+
+
+func _on_export_confirmed() -> void:
+	var path := _pending_export_path
+	_pending_export_path = ""
+	if not path.is_empty():
+		_write_export(path)
+
+
+func _write_export(path: String) -> void:
 	var err := SpreadsheetFileHandlerScript.export_file(path, spreadsheet_data)
 	if err != OK:
-		push_error("Failed to export file: " + path + " (error: " + str(err) + ")")
+		export_failed.emit("Couldn't export spreadsheet to %s (error %d). The original file is unchanged." % [path, err])
 
 
 ## Chart Methods

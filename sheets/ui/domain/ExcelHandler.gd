@@ -3,6 +3,7 @@ extends RefCounted
 ## Handles Excel .xlsx file import/export.
 ## Excel files are ZIP archives containing XML files.
 
+const Atomic := preload("res://Scripts/Services/Plugins/AtomicFile.gd")
 const SpreadsheetDataScript := preload("SpreadsheetData.gd")
 const SpreadsheetCellScript := preload("SpreadsheetCell.gd")
 
@@ -36,7 +37,8 @@ static func import_xlsx(path: String, data: SpreadsheetDataScript) -> Error:
 ## Export SpreadsheetData to Excel .xlsx file
 static func export_xlsx(path: String, data: SpreadsheetDataScript) -> Error:
 	var zip := ZIPPacker.new()
-	var err := zip.open(path)
+	var temporary := path + ".zip.tmp"
+	var err := zip.open(temporary)
 	if err != OK:
 		return err
 
@@ -46,44 +48,45 @@ static func export_xlsx(path: String, data: SpreadsheetDataScript) -> Error:
 
 	for row in range(data.row_count):
 		for col in range(data.column_count):
-			var cell := data.get_cell(row, col)
+			var cell := data.get_cell_if_exists(row, col)
 			if cell and cell.type == SpreadsheetCellScript.CellType.TEXT:
 				var val := str(cell.value)
 				if not val in string_indices:
 					string_indices[val] = shared_strings.size()
 					shared_strings.append(val)
 
-	# Write [Content_Types].xml
-	zip.start_file("[Content_Types].xml")
-	zip.write_file(_generate_content_types().to_utf8_buffer())
-
-	# Write _rels/.rels
-	zip.start_file("_rels/.rels")
-	zip.write_file(_generate_rels().to_utf8_buffer())
-
-	# Write xl/workbook.xml
-	zip.start_file("xl/workbook.xml")
-	zip.write_file(_generate_workbook().to_utf8_buffer())
-
-	# Write xl/_rels/workbook.xml.rels
-	zip.start_file("xl/_rels/workbook.xml.rels")
-	zip.write_file(_generate_workbook_rels().to_utf8_buffer())
-
-	# Write xl/sharedStrings.xml
+	var parts := {
+		"[Content_Types].xml": _generate_content_types(),
+		"_rels/.rels": _generate_rels(),
+		"xl/workbook.xml": _generate_workbook(),
+		"xl/_rels/workbook.xml.rels": _generate_workbook_rels(),
+	}
 	if shared_strings.size() > 0:
-		zip.start_file("xl/sharedStrings.xml")
-		zip.write_file(_generate_shared_strings(shared_strings).to_utf8_buffer())
-
-	# Write xl/styles.xml
-	zip.start_file("xl/styles.xml")
-	zip.write_file(_generate_styles().to_utf8_buffer())
-
-	# Write xl/worksheets/sheet1.xml
-	zip.start_file("xl/worksheets/sheet1.xml")
-	zip.write_file(_generate_sheet(data, string_indices).to_utf8_buffer())
-
-	zip.close()
-	return OK
+		parts["xl/sharedStrings.xml"] = _generate_shared_strings(shared_strings)
+	parts["xl/styles.xml"] = _generate_styles()
+	parts["xl/worksheets/sheet1.xml"] = _generate_sheet(data, string_indices)
+	for name: String in parts:
+		err = zip.start_file(name)
+		if err == OK:
+			var text: String = parts[name]
+			err = zip.write_file(text.to_utf8_buffer())
+		if err != OK:
+			break
+	var closed: Error = zip.close()
+	if err == OK:
+		err = closed
+	if err == OK:
+		var input := FileAccess.open(temporary, FileAccess.READ)
+		if input == null:
+			err = FileAccess.get_open_error()
+		else:
+			var bytes := input.get_buffer(input.get_length())
+			err = input.get_error()
+			input.close()
+			if err == OK and not Atomic.write_bytes(path, bytes):
+				err = ERR_CANT_CREATE
+	DirAccess.remove_absolute(temporary)
+	return err
 
 
 ## Parse shared strings XML
@@ -187,7 +190,7 @@ static func _cell_ref_to_col(ref: String) -> int:
 ## Set cell value from Excel data
 static func _set_cell_from_excel(data: SpreadsheetDataScript, row: int, col: int, cell_type: String, value: String, formula: String, shared_strings: PackedStringArray) -> void:
 	if not formula.is_empty():
-		data.set_cell_formula(row, col, "=" + formula)
+		data.set_cell_value(row, col, "=" + formula)
 	elif cell_type == "s":
 		# Shared string
 		var idx := value.to_int()
@@ -307,7 +310,7 @@ static func _generate_sheet(data: SpreadsheetDataScript, string_indices: Diction
 		xml += "<row r=\"%d\">\n" % (row + 1)
 
 		for col in range(max_col):
-			var cell := data.get_cell(row, col)
+			var cell := data.get_cell_if_exists(row, col)
 			if cell and cell.type != SpreadsheetCellScript.CellType.EMPTY:
 				var ref := SpreadsheetDataScript.get_column_label(col) + str(row + 1)
 				xml += _generate_cell_xml(ref, cell, string_indices)

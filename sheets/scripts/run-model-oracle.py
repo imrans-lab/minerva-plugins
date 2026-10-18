@@ -29,11 +29,18 @@ def main() -> int:
     target = destination / sdk_relative
     target.parent.mkdir(parents=True)
     shutil.copyfile(sdk, target)
+    atomic_relative = Path("Scripts/Services/Plugins/AtomicFile.gd")
+    atomic_source = host / "src" / atomic_relative
+    atomic_target = destination / atomic_relative
+    shutil.copyfile(atomic_source, atomic_target)
+    if atomic_source.read_bytes() != atomic_target.read_bytes():
+        raise ValueError("Public AtomicFile copy differs from host")
     for filename in ("project.godot", "oracle.gd"):
         shutil.copyfile(plugin / "tests/isolation" / filename, destination / filename)
     receipt = {"public_sdk_sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
                "host_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=host, text=True).strip(),
-               "host_source_files": [sdk_relative.as_posix()],
+               "host_source_files": [sdk_relative.as_posix(), atomic_relative.as_posix()],
+               "atomic_file_sha256": hashlib.sha256(atomic_target.read_bytes()).hexdigest(),
                "scope": "complete B0 spreadsheet model only; full-host tests cover host services"}
     if sdk.read_bytes() != target.read_bytes():
         raise ValueError("Public SDK copy differs from host")

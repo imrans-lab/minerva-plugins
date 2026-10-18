@@ -11,3 +11,11 @@ grow_vertical = 2
 size_flags_horizontal = 3
 size_flags_vertical = 3
 script = ExtResource("1_main")
+
+[node name="ExportConfirmation" type="ConfirmationDialog" parent="."]
+title = "Confirm export"
+size = Vector2i(560, 180)
+ok_button_text = "Export copy"
+
+[connection signal="confirmed" from="ExportConfirmation" to="." method="_on_export_confirmed"]
+[connection signal="canceled" from="ExportConfirmation" to="." method="_on_export_canceled"]

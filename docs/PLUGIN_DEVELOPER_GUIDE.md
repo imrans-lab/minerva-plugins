@@ -671,7 +671,7 @@ backend's tools.
 
 ### File ownership and document actions
 
-A `godot_scene` panel that imports lossy formats should declare `native_save_extensions` as a nonempty subset of its own `file_extensions` (for example `[".minsheet"]`). Saving a file in another claimed format opens Save As; cancellation or write failure preserves its original file and dirty state. Omit the field to retain existing save-in-place behavior. Host-owned JSON and `_bytes` payloads are written through a temporary file and atomically replaced; canonical document buffers retain their existing save lane.
+A `godot_scene` panel that imports lossy formats should declare `native_save_extensions` as a nonempty subset of its own `file_extensions` (for example `[".minsheet"]`). Saving a file in another claimed format opens Save As; cancellation or write failure preserves its original file and dirty state. Omit the field to retain existing save-in-place behavior. Host-owned JSON and `_bytes` payloads are written through a temporary file and atomically replaced; canonical document buffers retain their existing save lane. Plugins may preload `res://Scripts/Services/Plugins/AtomicFile.gd` for atomic write/replace of plugin-owned files; Windows requires the native `ProcessFileLock`, and publication refuses without it.
 
 Native `file_extensions` and `editor_items` use one host handoff. File opening uses `minerva_open_file({"path": "...", "action": "open"})`; `action: "import"` requests an explicitly declared import. Anonymous creation uses `minerva_create_plugin_editor` with the declared editor item. Existing manifests default to open/create.
 
