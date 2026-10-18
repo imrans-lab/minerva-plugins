@@ -33,6 +33,7 @@
   "tools": [
     {
       "name": "minerva_sheets_add_chart",
+      "tool_set": "spreadsheet",
       "executor": "panel",
       "description": "Add a line or bar chart visualization to an existing spreadsheet. Requires an already-created spreadsheet (minerva_sheets_create_editor) with data. This does NOT create a spreadsheet \u2014 use minerva_sheets_create_editor for that. After creating, use minerva_sheets_get_chart_image to view the chart, minerva_sheets_update_chart to modify it.",
       "input_schema": {
@@ -83,6 +84,7 @@
     },
     {
       "name": "minerva_sheets_add_column",
+      "tool_set": "spreadsheet",
       "executor": "panel",
       "description": "Add a new column to the spreadsheet with optional header.",
       "input_schema": {
@@ -115,6 +117,7 @@
     },
     {
       "name": "minerva_sheets_add_row",
+      "tool_set": "spreadsheet",
       "executor": "panel",
       "description": "Add a new row to the spreadsheet with optional values.",
       "input_schema": {
@@ -143,6 +146,7 @@
     },
     {
       "name": "minerva_sheets_create_editor",
+      "tool_set": "spreadsheet",
       "executor": "backend",
       "description": "Create a new spreadsheet. Use this when asked to 'make a spreadsheet', 'create a table', or organize data into rows and columns. Returns an editor_name for subsequent operations. Next steps: use minerva_sheets_update_data to populate cells, minerva_sheets_format_cells for styling, minerva_sheets_link_to_note to save as a note.",
       "input_schema": {
@@ -168,6 +172,7 @@
     },
     {
       "name": "minerva_sheets_delete_chart",
+      "tool_set": "spreadsheet",
       "executor": "panel",
       "description": "Delete a chart from a spreadsheet editor.",
       "input_schema": {
@@ -193,6 +198,7 @@
     },
     {
       "name": "minerva_sheets_delete_column",
+      "tool_set": "spreadsheet",
       "executor": "panel",
       "description": "Delete a column from the spreadsheet. All columns to the right shift left. This action can be undone.",
       "input_schema": {
@@ -215,6 +221,7 @@
     },
     {
       "name": "minerva_sheets_delete_row",
+      "tool_set": "spreadsheet",
       "executor": "panel",
       "description": "Delete a row from the spreadsheet. All rows below shift up. This action can be undone.",
       "input_schema": {
@@ -237,6 +244,7 @@
     },
     {
       "name": "minerva_sheets_export_to_nudge",
+      "tool_set": "spreadsheet",
       "executor": "panel",
       "description": "Export spreadsheet data to the Nudge MCP hint system for quick LLM retrieval.",
       "input_schema": {
@@ -279,6 +287,7 @@
     },
     {
       "name": "minerva_sheets_fill_down",
+      "tool_set": "spreadsheet",
       "executor": "panel",
       "description": "Fill down formulas/values from a source row to target rows. Copies the content from the source row and adjusts relative cell references (e.g., A1 becomes A2, A3, etc.). Absolute references ($A$1) are preserved. This is equivalent to Excel's Ctrl+D fill down feature.",
       "input_schema": {
@@ -316,6 +325,7 @@
     },
     {
       "name": "minerva_sheets_format_cells",
+      "tool_set": "spreadsheet",
       "executor": "panel",
       "description": "Apply formatting to cells or a range of cells. Requires editor_name from minerva_list_editors.",
       "input_schema": {
@@ -378,6 +388,7 @@
     },
     {
       "name": "minerva_sheets_get_chart_image",
+      "tool_set": "spreadsheet",
       "executor": "panel",
       "description": "Export a chart as a base64-encoded PNG image for LLM viewing. Requires editor_name and chart_id from minerva_sheets_list_charts.",
       "input_schema": {
@@ -407,6 +418,7 @@
     },
     {
       "name": "minerva_sheets_get_data",
+      "tool_set": "spreadsheet",
       "executor": "panel",
       "description": "Get the data from a spreadsheet in various formats. Returns data_starts_at_row (1-based) to show where content begins. Requires editor_name from minerva_list_editors.",
       "input_schema": {
@@ -441,6 +453,7 @@
     },
     {
       "name": "minerva_sheets_get_history",
+      "tool_set": "spreadsheet",
       "executor": "panel",
       "description": "Get the undo/redo history status of a spreadsheet editor.",
       "input_schema": {
@@ -458,6 +471,7 @@
     },
     {
       "name": "minerva_sheets_insert_column",
+      "tool_set": "spreadsheet",
       "executor": "panel",
       "description": "Insert an empty column at a specific position. All columns at and to the right shift right.",
       "input_schema": {
@@ -480,6 +494,7 @@
     },
     {
       "name": "minerva_sheets_insert_row",
+      "tool_set": "spreadsheet",
       "executor": "panel",
       "description": "Insert an empty row at a specific position. All rows at and below shift down.",
       "input_schema": {
@@ -502,6 +517,7 @@
     },
     {
       "name": "minerva_sheets_link_to_note",
+      "tool_set": "spreadsheet",
       "executor": "panel",
       "description": "Create a linked note from a spreadsheet. The note displays the spreadsheet as a markdown table. Editing the note opens the spreadsheet editor. Changes sync bidirectionally.",
       "input_schema": {
@@ -527,6 +543,7 @@
     },
     {
       "name": "minerva_sheets_list_charts",
+      "tool_set": "spreadsheet",
       "executor": "panel",
       "description": "List all charts in a spreadsheet editor.",
       "input_schema": {
@@ -544,6 +561,7 @@
     },
     {
       "name": "minerva_sheets_recalculate",
+      "tool_set": "spreadsheet",
       "executor": "panel",
       "description": "Recalculate all formulas in a spreadsheet. Use this after bulk operations or when cross-sheet references need refreshing.",
       "input_schema": {
@@ -561,6 +579,7 @@
     },
     {
       "name": "minerva_sheets_redo",
+      "tool_set": "spreadsheet",
       "executor": "panel",
       "description": "Redo a previously undone action in a spreadsheet editor.",
       "input_schema": {
@@ -582,6 +601,7 @@
     },
     {
       "name": "minerva_sheets_refresh_charts",
+      "tool_set": "spreadsheet",
       "executor": "panel",
       "description": "Refresh all charts in a spreadsheet to reflect current data. Call this after updating spreadsheet data.",
       "input_schema": {
@@ -599,6 +619,7 @@
     },
     {
       "name": "minerva_sheets_set_cell_formula",
+      "tool_set": "spreadsheet",
       "executor": "panel",
       "description": "Set a formula in a specific cell. Requires editor_name from minerva_list_editors.",
       "input_schema": {
@@ -626,6 +647,7 @@
     },
     {
       "name": "minerva_sheets_set_column_width",
+      "tool_set": "spreadsheet",
       "executor": "panel",
       "description": "Set the width of one or more spreadsheet columns. Use to make content fully visible.",
       "input_schema": {
@@ -665,6 +687,7 @@
     },
     {
       "name": "minerva_sheets_set_row_height",
+      "tool_set": "spreadsheet",
       "executor": "panel",
       "description": "Set the height of one or more spreadsheet rows. Use to make wrapped text visible.",
       "input_schema": {
@@ -704,6 +727,7 @@
     },
     {
       "name": "minerva_sheets_autofilter_clear",
+      "tool_set": "spreadsheet",
       "executor": "panel",
       "description": "Clear AutoFilter criteria. With column: clear that column's criterion. Without: clear every criterion and keep the filter range. With remove=true: turn AutoFilter off entirely. Returns the filter state. Undoable with minerva_sheets_undo.",
       "input_schema": {
@@ -729,6 +753,7 @@
     },
     {
       "name": "minerva_sheets_autofilter_enable",
+      "tool_set": "spreadsheet",
       "executor": "panel",
       "description": "Turn on AutoFilter over a range whose first row is the header. Without a range, the sheet's used range is filtered. Filtering hides rows from view only; it never deletes or moves data. Returns the filter state (see minerva_sheets_autofilter_get). Undoable with minerva_sheets_undo.",
       "input_schema": {
@@ -750,6 +775,7 @@
     },
     {
       "name": "minerva_sheets_autofilter_get",
+      "tool_set": "spreadsheet",
       "executor": "panel",
       "description": "Read a spreadsheet's AutoFilter state: criteria, filter_range, visible_rows (1-based sheet rows of the range's data rows, header excluded), visible_count, total_rows, and scope ('visible' when criteria hide rows from the list, 'all' when it covers every data row). With AutoFilter off, rows are the used range below its first row. Cell reads (minerva_sheets_get_data) are unfiltered: they return every row, hidden ones included.",
       "input_schema": {
@@ -775,6 +801,7 @@
     },
     {
       "name": "minerva_sheets_autofilter_set",
+      "tool_set": "spreadsheet",
       "executor": "panel",
       "description": "Set one column's AutoFilter criterion, replacing any previous criterion on that column. Pass exactly one of: values (keep rows whose displayed text is one of these; \"\" keeps blank cells) or contains (keep rows whose displayed text contains this, case-insensitive). Criteria on different columns combine with AND. AutoFilter must be enabled first. Returns the filter state. Undoable with minerva_sheets_undo.",
       "input_schema": {
@@ -808,6 +835,7 @@
     },
     {
       "name": "minerva_sheets_undo",
+      "tool_set": "spreadsheet",
       "executor": "panel",
       "description": "Undo the last action in a spreadsheet editor. Returns information about what was undone.",
       "input_schema": {
@@ -829,6 +857,7 @@
     },
     {
       "name": "minerva_sheets_update_chart",
+      "tool_set": "spreadsheet",
       "executor": "panel",
       "description": "Update an existing chart's properties. Use this when data ranges change or to modify chart appearance.",
       "input_schema": {
@@ -909,6 +938,7 @@
     },
     {
       "name": "minerva_sheets_update_data",
+      "tool_set": "spreadsheet",
       "executor": "panel",
       "description": "Update cells in a spreadsheet. Two modes: (1) csv_content parameter for full CSV replacement, (2) cells parameter for individual cell updates [{\"cell\":\"A1\",\"value\":\"Hello\"}]. Requires editor_name from minerva_list_editors.",
       "input_schema": {
@@ -983,7 +1013,9 @@
           "ui/tools/MCPSpreadsheetFilterTools.gd",
           "ui/tools/tool_utils.gd"
         ],
-        "native_save_extensions": [".minsheet"],
+        "native_save_extensions": [
+          ".minsheet"
+        ],
         "file_extensions": [
           ".minsheet",
           ".csv",

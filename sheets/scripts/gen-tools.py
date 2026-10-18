@@ -27,6 +27,7 @@ class SourceTool(TypedDict):
 
 class Tool(TypedDict):
     name: str
+    tool_set: str
     executor: str
     description: str
     input_schema: dict[str, Json]
@@ -60,7 +61,7 @@ def source_catalog(root: Path) -> tuple[list[SourceTool], dict[str, str]]:
 
 def load_tools(root: Path) -> list[Tool]:
     source, aliases = source_catalog(root)
-    return [Tool(name=aliases[tool["name"]],
+    return [Tool(name=aliases[tool["name"]], tool_set="spreadsheet",
                  executor="backend" if aliases[tool["name"]] == "minerva_sheets_create_editor" else "panel",
                  description=rewrite(tool["description"], aliases),
                  input_schema=rewrite(tool["inputSchema"], aliases)) for tool in source]

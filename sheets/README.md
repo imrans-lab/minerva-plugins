@@ -1,5 +1,7 @@
 # Sheets
 
+All 30 canonical tools declare `tool_set: "spreadsheet"`; saved spreadsheet presets retain their chat, search and HTTP membership across backend discovery.
+
 Staging extraction of Minerva's spreadsheet editor. This plugin is not in the
 marketplace or required-plugin list. The builtin remains active until the
 separate cutover batch.
