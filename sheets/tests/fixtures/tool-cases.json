@@ -1,0 +1,247 @@
+{
+  "parity": [
+    [
+      "minerva_get_spreadsheet_data",
+      {
+        "editor_name": "schema fixture",
+        "format": "json"
+      }
+    ],
+    [
+      "minerva_update_spreadsheet_data",
+      {
+        "cells": [
+          {
+            "cell": "A2",
+            "value": "changed"
+          }
+        ],
+        "editor_name": "schema fixture"
+      }
+    ],
+    [
+      "minerva_add_spreadsheet_row",
+      {
+        "at_row": 4,
+        "editor_name": "schema fixture",
+        "values": [
+          "new",
+          "9"
+        ]
+      }
+    ],
+    [
+      "minerva_add_spreadsheet_column",
+      {
+        "at_col": 3,
+        "editor_name": "schema fixture",
+        "header": "Extra",
+        "values": [
+          "x",
+          "y"
+        ]
+      }
+    ],
+    [
+      "minerva_delete_spreadsheet_row",
+      {
+        "editor_name": "schema fixture",
+        "row": 5
+      }
+    ],
+    [
+      "minerva_delete_spreadsheet_column",
+      {
+        "column": 4,
+        "editor_name": "schema fixture"
+      }
+    ],
+    [
+      "minerva_insert_spreadsheet_row",
+      {
+        "at_row": 2,
+        "editor_name": "schema fixture"
+      }
+    ],
+    [
+      "minerva_insert_spreadsheet_column",
+      {
+        "at_column": 2,
+        "editor_name": "schema fixture"
+      }
+    ],
+    [
+      "minerva_format_cells",
+      {
+        "bold": true,
+        "editor_name": "schema fixture",
+        "range": "A1:B2"
+      }
+    ],
+    [
+      "minerva_set_row_height",
+      {
+        "editor_name": "schema fixture",
+        "rows": [
+          {
+            "height": 32.0,
+            "row": 2
+          }
+        ]
+      }
+    ],
+    [
+      "minerva_set_column_width",
+      {
+        "columns": [
+          {
+            "column": "A",
+            "width": 180.0
+          }
+        ],
+        "editor_name": "schema fixture"
+      }
+    ],
+    [
+      "minerva_set_cell_formula",
+      {
+        "cell": "B2",
+        "editor_name": "schema fixture",
+        "formula": "=2+3"
+      }
+    ],
+    [
+      "minerva_fill_down",
+      {
+        "columns": [
+          "B"
+        ],
+        "editor_name": "schema fixture",
+        "source_row": 2,
+        "target_rows": [
+          3
+        ]
+      }
+    ],
+    [
+      "minerva_recalculate",
+      {
+        "editor_name": "schema fixture"
+      }
+    ],
+    [
+      "minerva_get_spreadsheet_history",
+      {
+        "editor_name": "schema fixture"
+      }
+    ],
+    [
+      "minerva_undo_spreadsheet",
+      {
+        "count": 1,
+        "editor_name": "schema fixture"
+      }
+    ],
+    [
+      "minerva_redo_spreadsheet",
+      {
+        "count": 1,
+        "editor_name": "schema fixture"
+      }
+    ],
+    [
+      "minerva_spreadsheet_autofilter_enable",
+      {
+        "editor_name": "schema fixture",
+        "range": "A1:C4"
+      }
+    ],
+    [
+      "minerva_spreadsheet_autofilter_set",
+      {
+        "column": 1,
+        "editor_name": "schema fixture",
+        "values": [
+          "keep",
+          "changed"
+        ]
+      }
+    ],
+    [
+      "minerva_spreadsheet_autofilter_get",
+      {
+        "editor_name": "schema fixture"
+      }
+    ],
+    [
+      "minerva_spreadsheet_autofilter_clear",
+      {
+        "editor_name": "schema fixture",
+        "remove": true
+      }
+    ],
+    [
+      "minerva_add_spreadsheet_chart",
+      {
+        "editor_name": "schema fixture",
+        "series": [
+          "B1:B4"
+        ],
+        "title": "Contract",
+        "x_range": "A1:A4"
+      }
+    ],
+    [
+      "minerva_get_chart_image",
+      {
+        "chart_index": 99,
+        "editor_name": "schema fixture",
+        "height": 32,
+        "width": 64
+      }
+    ],
+    [
+      "minerva_list_charts",
+      {
+        "editor_name": "schema fixture"
+      }
+    ],
+    [
+      "minerva_update_chart",
+      {
+        "chart_index": 0,
+        "editor_name": "schema fixture",
+        "title": "Edited"
+      }
+    ],
+    [
+      "minerva_refresh_charts",
+      {
+        "editor_name": "schema fixture"
+      }
+    ],
+    [
+      "minerva_delete_chart",
+      {
+        "chart_index": 0,
+        "editor_name": "schema fixture"
+      }
+    ]
+  ],
+  "staged": [
+    [
+      "minerva_link_spreadsheet_to_note",
+      {
+        "editor_name": "schema fixture"
+      }
+    ],
+    [
+      "minerva_export_to_nudge",
+      {
+        "component": "contract",
+        "editor_name": "schema fixture",
+        "key": "snapshot"
+      }
+    ]
+  ]
+}

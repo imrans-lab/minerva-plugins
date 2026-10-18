@@ -1,0 +1,212 @@
+{
+  "parity": [
+    [
+      "minerva_get_spreadsheet_data",
+      {
+        "format": "json"
+      }
+    ],
+    [
+      "minerva_update_spreadsheet_data",
+      {
+        "cells": [
+          {
+            "cell": "A2",
+            "value": "changed"
+          }
+        ]
+      }
+    ],
+    [
+      "minerva_add_spreadsheet_row",
+      {
+        "at_row": 4,
+        "values": [
+          "new",
+          "9"
+        ]
+      }
+    ],
+    [
+      "minerva_add_spreadsheet_column",
+      {
+        "at_col": 3,
+        "header": "Extra",
+        "values": [
+          "x",
+          "y"
+        ]
+      }
+    ],
+    [
+      "minerva_delete_spreadsheet_row",
+      {
+        "row": 5
+      }
+    ],
+    [
+      "minerva_delete_spreadsheet_column",
+      {
+        "column": 4
+      }
+    ],
+    [
+      "minerva_insert_spreadsheet_row",
+      {
+        "at_row": 2
+      }
+    ],
+    [
+      "minerva_insert_spreadsheet_column",
+      {
+        "at_column": 2
+      }
+    ],
+    [
+      "minerva_format_cells",
+      {
+        "range": "A1:B2",
+        "bold": true
+      }
+    ],
+    [
+      "minerva_set_row_height",
+      {
+        "rows": [
+          {
+            "row": 2,
+            "height": 32
+          }
+        ]
+      }
+    ],
+    [
+      "minerva_set_column_width",
+      {
+        "columns": [
+          {
+            "column": "A",
+            "width": 180
+          }
+        ]
+      }
+    ],
+    [
+      "minerva_set_cell_formula",
+      {
+        "cell": "B2",
+        "formula": "=2+3"
+      }
+    ],
+    [
+      "minerva_fill_down",
+      {
+        "source_row": 2,
+        "target_rows": [
+          3
+        ],
+        "columns": [
+          "B"
+        ]
+      }
+    ],
+    [
+      "minerva_recalculate",
+      {}
+    ],
+    [
+      "minerva_get_spreadsheet_history",
+      {}
+    ],
+    [
+      "minerva_undo_spreadsheet",
+      {
+        "count": 1
+      }
+    ],
+    [
+      "minerva_redo_spreadsheet",
+      {
+        "count": 1
+      }
+    ],
+    [
+      "minerva_spreadsheet_autofilter_enable",
+      {
+        "range": "A1:C4"
+      }
+    ],
+    [
+      "minerva_spreadsheet_autofilter_set",
+      {
+        "column": 1,
+        "values": [
+          "keep",
+          "changed"
+        ]
+      }
+    ],
+    [
+      "minerva_spreadsheet_autofilter_get",
+      {}
+    ],
+    [
+      "minerva_spreadsheet_autofilter_clear",
+      {
+        "remove": true
+      }
+    ],
+    [
+      "minerva_add_spreadsheet_chart",
+      {
+        "title": "Contract",
+        "x_range": "A1:A4",
+        "series": [
+          "B1:B4"
+        ]
+      }
+    ],
+    [
+      "minerva_get_chart_image",
+      {
+        "chart_index": 99,
+        "width": 64,
+        "height": 32
+      }
+    ],
+    [
+      "minerva_list_charts",
+      {}
+    ],
+    [
+      "minerva_update_chart",
+      {
+        "chart_index": 0,
+        "title": "Edited"
+      }
+    ],
+    [
+      "minerva_refresh_charts",
+      {}
+    ],
+    [
+      "minerva_delete_chart",
+      {
+        "chart_index": 0
+      }
+    ]
+  ],
+  "staged": [
+    [
+      "minerva_link_spreadsheet_to_note",
+      {}
+    ],
+    [
+      "minerva_export_to_nudge",
+      {
+        "component": "contract",
+        "key": "snapshot"
+      }
+    ]
+  ]
+}
