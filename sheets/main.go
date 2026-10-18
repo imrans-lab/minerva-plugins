@@ -2,13 +2,14 @@
 package main
 
 import (
-	"bufio"
+	"context"
 	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	"os/signal"
 )
 
 //go:embed manifest.json
@@ -19,10 +20,20 @@ type request struct {
 	ID      json.RawMessage `json:"id"`
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params"`
+	Result  json.RawMessage `json:"result"`
+	Error   *rpcError       `json:"error"`
 }
 
-// GO-4 exception: inert staging stdio loop; process lifetime owned by host, exits at EOF; S5 adds context with real orchestration (c4745).
-func serve(input io.Reader, output io.Writer) error {
+func serve(ctx context.Context, input io.ReadCloser, output io.WriteCloser) error {
+	// Closing the actual pipes interrupts both a blocked Scan and Encode.
+	stopClosing := context.AfterFunc(ctx, func() {
+		for _, stream := range []io.Closer{input, output} {
+			if err := stream.Close(); err != nil {
+				log.Printf("close cancelled RPC stream: %v", err)
+			}
+		}
+	})
+	defer stopClosing()
 	var manifest struct {
 		Version string           `json:"version"`
 		Tools   []map[string]any `json:"tools"`
@@ -36,9 +47,7 @@ func serve(input io.Reader, output io.Writer) error {
 			tools = append(tools, map[string]any{"name": tool["name"], "description": tool["description"], "inputSchema": tool["input_schema"]})
 		}
 	}
-	scanner := bufio.NewScanner(input)
-	scanner.Buffer(make([]byte, 4096), 16<<20)
-	encoder := json.NewEncoder(output)
+	stream := newStream(input, output)
 	// The host persists the real model via __panel_state. Sheets has no
 	// backend-owned document state or sidecar files to serialize or export.
 	projectReplies := map[string]string{
@@ -47,15 +56,15 @@ func serve(input io.Reader, output io.Writer) error {
 		"sheets.collect_export": `{"files":[]}`,
 		"sheets.apply_export":   `{"ok":true}`,
 	}
-	for scanner.Scan() {
+	for stream.scan(ctx) {
 		var message request
-		if err := json.Unmarshal(scanner.Bytes(), &message); err != nil {
-			if err := encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": nil, "error": map[string]any{"code": -32700, "message": "Invalid JSON"}}); err != nil {
+		if err := json.Unmarshal(stream.scanner.Bytes(), &message); err != nil {
+			if err := stream.write(ctx, map[string]any{"jsonrpc": "2.0", "id": nil, "error": map[string]any{"code": -32700, "message": "Invalid JSON"}}); err != nil {
 				return err
 			}
 			continue
 		}
-		if len(message.ID) == 0 || string(message.ID) == "null" {
+		if len(message.ID) == 0 || string(message.ID) == "null" || message.Method == "" {
 			continue
 		}
 		reply := map[string]any{"jsonrpc": "2.0", "id": message.ID}
@@ -68,7 +77,8 @@ func serve(input io.Reader, output io.Writer) error {
 			reply["result"] = map[string]any{"tools": tools}
 		case "tools/call":
 			var call struct {
-				Name string `json:"name"`
+				Name      string          `json:"name"`
+				Arguments json.RawMessage `json:"arguments"`
 			}
 			if err := json.Unmarshal(message.Params, &call); err != nil {
 				reply["error"] = map[string]any{"code": -32602, "message": "Invalid tool arguments"}
@@ -82,15 +92,17 @@ func serve(input io.Reader, output io.Writer) error {
 		default:
 			reply["error"] = map[string]any{"code": -32601, "message": "Method not found"}
 		}
-		if err := encoder.Encode(reply); err != nil {
+		if err := stream.write(ctx, reply); err != nil {
 			return fmt.Errorf("write reply: %w", err)
 		}
 	}
-	return scanner.Err()
+	return stream.readError(ctx)
 }
 
 func main() {
-	if err := serve(os.Stdin, os.Stdout); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	if err := serve(ctx, os.Stdin, os.Stdout); err != nil {
 		log.Fatal(err)
 	}
 }

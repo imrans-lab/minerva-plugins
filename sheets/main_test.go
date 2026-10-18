@@ -2,10 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"io"
 	"encoding/json"
 	"strings"
 	"testing"
 )
+
+type nopWriteCloser struct{ io.Writer }
+
+func (nopWriteCloser) Close() error { return nil }
 
 func TestStagingProtocol(t *testing.T) {
 	input := `{"jsonrpc":"2.0","id":1,"method":"initialize"}
@@ -14,7 +20,7 @@ func TestStagingProtocol(t *testing.T) {
 {"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"foreign_tool"}}
 `
 	var output bytes.Buffer
-	if err := serve(strings.NewReader(input), &output); err != nil {
+	if err := serve(context.Background(), io.NopCloser(strings.NewReader(input)), nopWriteCloser{&output}); err != nil {
 		t.Fatal(err)
 	}
 	decoder := json.NewDecoder(&output)
