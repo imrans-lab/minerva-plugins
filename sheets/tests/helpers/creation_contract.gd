@@ -10,6 +10,9 @@ func _editor(pane: EditorPane, title: String) -> Editor:
 			return candidate
 	return null
 
+func _create_into(registry: PluginToolRegistry, arguments: Dictionary, results: Array[Dictionary]) -> void:
+	results.append(await registry.handle_tool_call("minerva_sheets_create_editor", arguments))
+
 func run(check: Callable, pane: EditorPane, manager: PluginManager, registry: PluginToolRegistry,
 		broker: PluginScenePanelBroker, policy: PluginPolicy, source: String) -> void:
 	var host = pane.Tabs.get_tree().root.get_node("SingletonObject")
@@ -34,7 +37,34 @@ func run(check: Callable, pane: EditorPane, manager: PluginManager, registry: Pl
 		and not FileAccess.file_exists(paths["$missing_path"]))
 	var original_csv: PackedByteArray = FileAccess.get_file_as_bytes(paths["$csv_path"])
 	var original_native: PackedByteArray = FileAccess.get_file_as_bytes(paths["$minsheet_path"])
+	var witnesses: Array[Editor] = []
+	var witness_models: Array[Variant] = []
+	for witness_index: int in range(2):
+		var witness_editor: Editor = pane.add_plugin_scene_editor("sheets", "sheets_panel", null, "Creation witness %d" % witness_index, "create")
+		await pane.Tabs.get_tree().process_frame
+		witness_editor.plugin_scene_root.get("sheet").set_content("Witness,Value\n%d,%d" % [witness_index, witness_index + 100])
+		witnesses.append(witness_editor)
+		witness_models.append(_json(witness_editor.plugin_scene_root.call("_on_panel_save_request")))
+	check.call("creation starts beside two independent live Sheets", witnesses[0].plugin_panel_key != witnesses[1].plugin_panel_key
+		and witness_models[0] != witness_models[1])
 	check.call("creation uses the real running ready provider", manager.get_plugin_status("sheets").get("ready", false))
+	var concurrent: Array[Dictionary] = []
+	var concurrent_count: int = pane.Tabs.get_tab_count()
+	for name: String in ["Concurrent create one", "Concurrent create two"]:
+		var concurrent_args: Dictionary = fixtures.creation[0][1].duplicate(true)
+		concurrent_args["name"] = name
+		_create_into(registry, concurrent_args, concurrent)
+	var deadline: int = Time.get_ticks_msec() + 10000
+	while concurrent.size() < 2 and Time.get_ticks_msec() < deadline:
+		await pane.Tabs.get_tree().process_frame
+	check.call("two concurrent real host creates each receive a distinct live Sheet", concurrent.size() == 2
+		and concurrent[0].get("success") == true and concurrent[1].get("success") == true
+		and concurrent[0].get("editor_name") != concurrent[1].get("editor_name")
+		and pane.Tabs.get_tab_count() == concurrent_count + 2)
+	for concurrent_result: Dictionary in concurrent:
+		var concurrent_editor: Editor = _editor(pane, str(concurrent_result.get("editor_name", "")))
+		if concurrent_editor != null:
+			concurrent_editor.free()
 	for index: int in range(5):
 		var arguments: Dictionary = fixtures.creation[index][1].duplicate(true)
 		if arguments.has("file_path"):
@@ -86,6 +116,11 @@ func run(check: Callable, pane: EditorPane, manager: PluginManager, registry: Pl
 		surviving.free()
 	check.call("creation never overwrites either imported source", FileAccess.get_file_as_bytes(paths["$csv_path"]) == original_csv
 		and FileAccess.get_file_as_bytes(paths["$minsheet_path"]) == original_native)
+	check.call("creation leaves both existing complete sheet models unchanged",
+		_json(witnesses[0].plugin_scene_root.call("_on_panel_save_request")) == witness_models[0]
+		and _json(witnesses[1].plugin_scene_root.call("_on_panel_save_request")) == witness_models[1])
+	for existing_editor: Editor in witnesses:
+		existing_editor.free()
 	manager.stop_plugin("sheets")
 	var stopped_count: int = pane.Tabs.get_tab_count()
 	var stopped: Dictionary = await registry.handle_tool_call("minerva_sheets_create_editor", fixtures.creation[5][1])

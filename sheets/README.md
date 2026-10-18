@@ -27,3 +27,10 @@ the tab leaves that tab visible and identifies it in the error.
 Linked notes are snapshots that reopen the sheet, without synchronization
 with the original tab in either direction. Undo history
 across plugin live reload is deferred.
+
+The exact full-host runtime preset is `scripts/qualify-runtime.sh HOST`.
+Run it through Minerva's existing `agent.py run-job` with the host revision and
+plugin sibling revision pinned. Use `--env MINERVA_TEST_LOG_DIR=sheets-runtime-evidence`
+and `--artifact sheets-runtime-evidence`; the preset builds dev natives, imports
+the project, runs Go checks and the existing headed staging fixture, and retains
+its log. It refuses execution outside an assembled agent-container job.
