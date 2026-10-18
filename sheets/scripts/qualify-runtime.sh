@@ -26,6 +26,13 @@ export MINERVA_TEST_LOG_DIR="$log_directory"
     exit 2
   fi
   echo "Qualification toolchain: $actual_go_version"
+  node src/test/test_plugin_bridge_limits.js
+  node "$plugin_root/../multimeter/open_sheet_test.js" "$host_root"
+  (cd "$plugin_root/../multimeter" && go vet ./... &&
+    MINERVA_RECORDING_FIXTURE="$plugin_root/../multimeter/b5-recording.csv" go test -count=1 ./...)
+  (cd "$plugin_root/../nametag-maker" && go vet ./... && go test ./... &&
+    go build -o nametag-maker-plugin .)
+  bash scripts/build-host-pdf.sh linux
   python3 -B scripts/container-build/dev-natives.py &&
     godot --headless --path src --import &&
     cd "$plugin_root" &&
