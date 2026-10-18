@@ -25,6 +25,9 @@ def package(root: Path, binary: Path, target: str, output: Path) -> Path:
     }
     for directory in ("ui", "icons"):
         for path in sorted((root / directory).rglob("*")):
+            # S2 copies stay inert until S3a adapts their class names and paths.
+            if path.is_relative_to(root / "ui/domain") or path.is_relative_to(root / "ui/tools"):
+                continue
             if path.is_file() and path.suffix in (".gd", ".tscn", ".png"):
                 if path.is_symlink():
                     raise ValueError(f"Symlink refused: {path}")
