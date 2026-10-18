@@ -102,6 +102,8 @@ func _run() -> void:
 			var planted := domain_source + '\nconst ForbiddenProbe := preload("' + forbidden + '")\n'
 			check("private resource injection is refused: " + forbidden, guard.normalize_resource("ui/domain/SpreadsheetEditor.gd", planted).get("ok") == false)
 		await _hosting_contract(host, pane, manager)
+		var sessions: RefCounted = load(source.path_join("tests/helpers/session_contract.gd")).new()
+		await sessions.call("run", check, pane, manager, _project_container)
 		var capture_path: String = OS.get_environment("SHEETS_CAPTURE_BUILTIN_ORACLE")
 		if not capture_path.is_empty():
 			var generator: RefCounted = load(source.path_join("scripts/capture-builtin-oracle.gd")).new()
