@@ -252,7 +252,8 @@ dialect and nothing to migrate from. In particular:
 - `permissions.host_capabilities` (array, **nested under `permissions`**) is the
   capability **grant list**.
 - top-level `capabilities` (array) is a **separate opt-in contract list** whose only
-  legal values are `project_state`, `host_owned_save`, `project_export`, `live_reload`.
+  legal values are `project_state`, `host_owned_save`, `project_export`, `live_reload`,
+  `plugin_dependencies`.
 
 These are two different fields with different meanings — *not* two dialects. A guide
 or example that places `host_capabilities` at the top level, or treats top-level
@@ -270,7 +271,7 @@ Legend: **R** = required, **O** = optional. "Strict→null" means a violation ma
 | `version` | R | string | `""` | Semver by convention; only non-empty is checked. The marketplace tarball filename uses this version. |
 | `description` | R (marketplace) | string | — | Store listing a first-time user reads before installing: what the plugin does, what it can do, and what it needs (sign-in, providers, network, platforms). At least 120 characters. Not read by the host; `scripts/regen_registry.py --check` enforces it and copies it into `registry.json`. |
 | `price` | R (marketplace) | object | — | `{"amount_minor": 0, "currency": "USD"}`: integer minor units, never a float. Free is the only accepted value; the marketplace takes no payments. Enforced and carried like `description`. |
-| `host_api_version` | O | string | `"1"` | Coerced via `str()` (int `1` → `"1"`). **Unenforced** today — advisory metadata. |
+| `host_api_version` | O | string | `"1"` | Exact compatibility check at install/start: this host requires `"2"`. Old saved records can load, but an incompatible plugin refuses with an update/reinstall message. |
 | `backend` | O* | object | `{}` | Launch config. Its children make it effectively required. |
 | `backend.transport` | O | string | `"stdio"` | **Must equal `"stdio"`** or validation fails. Only stdio MCP is supported. |
 | `backend.entrypoint` | R | string | `""` | Launch command (`./bin`, `python3`, `node`). `./`-relative resolved against install dir. |
@@ -311,9 +312,10 @@ Legend: **R** = required, **O** = optional. "Strict→null" means a violation ma
 | `editor_items[].name` | O | string | — | Menu label (e.g. "New CAD Document"). |
 | `editor_items[].panel` | O | string | — | Must reference a declared `ui.panels` name if non-empty. |
 | `editor_items[].default_filename` | O | string | `"untitled"` | e.g. `untitled.mcad`. |
-| `capabilities` | O | string[] | `[]` | **Top-level opt-in contract list.** `project_state`, `host_owned_save`, `project_export`, `live_reload` (unknown → strict→null). See §12 and live reload below. |
+| `capabilities` | O | string[] | `[]` | **Top-level opt-in contract list.** `project_state`, `host_owned_save`, `project_export`, `live_reload`, `plugin_dependencies` (unknown → strict→null). See §12 and live reload below. |
 | `project_file` | O | object | — | `{serialize_channel, deserialize_channel}` — both must be non-empty AND in `ui.ipc_messages`. Required by `project_state`. |
 | `project_export` | O | object | — | `{collect_channel, apply_channel}` — same rules. Required by `project_export`. |
+| `requires_plugins` | O | object[] | `[]` | Nonempty declarations require top-level `plugin_dependencies`. Each entry has `id`, strict SemVer `min_version`, and an `actions` array of canonical `minerva_<id>_*` provider tool names. Only required providers may be dependencies; self, duplicate, malformed and cyclic declarations refuse. Explicit null refuses. |
 | `permissions` | O | object | `{}` | `{host_capabilities[], network{}, filesystem{}}`. Unknown keys ignored. |
 | `permissions.host_capabilities` | O | string[] | `[]` | **The capability grant list.** See §4 + §13. |
 | `permissions.network.mode` | O | string | `"none"` | `none`/`localhost`/`unrestricted` documented; **value not validated and not enforced** (see §13). |
@@ -676,6 +678,23 @@ Claims are reconciled in place on installed-DB changes. After a required provide
 
 For anonymous creation, `_on_panel_loaded(ctx)` receives `ctx.document_action == "create"`. During a file load hook, panels extending `MinervaPluginPanel` can call `get_document_action()` to distinguish `open` from `import`; it returns an empty string outside that hook. Action context is host metadata and does not modify the opaque document Dictionary. Reopening an already open file returns its existing editor without delivering another load/import; this API does not select the tab.
 
+### Required providers and readiness
+
+For example, a consumer can declare:
+
+```json
+"capabilities": ["plugin_dependencies"],
+"requires_plugins": [{"id": "voice", "min_version": "1.0.0", "actions": ["minerva_voice_speak"]}]
+```
+
+`actions` names tools owned by the provider, not consumer features. The host checks the provider's combined backend and panel catalog; panel tools need not have an open panel. Autostart orders providers before consumers with a stable ID tie-break. `get_plugin_status().ready` becomes true only after discovery and required-tool verification, and clears on stop/crash. `running` alone does not establish readiness. Missing versions/actions appear in the consumer's selectable status and log. An attached provider is checked against its live registered version.
+
+A dependent's calls to its declared provider actions, and its open/import/create requests for that provider's formats, wait for ready and then dispatch once. Its other actions and unrelated callers remain usable. A missing declared action or incompatible version refuses for that caller. Waiting ends on stop, crash, discovery failure, cancellation or the bounded deadline (at most 30 seconds); a mutation already sent is never retried. A discovery failure keeps the process running but unready and reports the cause with a restart instruction.
+
+GUI New/Item, file menu, drop and MCP open/import/create use asynchronous admission. Host-side `open_file_at_path`, `create_plugin_editor` and `PluginEditorHandoff.handoff` remain synchronous Dictionary APIs: they immediately return `provider_not_ready: <id>` when running but unready. Use `open_file_when_ready` or `create_plugin_editor_when_ready` when awaiting readiness. Project restore uses the same event-driven owner with its existing five-second budget. Pending requests are transient and are not replayed across restart.
+
+Hosts without this contract reject the unknown `plugin_dependencies` capability. Publish the supporting host before publishing a dependent plugin.
+
 ### 7.1 Panel lifecycle hooks (full list)
 
 Unless an opt-in contract below requires it, every hook is **optional** and probed with `has_method` on your panel's scene root
@@ -752,7 +771,7 @@ render-for-llm hooks):
   "file_path":         String,   # bound file, or "" when unbacked
   "associated_object": Variant,  # the editor's bound object (a String path when file-backed)
   "editor":            Object,   # the host Editor wrapper
-  "host_api_version":  "1",
+  "host_api_version":  "2",
 }
 ```
 
@@ -1373,7 +1392,7 @@ GitHub redirects) → `tar -xzf` → verify `SHA256SUMS` → read the **tarball-
   "id": "hello_world",
   "name": "Hello World",
   "version": "0.1.0",
-  "host_api_version": "1",
+  "host_api_version": "2",
   "backend": { "transport": "stdio", "entrypoint": "./hello-world", "args": [] },
   "permissions": { "host_capabilities": [], "network": { "mode": "none" },
                    "filesystem": { "mode": "none", "paths": [] } }
