@@ -6,7 +6,6 @@ const SpreadsheetDataScript := preload("../domain/SpreadsheetData.gd")
 const SpreadsheetChartScript := preload("../domain/SpreadsheetChart.gd")
 const SpreadsheetFileHandlerScript := preload("../domain/SpreadsheetFileHandler.gd")
 const SpreadsheetCellScript := preload("../domain/SpreadsheetCell.gd")
-const NoteScript := preload("res://Scripts/UI/Controls/Note.gd")
 
 
 func get_tool_names() -> Array[String]:
@@ -256,84 +255,15 @@ func _export_kv_pairs(data: SpreadsheetDataScript) -> Dictionary:
 
 
 ## Call Nudge MCP server to set a hint
-func _call_nudge_set_hint(component: String, key: String, value: Variant) -> Dictionary:
-	# Try to find the Nudge MCP server connection
-	if not server.mcp_manager:
-		return {"error": "MCP manager not available"}
-
-	# Check if Nudge server is connected
-	if not server.mcp_manager.is_server_connected("nudge"):
-		return {"error": "Nudge MCP server not connected"}
-
-	# Call the nudge_set_hint tool
-	var result: Dictionary = await server.mcp_manager.execute_tool("nudge_set_hint", {
-		"component": component,
-		"key": key,
-		"value": value
-	})
-
-	return result
+func _call_nudge_set_hint(_component: String, _key: String, _value: Variant) -> Dictionary:
+	return {"error": "Nudge is unavailable in this staging build"}
 
 #endregion
 
-
 #region Tool Implementations
 
-func _create_spreadsheet_editor(args: Dictionary) -> Dictionary:
-	var name_: String = args.get("name", "Spreadsheet")
-	var csv_content: String = args.get("csv_content", "")
-	var file_path: String = args.get("file_path", "")
-
-	var editor_pane = SingletonObject.editor_pane
-	if not editor_pane:
-		return MCPToolUtils.error("Editor pane not available")
-
-	# Before creating, check if resource with same name exists
-	# If it does, return it with already_existed: true
-	if not name_.is_empty():
-		var existing_editor = MCPToolUtils.find_editor_by_name(name_)
-		if existing_editor:
-			return {"success": true, "already_existed": true, "editor_name": existing_editor.tab_title}
-
-	# Check if file exists when file_path is provided
-	if not file_path.is_empty() and not FileAccess.file_exists(file_path):
-		return MCPToolUtils.error("File not found: %s" % file_path)
-
-	# Create the spreadsheet editor
-	var EditorGDScript = load("res://Scripts/UI/Controls/Editor.gd")
-	var file_arg: Variant = null
-	if not file_path.is_empty():
-		file_arg = file_path
-	var editor = editor_pane.add(EditorGDScript.Type.SPREADSHEET, file_arg, name_, null)
-
-	# Wait for the spreadsheet editor to be ready
-	if not editor.spreadsheet_editor:
-		await Engine.get_main_loop().process_frame
-
-	# Set CSV content if provided (and no file was loaded)
-	if not csv_content.is_empty() and file_path.is_empty() and editor.spreadsheet_editor:
-		editor.spreadsheet_editor.set_content(csv_content)
-
-	var result := {
-		"success": true,
-		"editor_name": editor.tab_title,
-		"message": "Spreadsheet editor created. Use this editor_name for subsequent operations."
-	}
-
-	# W9: an import that yields no data is a SILENT failure — surface it. The bug:
-	# an empty/missing-content import returned plain success on a blank sheet, so
-	# the agent proceeded as if data were loaded and only discovered the gap turns
-	# later (burning its tool-call budget). When a file/CSV import was attempted,
-	# report rows_imported and warn (does NOT block success) if it came up empty.
-	var attempted_import: bool = (not csv_content.is_empty()) or (not file_path.is_empty())
-	if attempted_import and editor.spreadsheet_editor and editor.spreadsheet_editor.spreadsheet_data:
-		var used: Rect2i = editor.spreadsheet_editor.spreadsheet_data.get_used_range()
-		var used_rows: int = max(0, used.size.y)
-		result["rows_imported"] = used_rows
-		if used_rows == 0:
-			result["warning"] = "Import produced 0 rows — the file/CSV had no usable data. Verify the source before continuing; do NOT proceed as if data were loaded."
-
-	return result
+func _create_spreadsheet_editor(_args: Dictionary) -> Dictionary:
+	return {"success": false, "error_code": "sheets_staging", "error_message": "Spreadsheet creation uses the backend."}
 
 
 func _get_spreadsheet_data(args: Dictionary) -> Dictionary:
@@ -1189,48 +1119,8 @@ func _refresh_charts(args: Dictionary) -> Dictionary:
 	}
 
 
-func _link_spreadsheet_to_note(args: Dictionary) -> Dictionary:
-	var editor_name: String = args.get("editor_name", "")
-	var note_title: String = args.get("note_title", "")
-	var thread_name: String = args.get("thread_name", "Spreadsheets")
-
-	if editor_name.is_empty():
-		return MCPToolUtils.error("editor_name is required")
-
-	var editor = MCPToolUtils.find_spreadsheet(editor_name)
-	if not editor:
-		return MCPToolUtils.error("Spreadsheet editor not found: %s" % editor_name)
-
-	if not editor.spreadsheet_editor:
-		return MCPToolUtils.error("Spreadsheet editor not initialized")
-
-	# Use spreadsheet name as note title if not provided
-	if note_title.is_empty():
-		note_title = editor_name
-
-	# Get markdown content from spreadsheet
-	var data = editor.spreadsheet_editor.spreadsheet_data
-	var markdown_content: String = data.to_markdown()
-
-	# Create the linked note
-	var note = NoteScript.create_spreadsheet_note(note_title, editor_name, markdown_content)
-
-	# Find or create the notes thread
-	var notes_container = SingletonObject.notes_container
-	if not notes_container:
-		return MCPToolUtils.error("Notes container not available")
-
-	var thread_vbox = notes_container.find_or_create_tab(thread_name)
-	thread_vbox.add_note(note)
-
-	return {
-		"success": true,
-		"note_uuid": note.uuid,
-		"note_title": note_title,
-		"thread_name": thread_name,
-		"linked_spreadsheet": editor_name,
-		"message": "Created linked note '%s' in thread '%s'. Edit button opens spreadsheet." % [note_title, thread_name]
-	}
+func _link_spreadsheet_to_note(_args: Dictionary) -> Dictionary:
+	return {"success": false, "error_code": "sheets_staging", "error_message": "Snapshot note creation is not available in this staging build."}
 
 
 func _export_to_nudge(args: Dictionary) -> Dictionary:
