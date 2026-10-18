@@ -297,6 +297,7 @@ Legend: **R** = required, **O** = optional. "Strict→null" means a violation ma
 | `ui.panels[].file_extensions` | O | string[] | `[]` | Each lowercased, **must start with `.`**. Maps an extension → this panel. |
 | `ui.panels[].file_actions` | O | string[] | `["open", "create"]` | Native panels: `open`, `import`, `create` only. Import is explicit opt-in; empty lists and unknown verbs refuse. |
 | `ui.panels[].ipc_channels` | O | string[] | `[]` | Per-panel subset of `ui.ipc_messages`. Every entry MUST be in `ui.ipc_messages`. |
+| `ui.panels[].native_save_extensions` | O | string[] | panel `file_extensions` | Nonempty subset of this native panel’s claimed extensions. Save As offers only these formats. |
 | `ui.panels[].save_mode` | O | string | `"host_owned"` | `host_owned` \| `plugin_owned` \| `none`. **Do not use `plugin_owned`** (unimplemented — see §7/§15). |
 | `ui.panels[].chrome.suppress` | O | string[] | `[]` | Subset of `save_all` \| `save` \| `create_note` \| `inject_toggle`. Hides editor-tab chrome buttons. |
 | `ui.panels[].fullscreen_capable` | O | bool | `false` | Advisory; no enforcement found. |
@@ -669,6 +670,8 @@ dispatches it just like the HTML path). Other declared channels route to your
 backend's tools.
 
 ### File ownership and document actions
+
+A `godot_scene` panel that imports lossy formats should declare `native_save_extensions` as a nonempty subset of its own `file_extensions` (for example `[".minsheet"]`). Saving a file in another claimed format opens Save As; cancellation or write failure preserves its original file and dirty state. Omit the field to retain existing save-in-place behavior. Host-owned JSON and `_bytes` payloads are written through a temporary file and atomically replaced; canonical document buffers retain their existing save lane.
 
 Native `file_extensions` and `editor_items` use one host handoff. File opening uses `minerva_open_file({"path": "...", "action": "open"})`; `action: "import"` requests an explicitly declared import. Anonymous creation uses `minerva_create_plugin_editor` with the declared editor item. Existing manifests default to open/create.
 
