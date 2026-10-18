@@ -21,6 +21,7 @@ type request struct {
 	Params  json.RawMessage `json:"params"`
 }
 
+// GO-4 exception: inert staging stdio loop; process lifetime owned by host, exits at EOF; S5 adds context with real orchestration (c4745).
 func serve(input io.Reader, output io.Writer) error {
 	var manifest struct {
 		Version string           `json:"version"`
@@ -38,6 +39,14 @@ func serve(input io.Reader, output io.Writer) error {
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 4096), 16<<20)
 	encoder := json.NewEncoder(output)
+	// The host persists the real model via __panel_state. Sheets has no
+	// backend-owned document state or sidecar files to serialize or export.
+	projectReplies := map[string]string{
+		"sheets.serialize":      `{"tab_state":{},"sidecar_paths":[]}`,
+		"sheets.deserialize":    `{"ok":true}`,
+		"sheets.collect_export": `{"files":[]}`,
+		"sheets.apply_export":   `{"ok":true}`,
+	}
 	for scanner.Scan() {
 		var message request
 		if err := json.Unmarshal(scanner.Bytes(), &message); err != nil {
@@ -63,6 +72,8 @@ func serve(input io.Reader, output io.Writer) error {
 			}
 			if err := json.Unmarshal(message.Params, &call); err != nil {
 				reply["error"] = map[string]any{"code": -32602, "message": "Invalid tool arguments"}
+			} else if body, ok := projectReplies[call.Name]; ok {
+				reply["result"] = map[string]any{"content": []map[string]any{{"type": "text", "text": body}}}
 			} else if call.Name != "minerva_sheets_create_editor" {
 				reply["error"] = map[string]any{"code": -32602, "message": "Unknown tool"}
 			} else {

@@ -12,7 +12,6 @@ const SpreadsheetFileHandlerScript := preload("SpreadsheetFileHandler.gd")
 const SpreadsheetChartScript := preload("SpreadsheetChart.gd")
 const ChartRendererScript := preload("ChartRenderer.gd")
 const ChartCanvasScript := preload("ChartCanvas.gd")
-const NoteScript := preload("res://Scripts/UI/Controls/Note.gd")
 const AutoFilterUIScript := preload("SpreadsheetAutoFilterUI.gd")
 const AutoFilterActionsScript := preload("SpreadsheetAutoFilterActions.gd")
 const RowGeometry := preload("SpreadsheetRowGeometry.gd")
@@ -146,24 +145,13 @@ func _recalculate_all() -> void:
 		_update_selection_display()
 
 
-## Resolve a sheet name to its SpreadsheetData for cross-sheet references
+## The hosting panel supplies plugin-local cross-sheet lookup.
+var sheet_resolver: Callable
+
 func _resolve_sheet(sheet_name: String) -> RefCounted:
-	if not SingletonObject.editor_container:
-		return null
-
-	var editor_pane = SingletonObject.editor_container.editor_pane
-	if not editor_pane:
-		return null
-
-	# Load the Editor script to check type
-	#var EditorScript = load("res://Scripts/UI/Controls/Editor.gd")
-
-	# Search through open editors for a matching spreadsheet
-	for editor in editor_pane.get_open_editors():
-		if editor.tab_title == sheet_name and editor.type == Editor.Type.SPREADSHEET:
-			if editor.spreadsheet_editor and editor.spreadsheet_editor.spreadsheet_data:
-				return editor.spreadsheet_editor.spreadsheet_data
-
+	if sheet_resolver.is_valid():
+		var data: RefCounted = sheet_resolver.call(sheet_name)
+		return data
 	return null
 
 
@@ -2328,32 +2316,6 @@ func deserialize(data: Dictionary) -> void:
 		chart_panel.visible = true
 
 	_update_layout()
-
-
-## Sync linked notes with current spreadsheet data
-## Call this when the spreadsheet is saved or closed
-func sync_linked_notes(editor_name: String) -> void:
-	var notes_container = SingletonObject.notes_container
-	if not notes_container:
-		return
-
-	var markdown_content: String = spreadsheet_data.to_markdown()
-
-	# Iterate through all note threads
-	for tab_idx in range(notes_container.Tabs.get_tab_count()):
-		var thread = notes_container.Tabs.get_tab_control(tab_idx)
-		if not thread:
-			continue
-
-		# Get notes in this thread
-		for child in thread.get_children():
-			if child is NoteScript and child.linked_spreadsheet == editor_name:
-				# Update the note's content
-				var controls = child.get_controls_container()
-				if controls and controls.has_method("set_content"):
-					controls.set_content(markdown_content)
-				elif controls and "content" in controls:
-					controls.content = markdown_content
 
 
 ## Raw PNG loading works outside the host's imported resource database.

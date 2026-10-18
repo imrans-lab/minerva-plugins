@@ -64,14 +64,53 @@
         "kind": "godot_scene",
         "entry_scene": "ui/SheetsPanel.tscn",
         "scripts": [
-          "ui/SheetsPanel.gd"
+          "ui/SheetsPanel.gd",
+          "ui/sheet_registry.gd",
+          "ui/domain/CellsCanvas.gd",
+          "ui/domain/ChartCanvas.gd",
+          "ui/domain/ChartRenderer.gd",
+          "ui/domain/ColumnHeaders.gd",
+          "ui/domain/ExcelHandler.gd",
+          "ui/domain/FormulaEngine.gd",
+          "ui/domain/RowHeaders.gd",
+          "ui/domain/SpreadsheetAutoFilter.gd",
+          "ui/domain/SpreadsheetAutoFilterActions.gd",
+          "ui/domain/SpreadsheetAutoFilterPopup.gd",
+          "ui/domain/SpreadsheetAutoFilterUI.gd",
+          "ui/domain/SpreadsheetCell.gd",
+          "ui/domain/SpreadsheetChart.gd",
+          "ui/domain/SpreadsheetData.gd",
+          "ui/domain/SpreadsheetEditor.gd",
+          "ui/domain/SpreadsheetFileHandler.gd",
+          "ui/domain/SpreadsheetHistory.gd",
+          "ui/domain/SpreadsheetRowGeometry.gd"
         ],
-        "file_extensions": [],
-        "save_mode": "none",
-        "ipc_channels": []
+        "file_extensions": [
+          ".minsheet",
+          ".csv",
+          ".tsv",
+          ".xlsx"
+        ],
+        "save_mode": "host_owned",
+        "ipc_channels": [
+          "sheets.serialize",
+          "sheets.deserialize",
+          "sheets.collect_export",
+          "sheets.apply_export"
+        ],
+        "file_actions": [
+          "open",
+          "import",
+          "create"
+        ]
       }
     ],
-    "ipc_messages": []
+    "ipc_messages": [
+      "sheets.serialize",
+      "sheets.deserialize",
+      "sheets.collect_export",
+      "sheets.apply_export"
+    ]
   },
   "editor_items": [
     {
@@ -81,7 +120,11 @@
       "default_filename": "untitled.minsheet"
     }
   ],
-  "capabilities": [],
+  "capabilities": [
+    "project_state",
+    "host_owned_save",
+    "project_export"
+  ],
   "permissions": {
     "host_capabilities": [],
     "filesystem": {
@@ -97,5 +140,13 @@
   "price": {
     "amount_minor": 0,
     "currency": "USD"
+  },
+  "project_file": {
+    "serialize_channel": "sheets.serialize",
+    "deserialize_channel": "sheets.deserialize"
+  },
+  "project_export": {
+    "collect_channel": "sheets.collect_export",
+    "apply_channel": "sheets.apply_export"
   }
 }

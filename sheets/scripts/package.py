@@ -11,6 +11,21 @@ import tarfile
 from pathlib import Path
 
 
+def interface_files(root: Path) -> list[Path]:
+    """One inventory for archives and the public-API dependency census."""
+    files = []
+    for directory in ("ui", "icons"):
+        for path in sorted((root / directory).rglob("*")):
+            # Tool modules stay inert until S4 adapts their host interfaces.
+            if path.is_relative_to(root / "ui/tools"):
+                continue
+            if path.is_file() and path.suffix in (".gd", ".tscn", ".png"):
+                if path.is_symlink():
+                    raise ValueError(f"Symlink refused: {path}")
+                files.append(path)
+    return files
+
+
 def package(root: Path, binary: Path, target: str, output: Path) -> Path:
     """Build one deterministic root-layout archive without deleting staging files."""
     manifest = json.loads((root / "manifest.json").read_text())
@@ -23,15 +38,8 @@ def package(root: Path, binary: Path, target: str, output: Path) -> Path:
         "README.md": (root / "README.md").read_bytes(),
         "LICENSE.md": (root.parent / "LICENSE.md").read_bytes(),
     }
-    for directory in ("ui", "icons"):
-        for path in sorted((root / directory).rglob("*")):
-            # S2 copies stay inert until S3a adapts their class names and paths.
-            if path.is_relative_to(root / "ui/domain") or path.is_relative_to(root / "ui/tools"):
-                continue
-            if path.is_file() and path.suffix in (".gd", ".tscn", ".png"):
-                if path.is_symlink():
-                    raise ValueError(f"Symlink refused: {path}")
-                files[path.relative_to(root).as_posix()] = path.read_bytes()
+    for path in interface_files(root):
+        files[path.relative_to(root).as_posix()] = path.read_bytes()
     files["SHA256SUMS"] = "".join(
         f"{hashlib.sha256(data).hexdigest()}  {name}\n"
         for name, data in sorted(files.items())
