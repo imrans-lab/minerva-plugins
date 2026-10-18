@@ -101,7 +101,7 @@ func _run() -> void:
 		for forbidden: String in ["res://Scripts/UI/Controls/Note.gd", "uid://private-probe"]:
 			var planted := domain_source + '\nconst ForbiddenProbe := preload("' + forbidden + '")\n'
 			check("private resource injection is refused: " + forbidden, guard.normalize_resource("ui/domain/SpreadsheetEditor.gd", planted).get("ok") == false)
-		await _hosting_contract(host, pane, manager)
+		await _hosting_contract(host, pane, manager, source)
 		var sessions: RefCounted = load(source.path_join("tests/helpers/session_contract.gd")).new()
 		await sessions.call("run", check, pane, manager, _project_container)
 		var legacy_notes: RefCounted = load(source.path_join("tests/helpers/note_legacy_contract.gd")).new()
@@ -117,8 +117,8 @@ func _run() -> void:
 				check("historical builtin oracle capture", false)
 		var contract: RefCounted = load(source.path_join("tests/helpers/tool_contract.gd")).new()
 		await contract.call("run", check, pane, registry, broker, source, capabilities, policy)
-		var aliases: RefCounted = load(source.path_join("tests/helpers/alias_contract.gd")).new()
-		await aliases.call("run", check, pane, registry, source)
+		var routes: RefCounted = load(source.path_join("tests/helpers/routing_contract.gd")).new()
+		await routes.call("run", check, pane, registry, source)
 		var creation: RefCounted = load(source.path_join("tests/helpers/creation_contract.gd")).new()
 		await creation.call("run", check, pane, manager, registry, broker, policy, source)
 
@@ -187,7 +187,7 @@ func _project_reply(tool_name: String, result: Dictionary) -> void:
 func _json_value(value: Variant) -> Variant:
 	return JSON.parse_string(JSON.stringify(value))
 
-func _hosting_contract(host: Node, pane: EditorPane, manager: PluginManager) -> void:
+func _hosting_contract(host: Node, pane: EditorPane, manager: PluginManager, plugin_source: String) -> void:
 	var fixtures := "res://test/fixtures/spreadsheet_contract/"
 	for extension: String in ["minsheet", "csv", "tsv", "xlsx"]:
 		var filename := "baseline.minsheet" if extension == "minsheet" else "sample." + extension
@@ -203,6 +203,26 @@ func _hosting_contract(host: Node, pane: EditorPane, manager: PluginManager) -> 
 		check(extension + " complete plugin model matches the frozen B0 oracle",
 			_json_value(panel.call("_on_panel_save_request")) == JSON.parse_string(FileAccess.get_file_as_string(fixtures + oracle)))
 		check(extension + " import leaves original bytes intact", FileAccess.get_file_as_bytes(path) == before)
+		var model: Dictionary = panel.call("_on_panel_save_request")
+		var data_script: Script = load(plugin_source.path_join("ui/domain/SpreadsheetData.gd"))
+		var reloaded: RefCounted = data_script.new()
+		reloaded.call("load_from_dict", _json_value(model))
+		var values: Script = load(plugin_source.path_join("tests/helpers/value_domain.gd"))
+		check(extension + " complete frozen model survives JSON/native serialization", values.equal_json(reloaded.call("to_dict"), model))
+		if extension == "minsheet":
+			var data: RefCounted = panel.call("get_sheet_data")
+			data.call("recalculate_all")
+			check("native frozen formula evaluates independent2plus3", data.call("get_cell_display", 3, 1) == "5")
+			check("native frozen filter retains hidden cell content", not data.get("autofilter").is_row_visible(2)
+				and data.call("get_cell_display", 2, 0) == "hide")
+			var files: Script = load(plugin_source.path_join("ui/domain/SpreadsheetFileHandler.gd"))
+			var exported_path := ProjectSettings.globalize_path("user://cutover-frozen-native.minsheet")
+			check("native frozen model exports through plugin format owner", files.export_file(exported_path, data) == OK)
+			var imported: RefCounted = data_script.new()
+			check("native frozen export reimports with its complete model", files.import_file(exported_path, imported) == OK
+				and values.equal_json(imported.call("to_dict"), model))
+			DirAccess.remove_absolute(exported_path)
+
 	var import_editor: Editor = pane.Tabs.get_current_tab_control()
 	var import_panel: Node = import_editor.plugin_scene_root
 	var fallback: Editor = pane.add_plugin_scene_editor("sheets", "sheets_panel",
