@@ -501,6 +501,8 @@ func delete_row(row: int) -> void:
 	if row < row_meta.size():
 		row_meta.remove_at(row)
 	row_count = maxi(1, row_count - 1)
+	frozen_rows = mini(frozen_rows, row_count)
+	header_row_count = mini(header_row_count, row_count)
 	autofilter.on_row_deleted(row)
 
 	structure_changed.emit()
@@ -539,6 +541,7 @@ func delete_column(col: int) -> void:
 	if col < column_meta.size():
 		column_meta.remove_at(col)
 	column_count = maxi(1, column_count - 1)
+	frozen_cols = mini(frozen_cols, column_count)
 	autofilter.on_column_deleted(col)
 
 	structure_changed.emit()

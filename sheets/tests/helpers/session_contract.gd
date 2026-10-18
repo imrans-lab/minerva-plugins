@@ -40,6 +40,8 @@ func run(check: Callable, pane: EditorPane, manager: PluginManager, container: N
 	var source: String = ProjectSettings.globalize_path("res://../../minerva-plugins/sheets")
 	var census: RefCounted = load(source.path_join("tests/helpers/snapshot_census.gd")).new()
 	census.run(check, pane, source)
+	var values: RefCounted = load(source.path_join("tests/helpers/value_domain.gd")).new()
+	values.run(check)
 	var compatibility: Script = load("res://Scripts/Services/Plugins/SpreadsheetSession.gd")
 	var fixture: Dictionary = JSON.parse_string(FileAccess.get_file_as_string("res://test/fixtures/spreadsheet_contract/session.minproj"))
 	var legacy: Dictionary = fixture.Editors[0].duplicate(true)

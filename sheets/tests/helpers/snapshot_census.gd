@@ -69,13 +69,9 @@ func run(check: Callable, pane: EditorPane, source: String) -> void:
 	data.call("recalculate_all")
 	var actual: Dictionary = PluginScenePanelHost.invoke_save(panel, {})
 	check.call("actual all-feature serializer output validates", Snapshot.validate(actual))
-	var coverage: Dictionary = {"model": actual, "column": actual.columns[0], "row": actual.rows[0],
-		"cell": _union(actual.cells.values()), "chart": actual.charts[0], "series": actual.charts[0].series[0],
-		"filter": actual.autofilter, "criterion": _union(actual.autofilter.columns)}
-	for name: String in Snapshot.FIELDS:
-		var observed: Dictionary = coverage[name]
-		var accepted: Dictionary = Snapshot.FIELDS[name]
-		check.call("actual emitted key set equals accepted fields " + name, _keys_match(observed, accepted))
+	check.call("all-feature snapshot restores through the public hook", PluginScenePanelHost.invoke_restore_from_note(panel, actual))
+	var reopened: Dictionary = PluginScenePanelHost.invoke_save(panel, {})
+	check.call("every emitted feature survives real panel save/reload", JSON.parse_string(JSON.stringify(actual)) == JSON.parse_string(JSON.stringify(reopened)))
 	editor.free()
 	var files: PackedStringArray = DirAccess.get_files_at(FIXTURE)
 	files.sort()
