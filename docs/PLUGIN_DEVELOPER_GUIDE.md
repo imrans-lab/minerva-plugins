@@ -674,7 +674,7 @@ Required plugins take precedence over optional providers. Equal-rank conflicts r
 
 Claims are reconciled in place on installed-DB changes. After a required provider is removed, an optional provider can regain the claim at its next registration during reconciliation. Unclaimed `.minsheet`, `.csv`, `.tsv`, and `.xlsx` retain the builtin spreadsheet fallback until the spreadsheet extraction.
 
-For anonymous creation, `_on_panel_loaded(ctx)` receives `ctx.document_action == "create"`. During a file load hook, panels extending `MinervaPluginPanel` can call `get_document_action()` to distinguish `open` from `import`; it returns an empty string outside that hook. Action context is host metadata and does not modify the opaque document Dictionary. Reopening an already open file focuses its existing editor without delivering another load/import.
+For anonymous creation, `_on_panel_loaded(ctx)` receives `ctx.document_action == "create"`. During a file load hook, panels extending `MinervaPluginPanel` can call `get_document_action()` to distinguish `open` from `import`; it returns an empty string outside that hook. Action context is host metadata and does not modify the opaque document Dictionary. Reopening an already open file returns its existing editor without delivering another load/import; this API does not select the tab.
 
 ### 7.1 Panel lifecycle hooks (full list)
 
