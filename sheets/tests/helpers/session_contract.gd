@@ -12,7 +12,17 @@ func _open(entries: Array, pane: EditorPane) -> Array:
 	var container_script = load("res://Scripts/UI/Controls/vboxEditor.gd")
 	var views: Array = await container_script.deserialize(_json(entries))
 	for view: Editor in views:
+		var entered: Array[Node] = []
+		view.set_meta("session_chart_entries", entered)
+		var sheet: Node = view.plugin_scene_root.get_node_or_null("Sheet")
+		if sheet != null:
+			sheet.ready.connect(func() -> void:
+				var charts: Control = sheet.get("chart_container")
+				charts.child_entered_tree.connect(func(child: Node) -> void: entered.append(child))
+			, CONNECT_ONE_SHOT)
 		pane.Tabs.add_child(view)
+		pane.Tabs.set_tab_title(pane.Tabs.get_tab_idx_from_control(view), view.tab_title)
+	await pane.Tabs.get_tree().process_frame
 	await pane.Tabs.get_tree().process_frame
 	return views
 
@@ -22,19 +32,25 @@ func run(check: Callable, pane: EditorPane, manager: PluginManager, container: N
 	var legacy: Dictionary = fixture.Editors[0].duplicate(true)
 	legacy.file = null # Unsaved, fileless is the load-bearing migration case.
 	legacy.name = "Duplicate session title"
+	legacy.content.cells["0,2"] = {"type": 4, "formula": "=1<2", "value": true}
 	var second: Dictionary = legacy.duplicate(true)
 	second.content.cells["0,0"].value = "Second independent model"
 	var entries: Array = [legacy, second]
 	_close(pane)
+	manager.stop_plugin("sheets")
+	check.call("legacy conversion begins with a stopped real provider", not manager.get_plugin_status("sheets").get("running", false))
 	for pass_index: int in 3:
 		var views: Array = await _open(entries, pane)
 		check.call("legacy migration restores two distinct panels pass%d" % pass_index, views.size() == 2
 			and views[0].plugin_panel_key != views[1].plugin_panel_key)
 		for index: int in views.size():
 			var view: Editor = views[index]
+			var entered: Array = view.get_meta("session_chart_entries")
+			check.call("one deserialize mounts each chart exactly once sheet%d pass%d" % [index, pass_index], entered.size() == legacy.content.charts.size())
 			check.call("duplicate title preserves full sheet%d pass%d" % [index, pass_index], view.tab_title == legacy.name
 				and view.pending_plugin_entry.is_empty()
 				and _json(PluginScenePanelHost.invoke_save(view.plugin_scene_root, {})) == [legacy.content, second.content][index])
+		check.call("production legacy/native restore has the real provider ready pass%d" % pass_index, manager.get_plugin_status("sheets").get("ready", false))
 		entries = _json(await container.call("serialize"))
 		check.call("saved migration uses Sheets envelope pass%d" % pass_index, entries.size() == 2 and entries[1].get("type") == Editor.Type.PLUGIN_SCENE)
 		_close(pane)
@@ -76,10 +92,15 @@ func run(check: Callable, pane: EditorPane, manager: PluginManager, container: N
 		and opaque[0].pending_plugin_entry == legacy and manager.get_live_panels("sheets").size() == 1
 		and _json(PluginScenePanelHost.invoke_save(opaque[1].plugin_scene_root, {})) == second.content)
 	_close(pane)
-	for invalid: Variant in [null, {"version": 99}, {"version": 1, "cells": ["malformed"]}, {"version": 1, "row_count": 2, "column_count": 2, "cells": {"0,0": {"formula": []}}}]:
+	for invalid: Variant in [null, {"version": 99}, {"version": 1, "cells": ["malformed"]}, {"version": 1, "row_count": 1, "column_count": 1, "cells": {"0,0": {"value": "KEEP"}}}, {"version": 1, "row_count": 1, "column_count": 1, "cells": {}, "autofilter": {"range": [0], "columns": []}}, {"version": 1, "row_count": 1, "column_count": 1, "cells": {}, "autofilter": {"range": [0, 0, 1], "columns": []}}, {"version": 1, "row_count": 2, "column_count": 2, "cells": {"0,0": {"formula": []}}}]:
 		var refused: Dictionary = native.duplicate(true)
 		refused.plugin_state.payload.__panel_state = invalid
 		var refused_views: Array = await _open([refused], pane)
+		var refusal: Control = refused_views[0].plugin_scene_root
+		var labels: Array[Node] = refusal.find_children("*", "RichTextLabel", true, false)
+		check.call("refusal is mounted selectable with Retry before Save", refusal.is_inside_tree() and refusal.is_visible_in_tree()
+			and labels.size() == 1 and labels[0].get("selection_enabled") == true
+			and refusal.find_children("*", "Button", true, false).size() == 1)
 		check.call("malformed/future snapshot remains opaque with no file write", _json(await container.call("serialize")) == [refused]
 			and not await refused_views[0].save_file_to_disc("user://refused-session.minsheet")
 			and not FileAccess.file_exists("user://refused-session.minsheet"))
@@ -108,10 +129,13 @@ func run(check: Callable, pane: EditorPane, manager: PluginManager, container: N
 		await pane.Tabs.get_tree().process_frame
 	check.call("close during startup leaves no remounted editor", pane.get_open_editors().is_empty()
 		and manager.get_live_panels("sheets").is_empty() and manager.get_plugin_status("sheets").get("ready", false))
-	# Close an unmounted editor before the deferred ready restore can execute.
+	# Close after mounting but before a refused ready restore swaps its surface.
 	var closing: Editor = Editor.create_plugin_scene("sheets", "sheets_panel")
 	closing.pending_plugin_entry = native.duplicate(true)
-	compatibility.restore(closing, native, manager)
+	var future: Dictionary = native.duplicate(true)
+	future.plugin_state.payload.__panel_state = {"version": 99}
+	compatibility.restore(closing, future, manager)
+	pane.Tabs.add_child(closing)
 	closing.free()
 	await pane.Tabs.get_tree().process_frame
 	check.call("close before deferred restore leaves no panel registration", manager.get_live_panels("sheets").is_empty())

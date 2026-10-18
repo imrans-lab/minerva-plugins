@@ -127,7 +127,7 @@ func handle_tool(tool_name: String, arguments: Dictionary) -> Dictionary:
 
 ## Session and note snapshots are opaque until the provider accepts the whole
 ## current format. Never partially load a malformed/future model.
-func _valid_snapshot(model: Dictionary) -> bool:
+static func _valid_snapshot(model: Dictionary) -> bool:
 	if model.get("version") != 1 or not model.get("cells") is Dictionary:
 		return false
 	for key: String in ["row_count", "column_count"]:
@@ -148,6 +148,30 @@ func _valid_snapshot(model: Dictionary) -> bool:
 	var cell_schema: Dictionary = {"type": 0, "formula": "", "bold": false, "italic": false, "alignment": 0,
 		"text_color": "", "bg_color": "", "date_format": "", "number_format": "", "wrap_text": false}
 	var cells: Dictionary = model.cells
+	if model.has("autofilter"):
+		var filter: Dictionary = model.autofilter
+		var region: Array = filter.get("range", [])
+		if region.size() != 4 or not filter.has("columns"):
+			return false
+		var x: float = region[0]
+		var y: float = region[1]
+		var width: float = region[2]
+		var height: float = region[3]
+		if x < 0 or y < 0 or width <= 0 or height <= 0:
+			return false
+		var seen_columns: Dictionary = {}
+		var criteria: Array = filter.get("columns", [])
+		for criterion: Dictionary in criteria:
+			if not criterion.has("col") or criterion.get("type") not in ["text", "values"]:
+				return false
+			if criterion.size() != 3 or seen_columns.has(criterion.col):
+				return false
+			seen_columns[criterion.col] = true
+			var column: float = criterion.col
+			if column < x or column >= x + width:
+				return false
+			if not criterion.has("text" if criterion.type == "text" else "values"):
+				return false
 	for key: String in cells:
 		var parts: PackedStringArray = key.split(",")
 		if parts.size() != 2 or not parts[0].is_valid_int() or not parts[1].is_valid_int():
@@ -160,8 +184,12 @@ func _valid_snapshot(model: Dictionary) -> bool:
 			return false
 		var record: Dictionary = cells[key]
 		var cell: Dictionary = record.duplicate()
+		if not cell.has("type") or not cell.has("value") or cell.type not in [1, 2, 3, 4]:
+			return false
+		if cell.type == 4 and (not cell.has("formula") or str(cell.formula).is_empty()):
+			return false
 		var value: Variant = cell.get("value")
-		if value != null and not (value is String or value is int or value is float):
+		if value != null and not (value is String or value is int or value is float or value is bool):
 			return false
 		cell.erase("value")
 		if not _snapshot_shape(cell, cell_schema):
