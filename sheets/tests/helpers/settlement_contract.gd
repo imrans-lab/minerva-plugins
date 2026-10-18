@@ -50,7 +50,7 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry, host: 
 	registry.plugin_policy.grant_capability("parent_fixture", "mcp.proxy:minerva_parent_fixture_parent")
 	for tool: Dictionary in registry.get_plugin_tools("parent_fixture"):
 		server.tool_budget_manager.activate_tool(tool.name, tool)
-	for mode: String in ["preflight", "raw", "nested", "private", "registry_schema", "external_schema", "rpc_error", "disconnect"]:
+	for mode: String in ["preflight", "raw", "nested", "private", "private_timeout", "registry_schema", "external_schema", "rpc_error", "disconnect"]:
 		var connection: MCPServerConnection = registry.plugin_manager.get_connection("parent_fixture")
 		var gate := AdmissionGate.new()
 		server.policy_engine = gate
@@ -79,8 +79,8 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry, host: 
 			_into(external.execute_tool.bind("parent", arguments, "", context), replies)
 		elif mode == "rpc_error":
 			_into(registry.capability_broker.dispatch.bind("parent_fixture", "mcp.proxy:minerva_parent_fixture_parent", arguments, context), replies)
-		elif mode == "private":
-			_into(connection.request_method.bind("private/write", arguments), replies)
+		elif mode in ["private", "private_timeout"]:
+			_into(connection.request_method.bind("private/write", arguments, 0.8 if mode == "private_timeout" else 120.0), replies)
 		else:
 			_into(connection.call_tool_with_context.bind("parent", arguments, context), replies)
 		var held: bool = await _wait(tree, func() -> bool: return gate.held)
@@ -95,6 +95,8 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry, host: 
 		if mode == "preflight":
 			var rejected: Dictionary = await connection.call_tool_with_context("hold", {"value": NAN}, context)
 			check.call("matrix STDIO preflight preserves the outgoing rejection", rejected.has("error") and context.is_stopped())
+		elif mode == "private_timeout":
+			pass
 		elif mode == "disconnect":
 			registry.plugin_manager.stop_plugin("parent_fixture")
 		else:
@@ -111,6 +113,8 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry, host: 
 			check.call("matrix %s retires the admitted child before returning failure" % mode, failed_context.is_stopped() and result.get("success") != true)
 			if mode == "disconnect":
 				check.call("matrix explicit disconnect retains its original specific error", str(result.get("error", "")).contains("disconnected") and result.get("error_code") != "cancelled")
+			elif mode == "private_timeout":
+				check.call("matrix private timeout retains its typed native deadline", result.get("error_code") == "deadline_exceeded")
 			elif mode.ends_with("schema"):
 				check.call("matrix %s retains its original schema rejection" % mode, str(result.get("error", "")).contains("outputSchema") and result.get("error_code") == "schema_mismatch")
 			else:
@@ -163,7 +167,7 @@ func _ipc_rows(check: Callable, pane: EditorPane, registry: PluginToolRegistry, 
 		var context := MCPExecutionContext.create("internal")
 		var replies: Array = []
 		_into(context.run.bind(ipc.request_capability.bind("mcp.proxy:minerva_sheets_update_data",
-			{"editor_name": target.tab_title, "cells": [{"cell": "B2", "value": "STALE IPC WRITE"}]}, context, 200 if mode == "timeout" else 5000)), replies)
+			{"editor_name": target.tab_title, "cells": [{"cell": "B2", "value": "PARENT CONTINUED" if mode in ["denied", "payload"] else "STALE IPC WRITE"}]}, context, 200 if mode == "timeout" else 5000)), replies)
 		check.call("matrix IPC %s holds actual capability admission against another live panel" % mode,
 			await _wait(tree, func() -> bool: return gate.held) and replies.is_empty() and caller.plugin_panel_key != target.plugin_panel_key)
 		var changed: Dictionary = await _edit(registry, target)
@@ -172,8 +176,16 @@ func _ipc_rows(check: Callable, pane: EditorPane, registry: PluginToolRegistry, 
 		if mode in ["denied", "payload"]:
 			var failure: Dictionary = await ipc.request_capability("host.not_declared" if mode == "denied" else "mcp.proxy:minerva_sheets_update_data",
 				{} if mode == "denied" else {"large": "x".repeat(PluginPayloadLimits.CONTROL_BYTES + 1)}, context)
-			check.call("matrix IPC %s retires before publishing a specific refusal" % mode, context.is_stopped() and failure.get("success") == false
+			check.call("matrix IPC %s returns a typed application refusal with a live parent" % mode, not context.is_stopped() and failure.get("success") == false
 				and failure.get("error_code") == ("capability_not_granted" if mode == "denied" else "payload_too_large"))
+			# The parent consumes the refusal and explicitly continues its requested write.
+			gate.released.emit()
+			await _wait(tree, func() -> bool: return gate.resumed and replies.size() == 1)
+			check.call("matrix IPC %s lets the parent consume its child refusal and continue" % mode,
+				not context.is_stopped() and replies.size() == 1 and replies[0].get("success") == true
+				and _model(target) != before and _model(witness) == witness_before)
+			caller.free()
+			continue
 		if mode == "close":
 			registry.scene_panel_broker.unregister_panel("sheets", caller.plugin_panel_key)
 		check.call("matrix IPC %s returns specific local failure with its lifetime stopped" % mode,
