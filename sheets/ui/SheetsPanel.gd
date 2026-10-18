@@ -95,14 +95,21 @@ func _on_panel_restore_from_note(payload: Dictionary) -> bool:
 	_snapshot_restored = true
 	return true
 
-func _create_snapshot_note(arguments: Dictionary) -> Dictionary:
+func _create_snapshot_note(arguments: Dictionary, context: Object = null) -> Dictionary:
 	_note_sequence += 1
 	var reply_id := "sheets-note:%d" % _note_sequence
 	var ipc: Node = get_node("_MinervaIPC")
-	request.emit("capability:host.notes.create_from_editor", {"editor_name": _panel_key,
+	var payload := {"editor_name": _panel_key,
 		"thread": arguments.get("thread_name", "Spreadsheets"),
-		"title": arguments.get("note_title", get_sheet_name())}, reply_id)
-	var response: Dictionary = await ipc.call("await_reply", reply_id)
+		"title": arguments.get("note_title", get_sheet_name())}
+	var response: Dictionary
+	if context != null:
+		response = await ipc.call("request_capability", "host.notes.create_from_editor", payload, context)
+	else:
+		request.emit("capability:host.notes.create_from_editor", payload, reply_id)
+		response = await ipc.call("await_reply", reply_id)
+	if context != null and context.call("is_stopped"):
+		return context.call("stopped_result")
 	if not _loaded or not is_inside_tree():
 		return {"success": false, "error_code": "panel_unavailable", "error_message": "Spreadsheet panel closed during note creation."}
 	if not response.get("success", false):
@@ -118,10 +125,16 @@ func _create_snapshot_note(arguments: Dictionary) -> Dictionary:
 	return result
 
 func handle_tool(tool_name: String, arguments: Dictionary) -> Dictionary:
+	return await handle_tool_with_context(tool_name, arguments, null)
+
+## The host supplies the native per-call lifetime; no private host import.
+func handle_tool_with_context(tool_name: String, arguments: Dictionary, context: Object) -> Dictionary:
+	if context != null and context.call("is_stopped"):
+		return context.call("stopped_result")
 	if not _loaded or not is_inside_tree():
 		return {"success": false, "error_code": "panel_unavailable", "error_message": "Spreadsheet panel is not available."}
 	if tool_name == "minerva_sheets_link_to_note":
-		return await _create_snapshot_note(arguments)
+		return await _create_snapshot_note(arguments, context)
 	if tool_name == "minerva_sheets_export_to_nudge":
 		status.text = "Nudge is unavailable through the plugin host. The spreadsheet has not changed."
 		status.show()
@@ -129,7 +142,7 @@ func handle_tool(tool_name: String, arguments: Dictionary) -> Dictionary:
 		return {"success": false, "error_code": "nudge_unavailable", "error_message": status.text}
 	if tool_name.begins_with("minerva_sheets_autofilter_"):
 		return _filters.handle(tool_name, arguments)
-	return await _tools.handle(tool_name, arguments)
+	return await _tools.handle(tool_name, arguments, context)
 
 func _restore_legacy_note(markdown: String) -> bool:
 	var prepared: Dictionary = _prepare_legacy_note(markdown)

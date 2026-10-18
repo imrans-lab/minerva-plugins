@@ -49,7 +49,9 @@ func get_tool_names() -> Array[String]:
 	]
 
 
-func handle(tool_name: String, arguments: Dictionary) -> Dictionary:
+func handle(tool_name: String, arguments: Dictionary, context: Object = null) -> Dictionary:
+	if context != null and context.call("is_stopped"):
+		return context.call("stopped_result")
 	match tool_name:
 		"minerva_sheets_create_editor":
 			return _create_spreadsheet_editor(arguments)
@@ -80,7 +82,7 @@ func handle(tool_name: String, arguments: Dictionary) -> Dictionary:
 		"minerva_sheets_add_chart":
 			return _create_chart(arguments)
 		"minerva_sheets_get_chart_image":
-			return await _get_chart_image(arguments)
+			return await _get_chart_image(arguments, context)
 		"minerva_sheets_list_charts":
 			return _list_charts(arguments)
 		"minerva_sheets_update_chart":
@@ -965,7 +967,7 @@ func _create_chart(args: Dictionary) -> Dictionary:
 	}
 
 
-func _get_chart_image(args: Dictionary) -> Dictionary:
+func _get_chart_image(args: Dictionary, context: Object = null) -> Dictionary:
 	var editor_name: String = args.get("editor_name", "")
 	var chart_index: int = ToolUtils.coerce_int(args.get("chart_index", 0), 0)
 	var width: int = ToolUtils.coerce_int(args.get("width", 800), 800)
@@ -998,6 +1000,8 @@ func _get_chart_image(args: Dictionary) -> Dictionary:
 
 	# Capture the chart as base64 PNG
 	var base64_png: String = await chart_canvas.capture_to_base64_png(width, height)
+	if context != null and context.call("is_stopped"):
+		return context.call("stopped_result")
 
 	if base64_png.is_empty():
 		return ToolUtils.error("Failed to capture chart image")

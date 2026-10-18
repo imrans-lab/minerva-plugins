@@ -80,8 +80,12 @@ func (s *rpcStream) write(ctx context.Context, message any) error {
 func (s *rpcStream) capability(ctx context.Context, capability string, args map[string]any) (map[string]any, error) {
 	s.sequence++
 	id := fmt.Sprintf("sheets-cap-%d", s.sequence)
+	params := map[string]any{"capability": capability, "args": args}
+	if len(s.activeID) != 0 && string(s.activeID) != "null" {
+		params["parent_request_id"] = s.activeID
+	}
 	if err := s.write(ctx, map[string]any{"jsonrpc": "2.0", "id": id, "method": "minerva/capability",
-		"params": map[string]any{"capability": capability, "args": args}}); err != nil {
+		"params": params}); err != nil {
 		return nil, err
 	}
 	for s.scan(ctx) {
