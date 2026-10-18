@@ -47,62 +47,6 @@ func get_tool_names() -> Array[String]:
 	]
 
 
-func register_tools() -> void:
-	var editor_name_prop := {"type": "string", "description": "The name/title of the spreadsheet editor tab"}
-
-	server._register_tool("minerva_spreadsheet_autofilter_enable",
-		"Turn on AutoFilter over a range whose first row is the header. Without a range, the sheet's used range is filtered. Filtering hides rows from view only; it never deletes or moves data. Returns the filter state (see minerva_spreadsheet_autofilter_get). Undoable with minerva_undo_spreadsheet.",
-		{
-			"type": "object",
-			"properties": {
-				"editor_name": editor_name_prop,
-				"range": {"type": "string", "description": "Range to filter, header row first (e.g. 'A1:D20'). Default: the used range."},
-			},
-			"required": ["editor_name"]
-		}
-	, "spreadsheet")
-
-	server._register_tool("minerva_spreadsheet_autofilter_set",
-		"Set one column's AutoFilter criterion, replacing any previous criterion on that column. Pass exactly one of: values (keep rows whose displayed text is one of these; \"\" keeps blank cells) or contains (keep rows whose displayed text contains this, case-insensitive). Criteria on different columns combine with AND. AutoFilter must be enabled first. Returns the filter state. Undoable with minerva_undo_spreadsheet.",
-		{
-			"type": "object",
-			"properties": {
-				"editor_name": editor_name_prop,
-				"column": {"type": "integer", "description": "Column number (1-based, A = 1) inside the filter range"},
-				"values": {"type": "array", "items": {"type": "string"}, "description": "Displayed values to keep; \"\" stands for blank"},
-				"contains": {"type": "string", "description": "Non-empty text to match, case-insensitive"},
-			},
-			"required": ["editor_name", "column"]
-		}
-	, "spreadsheet")
-
-	server._register_tool("minerva_spreadsheet_autofilter_get",
-		"Read a spreadsheet's AutoFilter state: criteria, filter_range, visible_rows (1-based sheet rows of the range's data rows, header excluded), visible_count, total_rows, and scope ('visible' when criteria hide rows from the list, 'all' when it covers every data row). With AutoFilter off, rows are the used range below its first row. Cell reads (minerva_get_spreadsheet_data) are unfiltered: they return every row, hidden ones included.",
-		{
-			"type": "object",
-			"properties": {
-				"editor_name": editor_name_prop,
-				"offset": {"type": "integer", "description": "Skip this many visible rows before listing (default 0)"},
-				"limit": {"type": "integer", "description": "Maximum rows in visible_rows (default %d). visible_count is always exact." % DEFAULT_ROW_LIMIT},
-			},
-			"required": ["editor_name"]
-		}
-	, "spreadsheet")
-
-	server._register_tool("minerva_spreadsheet_autofilter_clear",
-		"Clear AutoFilter criteria. With column: clear that column's criterion. Without: clear every criterion and keep the filter range. With remove=true: turn AutoFilter off entirely. Returns the filter state. Undoable with minerva_undo_spreadsheet.",
-		{
-			"type": "object",
-			"properties": {
-				"editor_name": editor_name_prop,
-				"column": {"type": "integer", "description": "Column number (1-based) whose criterion to clear"},
-				"remove": {"type": "boolean", "description": "Turn AutoFilter off (range and criteria). Default: false"},
-			},
-			"required": ["editor_name"]
-		}
-	, "spreadsheet")
-
-
 func handle(tool_name: String, arguments: Dictionary) -> Dictionary:
 	var editor_name: String = str(arguments.get("editor_name", ""))
 	if editor_name.is_empty():
