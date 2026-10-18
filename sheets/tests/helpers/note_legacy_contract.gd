@@ -29,10 +29,9 @@ func run(check: Callable, pane: EditorPane, manager: PluginManager, container: N
 	var duplicate: Dictionary = fixture.duplicate(true)
 	duplicate.UUID = "legacy-note-same-reference"
 	var same: Node = _note(duplicate, pane)
+	var before: Dictionary = first.call("serialize")
+	var same_before: Dictionary = same.call("serialize")
 	first.call("_on_edit_button_pressed")
-	first.call("_on_edit_button_pressed")
-	same.call("_on_edit_button_pressed")
-	check.call("two legacy notes and repeated Edit open one visible panel", pane.Tabs.visible and pane.get_open_editors().size() == 1)
 	var editor: Editor = pane.get_open_editors()[0]
 	var sheet: Node = editor.plugin_scene_root.get("sheet")
 	var data: RefCounted = sheet.get("spreadsheet_data")
@@ -41,7 +40,13 @@ func run(check: Callable, pane: EditorPane, manager: PluginManager, container: N
 	var values: ValueDomain = ValueDomain.new()
 	var seed_model: Dictionary = PluginScenePanelHost.invoke_save(editor.plugin_scene_root, {})
 	values.check_model_roundtrip(check, seed_model, "legacy note seed")
-	var before: Dictionary = first.call("serialize")
+	sheet.call("set_cell_value_with_history", 1, 0, "live-owned")
+	var live_model: Dictionary = PluginScenePanelHost.invoke_save(editor.plugin_scene_root, {})
+	first.call("_on_edit_button_pressed")
+	same.call("_on_edit_button_pressed")
+	check.call("repeated Edit preserves changed complete model and both source notes", pane.Tabs.visible and pane.get_open_editors().size() == 1
+		and ValueDomain.equal_json(PluginScenePanelHost.invoke_save(editor.plugin_scene_root, {}), live_model)
+		and ValueDomain.equal_json(first.call("serialize"), before) and ValueDomain.equal_json(same.call("serialize"), same_before))
 	editor.tab_title = "Renamed legacy sheet"
 	first.call("_on_edit_button_pressed")
 	check.call("rename retains stable note reference and source bytes", pane.get_open_editors().size() == 1
@@ -58,16 +63,24 @@ func run(check: Callable, pane: EditorPane, manager: PluginManager, container: N
 	await pane.Tabs.get_tree().process_frame
 	first.call("_on_edit_button_pressed")
 	check.call("project reopen keeps renamed reference without duplicate", pane.get_open_editors().size() == 1
-		and pane.get_open_editors()[0].tab_title == "Renamed legacy sheet" and ValueDomain.equal_json(first.call("serialize"), before))
+		and pane.get_open_editors()[0].tab_title == "Renamed legacy sheet" and ValueDomain.equal_json(first.call("serialize"), before)
+		and ValueDomain.equal_json(PluginScenePanelHost.invoke_save(pane.get_open_editors()[0].plugin_scene_root, {}), live_model))
 	var second_fixture: Dictionary = fixture.duplicate(true)
 	second_fixture.UUID = "legacy-note-second-reference"
 	second_fixture.LinkedSpreadsheet = "Second legacy note"
 	second_fixture.Content = fixture.Content.replace("keep", "second")
 	var second: Node = _note(second_fixture, pane)
+	# A is already bound but is renamed to B: its title is not B's identity.
+	pane.get_open_editors()[0].tab_title = second_fixture.LinkedSpreadsheet
 	second.call("_on_edit_button_pressed")
 	check.call("second note targets a second independent sheet", pane.get_open_editors().size() == 2
 		and pane.get_open_editors()[1].plugin_scene_root.call("get_sheet_data").get_cell_value(1, 0) == "second"
-		and pane.get_open_editors()[0].plugin_scene_root.call("get_sheet_data").get_cell_value(1, 0) == "keep")
+		and ValueDomain.equal_json(PluginScenePanelHost.invoke_save(pane.get_open_editors()[0].plugin_scene_root, {}), live_model))
+	first.call("_on_edit_button_pressed")
+	second.call("_on_edit_button_pressed")
+	check.call("colliding titles keep both established references and independent models", pane.get_open_editors().size() == 2
+		and ValueDomain.equal_json(PluginScenePanelHost.invoke_save(pane.get_open_editors()[0].plugin_scene_root, {}), live_model)
+		and pane.get_open_editors()[1].plugin_scene_root.call("get_sheet_data").get_cell_value(1, 0) == "second")
 	_close(pane)
 	var definition: PluginDefinition = manager.get_db().get_by_id("sheets")
 	manager.get_db()._plugins.erase("sheets")
@@ -87,11 +100,46 @@ func run(check: Callable, pane: EditorPane, manager: PluginManager, container: N
 		and ValueDomain.equal_json(pending[0].pending_plugin_entry, absent_entries[0]) and ValueDomain.equal_json(first.call("serialize"), before))
 	absent = pending[0]
 	manager.get_db()._plugins["sheets"] = definition
+	manager.stop_plugin("sheets")
+	var pending_seed: Dictionary = absent.pending_plugin_entry.duplicate(true)
+	var panel_key: String = absent.plugin_panel_key
+	var buttons: Array[Node] = absent.plugin_scene_root.find_children("*", "Button", true, false)
+	var retry_button: Button = buttons[0]
+	retry_button.pressed.emit()
+	check.call("actual Retry button suspends during real backend startup", absent.plugin_restore_busy)
 	first.call("_on_edit_button_pressed")
-	check.call("Edit retries on the same editor and imports the original note", pane.get_open_editors().size() == 1
+	check.call("source Note Edit while Retry is busy preserves seed and placeholder", absent.plugin_restore_busy
+		and ValueDomain.equal_json(absent.pending_plugin_entry, pending_seed)
+		and not absent.plugin_scene_root.get_meta("_minerva_plugin_panel_load_ok", true))
+	var deadline: int = Time.get_ticks_msec() + 10000
+	while absent.plugin_restore_busy and Time.get_ticks_msec() < deadline:
+		await pane.Tabs.get_tree().process_frame
+	check.call("Retry finishes once with the full original model and stable key", not absent.plugin_restore_busy
+		and absent.pending_plugin_entry.is_empty() and absent.plugin_panel_key == panel_key
+		and ValueDomain.equal_json(PluginScenePanelHost.invoke_save(absent.plugin_scene_root, {}), seed_model))
+	first.call("_on_edit_button_pressed")
+	check.call("Edit reuses the retried editor and imports the original note", pane.get_open_editors().size() == 1
 		and pane.get_open_editors()[0] == absent and absent.plugin_scene_root.call("get_sheet_data").get_cell_value(1, 0) == "keep"
 		and ValueDomain.equal_json(first.call("serialize"), before))
 	_close(pane)
+	# Unique unbound native tabs retain the existing title-adoption behaviour.
+	var native: Editor = pane.add_plugin_scene_editor("sheets", "sheets_panel", null, "Unbound native match")
+	native.plugin_scene_root.call("get_sheet_data").set_cell_value(0, 0, "native-owned")
+	var native_model: Dictionary = PluginScenePanelHost.invoke_save(native.plugin_scene_root, {})
+	var native_fixture: Dictionary = fixture.duplicate(true)
+	native_fixture.UUID = "legacy-native-title-adoption"
+	native_fixture.LinkedSpreadsheet = native.tab_title
+	var native_note: Node = _note(native_fixture, pane)
+	var native_before: Dictionary = native_note.call("serialize")
+	native_note.call("_on_edit_button_pressed")
+	var legacy: Script = load("res://Scripts/Services/Plugins/LegacySpreadsheetNote.gd")
+	var reference_meta: StringName = legacy.REFERENCE
+	check.call("unique unbound native title is adopted without reseeding", pane.get_open_editors().size() == 1
+		and native.get_meta(reference_meta) == native_fixture.LinkedSpreadsheet
+		and ValueDomain.equal_json(PluginScenePanelHost.invoke_save(native.plugin_scene_root, {}), native_model)
+		and ValueDomain.equal_json(native_note.call("serialize"), native_before))
+	_close(pane)
+	native_note.free()
 	var model: Dictionary = JSON.parse_string(FileAccess.get_file_as_string("res://test/fixtures/spreadsheet_contract/session.minproj"))
 	var chart_fixture: Dictionary = fixture.duplicate(true)
 	chart_fixture.UUID = "legacy-chart-note"
