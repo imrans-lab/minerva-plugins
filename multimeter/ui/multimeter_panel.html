@@ -436,6 +436,7 @@
       await window.minerva.call('minerva_sheets_create_editor', { name: 'Recording', file_path: lastPath });
     } catch (e) {
       sheetError = '[' + ((e && e.code) || 'open_failed') + '] ' + String((e && e.message) || e);
+      console.error('Open Recording: ' + sheetError);
       if (button.isConnected) $('err').textContent = [sheetError, state.error].filter(Boolean).join('; ');
     } finally {
       openingSheet = false;

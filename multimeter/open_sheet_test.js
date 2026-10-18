@@ -12,6 +12,7 @@ const bridge = fs.readFileSync(path.join(host, 'src/Scripts/UI/Controls/WebViewE
 const html = fs.readFileSync(path.join(__dirname, 'ui/multimeter_panel.html'), 'utf8');
 const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(match => match[1]).find(text => text.includes('var openingSheet'));
 assert.ok(script, 'actual recording panel script is present');
+assert.ok(!html.includes('user-select: none'), 'error span keeps native text selection for copying');
 const settle = () => new Promise(resolve => setImmediate(resolve));
 function panel(file) {
   const elements = new Map();
@@ -21,7 +22,7 @@ function panel(file) {
       textContent: '', addEventListener: (event, callback) => {handlers[event] = callback;},
       getContext: () => ({setTransform() {}, clearRect() {}}), handlers});
   }
-  const native = [], waiting = [];
+  const native = [], waiting = [], errors = [];
   let recording = false;
   const window = {addEventListener() {}, sendIpcMessage(raw) {
     const message = JSON.parse(raw), tool = message.payload.tool;
@@ -35,10 +36,10 @@ function panel(file) {
     queueMicrotask(() => window.minerva._ipcReply({id: message.id, success: true, result}));
   }};
   const context = {window, document: {getElementById: id => elements.get(id), querySelectorAll: () => []},
-    crypto: webcrypto, TextEncoder, console, setTimeout, clearTimeout, setInterval() {}};
+    crypto: webcrypto, TextEncoder, console: {...console, error: message => errors.push(message)}, setTimeout, clearTimeout, setInterval() {}};
   vm.runInNewContext(bridge, context);
   vm.runInNewContext(script, context);
-  return {elements, native, waiting, window, click: id => elements.get(id).handlers.click(),
+  return {elements, native, waiting, errors, window, click: id => elements.get(id).handlers.click(),
     reply(result) {const message = waiting.shift(); window.minerva._ipcReply({id: message.id, ...result});},
     poll() {window.minerva._dispatchPluginState({connected: false, recording: {recording: false}});}};
 }
@@ -57,6 +58,7 @@ function panel(file) {
     first.reply({success: false, error_code: code, error_message: 'native refusal'});
     await pending; first.poll();
     assert.equal(first.elements.get('err').textContent, '[' + code + '] native refusal');
+    assert.equal(first.errors.at(-1), 'Open Recording: [' + code + '] native refusal');
     assert.equal(first.elements.get('openSheet').disabled, false, 'retry stays available');
   }
   const second = panel('/tmp/recording-two.csv'); await settle();

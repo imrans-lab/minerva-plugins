@@ -1239,13 +1239,10 @@ schema, trust boundary and workbench dock — how to *host* them from your panel
 
 ### ⚠ The local MCP HTTP server (`localhost:9315`) is unauthenticated
 
-`minerva.call()` in the injected bridge POSTs directly to `http://localhost:9315` —
-the Minerva MCP HTTP server. That server has **no Authorization/token check and no
-plugin scoping** (agent identity is a TODO). Consequence: any HTML panel — and any
-other process on the same machine — can call **every** MCP tool, bypassing the
-per-message `ui.ipc_messages` allowlist that gates `pluginIPC()`. Treat
-`minerva.call()` as an **unscoped, unauthenticated** channel and design your panel's
-trust assumptions accordingly.
+The injected `minerva.call()` bridge uses native IPC and the panel's registered
+plugin identity. Cross-plugin tool calls require the exact
+`mcp.proxy:<toolName>` capability. Direct HTTP access to the loopback MCP server
+is a separate interface; it does not describe the injected panel bridge.
 
 **Update (2026-08-17): the LAN half of this is fixed.** The server now binds the IPv4
 loopback (`127.0.0.1`) rather than all interfaces, so the OS rejects non-local
@@ -1320,9 +1317,9 @@ GitHub redirects) → `tar -xzf` → verify `SHA256SUMS` → read the **tarball-
    are the exception — they return a bare `{success, error}`.
 3. **`save_mode: "plugin_owned"` is unimplemented.** Ctrl+S logs a warning and writes
    nothing. Use `host_owned` or `none`.
-4. **`localhost:9315` (and thus `minerva.call()`) is unauthenticated and unscoped**
-   (§13). No token; reaches every MCP tool. It now binds loopback only, so the
-   exposure is same-host rather than LAN-wide.
+4. **Direct `localhost:9315` access and the panel bridge are separate** (§13).
+   The injected `minerva.call()` uses native IPC with exact capability grants;
+   the loopback HTTP listener has its own access policy.
 5. **`network.mode` is unenforced and `network.ports` is dropped.** No egress gating
    anywhere — do not rely on the network permission to constrain your plugin.
 6. **Interpreter-script plugins have an unshipped, unverified PATH dependency**

@@ -55,6 +55,8 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry, source
 		var image := Image.new()
 		check.call("recording chart returns an actual decodable PNG", chart.get("success") == true and png.get("success") == true
 			and image.load_png_from_buffer(Marshalls.base64_to_raw(str(png.get("image_data", "")))) == OK and image.get_size() == Vector2i(64, 32))
+	var native_callers: RefCounted = load(source.path_join("tests/helpers/native_caller_contract.gd")).new()
+	await native_callers.call("run", check, pane, registry, host, web, path)
 	var denied: Dictionary = await web.handle_ipc_message("multimeter_panel", "mcp.proxy:minerva_sheets_delete_row", {})
 	check.call("ungranted Sheets mutation is explicitly denied by the real panel broker", denied.get("success") == false and denied.get("error_code") == "capability_not_granted")
 	var roster: Dictionary = await registry.handle_tool_call("minerva_sheets_create_editor", {"name": "Nametag roster", "csv_content": "Name,Subtitle,ID\nZoë,,EMP-007\n李,Guide,EMP-008"})

@@ -168,7 +168,7 @@ Column meaning:
 | Release tag + tarball naming | registry | no (repo-side) | no | cad, scansort, presentation | presentation.yml; regen_registry.py |
 | save_mode=plugin_owned (UNIMPLEMENTED) | lifecycle | **no (stub)** | yes | — | Editor.gd (TODO, push_warning only) |
 | minerva.call / minerva.createNote | ipc | yes | no | MultiMeter (canonical Sheets create) | minerva_bridge.gd; cef_bridge.gd; PluginWebviewBroker.gd |
-| localhost:9315 MCP HTTP server (no auth) | runtime | yes | no | obs_controller (via minerva.call) | MinervaMCPHttpServer.gd |
+| localhost:9315 MCP HTTP server | runtime | yes | no | direct HTTP clients | MinervaMCPHttpServer.gd; separate from the native panel bridge |
 | elgato Stream Deck companion (separate substrate) | language | no (external) | no | elgato | plugins/elgato/manifest.json; src/index.ts |
 | host.settings.get **(2026-08)** | host_api | yes | yes | — | CapabilityBroker `_handle_host_settings_get`; PluginSettingsStore.gd |
 | host.settings.list **(2026-08)** | host_api | yes | yes | — | CapabilityBroker `_handle_host_settings_list` |
@@ -337,14 +337,11 @@ seventh language. `pcb` is the reference consumer. See the developer guide §17.
    Minerva") and returns. `capability:editor.request_save` appears only in a TODO
    comment (Editor.gd) and a manifest doc-comment (PluginDefinition.gd) — **zero
    dispatch sites**. Authors must NOT use `plugin_owned`.
-4. **`localhost:9315` MCP HTTP server is unauthenticated and unscoped** — no
-   Authorization/token check, agent identity is a TODO. `minerva.call()` POSTs here,
-   bypassing the per-message `ui.ipc_messages` allowlist that gates `pluginIPC()`, so
-   every HTML panel — and any other process on the same machine — can call every MCP
-   tool. **(2026-08 partial fix)** the "binds all interfaces" half is resolved: the
-   server now listens on `BIND_ADDRESS = "127.0.0.1"` so the OS rejects non-local
-   connections at the socket layer. Exposure is same-host, no longer LAN-wide; the
-   missing auth/scoping stands. (`MinervaMCPHttpServer.gd` `BIND_ADDRESS`.)
+4. **Direct loopback HTTP and the panel bridge are separate interfaces.**
+   `minerva.call()` uses native IPC and the registered panel identity, with exact
+   cross-plugin capability grants. Direct HTTP clients use the loopback MCP
+   listener and its own access policy. (`PluginWebviewBroker.gd`;
+   `MinervaMCPHttpServer.gd`.)
 5. **`network.mode`/`filesystem.mode` value enums unenforced + no egress layer** —
    there is no network-egress gate anywhere; `permissions.network.mode` is purely
    documentary for all values, and a `mode:"none"` plugin can still open arbitrary

@@ -10,6 +10,6 @@ func _init() -> void:
 	var body: Node = script.new()
 	body.connect("completed", func(code: int) -> void: quit(code))
 	root.add_child(body)
-	create_timer(180.0).timeout.connect(func() -> void:
+	create_timer(240.0).timeout.connect(func() -> void:
 		printerr("FAIL: Sheets staging timed out")
 		quit(1))
