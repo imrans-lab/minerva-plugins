@@ -960,6 +960,7 @@
           "ui/SheetsPanel.gd",
           "ui/sheet_registry.gd",
           "ui/snapshot.gd",
+          "ui/snapshot_roundtrip.gd",
           "ui/domain/CellsCanvas.gd",
           "ui/domain/ChartCanvas.gd",
           "ui/domain/ChartRenderer.gd",
