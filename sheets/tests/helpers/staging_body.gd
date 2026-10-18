@@ -121,6 +121,8 @@ func _run() -> void:
 		await routes.call("run", check, pane, registry, source)
 		var reads: RefCounted = load(source.path_join("tests/helpers/read_contract.gd")).new()
 		await reads.call("run", check, pane, registry)
+		var matrix: RefCounted = load(source.path_join("tests/helpers/settlement_contract.gd")).new()
+		await matrix.call("run", check, pane, registry, host)
 		var retirement: RefCounted = load(source.path_join("tests/helpers/retirement_contract.gd")).new()
 		await retirement.call("run", check, pane, registry, host)
 		var cancellation: RefCounted = load(source.path_join("tests/helpers/cancellation_contract.gd")).new()
