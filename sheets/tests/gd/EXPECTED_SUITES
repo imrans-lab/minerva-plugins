@@ -1,4 +1,4 @@
-test_sheets_staging.gd assertions=733
+test_sheets_staging.gd assertions=909
 test_spreadsheet_autofilter.gd assertions=34
 test_spreadsheet_autofilter_undo.gd assertions=39
 test_mcp_spreadsheet_filter_tools.gd assertions=84
