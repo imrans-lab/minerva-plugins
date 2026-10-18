@@ -64,7 +64,7 @@ func TestCreationWire(t *testing.T) {
 					t.Fatal(err)
 				}
 				capabilities = append(capabilities, capability.Capability)
-				result := map[string]any{"success": true, "editor_name": "Created tab"}
+				result := map[string]any{"success": true, "editor_name": "Created tab", "plugin_id": "sheets"}
 				if capability.Capability == "host.documents.list_open" {
 					result = map[string]any{"documents": []any{}}
 					if index == 7 {

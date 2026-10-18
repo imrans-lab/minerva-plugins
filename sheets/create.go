@@ -58,13 +58,19 @@ func createEditor(ctx context.Context, stream *rpcStream, raw json.RawMessage) m
 	request := map[string]any{"plugin_id": "sheets", "editor_item_id": "new_minsheet", "tab_title": title}
 	if args.FilePath != "" {
 		capability = "mcp.proxy:minerva_open_file"
-		request = map[string]any{"path": args.FilePath, "action": "import"}
+		request = map[string]any{"path": args.FilePath, "action": "open"}
 	}
 	opened, err := stream.capability(ctx, capability, request)
 	if err != nil {
 		return transportFailure("creation_failed", "Spreadsheet creation failed: ", err)
 	}
 	if opened["success"] != true {
+		return opened
+	}
+	if args.FilePath != "" && opened["plugin_id"] != "sheets" {
+		if args.Name != nil && *args.Name != "" {
+			opened["note"] = "name ignored for plugin-owned file"
+		}
 		return opened
 	}
 	name, ok := opened["editor_name"].(string)
