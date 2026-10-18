@@ -1541,6 +1541,8 @@ func _apply_history_action(action, is_undo: bool) -> void:
 			if is_undo:
 				# Re-insert the row and restore its data
 				spreadsheet_data.insert_row(row)
+				var record: Dictionary = action.data
+				_restore_delete_bounds(record)
 				var row_data: Dictionary = action.data["row_data"]
 				var row_height: float = action.data["row_height"]
 				spreadsheet_data.set_row_height(row, row_height)
@@ -1568,6 +1570,8 @@ func _apply_history_action(action, is_undo: bool) -> void:
 			if is_undo:
 				# Re-insert the column and restore its data
 				spreadsheet_data.insert_column(col)
+				var record: Dictionary = action.data
+				_restore_delete_bounds(record)
 				var col_data: Dictionary = action.data["col_data"]
 				var col_width: float = action.data["col_width"]
 				spreadsheet_data.set_column_width(col, col_width)
@@ -1731,6 +1735,16 @@ func format_cell_with_history(row: int, col: int, format_options: Dictionary) ->
 	content_changed.emit()
 
 
+func _delete_bounds() -> Dictionary:
+	return {"frozen_rows": spreadsheet_data.frozen_rows, "frozen_cols": spreadsheet_data.frozen_cols,
+		"header_row_count": spreadsheet_data.header_row_count}
+
+func _restore_delete_bounds(action: Dictionary) -> void:
+	var bounds: Dictionary = action.get("bounds", {})
+	var data: SpreadsheetDataScript = spreadsheet_data
+	for key: String in bounds:
+		data.set(key, bounds[key])
+
 ## Delete a row with history recording (for external callers like MCP)
 func delete_row_with_history(row: int) -> bool:
 	if row < 0 or row >= spreadsheet_data.row_count:
@@ -1754,12 +1768,13 @@ func delete_row_with_history(row: int) -> bool:
 
 	# Get row height
 	var row_height: float = spreadsheet_data.get_row_height(row)
+	var bounds: Dictionary = _delete_bounds()
 
 	# Delete the row
 	spreadsheet_data.delete_row(row)
 
 	# Record in history
-	history.record_row_delete(row, row_data, row_height)
+	history.record_row_delete(row, row_data, row_height, bounds)
 
 	# Trigger UI updates
 	row_headers.queue_redraw()
@@ -1793,12 +1808,13 @@ func delete_column_with_history(col: int) -> bool:
 
 	# Get column width
 	var col_width: float = spreadsheet_data.get_column_width(col)
+	var bounds: Dictionary = _delete_bounds()
 
 	# Delete the column
 	spreadsheet_data.delete_column(col)
 
 	# Record in history
-	history.record_column_delete(col, col_data, col_width)
+	history.record_column_delete(col, col_data, col_width, bounds)
 
 	# Trigger UI updates
 	column_headers.queue_redraw()

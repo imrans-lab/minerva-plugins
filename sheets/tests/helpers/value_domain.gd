@@ -47,11 +47,8 @@ func run(check: Callable) -> void:
 			check.call("JSON reopen and evaluation preserve engine value " + key, reopened.get_cell_value(position.y, position.x) == expected[key])
 		var evaluated_inf: Variant = reopened.get_cell_value(0, 6)
 		check.call("reopened overflow formula evaluates again", evaluated_inf is float and is_inf(evaluated_inf))
-	else:
-		check.call("existing nonfinite JSON encoding is recorded explicitly", encoded.contains("inf") or encoded.contains("INF"))
-		print("EXISTING_NONFINITE_JSON_LOSS=" + parser.get_error_message())
-	# Null caches arise when JSON replaces a nonfinite number; loaded formulas
-	# still recompute. The cache's nullable contract must remain supported.
+	check.call("JSON round trip is mandatory for every value witness", parse_result == OK)
+	# The nullable cache contract remains supported independently of JSON encoding.
 	var nullable: Dictionary = model.duplicate(true)
 	nullable.cells["0,6"].value = null
 	check.call("nullable formula cache validates", Snapshot.validate(nullable))
@@ -84,3 +81,38 @@ func run(check: Callable) -> void:
 	var cached_object: Dictionary = model.duplicate(true)
 	cached_object.cells["0,6"].value = {"cached": [1, null, true]}
 	check.call("JSON-compatible Variant cache survives the actual loader", Snapshot.validate(cached_object))
+
+func run_editor(check: Callable, sheet: Control) -> void:
+	var colors: Dictionary = {"text_color": Color(1, 1, 1, 0.999), "bg_color": Color(Color.TRANSPARENT, 0.001)}
+	var model: Data = sheet.get("spreadsheet_data")
+	model.set_cell_value(0, 0, "KEEP")
+	for field: String in colors:
+		sheet.call("format_cell_with_history", 0, 0, {field: colors[field]})
+		var saved: Dictionary = sheet.call("serialize")
+		check.call("public producer emits quantized default " + field, saved.cells["0,0"].has(field))
+		check.call("quantized default producer snapshot accepts " + field, Snapshot.validate(saved))
+		sheet.call("deserialize", JSON.parse_string(JSON.stringify(saved)))
+		var normalized: Dictionary = sheet.call("serialize")
+		check.call("quantized default normalizes to omitted field " + field, not normalized.cells["0,0"].has(field))
+		sheet.call("deserialize", JSON.parse_string(JSON.stringify(normalized)))
+		check.call("normalized model is stable after reopen " + field, normalized == sheet.call("serialize"))
+	var refused: Dictionary = sheet.call("serialize")
+	# Chart grid_color is ignored by its serializer, and this input is not its
+	# prototype default. Omitted nondefault information must still refuse.
+	refused.charts = [{"grid_color": "ff0000ff"}]
+	check.call("omitted nondefault color remains refused", not Snapshot.validate(refused))
+	for columns: bool in [false, true]:
+		var fresh: Data = Data.new(4, 4)
+		fresh.frozen_rows = 3
+		fresh.header_row_count = 3
+		fresh.frozen_cols = 3
+		sheet.call("deserialize", fresh.to_dict())
+		var method: String = "delete_column_with_history" if columns else "delete_row_with_history"
+		sheet.call(method, 3)
+		sheet.call(method, 2)
+		check.call("delete clamps active bounds " + str(columns), sheet.get("spreadsheet_data").get("frozen_cols" if columns else "frozen_rows") == 2)
+		check.call("delete undo succeeds " + str(columns), sheet.call("undo"))
+		var restored: Data = sheet.get("spreadsheet_data")
+		check.call("undo restores freeze and header metadata " + str(columns), restored.frozen_rows == 3 and restored.frozen_cols == 3 and restored.header_row_count == 3)
+		check.call("delete redo succeeds " + str(columns), sheet.call("redo"))
+		check.call("redo reclamps bound " + str(columns), restored.get("frozen_cols" if columns else "frozen_rows") == 2)

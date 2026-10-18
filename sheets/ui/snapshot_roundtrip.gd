@@ -8,7 +8,8 @@ const MAX_INDEX: int = 2147483647
 
 static func validate(input: Dictionary) -> bool:
 	var model: Data = Data.new()
-	if input.get("version") != 1 or not _safe(input, model.to_dict()): return false
+	var defaults: Dictionary = model.to_dict()
+	if input.get("version") != 1 or not _safe(input, defaults): return false
 	model.load_from_dict(input)
 	var output: Dictionary = model.to_dict()
 	var charts: Array[Dictionary] = []
@@ -18,7 +19,10 @@ static func validate(input: Dictionary) -> bool:
 		chart.load_from_dict(entry)
 		charts.append(chart.to_dict())
 	output["charts"] = charts
-	return _preserves(input, output)
+	var chart_default: Chart = Chart.new()
+	chart_default.load_from_dict({"series": [{}]})
+	defaults["charts"] = [chart_default.to_dict()]
+	return _preserves(input, output, "", defaults)
 
 static func _safe(input: Dictionary, example: Dictionary) -> bool:
 	if not _shape(input, example): return false
@@ -125,13 +129,35 @@ static func _json_value(value: Variant) -> bool:
 		return true
 	return false
 
-static func _preserves(input: Variant, output: Variant, path: String = "") -> bool:
+static func _default_fields(object: Object) -> Dictionary:
+	var fields: Dictionary = {}
+	for info: Dictionary in object.get_property_list():
+		var usage: int = info.usage
+		var name: StringName = info.name
+		if usage & PROPERTY_USAGE_SCRIPT_VARIABLE:
+			fields[name] = object.get(name)
+	return fields
+
+static func _default_equivalent(input: Variant, value: Variant) -> bool:
+	if value is Color:
+		if not input is String: return false
+		var html: String = input
+		return Color.html(html) == value
+	return _preserves(input, value)
+
+static func _preserves(input: Variant, output: Variant, path: String = "", defaults: Variant = null) -> bool:
 	if input is Dictionary:
 		if not output is Dictionary: return false
 		var fields: Dictionary = input
 		var result: Dictionary = output
+		var prototype: Dictionary = defaults if defaults is Dictionary else {}
 		for key: Variant in fields:
-			if not result.has(key) or not _preserves(fields[key], result[key], path + "/" + str(key) if not path.is_empty() else str(key)): return false
+			if not result.has(key):
+				if not prototype.has(key) or not _default_equivalent(fields[key], prototype[key]): return false
+				continue
+			var next: Variant = _default_fields(Cell.new()) if path == "cells" else prototype.get(key)
+			var child_path: String = path + "/" + str(key) if not path.is_empty() else str(key)
+			if not _preserves(fields[key], result[key], child_path, next): return false
 		return true
 	if input is Array:
 		if not output is Array: return false
@@ -142,8 +168,10 @@ static func _preserves(input: Variant, output: Variant, path: String = "") -> bo
 			var fallback: Dictionary = Data.RowMeta.new().to_dict() if path == "rows" else Data.ColumnMeta.new().to_dict()
 			for index: int in range(array.size(), result.size()):
 				if result[index] != fallback: return false
+		var examples: Array = defaults if defaults is Array else []
 		for index: int in array.size():
-			if not _preserves(array[index], result[index], path + "/" + str(index)): return false
+			var prototype: Variant = examples[0] if not examples.is_empty() else null
+			if not _preserves(array[index], result[index], path + "/" + str(index), prototype): return false
 		return true
 	if (input is int or input is float) and (output is int or output is float):
 		var left: float = input
