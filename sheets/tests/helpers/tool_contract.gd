@@ -94,6 +94,22 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry,
 			check.call("raw domain chart capture yields a real64x32PNG", old_png == new_png
 				and image.load_png_from_buffer(Marshalls.base64_to_raw(new_png)) == OK and image.get_size() == Vector2i(64, 32))
 	var unchanged: Variant = _json(panel.call("_on_panel_save_request"))
+	var second: Editor = pane.add_plugin_scene_editor("sheets", "sheets_panel", null, "Second contract", "create")
+	await pane.Tabs.get_tree().process_frame
+	var second_panel: Control = second.plugin_scene_root
+	PluginScenePanelHost.invoke_load(second_panel, baseline)
+	check.call("two live Sheets panels have distinct routing identities", second_panel != panel
+		and second.plugin_panel_key != plugin.plugin_panel_key and broker.get_panel_for_editor("Second contract") == second_panel)
+	var second_args: Dictionary
+	for entry: Array in cases:
+		if entry[0] == "minerva_update_spreadsheet_data":
+			second_args = _json(entry[1])
+	second_args["editor_name"] = "Second contract"
+	var targeted: Dictionary = await registry.handle_tool_call("minerva_sheets_update_data", second_args)
+	check.call("host dispatch mutates the second sheet and preserves the first", targeted.get("success") == true
+		and second_panel.get("sheet").spreadsheet_data.get_cell_value(1, 0) == "changed"
+		and _json(panel.call("_on_panel_save_request")) == unchanged)
+	second.free()
 	for entry: Array in generated.staged:
 		var canonical: String = names[entry[0]]
 		var arguments: Dictionary = _json(entry[1])
