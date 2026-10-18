@@ -121,6 +121,8 @@ func _run() -> void:
 		await routes.call("run", check, pane, registry, source)
 		var reads: RefCounted = load(source.path_join("tests/helpers/read_contract.gd")).new()
 		await reads.call("run", check, pane, registry)
+		var cancellation: RefCounted = load(source.path_join("tests/helpers/cancellation_contract.gd")).new()
+		await cancellation.call("run", check, pane, registry, source, host)
 		var consumers: RefCounted = load(source.path_join("tests/helpers/consumer_contract.gd")).new()
 		await consumers.call("run", check, pane, registry, source)
 		var creation: RefCounted = load(source.path_join("tests/helpers/creation_contract.gd")).new()
@@ -168,8 +170,8 @@ func _proxy_probe(host, source: String, registry: PluginToolRegistry, policy: Pl
 	var connection = load("res://Scripts/Services/MCP/MCPServerConnection.gd").new("sheets-probe", "", MCPServerConnection.TransportType.STDIO)
 	connection.plugin_id = "sheets"
 	connection.configure_stdio(source.path_join("tests/proxy/sheets-proxy"))
-	connection.capability_request_handler = func(id: String, capability: String, args: Dictionary) -> Dictionary:
-		return await capabilities.dispatch(id, capability, args)
+	connection.capability_request_handler = func(id: String, capability: String, args: Dictionary, context: MCPExecutionContext = null) -> Dictionary:
+		return await capabilities.dispatch(id, capability, args, context)
 	var connected: int = await connection.connect_to_server()
 	check("Go probe backend negotiates the real legacy transport", connected == OK)
 	if connected == OK:

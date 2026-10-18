@@ -48,6 +48,32 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry,
 	var raw: String = await sheet.chart_canvases[0].capture_to_base64_png(64, 32)
 	check.call("canonical image targets the second chart and matches its raw PNG", png == raw and png != first_png)
 	check.call("overlapping captures leave the first complete model untouched", _json(first.plugin_scene_root.call("_on_panel_save_request")) == original)
+	var stopped_context := MCPExecutionContext.create("module")
+	var survivor_context := MCPExecutionContext.create("module")
+	var stopped_replies: Array[Dictionary] = []
+	var survivor_replies: Array[Dictionary] = []
+	var simultaneous := {"seen": false, "armed": false}
+	var cancel_one := func() -> void:
+		simultaneous.seen = stopped_replies.is_empty() and survivor_replies.is_empty()
+		stopped_context.cancel()
+	var start_cancel := func(child: Node) -> void:
+		if child is SubViewport and not simultaneous.armed:
+			simultaneous.armed = true
+			RenderingServer.frame_pre_draw.connect(cancel_one, CONNECT_ONE_SHOT)
+	var target_canvas: Node = sheet.chart_canvases[0]
+	target_canvas.child_entered_tree.connect(start_cancel)
+	_capture_into(registry, tool, arguments, stopped_replies, stopped_context)
+	_capture_into(registry, tool, arguments, survivor_replies, survivor_context)
+	deadline = Time.get_ticks_msec() + 5000
+	while (stopped_replies.is_empty() or survivor_replies.is_empty()) and Time.get_ticks_msec() < deadline:
+		await tree.process_frame
+	target_canvas.child_entered_tree.disconnect(start_cancel)
+	if RenderingServer.frame_pre_draw.is_connected(cancel_one):
+		RenderingServer.frame_pre_draw.disconnect(cancel_one)
+	print("Concurrent capture measurements: ", JSON.stringify({"precondition": simultaneous, "stopped": stopped_replies, "survivor_success": survivor_replies[0].get("success") if survivor_replies.size() == 1 else false, "survivor_stopped": survivor_context.is_stopped()}))
+	check.call("concurrent actual panel captures keep independent caller lifetimes", simultaneous.seen and stopped_replies.size() == 1
+		and stopped_replies[0].get("error_code") == "cancelled" and survivor_replies.size() == 1 and survivor_replies[0].get("success") == true
+		and not survivor_context.is_stopped() and _json(first.plugin_scene_root.call("_on_panel_save_request")) == original)
 	var context := MCPExecutionContext.create("module")
 	var started: Array[bool] = [false]
 	var stop := func() -> void:

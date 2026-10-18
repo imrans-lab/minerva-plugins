@@ -124,8 +124,8 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry, source
 		var connection = load("res://Scripts/Services/MCP/MCPServerConnection.gd").new("b5-nametag", "", MCPServerConnection.TransportType.STDIO)
 		connection.plugin_id = nametag.id
 		connection.configure_stdio(consumers.path_join("nametag-maker/nametag-maker-plugin"))
-		connection.capability_request_handler = func(id: String, capability: String, arguments: Dictionary) -> Dictionary:
-			return await registry.capability_broker.dispatch(id, capability, arguments)
+		connection.capability_request_handler = func(id: String, capability: String, arguments: Dictionary, context: MCPExecutionContext = null) -> Dictionary:
+			return await registry.capability_broker.dispatch(id, capability, arguments, context)
 		check.call("real Nametag backend negotiates stdio", await connection.connect_to_server() == OK)
 		for absent: bool in [false, true]:
 			if absent:
@@ -168,8 +168,8 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry, source
 	var sheets_connection = manager.get_connection("sheets")
 	var forward: Callable = sheets_connection.capability_request_handler
 	var interruption := {"seen": false}
-	sheets_connection.capability_request_handler = func(id: String, capability: String, arguments: Dictionary) -> Dictionary:
-		var reply: Dictionary = await forward.call(id, capability, arguments)
+	sheets_connection.capability_request_handler = func(id: String, capability: String, arguments: Dictionary, context: MCPExecutionContext = null) -> Dictionary:
+		var reply: Dictionary = await forward.call(id, capability, arguments, context)
 		if capability == "mcp.proxy:minerva_sheets_get_data" and str(arguments.get("editor_name", "")).begins_with("b5-interrupted-recording"):
 			interruption.seen = true
 			# The real file is open and the real read finished, before its reply reaches Go.

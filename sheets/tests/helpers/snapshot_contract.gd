@@ -102,8 +102,7 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry,
 				RenderingServer.frame_pre_draw.disconnect(swap_notes)
 			host.notes_container = notes
 			replacement.free()
-			# c4814 staging falsifier: real caller cancellation may leave one note,
-			# but it must neither change any sheet nor leave backend/IPC work running.
+			# Actual caller cancellation must retire capture without publishing a note.
 			var cancel_context := MCPExecutionContext.create("module")
 			var capture_armed: Array[bool] = [false]
 			var capture_started: Array[bool] = [false]
@@ -133,11 +132,11 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry,
 			capabilities.editor_note_context = live_context
 			var pending_ipc: Dictionary = target.get_node("_MinervaIPC").get("_pending")
 			backend_pending = backend.get("_pending")
-			check.call("real cancelled capture has only the accepted staged extra-note effect", capture_started[0]
+			check.call("real cancelled capture publishes no note and leaves no pending work", capture_started[0]
 				and cancel_context.is_stopped() and cancelled.get("error_code") == "cancelled"
-				and notes.get_notes().size() >= notes_before and notes.get_notes().size() <= notes_before + 1
+				and notes.get_notes().size() == notes_before
 				and pending_ipc.is_empty() and backend_pending.is_empty())
-			print("Staged capture cancellation extra notes: %d" % (notes.get_notes().size() - notes_before))
+			print("Cancelled capture extra notes: %d" % (notes.get_notes().size() - notes_before))
 		else:
 			var result: Dictionary = await registry.handle_tool_call(canonical, arguments)
 			var status: RichTextLabel = target.get_node("Status")
