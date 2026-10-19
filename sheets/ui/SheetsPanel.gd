@@ -4,6 +4,7 @@ extends "res://Scripts/Services/Plugins/MinervaPluginPanel.gd"
 
 const SpreadsheetEditorScript := preload("domain/SpreadsheetEditor.gd")
 const SpreadsheetDataScript := preload("domain/SpreadsheetData.gd")
+const SpreadsheetHistoryScript := preload("domain/SpreadsheetHistory.gd")
 const Snapshot := preload("snapshot.gd")
 const SheetRegistry := preload("sheet_registry.gd")
 const Tools := preload("MCPSpreadsheetTools.gd")
@@ -56,14 +57,20 @@ func _on_panel_save_request() -> Dictionary:
 	return sheet.serialize()
 
 func _on_panel_capture_live_state() -> Dictionary:
-	return {"document": sheet.serialize(), "history": sheet.history.capture_live_state()}
+	var history: SpreadsheetHistoryScript = sheet.history
+	return {"document": sheet.serialize(), "history": history.capture_live_state()}
 
 func _on_panel_restore_live_state(state: Dictionary) -> bool:
-	if not state.get("document") is Dictionary or not Snapshot.validate(state.document) or not state.get("history") is Dictionary:
+	var document: Variant = state.get("document")
+	var captured_history: Variant = state.get("history")
+	if not document is Dictionary or not captured_history is Dictionary:
 		return false
-	if not sheet.history.restore_live_state(state.history):
+	if not Snapshot.validate(document):
 		return false
-	sheet.deserialize(state.document)
+	var history: SpreadsheetHistoryScript = sheet.history
+	if not history.restore_live_state(captured_history):
+		return false
+	sheet.deserialize(document)
 	_snapshot_restored = true
 	return true
 

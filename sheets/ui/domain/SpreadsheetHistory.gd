@@ -238,8 +238,10 @@ func restore_live_state(state: Dictionary) -> bool:
 		return false
 	if not _valid_stack(state.get("undo")) or not _valid_stack(state.get("redo")):
 		return false
-	var undo_actions: Array = _restore_stack(state.undo)
-	var redo_actions: Array = _restore_stack(state.redo)
+	var undo_entries: Array = state.undo
+	var redo_entries: Array = state.redo
+	var undo_actions: Array = _restore_stack(undo_entries)
+	var redo_actions: Array = _restore_stack(redo_entries)
 	max_history = state.max_history
 	_undo_stack = undo_actions
 	_redo_stack = redo_actions
@@ -252,9 +254,12 @@ static func _valid_stack(value: Variant) -> bool:
 	if not value is Array:
 		return false
 	for entry: Variant in value:
-		if not entry is Dictionary or not entry.get("type") is int or not entry.get("data") is Dictionary:
+		if not entry is Dictionary:
 			return false
-		if entry.type < ActionType.CELL_EDIT or entry.type > ActionType.AUTOFILTER:
+		var action: Dictionary = entry
+		if not action.get("type") is int or not action.get("data") is Dictionary:
+			return false
+		if action.type < ActionType.CELL_EDIT or action.type > ActionType.AUTOFILTER:
 			return false
 	return true
 
@@ -262,5 +267,7 @@ static func _valid_stack(value: Variant) -> bool:
 static func _restore_stack(stack: Array) -> Array:
 	var restored: Array = []
 	for entry: Dictionary in stack:
-		restored.append(HistoryAction.new(entry.type, entry.data.duplicate(true)))
+		var action_type: ActionType = entry.type
+		var action_data: Dictionary = entry.data
+		restored.append(HistoryAction.new(action_type, action_data.duplicate(true)))
 	return restored
