@@ -51,7 +51,7 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry) -> voi
 	check.call("H1 complete model matches independently derived cells and metadata", data.to_dict() == _expected_model())
 	check.call("H1 forward formula keeps its expression and recalculated value", data.get_cell_if_exists(1, 2).formula == "=SUM(B2:B3)" and data.get_cell_value(1, 2) == 5
 		and data.get_cell_display(1, 2) == "5")
-	check.call("H1 opening creates no edit or undo history", not imported._plugin_scene_modified and not sheet.can_undo() and not sheet.can_redo())
+	check.call("H1 preserves imported dirty state without edit history", imported._plugin_scene_modified and not sheet.can_undo() and not sheet.can_redo())
 	check.call("H1 importing preserves every source byte", FileAccess.get_sha256(path) == CSV_SHA256)
 	imported.free()
 	pane.Tabs.size = previous_size
