@@ -1,10 +1,10 @@
 """Exercise stable annotated-tag admission against real temporary Git history."""
 import json
 import os
-from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 SCRIPT = Path(__file__).with_name("release-publish-guard.sh").resolve()
 
