@@ -7,10 +7,8 @@ func _editor(pane: EditorPane, title: String) -> Editor:
 			return editor
 	return null
 
-func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry, source: String) -> void:
+func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry, source: String, host: Node) -> void:
 	var tree: SceneTree = pane.Tabs.get_tree()
-	# Runtime-loaded host services depend on autoloads in the standalone runner.
-	var host = tree.root.get_node("SingletonObject")
 	var previous_server = host.mcp_manager.minerva_server
 	var server = load("res://Scripts/Services/MCP/MinervaMCPServer.gd").new(host.mcp_manager)
 	server.policy_engine = load("res://test/helpers/hosted_policy_fixture.gd").new()

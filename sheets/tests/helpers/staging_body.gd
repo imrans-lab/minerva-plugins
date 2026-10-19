@@ -128,7 +128,7 @@ func _run() -> void:
 		var cancellation: RefCounted = load(source.path_join("tests/helpers/cancellation_contract.gd")).new()
 		await cancellation.call("run", check, pane, registry, source, host)
 		var consumers: RefCounted = load(source.path_join("tests/helpers/consumer_contract.gd")).new()
-		await consumers.call("run", check, pane, registry, source)
+		await consumers.call("run", check, pane, registry, source, host)
 		var creation: RefCounted = load(source.path_join("tests/helpers/creation_contract.gd")).new()
 		await creation.call("run", check, pane, manager, registry, broker, policy, source)
 

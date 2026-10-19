@@ -133,7 +133,8 @@
     }
   },
   "capabilities": [
-    "host_owned_save"
+    "host_owned_save",
+    "plugin_dependencies"
   ],
   "data_directory": "",
   "autostart": false,
@@ -152,5 +153,20 @@
         "output": "nametag-maker-plugin"
       }
     ]
-  }
+  },
+  "requires_plugins": [
+    {
+      "id": "sheets",
+      "min_version": "0.1.0",
+      "actions": [
+        "minerva_sheets_create_editor",
+        "minerva_sheets_get_data",
+        "minerva_sheets_update_data",
+        "minerva_sheets_add_row",
+        "minerva_sheets_delete_row",
+        "minerva_sheets_add_column",
+        "minerva_sheets_delete_column"
+      ]
+    }
+  ]
 }

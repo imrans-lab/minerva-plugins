@@ -265,5 +265,17 @@
         "output": "multimeter-plugin"
       }
     ]
-  }
+  },
+  "capabilities": [
+    "plugin_dependencies"
+  ],
+  "requires_plugins": [
+    {
+      "id": "sheets",
+      "min_version": "0.1.0",
+      "actions": [
+        "minerva_sheets_create_editor"
+      ]
+    }
+  ]
 }
