@@ -52,6 +52,9 @@ def check_documents(documents: dict[str, str]) -> list[str]:
                     reference = re.search(r"\]\((?:\./)?PLUGIN_DEVELOPER_GUIDE\.md#([^)]*)\)", line)
                     if not reference:
                         errors.append(f"{name}: contract row needs a guide anchor: {cells[0]}")
+                    token = re.search(r"`([^`]+)`", cells[0])
+                    if not token or token[1] not in documents.get("PLUGIN_DEVELOPER_GUIDE.md", ""):
+                        errors.append(f"{name}: contract has no guide description: {cells[0]}")
                 for retired in RETIRED:
                     if retired in line and not re.search(r"\b(retired|unsupported|not called)\b", line, re.IGNORECASE):
                         errors.append(f"{name}: retired hook claimed as supported: {retired}")

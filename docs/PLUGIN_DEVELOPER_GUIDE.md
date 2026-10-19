@@ -11,12 +11,19 @@ unconfirmed it is called out explicitly and cross-referenced to
 > The marketplace registry is served from
 > `https://raw.githubusercontent.com/imrans-lab/minerva-plugins/main/registry.json`.
 
-> **Verified against:** Minerva `adcb58e3` (2026-08-17). Substrate added since the
-> previous revision: the `setup` build pipeline and install lanes ([§17](#17-build-from-source--the-setup-stanza--install-lanes)),
-> manifest-declared `settings` ([§3.4](#34-settings-fields)), eight host capabilities
-> (`host.settings.*`, `host.models.*`, `host.chat_providers.*`, `host.project.*` — [§4.2](#42-capability-reference)),
-> six panel lifecycle hooks ([§7.1](#71-panel-lifecycle-hooks-full-list)), and the
-> annotation substrate ([§18](#18-annotations)).
+> **Source basis:** the B6 host/plugin tuple (Minerva `96c0252a`, plugins
+> `1e558e5c`, Sheets release `sheets-v0.1.2`). This revision reconciles file
+> ownership, provider readiness, live generations and contextual calls through B6.
+> Final B7 release qualification records the final two repository revisions.
+
+> **Maintainers:** each repository's `scripts/check-fast` checks its own tree.
+> Minerva checks the host guide against source declaration owners; minerva-plugins
+> checks this guide and the ledger's links and retired claims. Final cross-repo
+> qualification explicitly runs Minerva's `scripts/check_plugin_docs.py
+> --host-root /path/to/Minerva --plugins-root /path/to/minerva-plugins`.
+> It compares the source-derived names with ledger rows and validates guide
+> anchors. No check guesses an adjacent checkout or uses a generated contract
+> snapshot. Update the guide and ledger together when adding a public declaration.
 
 ---
 
@@ -60,7 +67,9 @@ my_plugin/
   MCP `initialize` handshake, then calls `tools/list`. The plugin only becomes
   `RUNNING` after the handshake completes.
 - The subprocess inherits Minerva's environment and current working directory.
-  **There is no per-plugin env-var injection and no `chdir`** (see §10).
+  There is no author-defined environment map or process `chdir` in the manifest.
+  The host-owned private panel-authority protocol can inject its per-launch secret
+  into that child only (see `panel_authority` and §10).
 
 ---
 
@@ -277,14 +286,19 @@ Legend: **R** = required, **O** = optional. "Strict→null" means a violation ma
 | `backend.entrypoint` | R | string | `""` | Launch command (`./bin`, `python3`, `node`). `./`-relative resolved against install dir. |
 | `backend.args` | O | string[] | `[]` | Appended after entrypoint. `.py/.js/.sh/.gd` args resolved to absolute plugin-relative paths if the file exists. |
 | `backend.working_dir` | O | string | `""` | **Parsed but NEVER applied** (SubProcess cannot `chdir`). Do not rely on it. |
-| `tools` | O | object[] | `[]` | **Install-time review metadata only.** The runtime `tools/list` REPLACES this. Only `tools[].name` is validated. |
+| `tools` | O | object[] | `[]` | Declares tool names, panel/backend executor and canonical tool-set membership. Backend discovery supplies runtime descriptions and schemas; it does not override manifest membership. |
 | `tools[].name` | R* | string | — | Must begin with `minerva_<id>_`. |
 | `tools[].description` | O | string | — | Pass-through, surfaced to `tools/list`. |
 | `tools[].input_schema` | O | object | — | JSON Schema, pass-through, **not validated**. |
 | `tools[].executor` | O | string | `"backend"` | `backend` \| `panel`. `panel` serves the tool from the live scene panel instead of the subprocess. See §7. |
+| `tools[].tool_set` | O | string | `""` | Canonical tool-set membership for this tool on both dispatch paths. An empty string means no set restriction. Non-strings refuse; a caller must enable a nonempty set before calling the tool. |
 | `skills` | O | object[] | `[]` | Agent skills seeded into the docket on install. See §3.3. |
 | `settings` | O | object[] | `[]` | Declarative user-editable settings contributed to Minerva's Preferences window. See §3.4. |
 | `settings_title` | O | string | `""` | Preferences tab title for this plugin's settings. Defaults to the plugin's display `name`. |
+| `knowledge` | O | object[] | `[]` | Docket `kb`/`hint` records with unique `minerva_<id>_*` keys. A kb needs `title` and `article`; a hint needs `title` and `value`. Optional kb fields: summary/topic/tags; hint: component/topic. Type changes refuse; customized records retain user edits. |
+| `knowledge_project` | O | string | `"master"` | Existing Docket project for seeded knowledge. The host reports a missing project rather than creating one. |
+| `log_stderr` | O | bool | `false` | Explicit opt-in to bounded subprocess stderr diagnostics. Keep stdout exclusively for MCP. |
+| `panel_authority` | O | object | absent | Private Docket panel protocol declaration: exactly `{"protocol":"docket_panel_v1","method_prefix":"docket/panel/","secret_env":"DOCKET_PANEL_SECRET"}`. The host supplies the per-launch secret; never place a secret in the manifest. Ordinary panels omit this. |
 | `setup` | O | object | `{}` | `{requires[], steps[]}` build recipe. Run at install on the **manifest lane only**. Structurally validated — a bad stanza fails manifest load. See §17. |
 | `ui` | O | object | `{}` | `{panels[], ipc_messages[]}`. |
 | `ui.ipc_messages` | O | string[] | `[]` | Plugin-wide IPC allowlist. Every channel referenced anywhere (panel `ipc_channels`, `project_file`, `project_export`, and `capability:*` messages) MUST appear here. |
@@ -298,6 +312,7 @@ Legend: **R** = required, **O** = optional. "Strict→null" means a violation ma
 | `ui.panels[].file_actions` | O | string[] | `["open", "create"]` | Native panels: `open`, `import`, `create` only. Import is explicit opt-in; empty lists and unknown verbs refuse. |
 | `ui.panels[].ipc_channels` | O | string[] | `[]` | Per-panel subset of `ui.ipc_messages`. Every entry MUST be in `ui.ipc_messages`. |
 | `ui.panels[].native_save_extensions` | O | string[] | panel `file_extensions` | Nonempty subset of this native panel’s claimed extensions. Save As offers only these formats. |
+| `ui.panels[].write_guidance` | O | string | `""` | Guidance for writing this panel's native document format. A live generation swap cannot change the open editor's save/chrome/write policy; restart to adopt policy changes. |
 | `ui.panels[].save_mode` | O | string | `"host_owned"` | `host_owned` \| `plugin_owned` \| `none`. **Do not use `plugin_owned`** (unimplemented — see §7/§15). |
 | `ui.panels[].chrome.suppress` | O | string[] | `[]` | Subset of `save_all` \| `save` \| `create_note` \| `inject_toggle`. Hides editor-tab chrome buttons. |
 | `ui.panels[].fullscreen_capable` | O | bool | `false` | Advisory; no enforcement found. |
@@ -315,10 +330,15 @@ Legend: **R** = required, **O** = optional. "Strict→null" means a violation ma
 | `editor_items[].default_filename` | O | string | `"untitled"` | e.g. `untitled.mcad`. |
 | `capabilities` | O | string[] | `[]` | **Top-level opt-in contract list.** `project_state`, `host_owned_save`, `project_export`, `live_reload`, `plugin_dependencies` (unknown → strict→null). See §12 and live reload below. |
 | `project_file` | O | object | — | `{serialize_channel, deserialize_channel}` — both must be non-empty AND in `ui.ipc_messages`. Required by `project_state`. |
+| `project_file.serialize_channel` | R* | string | — | Backend channel collecting project state for this plugin. |
+| `project_file.deserialize_channel` | R* | string | — | Backend channel restoring the collected project state. |
 | `project_export` | O | object | — | `{collect_channel, apply_channel}` — same rules. Required by `project_export`. |
+| `project_export.collect_channel` | R* | string | — | Collect sidecar files for package export. |
+| `project_export.apply_channel` | R* | string | — | Apply unpacked sidecar paths on package import. |
 | `requires_plugins` | O | object[] | `[]` | Nonempty declarations require top-level `plugin_dependencies`. Each entry has `id`, strict SemVer `min_version`, and an `actions` array of canonical `minerva_<id>_*` provider tool names. Only required providers may be dependencies; self, duplicate, malformed and cyclic declarations refuse. Explicit null refuses. |
 | `permissions` | O | object | `{}` | `{host_capabilities[], network{}, filesystem{}}`. Unknown keys ignored. |
 | `permissions.host_capabilities` | O | string[] | `[]` | **The capability grant list.** See §4 + §13. |
+| `permissions.host_events` | O | string[] | `[]` | Subscriptions to allowed host events, separate from capability grants. The host delivers `minerva/host_event` notifications after admission. |
 | `permissions.network.mode` | O | string | `"none"` | `none`/`localhost`/`unrestricted` documented; **value not validated and not enforced** (see §13). |
 | `permissions.network.ports` | O | int[] | — | **Silently dropped** by the parser. Dead metadata. |
 | `permissions.filesystem.mode` | O | string | `"none"` | `none` \| `scoped_paths` \| **`unrestricted`**. Must be `scoped_paths` (with non-empty `paths`) **or** `unrestricted` if any `host.files.*` is declared. |
@@ -326,7 +346,7 @@ Legend: **R** = required, **O** = optional. "Strict→null" means a violation ma
 | `release_targets` | O | string[] | — | **Not parsed by the host** — CI/registry metadata naming the platforms you publish tarballs for. See §14. |
 | `data_directory` | O | string | (overwritten) | Ignored from manifest (host overwrites with the plugin's own dir). |
 | `autostart` | O | bool | `false` | **Loader drift:** NOT read on manifest install; only honored after persist+reload (§10). |
-| `auto_reload` | O | bool | `false` | Same loader drift. When true, source edits trigger a debounced reload. |
+| `auto_reload` | O | bool | `false` | Same loader drift. Source watching performs debounced generation swaps only for native panels opting into `live_reload`; otherwise restart is required. |
 | `class_names` | — | — | — | **Not author-supplied.** Populated by the host at install (scanning panel scripts). |
 | `install_lane` | — | — | `"manifest"` | **Not author-supplied.** Recorded by the host at install (`manifest` \| `marketplace`) and persisted. See §17. |
 
@@ -559,6 +579,16 @@ plugin — the host only draws. Full contract: Minerva `Docs/design/host_pdf_con
 
 ---
 
+Additional capability families in the current host:
+
+| Capability | Request and result |
+|---|---|
+| `host.notes.create_from_editor` | `{editor_name, thread?, title?}` creates a snapshot note from an editor owned by this plugin. Returns note UUID/title, thread and editor name. Ownership or capture failure refuses; cancellation preserves the call's typed failure. |
+| `host.chat.active` | `{}` returns the visible chat payload, including its chat id. Refuses when the chat pane is unavailable. |
+| `host.chat.input` | `op`: `ensure_chat`, `append` (`text`, optional `expected_chat_id`), `clear`, `submit` (required `expected_chat_id`), or `set_external_ptt_state` (`state`). Submission and transcript append refuse a changed chat; pending submission is not proof of send. |
+| `host.audio` | Device ops: `register` (`device_id`, `label`, boolean `input`/`output`), `availability` (`available`), `unregister`, `output_complete` (`stream_id`, `success`, optional `error_message`). Input uses `input_begin`/`input_chunk`/`input_end`/`input_cancel`; the session id, sequence and selected chat/device are validated. Input begins with mono 16kHz `pcm_s16le` and requires the `voice.transcript` event grant. |
+| `host.speech_log` | `op` defaults to `list` (`offset`, `limit`, optional `topic`); also `state`, `play` (`log_id`, optional `device_id`), `mark` (`log_id`, boolean `heard`), `delete` (`log_id`), and `delete_all` (explicit `confirmed:true`). Reads/mutations are scoped to the calling producer. |
+
 ## 5. Tools a plugin EXPOSES to Minerva
 
 Your backend advertises tools via the MCP `tools/list` response. Each tool has
@@ -673,7 +703,12 @@ Native `file_extensions` and `editor_items` use one host handoff. File opening u
 
 Required plugins take precedence over optional providers: the optional provider skips only the colliding extension or editor kind and retains its other contributions. Equal-rank conflicts refuse the new registration atomically, naming both providers. PluginDB preserves install order across restarts; that order breaks equal-rank ties. A refused update keeps its previously accepted claims. Refusals appear in `get_plugin_status().editor_registration`, the selectable Plugin Manager detail, and the log; backend tools remain available. A stopped or crashed installed provider keeps its claims and opening refuses with `plugin_not_running`, without text fallback. Existing tabs with another owner must be closed before reopening under a changed claim.
 
-Claims are reconciled in place on installed-DB changes. After a required provider is removed, an optional provider can regain the claim at its next registration during reconciliation. Unclaimed `.minsheet`, `.csv`, `.tsv`, and `.xlsx` retain the builtin spreadsheet fallback until the spreadsheet extraction.
+Claims are reconciled in place on installed-DB changes. Spreadsheet formats
+`.minsheet`, `.csv`, `.tsv`, and `.xlsx` belong to the required Sheets plugin; the
+host has no builtin spreadsheet fallback. A missing/broken Sheets provider gives
+a repair/readiness reason rather than opening spreadsheet bytes in a text editor.
+Project and note compatibility retain opaque plugin state even when its provider
+is unavailable: saving/reopening must not silently discard that state.
 
 For anonymous creation, `_on_panel_loaded(ctx)` receives `ctx.document_action == "create"`. During a file load hook, panels extending `MinervaPluginPanel` can call `get_document_action()` to distinguish `open` from `import`; it returns an empty string outside that hook. Action context is host metadata and does not modify the opaque document Dictionary. Reopening an already open file returns its existing editor without delivering another load/import; this API does not select the tab.
 
@@ -686,7 +721,14 @@ For example, a consumer can declare:
 "requires_plugins": [{"id": "voice", "min_version": "0.1.4", "actions": ["minerva_voice_status"]}]
 ```
 
-`actions` names tools owned by the provider, not consumer features. The current required-provider IDs are `agent_relay`, `voice` and `docket`; the host's `RequiredPlugins.PLUGINS` is authoritative. The host checks the provider's combined backend and panel catalog; panel tools need not have an open panel. Autostart orders providers before consumers with persisted install order breaking ties. `get_plugin_status().ready` becomes true only after discovery and required-tool verification, and clears on stop/crash. `running` alone does not establish readiness. Missing versions/actions appear in the consumer's selectable status and log. An attached provider is checked against its live registered version.
+`actions` names tools owned by the provider, not consumer features. The current required-provider IDs are `agent_relay`, `voice`, `docket` and `sheets`; the host's `RequiredPlugins.PLUGINS` is authoritative. The host checks the provider's combined backend and panel catalog; panel tools need not have an open panel. Autostart orders providers before consumers with persisted install order breaking ties. `get_plugin_status().ready` becomes true only after discovery and required-tool verification, and clears on stop/crash. `running` alone does not establish readiness. Missing versions/actions appear in the consumer's selectable status and log. An attached provider is checked against its live registered version.
+
+Each host-owned required-plugin entry can carry a `repo` coordinate. It is not a
+consumer manifest field. `RequiredPlugins.repository(id)` uses that entry's repo
+or the host default, and `RequiredPlugins.release_page(id)` derives its release
+page. Sheets comes from `imrans-lab/minerva-plugins`; the other current required
+providers use `turnrocklabs/Minerva`. The host fetches required providers directly
+from those releases; Sheets needs no marketplace registry entry.
 
 A dependent's calls to its declared backend provider actions, and its open/import/create requests for that provider's formats, wait for ready and then dispatch once. Its other actions and unrelated callers remain usable. A missing declared action or incompatible version refuses for that caller. Waiting ends on stop, crash, discovery failure, cancellation or the bounded deadline (at most 30 seconds); a mutation already sent is never retried. Panel-executor actions dispatch without waiting for backend readiness; declared actions still require the installed provider, compatible active version and matching registered owner. Discovery failure keeps a managed or attached provider unready and reports the cause with a restart instruction. Attached Docket first verifies its required tools during attachment; a failure of that initial check refuses the attachment, clears the host connection, and reports an ERROR with attachment choices instead.
 
@@ -712,7 +754,10 @@ default behavior. Declare them on the root `Control` script.
 | `receive(channel: String, payload)` | Backend→panel push. | Channel is the **raw event name** for events and the literal `"state"` for state (see below). |
 | `handle_tool(tool_name, args) -> Dictionary` | An `executor: "panel"` tool targets this panel. | See the panel-tools section below. Return `{}` for names you don't own. |
 | `on_progress(request_id, phase, fraction)` | Backend progress notification. **Implicit channel** — not declared in `ipc_channels`/`ui.ipc_messages`. | See the caveat in §8. |
-| `_on_hot_reload()` | After the host hot-reloads your `.gd`/`.tscn` sources (`auto_reload`). | Re-establish anything the reload dropped. Manifest edits are *not* covered — see the reinstall gotcha below. |
+| `_on_panel_capture_live_state() -> Dictionary` | Before an opt-in live generation swap. | Pair with restore below; preserve transient edits, undo/redo and view state separately from file serialization. |
+| `_on_panel_restore_live_state(state: Dictionary) -> bool` | Candidate initialization and live state handoff. | Pair with capture above; return `true` only when the state is restored. A partial pair refuses reload. With neither hook, the host uses save/load. |
+| `_on_panel_self_check() -> bool` | After candidate initialization/restoration. | Optional synchronous validation; explicit `true` accepts, any other result refuses. |
+| `_on_panel_undo_request()` / `_on_panel_redo_request()` | Editor Undo/Redo. | Both hooks must exist for native panel undo/redo controls. Keep history inside the panel's live state. |
 | `_on_panel_create_note_request(ctx) -> Dictionary` | User creates a note from your panel. | Return a note descriptor. Not implementing it falls back to screenshot-to-image-note. |
 | `_on_panel_restore_from_note(payload) -> bool` | A `plugin_data` note created by the hook above is reopened. | Inverse of `_on_panel_create_note_request`. Return `false` for an unrecognised/old payload — the host toasts and leaves the panel blank. Without the hook the note degrades to preview-image-only. |
 | `_on_panel_render_for_llm(ctx) -> Array` | Your panel's content is being injected into a chat. | Return a canonical multimodal payload: an Array of `{"type":"text","text":String}` and/or `{"type":"image","image":Image,"alt":String}` parts. Return `[]` / omit the hook to fall back to the note's preview image. |
@@ -724,9 +769,15 @@ default behavior. Declare them on the root `Control` script.
 On hosts with the B1 live-reload substrate, add `"live_reload"` to the top-level
 `capabilities` array to opt native scene panels into generation swaps. Every
 `godot_scene` panel must declare `_on_panel_save_request() -> Dictionary` and
-`_on_panel_load_request(state: Dictionary)`. The save result must contain the
-complete transient state, including unsaved edits, undo history and view state;
-load must restore it exactly. Large integers survive the host's state envelope.
+`_on_panel_load_request(state: Dictionary)`. For a separate transient envelope,
+implement both `_on_panel_capture_live_state` and `_on_panel_restore_live_state`.
+Otherwise save/load also carry the complete reload state. Preserve unsaved edits,
+undo history and view state exactly; large integers survive the host envelope.
+File/project saves continue to use save/load, never the transient hook pair.
+
+`_on_hot_reload` is retired and has no production caller. Opt-in generation
+handoff and its validation hooks define reload behavior; do not wait for that old
+callback. Plugins without `live_reload` retain restart-required behavior.
 
 Use relative resource paths and text `.gd`/`.tscn`/`.tres` files. Absolute plugin
 paths, UID-only references, computed resource loads, symlinks and cross-plugin
@@ -777,7 +828,7 @@ render-for-llm hooks):
 ```
 
 `data_directory` is the supported way to find your own files — the process has no
-per-plugin CWD and no per-plugin env var (§10).
+per-plugin CWD or general data-directory environment variable (§10).
 
 **Event/state delivery to scene panels (important shape difference):** for an event,
 the host calls `panel.receive(<event_name>, payload)` — the channel is the **raw
@@ -799,6 +850,58 @@ channels (used internally by the host for panel-canonical state, §12).
 Ctrl+S the host only logs a warning ("plugin_owned mode not yet implemented … file
 NOT written by Minerva") and writes nothing. **Do not use `plugin_owned`** — your
 document will silently never save.
+
+### Public scene SDK
+
+Generation snapshots accept these host script paths. Other host implementation
+paths are private; copy reusable plugin logic into your own package instead of
+preloading host internals. Use relative paths for plugin-owned scripts/resources.
+
+| Host path | Purpose |
+|---|---|
+| `res://Scripts/Services/Plugins/AtomicFile.gd` | Atomic file replacement helper. |
+| `res://Scripts/Services/Documents/DocumentBuffer.gd` | Shared document buffer. |
+| `res://Scripts/Services/Plugins/MinervaPluginPanel.gd` | Panel base and document-action context. |
+| `res://Scripts/Services/Annotations/AnnotationV2Schema.gd` | Annotation schema. |
+| `res://Scripts/Services/Annotations/BuiltinKinds.gd` | Built-in annotation kinds. |
+| `res://Scripts/UI/Controls/responsive_container.gd` | Responsive width classification. |
+
+The host injects a `MinervaIPC` helper into native panels. Feature-detect its
+request methods when supporting older hosts; this helper is a runtime service,
+not an additional source path in the generation allowlist.
+
+### Contextual calls and cancellation
+
+For panel tools, the host prefers
+`handle_tool_with_context(tool_name, args, context) -> Dictionary`. If absent, it
+calls `handle_tool(tool_name, args)`. The context is host-owned provenance and a
+shared call lifetime, not authority accepted from tool arguments. Forward the
+same context through `MinervaIPC.request_capability(capability, payload, context,
+timeout_ms)` when a scene tool calls a host capability. That preserves caller
+identity, admission, cancellation and deadline through nested dispatch.
+
+`MinervaIPC.request_bulk(channel, payload, timeout_ms)` carries snapshots on
+declared channels; `MinervaIPC.get_bulk_payload_limit()` reports the whole-envelope
+limit. `MinervaIPC.request_private(action, params, timeout_ms)` uses the declared
+private panel authority channel. Closing a panel settles outstanding waits;
+timeouts/cancellation do not undo a mutation already performed by a backend.
+
+Check `context.is_stopped()` before starting another operation. A stopped call
+returns a typed `success:false` with `error_code:"cancelled"` (or its first local
+failure/deadline code). For effects already made, `context.lifetime.recovery`
+provides recovery information; creating/opening a tab records its `editor_name`.
+A late cancellation preserves that tab and user edits and returns the recovery
+pointer. Cancellation is not rollback. Transport failure and an application
+reply with `success:false` are separate outcomes; retain the first local failure
+instead of manufacturing an empty successful result.
+
+Legacy stdio backends can pass `parent_request_id` on a nested
+`minerva/capability` request, naming the still-outstanding host request. The host
+then shares its lifetime; an unknown/stale parent returns
+`parent_request_unknown`. In the legacy profile this is also the behavioral
+opt-in to `notifications/cancelled` for that process generation. Older backends
+that never supply a parent retain their legacy notification behavior. Modern
+negotiated transport behavior is separate; do not infer it from legacy opt-in.
 
 ### Panel-executed MCP tools (executor: `"panel"`)
 
@@ -869,7 +972,7 @@ func handle_tool(tool_name: String, args: Dictionary) -> Dictionary:
   that declared the tool. A tool from plugin A can never execute against
   plugin B's panel — this is checked before `handle_tool` is called, not
   something your code needs to defend against.
-- If your panel doesn't implement `handle_tool` at all, callers get a
+- If your panel implements neither contextual nor fallback handler, callers get a
   structured `panel_no_handler` error instead of a crash.
 
 **Worked example (from this plugin — the CAD `minerva_cad_view_state` tool,
@@ -1028,15 +1131,18 @@ Undeclared event names log a warning but are still delivered.
 ## 9. Transport & lifecycle
 
 **Spawn:** the host requires the `SubProcess` GDExtension (same extension as the
-terminal). It runs `entrypoint + args` via `SubProcess.start(command, args)`. **There
-is no env-var parameter and no working-directory parameter** — the plugin inherits
-Minerva's environment and CWD. Resolve all your own paths from `argv`, not from CWD.
+terminal). It runs `entrypoint + args` through the native subprocess owner.
+The plugin inherits Minerva's environment and CWD. The private panel-authority
+protocol uses the native per-child environment API for its host-generated secret;
+that does not expose a manifest environment map or a working-directory override.
+Resolve plugin data through the supplied context or explicit arguments.
 
 **Handshake:** newline-delimited JSON-RPC 2.0. The host sends `initialize`
 (`protocolVersion: "2025-06-18"`, `clientInfo: {name:"Minerva", version:"1.0.0"}`),
 then `notifications/initialized`, then `tools/list`. Your plugin only reaches
 `RUNNING` after `initialize` succeeds. **stdout is the transport only; stderr is for
-logs** (captured and shown as rate-limited toasts).
+logs**. Set `log_stderr:true` to opt into bounded host diagnostics; otherwise
+backend stderr is not a visible error-reporting channel.
 
 **Lifecycle (no separate "enable" verb):**
 - **Install** is the trust act — parse + validate manifest, create the plugin data
@@ -1069,7 +1175,7 @@ failure envelope readable with `minerva_plugin_build_status`. See §17.
 
 ## 10. Runtime & packaging caveats you must design around
 
-- **No per-plugin env vars, no CWD.** `backend.working_dir` is parsed but never
+- **No general manifest environment map or per-plugin CWD.** `backend.working_dir` is parsed but never
   applied. Make your plugin location-independent.
 - **Compiled plugins ship a binary per platform.** Targets:
   `linux-x86_64`, `linux-arm64`, `macos-universal`, `windows-x86_64`. Missing binary
@@ -1277,8 +1383,12 @@ build produces a registry entry with no artifact behind it.
 ### Tag / tarball / SHA256 conventions
 
 - **Release tag:** `<id>-v<MAJOR>.<MINOR>.<PATCH>` (e.g. `presentation-v0.0.3`).
-  Pushes to `main` tag as `<id>-v<manifest.version>`; other branches get a
-  `-branch-<branch>` sentinel (prerelease, **excluded** from the registry).
+  Sheets and MultiMeter publish stable releases from explicitly pushed
+  **annotated** tags, using `.github/workflows/sheets-tags.yml` and
+  `multimeter-tags.yml`. Commit the matching manifest version to `main`, require
+  its CI to pass, then create/push the annotated tag. Branch previews use a
+  `-branch-<branch>` sentinel and are excluded from the registry. Other plugins'
+  workflows may retain their existing main/manual publication lanes.
 - **Tarball filename:** `<id>-<manifest.version>-<target>.tar.gz`,
   `target ∈ {linux-x86_64, linux-arm64, macos-universal, windows-x86_64}`.
 - **Tarball contents (files at archive ROOT, not nested):** the plugin binary
@@ -1291,6 +1401,20 @@ build produces a registry entry with no artifact behind it.
   hard failure. **Integrity only — no signing/GPG/notarization.** The sidecar lives
   inside the same tarball it describes, so it guards against transit corruption, not a
   malicious publisher; authenticity is anchored solely in HTTPS to github.com.
+
+`scripts/release-publish-guard.sh` requires a stable tag to be annotated, point to
+the checked-out commit and match the source manifest's version. Tag workflows
+restore the actual remote tag ref before this check, because checkout can flatten
+the runner-local ref. A genuinely lightweight remote tag still refuses. Verify
+the published release and every declared platform archive with
+`python3 scripts/verify-release.py <id> <tag>`; a successful build alone is not
+publication proof. Tags and published release coordinates never move. Repair a
+failed publication or artifact by advancing the version and publishing forward.
+
+For dependent consumers, publish the supporting host before their release and
+registry update. Run `scripts/regen_registry.py --check` after selecting a release;
+keep Sheets out of the optional marketplace registry because required-provider
+installation uses its own repository coordinate.
 
 ### Marketplace install pipeline
 
@@ -1363,7 +1487,7 @@ GitHub redirects) → `tar -xzf` → verify `SHA256SUMS` → read the **tarball-
 19. **Never declare `host.chat_providers.unregister`** — it is dispatchable but not in
     the host's allowed list (it rides the `…register` grant). Declaring it fails
     install with `unknown host_capability` (§4.2).
-20. **`MINERVA_PLUGIN_DATA_DIR` is not set by the host** (§11). No env var is. Resolve
+20. **`MINERVA_PLUGIN_DATA_DIR` is not set by the host** (§11). The private authority secret is a separate, host-owned exception. Resolve
     your own paths from `argv[0]`, or `ctx.data_directory` in a scene panel.
 21. **A `setup` stanza is inert on the marketplace lane** (§17). The same
     `manifest.json` ships in the release tarball, where the source it would build was

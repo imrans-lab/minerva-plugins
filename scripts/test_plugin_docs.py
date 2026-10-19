@@ -25,6 +25,9 @@ class PluginDocsTest(unittest.TestCase):
         stale["PLUGIN_API_COVERAGE.md"] += "| `host.echo` | host_capability | no link |\n"
         self.assertIn("PLUGIN_API_COVERAGE.md: contract row needs a guide anchor: `host.echo`",
                       check_documents(stale))
+        stale["PLUGIN_API_COVERAGE.md"] = ledger + "| `host.undocumented` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#live-reload) |\n"
+        self.assertIn("PLUGIN_API_COVERAGE.md: contract has no guide description: `host.undocumented`",
+                      check_documents(stale))
 
 
 if __name__ == "__main__":

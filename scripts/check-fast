@@ -11,6 +11,8 @@ def main() -> int:
     argparse.ArgumentParser(description=__doc__).parse_args()
     root = Path(__file__).resolve().parents[1]
     checks = [
+        ("plugin-docs", root, [sys.executable, "scripts/check_plugin_docs.py"]),
+        ("plugin-docs-tests", root, [sys.executable, "scripts/test_plugin_docs.py"]),
         ("push-lanes", root, [sys.executable, "scripts/ci/check_push_lanes.py"]),
         ("dependency-coherence", root, [sys.executable, "scripts/ci/test_dependency_coherence.py"]),
         ("packed-manifest", root, [sys.executable, "scripts/test_verify_packed_manifest.py"]),

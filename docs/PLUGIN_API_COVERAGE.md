@@ -10,196 +10,239 @@ Column meaning:
 - **in_schema** — recognized by the manifest parser / capability allowlist.
 - **used_by** — shipped plugins that actually exercise it (empty = available-but-unused).
 
-> **Revision state.** The original audit was taken against Minerva as of 2026-06-13.
-> This revision (2026-08-17, Minerva `adcb58e3`) re-verified the *claims* and folded in
-> the substrate added since — the `setup` build pipeline and install lanes, manifest
-> `settings`, eight host capabilities (`host.settings.*`, `host.models.*`,
-> `host.chat_providers.*`, `host.project.*`), six panel lifecycle hooks, three
-> setup-pipeline states, and the annotation substrate. Rows and findings added or
-> corrected in this pass are marked **(2026-08)**.
->
-> **`source_ref` carries files and symbols, never line numbers.** The original audit
-> pinned every reference to a line; a single epoch of work moved nearly all of them
-> (`CapabilityBroker.gd` alone grew past 4000 lines), which made the column actively
-> misleading — it looked precise while pointing at the wrong code. All 223 line
-> references were removed in this pass. **Grep for the symbol**; file and symbol names
-> survive refactors that line numbers do not. Keep it that way when you add rows.
+The guarded categories below are compared in both directions with their source
+owners during explicit two-repository qualification. Other rows distinguish
+runtime behavior, pass-through metadata, unsupported fields and repo-only tooling;
+they are not additional capability grants. Guide links are checked locally.
+`source_ref` names files and symbols, never unstable line numbers.
 
 ---
 
 ## 1. Coverage matrix
 
-| symbol | category | in_host | in_schema | used_by | source_ref |
-|---|---|---|---|---|---|
-| CapabilityBroker.dispatch | runtime | yes | no | presentation, scansort, notes_helper, obs_controller, cad | CapabilityBroker.gd |
-| mcp.proxy:&lt;tool&gt; | host_api | yes | yes | notes_helper | CapabilityBroker.gd; PluginPolicy.gd |
-| secrets:get:&lt;handle&gt; | host_api | yes | yes | obs_controller | CapabilityBroker.gd |
-| secrets:set:&lt;handle&gt; | host_api | yes | yes | obs_controller | CapabilityBroker.gd |
-| secrets:delete:&lt;handle&gt; | host_api | yes | yes | — | CapabilityBroker.gd |
-| host.echo | host_api | yes | yes | scansort | CapabilityBroker.gd; scansort/src/main.rs |
-| host.documents.list_open | host_api | yes | yes | presentation | CapabilityBroker.gd; presentation/main.go |
-| host.documents.get_state | host_api | yes | yes | presentation | CapabilityBroker.gd; presentation/main.go |
-| host.documents.set_state | host_api | yes | yes | presentation | CapabilityBroker.gd; presentation/main.go |
-| host.documents.mark_dirty | host_api | yes | yes | — | CapabilityBroker.gd |
-| host.documents.get_node | host_api | yes | yes | presentation | CapabilityBroker.gd; JsonPointer.gd |
-| host.documents.get_blob | host_api | yes | yes | presentation | CapabilityBroker.gd; presentation/main.go |
-| host.documents.put_blob | host_api | yes | yes | presentation | CapabilityBroker.gd; presentation/main.go |
-| host.documents.patch_state | host_api | yes | yes | presentation | CapabilityBroker.gd; presentation/main.go |
-| host.files.read | host_api | yes | yes | — (scansort declares, uses std::fs) | CapabilityBroker.gd |
-| host.files.write | host_api | yes | yes | — | CapabilityBroker.gd |
-| host.files.list | host_api | yes | yes | — | CapabilityBroker.gd |
-| host.files.exists | host_api | yes | yes | — | CapabilityBroker.gd |
-| host.files.stat | host_api | yes | yes | — | CapabilityBroker.gd |
-| host.files.mkdir | host_api | yes | yes | — | CapabilityBroker.gd |
-| host.files.delete | host_api | yes | yes | — | CapabilityBroker.gd |
-| host.files.move | host_api | yes | yes | — | CapabilityBroker.gd |
-| host.editors.list | host_api | yes | yes | — | CapabilityBroker.gd |
-| host.editors.export | host_api | yes | yes | presentation | CapabilityBroker.gd; presentation/main.go |
-| host.editors.open | host_api | yes | yes | presentation | CapabilityBroker.gd; presentation/main.go |
-| host.providers.chat | host_api | yes | yes | scansort | CapabilityBroker.gd; scansort/src/main.rs |
-| host.dialogs.file_picker | host_api | yes | yes | — | CapabilityBroker.gd |
-| host.dialogs.directory_picker | host_api | yes | yes | — | CapabilityBroker.gd |
-| host.permissions.grant_scope | permission | yes | yes | — | CapabilityBroker.gd; PluginManager.gd |
-| host.terminal.exec | host_api | yes | yes | — | CapabilityBroker.gd |
-| host.terminal.list | host_api | yes | yes | agent-relay | CapabilityBroker.gd; PluginDefinition.gd |
-| host.terminal.read | host_api | yes | yes | agent-relay | CapabilityBroker.gd; PluginDefinition.gd |
-| host.terminal.write | host_api | yes | yes | agent-relay | CapabilityBroker.gd; PluginDefinition.gd |
-| host.terminal.wait | host_api | yes | yes | agent-relay | CapabilityBroker.gd; PluginDefinition.gd |
-| host.pdf.generate | host_api | yes | yes | — | CapabilityBroker.gd; src/sidecars/host_pdf/ |
-| host.notify (capability form) | host_api | yes | yes | — | CapabilityBroker.gd |
-| host.notify (JSON-RPC notification) | ipc | yes | no | cad, hello_scene | PluginNotifyRouter.gd; MCPServerConnection.gd; cad/main.go |
-| network.none (deny marker) | host_api | yes | no | — | CapabilityBroker.gd |
-| minerva/capability (plugin→host wire) | ipc | yes | no | presentation, scansort, notes_helper | MCPServerConnection.gd; presentation/main.go; notes_helper/server.py |
-| PluginWebviewBroker.handle_ipc_message | ipc | yes | no | obs_controller | PluginWebviewBroker.gd |
-| capability:&lt;name&gt; (panel string form) | ipc | yes | no | obs_controller | PluginWebviewBroker.gd; PluginScenePanelBroker.gd |
-| PluginScenePanelBroker.handle_scene_request | ipc | yes | no | cad, hello_scene, test_paired_dsl | PluginScenePanelBroker.gd |
-| host.fs.watch / host.fs.unwatch | ipc | yes | no | — | PluginScenePanelBroker.gd |
-| host.fs.changed (outbound) | event | yes | no | — | PluginScenePanelBroker.gd |
-| host_owned_save.get/set/response | ipc | yes | no | presentation | PluginScenePanelBroker.gd |
-| attach_buffer / text_changed / detach_buffer | ipc | yes | no | cad, test_paired_dsl | PluginScenePanelBroker.gd |
-| minerva/plugin_event (wire) | event | yes | no | obs_controller, scansort, agent-relay | MCPServerConnection.gd; obs_controller/events.go |
-| minerva/plugin_state (wire) | state | yes | no | obs_controller | MCPServerConnection.gd; obs_controller/events.go |
-| PLUGIN_EVENT trigger type (trigger_type=4) | trigger | yes | yes | agent-relay | TriggerDefinition.gd; TriggerManager.gd; MCPAgentTools.gd |
-| id | manifest_field | yes | yes | all 8 | PluginDefinition.gd |
-| name | manifest_field | yes | yes | all 8 | PluginDefinition.gd |
-| version | manifest_field | yes | yes | all 8 | PluginDefinition.gd; cad/main.go |
-| host_api_version | manifest_field | yes | yes | all 8 | PluginDefinition.gd; PluginMCPTools.gd |
-| backend.transport | manifest_field | yes | yes | all 8 | PluginDefinition.gd |
-| backend.entrypoint | manifest_field | yes | yes | all 8 | PluginDefinition.gd; PluginManager.gd |
-| backend.args | manifest_field | yes | yes | hello_scene, notes_helper, test_paired_dsl, test_stdio_server | PluginDefinition.gd; PluginManager.gd |
-| backend.working_dir | manifest_field | yes | yes | — | PluginDefinition.gd; PluginManager.gd |
-| tools[] | manifest_field | yes | yes | obs_controller, notes_helper, test_stdio_server, scansort | PluginDefinition.gd; PluginToolRegistry.gd |
-| tools[].name | manifest_field | yes | yes | (same) | PluginDefinition.gd |
-| tools[].description | manifest_field | yes | yes | (same) | PluginDefinition.gd |
-| tools[].input_schema | manifest_field | yes | yes | obs_controller, notes_helper, scansort | PluginDefinition.gd |
-| skills[] | manifest_field | yes | yes | cad | PluginDefinition.gd; cad/manifest.json |
-| ui | manifest_field | yes | yes | cad, scansort, presentation, obs_controller, hello_scene, test_paired_dsl | PluginDefinition.gd |
-| ui.ipc_messages | manifest_field | yes | yes | cad, obs_controller, hello_scene, test_paired_dsl | PluginDefinition.gd; PluginWebviewBroker.gd |
-| ui.panels[] | manifest_field | yes | yes | cad, scansort, presentation, obs_controller, hello_scene, test_paired_dsl | PluginDefinition.gd |
-| ui.panels[].name | manifest_field | yes | yes | (same) | PluginDefinition.gd |
-| ui.panels[].kind | manifest_field | yes | yes | (same) | PluginDefinition.gd |
-| ui.panels[].entry | manifest_field | yes | yes | obs_controller | PluginDefinition.gd; PluginManagerPanel.gd |
-| ui.panels[].entry_scene | manifest_field | yes | yes | cad, scansort, presentation, hello_scene, test_paired_dsl | PluginDefinition.gd; PluginScenePanelHost.gd |
-| ui.panels[].scripts | manifest_field | yes | yes | (scene plugins) | PluginDefinition.gd; PluginScenePanelHost.gd |
-| ui.panels[].file_extensions | manifest_field | yes | yes | cad, presentation, hello_scene, test_paired_dsl | PluginDefinition.gd; PluginEditorRegistry.gd |
-| ui.panels[].ipc_channels | manifest_field | yes | yes | cad, obs_controller, hello_scene, test_paired_dsl | PluginDefinition.gd |
-| ui.panels[].save_mode | manifest_field | yes | yes | cad, scansort, presentation, hello_scene, test_paired_dsl | PluginDefinition.gd |
-| ui.panels[].chrome.suppress | manifest_field | yes | yes | hello_scene | PluginDefinition.gd |
-| ui.panels[].fullscreen_capable | manifest_field | yes | yes | obs_controller | PluginDefinition.gd |
-| ui.panels[].multi_window | manifest_field | yes | yes | obs_controller | PluginDefinition.gd |
-| ui.panels[].render_mode | manifest_field | yes | yes | cad, test_paired_dsl | PluginDefinition.gd; singleton_object.gd |
-| ui.panels[].layout_hint | manifest_field | yes | yes | cad, test_paired_dsl | PluginDefinition.gd; singleton_object.gd |
-| events[] | manifest_field | yes | yes | obs_controller, scansort | PluginDefinition.gd |
-| events[].name | manifest_field | yes | yes | obs_controller, scansort | PluginDefinition.gd |
-| events[].payload_schema | manifest_field | yes | yes | obs_controller | PluginDefinition.gd |
-| state.schema | manifest_field | yes | yes | obs_controller | PluginDefinition.gd |
-| editor_items[] | manifest_field | yes | yes | cad, presentation, hello_scene, test_paired_dsl | PluginDefinition.gd |
-| editor_items[].id | manifest_field | yes | yes | (same) | PluginDefinition.gd; PluginEditorRegistry.gd |
-| editor_items[].name | manifest_field | yes | yes | cad, presentation, hello_scene | PluginEditorRegistry.gd |
-| editor_items[].panel | manifest_field | yes | yes | (same) | PluginDefinition.gd |
-| editor_items[].default_filename | manifest_field | yes | yes | (same) | PluginEditorRegistry.gd |
-| capabilities[] (top-level) | manifest_field | yes | yes | cad, presentation, hello_scene | PluginDefinition.gd |
-| capability: project_state | manifest_field | yes | yes | cad, hello_scene | PluginDefinition.gd |
-| capability: host_owned_save | manifest_field | yes | yes | cad, presentation, hello_scene | PluginDefinition.gd |
-| capability: project_export | manifest_field | yes | yes | cad, hello_scene | PluginDefinition.gd |
-| project_file | manifest_field | yes | yes | cad, hello_scene | PluginDefinition.gd |
-| project_file.serialize_channel | manifest_field | yes | yes | cad, hello_scene | PluginDefinition.gd |
-| project_file.deserialize_channel | manifest_field | yes | yes | cad, hello_scene | PluginDefinition.gd |
-| project_export | manifest_field | yes | yes | cad, hello_scene | PluginDefinition.gd |
-| project_export.collect_channel | manifest_field | yes | yes | cad, hello_scene | PluginDefinition.gd |
-| project_export.apply_channel | manifest_field | yes | yes | cad, hello_scene | PluginDefinition.gd |
-| permissions | manifest_field | yes | yes | scansort, presentation, obs_controller, cad, notes_helper | PluginDefinition.gd |
-| permissions.host_capabilities | permission | yes | yes | scansort, presentation, obs_controller, notes_helper | PluginDefinition.gd |
-| permissions.network.mode | permission | yes | yes | obs_controller | PluginDefinition.gd |
-| permissions.network.ports | permission | **no** | **no** | obs_controller (declared, dropped) | PluginDefinition.gd; obs_controller/manifest.json |
-| permissions.filesystem.mode | permission | yes | yes | scansort, notes_helper, obs_controller | PluginDefinition.gd |
-| permissions.filesystem.paths | permission | yes | yes | scansort, notes_helper, obs_controller | PluginDefinition.gd |
-| data_directory | manifest_field | yes | yes | cad, presentation, hello_scene, test_paired_dsl | PluginDefinition.gd |
-| autostart | manifest_field | yes | yes | cad, presentation, hello_scene, test_paired_dsl | PluginDefinition.gd; PluginManager.gd |
-| auto_reload | manifest_field | yes | yes | cad, presentation, hello_scene, test_paired_dsl | PluginDefinition.gd; PluginManager.gd |
-| class_names | manifest_field | yes | no | (host-populated) | PluginDefinition.gd |
-| STDIO transport / SubProcess.start | runtime | yes | no | all 8 | MCPServerConnection.gd; subprocess.cpp |
-| MCP initialize handshake | ipc | yes | no | all 8 | MCPServerConnection.gd |
-| tools/call routing + namespacing | ipc | yes | no | cad, scansort, presentation, obs_controller, notes_helper, test_stdio_server | PluginToolRegistry.gd |
-| PluginDB.install / install_plugin | lifecycle | yes | no | — | PluginDB.gd; PluginManager.gd |
-| start/stop/restart/remove | lifecycle | yes | no | — | PluginManager.gd |
-| Crash detection / CRASH_LOOP | lifecycle | yes | no | — | PluginManager.gd |
-| PluginDefinition.State enum | state | yes | no | — | PluginDefinition.gd |
-| PluginManager lifecycle signals | event | yes | no | — | PluginManager.gd; singleton_object.gd |
-| tools_registered/unregistered signals | event | yes | no | — | PluginToolRegistry.gd |
-| Hot reload (auto_reload watch) | lifecycle | yes | no | — | PluginManager.gd |
-| PluginDB persistence + boot reconstruction | lifecycle | yes | no | — | PluginDB.gd |
-| PluginErrors success/error envelope | runtime | yes | no | presentation, scansort, cad, notes_helper, obs_controller | PluginErrors.gd |
-| Audit redaction | runtime | yes | no | — | CapabilityBroker.gd |
-| window.minerva JS bridge (WRY + CEF) | ipc | yes | no | obs_controller | minerva_bridge.gd; cef_bridge.gd |
-| HTML webview hosts (CEF preferred / WRY fallback) | ui_surface | yes | no | obs_controller | CefWebViewEditor.gd; WebViewEditor.gd |
-| PluginScenePanelHost (native mount) | ui_surface | yes | no | cad, scansort, presentation, hello_scene, test_paired_dsl | PluginScenePanelHost.gd |
-| MinervaPluginPanel + lifecycle hooks | lifecycle | yes | no | (scene plugins) | MinervaPluginPanel.gd |
-| PluginEditorRegistry | registry | yes | no | cad, presentation, hello_scene, test_paired_dsl | PluginEditorRegistry.gd |
-| Document state (canonicality model) | document_model | yes | no | cad, presentation, test_paired_dsl | CapabilityBroker.gd |
-| JSON Pointer (RFC 6901) | document_model | yes | no | presentation | JsonPointer.gd |
-| JSON Patch (RFC 6902) | document_model | yes | no | presentation | JsonPatch.gd |
-| Blob storage / reference model | document_model | yes | no | presentation | PluginScenePanelBroker.gd; slide_model.gd |
-| Annotation model | document_model | yes | no | presentation, cad, hello_scene | presentation_tile_annotation_host.gd; cad/ui/CadAnnotationHost.gd |
-| Embedded Python runtime (go:embed PBS) | runtime | no (plugin-side) | no | cad | cad/internal/runtime/embed.go; extract.go |
-| build-python-runtime-bundle.sh + .lock | runtime | no (plugin-side) | no | cad | scripts/build-python-runtime-bundle.sh; cad/scripts/runtime-bundle.lock |
-| registry.json + regen_registry.py | registry | no (repo-side) | no | cad, scansort, presentation | registry.json; regen_registry.py |
-| MarketplaceClient install pipeline | runtime | yes | no | cad, scansort, presentation | MarketplaceClient.gd |
-| Release tag + tarball naming | registry | no (repo-side) | no | cad, scansort, presentation | presentation.yml; regen_registry.py |
-| save_mode=plugin_owned (UNIMPLEMENTED) | lifecycle | **no (stub)** | yes | — | Editor.gd (TODO, push_warning only) |
-| minerva.call / minerva.createNote | ipc | yes | no | MultiMeter (canonical Sheets create) | minerva_bridge.gd; cef_bridge.gd; PluginWebviewBroker.gd |
-| localhost:9315 MCP HTTP server | runtime | yes | no | direct HTTP clients | MinervaMCPHttpServer.gd; separate from the native panel bridge |
-| elgato Stream Deck companion (separate substrate) | language | no (external) | no | elgato | plugins/elgato/manifest.json; src/index.ts |
-| host.settings.get **(2026-08)** | host_api | yes | yes | — | CapabilityBroker `_handle_host_settings_get`; PluginSettingsStore.gd |
-| host.settings.list **(2026-08)** | host_api | yes | yes | — | CapabilityBroker `_handle_host_settings_list` |
-| host.models.list_providers **(2026-08)** | host_api | yes | yes | — | CapabilityBroker `_handle_host_models_list_providers` |
-| host.models.list_models **(2026-08)** | host_api | yes | yes | — | CapabilityBroker `_handle_host_models_list_models` |
-| host.chat_providers.register **(2026-08)** | host_api | yes | yes | — | CapabilityBroker `_handle_host_chat_providers_register`; PluginChatProviderRegistry.gd |
-| host.chat_providers.unregister **(2026-08)** | host_api | yes | **no (rides the register grant — declaring it fails install)** | — | CapabilityBroker `_handle_host_chat_providers_unregister`; PluginDefinition `ALLOWED_HOST_CAPABILITIES` |
-| host.project.current **(2026-08)** | host_api | yes | yes | — | CapabilityBroker `_handle_host_project_current` |
-| host.project.open **(2026-08)** | host_api | yes | yes | — | CapabilityBroker `_handle_host_project_open` |
-| PluginProvider (plugin-as-chat-provider) **(2026-08)** | runtime | yes | no | — | Providers/PluginProvider.gd `generate_content`, `_apply_result_to_bot` |
-| settings[] **(2026-08)** | manifest_field | yes | yes | — | PluginDefinition `SETTING_TYPES`, `validate()`; PluginSettingsStore.gd |
-| settings_title **(2026-08)** | manifest_field | yes | yes | — | PluginSettingsStore `scope_tab` |
-| setup{} (requires/steps) **(2026-08)** | manifest_field | yes | yes | 8 of 10: nametag-maker, pcb, presentation (go_build); 3d-gen, agent-relay, drive, movie-gen, scansort (cargo_build+copy). cad + codetools abstain — embedded-runtime build not expressible in v1 vocabulary | Setup/SetupSchema.gd, SetupPipeline.gd, SetupExecutors.gd |
-| `setup` stripped from packed manifest **(2026-08)** | registry | n/a (repo-side) | n/a | every release workflow | .github/workflows/*.yml pack step; pcb/manifest_binary_tier_test.go |
-| setup toolchain registry + preflight **(2026-08)** | runtime | yes | n/a | pcb | Setup/ToolchainRegistry.gd `TOOLS`, ToolchainProbe.gd |
-| install_lane (manifest \| marketplace) **(2026-08)** | manifest_field | yes | no (host-recorded) | all | PluginDefinition `LANE_MANIFEST`/`LANE_MARKETPLACE`, `resolve_install_lane` |
-| release_targets **(2026-08)** | manifest_field | **no (repo/CI only)** | **no (parser ignores)** | all 10 | */manifest.json; scripts/regen_registry.py |
-| tools[].executor: "panel" **(2026-08)** | manifest_field | yes | yes | pcb (76 of 88), cad | PluginToolRegistry; PluginDefinition `_from_dict_internal` |
-| S_BUILDING / S_BUILD_FAILED / S_NEEDS_BINARY **(2026-08)** | state | yes | no | — | PluginManager.gd `S_BUILDING`…`S_NEEDS_BINARY` (**not** members of `PluginDefinition.State`) |
-| minerva_plugin_build_status **(2026-08)** | host_tool | yes | n/a | — | PluginMCPTools.gd |
-| minerva_plugin_setup_dry_run **(2026-08)** | host_tool | yes | n/a | — | PluginMCPTools.gd; Setup/SetupDryRun.gd |
-| minerva_get/set/list_preference(s) **(2026-08)** | host_tool | yes | n/a | — | MCP preference tools → PluginSettingsStore |
-| panel hook `_on_panel_apply_sync` **(2026-08)** | lifecycle | yes | no | pcb, cad | PluginScenePanelHost `invoke_apply_sync` |
-| panel hook `_on_panel_create_note_request` **(2026-08)** | lifecycle | yes | no | — | PluginScenePanelHost `invoke_create_note` |
-| panel hook `_on_panel_restore_from_note` **(2026-08)** | lifecycle | yes | no | — | PluginScenePanelHost `invoke_restore_from_note` |
-| panel hook `_on_panel_render_for_llm` **(2026-08)** | lifecycle | yes | no | — | PluginScenePanelHost `invoke_render_for_llm` |
-| panel hook `_on_panel_inject_toggle_changed` **(2026-08)** | lifecycle | yes | no | — | PluginScenePanelHost `invoke_inject_toggle` |
-| panel hook `_on_hot_reload` **(2026-08)** | lifecycle | yes | no | — | PluginManager (hot-reload dispatch) |
-| panel hook `on_progress` **(2026-08)** | lifecycle | **partial — delivery only, no producer wiring** | no (implicit channel) | — | PluginScenePanelBroker `push_progress` (carries a TODO(integration)) |
-| Annotation substrate v2 **(2026-08)** | document_model | yes | no | pcb, cad, hello_scene | src/Scripts/Services/Annotations/*; `get_annotation_host()` |
-| filesystem mode "unrestricted" **(2026-08)** | permission | yes | yes | — (no shipped plugin declares it) | PluginDefinition `filesystem_mode`; CapabilityBroker `_files_scope_check` |
+| symbol | category | in_host | in_schema | used_by | source_ref | guide |
+|---|---|---|---|---|---|---|
+| CapabilityBroker.dispatch | runtime | yes | no | presentation, scansort, notes_helper, obs_controller, cad | CapabilityBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#1-overview--plugin-anatomy) |
+| mcp.proxy:&lt;tool&gt; | host_api | yes | yes | notes_helper | CapabilityBroker.gd; PluginPolicy.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| secrets:get:&lt;handle&gt; | host_api | yes | yes | obs_controller | CapabilityBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| secrets:set:&lt;handle&gt; | host_api | yes | yes | obs_controller | CapabilityBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| secrets:delete:&lt;handle&gt; | host_api | yes | yes | — | CapabilityBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.echo` | host_capability | yes | yes | scansort | CapabilityBroker.gd; scansort/src/main.rs | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.documents.list_open` | host_capability | yes | yes | presentation | CapabilityBroker.gd; presentation/main.go | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.documents.get_state` | host_capability | yes | yes | presentation | CapabilityBroker.gd; presentation/main.go | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.documents.set_state` | host_capability | yes | yes | presentation | CapabilityBroker.gd; presentation/main.go | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.documents.mark_dirty` | host_capability | yes | yes | — | CapabilityBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.documents.get_node` | host_capability | yes | yes | presentation | CapabilityBroker.gd; JsonPointer.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.documents.get_blob` | host_capability | yes | yes | presentation | CapabilityBroker.gd; presentation/main.go | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.documents.put_blob` | host_capability | yes | yes | presentation | CapabilityBroker.gd; presentation/main.go | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.documents.patch_state` | host_capability | yes | yes | presentation | CapabilityBroker.gd; presentation/main.go | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.files.read` | host_capability | yes | yes | — (scansort declares, uses std::fs) | CapabilityBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.files.write` | host_capability | yes | yes | — | CapabilityBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.files.list` | host_capability | yes | yes | — | CapabilityBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.files.exists` | host_capability | yes | yes | — | CapabilityBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.files.stat` | host_capability | yes | yes | — | CapabilityBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.files.mkdir` | host_capability | yes | yes | — | CapabilityBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.files.delete` | host_capability | yes | yes | — | CapabilityBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.files.move` | host_capability | yes | yes | — | CapabilityBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.editors.list` | host_capability | yes | yes | — | CapabilityBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.editors.export` | host_capability | yes | yes | presentation | CapabilityBroker.gd; presentation/main.go | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.editors.open` | host_capability | yes | yes | presentation | CapabilityBroker.gd; presentation/main.go | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.providers.chat` | host_capability | yes | yes | scansort | CapabilityBroker.gd; scansort/src/main.rs | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.dialogs.file_picker` | host_capability | yes | yes | — | CapabilityBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.dialogs.directory_picker` | host_capability | yes | yes | — | CapabilityBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.permissions.grant_scope` | host_capability | yes | yes | — | CapabilityBroker.gd; PluginManager.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.terminal.exec` | host_capability | yes | yes | — | CapabilityBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.terminal.list` | host_capability | yes | yes | agent-relay | CapabilityBroker.gd; PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.terminal.read` | host_capability | yes | yes | agent-relay | CapabilityBroker.gd; PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.terminal.write` | host_capability | yes | yes | agent-relay | CapabilityBroker.gd; PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.terminal.wait` | host_capability | yes | yes | agent-relay | CapabilityBroker.gd; PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.pdf.generate` | host_capability | yes | yes | — | CapabilityBroker.gd; src/sidecars/host_pdf/ | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| host.notify (capability form) | host_api | yes | yes | — | CapabilityBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| host.notify (JSON-RPC notification) | ipc | yes | no | cad, hello_scene | PluginNotifyRouter.gd; MCPServerConnection.gd; cad/main.go | [reference](PLUGIN_DEVELOPER_GUIDE.md#6-html-panels--the-ipc-model) |
+| network.none (deny marker) | host_api | yes | no | — | CapabilityBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| minerva/capability (plugin→host wire) | ipc | yes | no | presentation, scansort, notes_helper | MCPServerConnection.gd; presentation/main.go; notes_helper/server.py | [reference](PLUGIN_DEVELOPER_GUIDE.md#6-html-panels--the-ipc-model) |
+| PluginWebviewBroker.handle_ipc_message | ipc | yes | no | obs_controller | PluginWebviewBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#6-html-panels--the-ipc-model) |
+| capability:&lt;name&gt; (panel string form) | ipc | yes | no | obs_controller | PluginWebviewBroker.gd; PluginScenePanelBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#6-html-panels--the-ipc-model) |
+| PluginScenePanelBroker.handle_scene_request | ipc | yes | no | cad, hello_scene, test_paired_dsl | PluginScenePanelBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#6-html-panels--the-ipc-model) |
+| host.fs.watch / host.fs.unwatch | ipc | yes | no | — | PluginScenePanelBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#6-html-panels--the-ipc-model) |
+| host.fs.changed (outbound) | event | yes | no | — | PluginScenePanelBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#8-events--state) |
+| host_owned_save.get/set/response | ipc | yes | no | presentation | PluginScenePanelBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#6-html-panels--the-ipc-model) |
+| attach_buffer / text_changed / detach_buffer | ipc | yes | no | cad, test_paired_dsl | PluginScenePanelBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#6-html-panels--the-ipc-model) |
+| minerva/plugin_event (wire) | event | yes | no | obs_controller, scansort, agent-relay | MCPServerConnection.gd; obs_controller/events.go | [reference](PLUGIN_DEVELOPER_GUIDE.md#8-events--state) |
+| minerva/plugin_state (wire) | state | yes | no | obs_controller | MCPServerConnection.gd; obs_controller/events.go | [reference](PLUGIN_DEVELOPER_GUIDE.md#1-overview--plugin-anatomy) |
+| PLUGIN_EVENT trigger type (trigger_type=4) | trigger | yes | yes | agent-relay | TriggerDefinition.gd; TriggerManager.gd; MCPAgentTools.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#1-overview--plugin-anatomy) |
+| `id` | manifest_field | yes | yes | all 8 | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `name` | manifest_field | yes | yes | all 8 | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `version` | manifest_field | yes | yes | all 8 | PluginDefinition.gd; cad/main.go | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `host_api_version` | manifest_field | yes | yes | all 8 | PluginDefinition.gd; PluginMCPTools.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `backend.transport` | manifest_field | yes | yes | all 8 | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `backend.entrypoint` | manifest_field | yes | yes | all 8 | PluginDefinition.gd; PluginManager.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `backend.args` | manifest_field | yes | yes | hello_scene, notes_helper, test_paired_dsl, test_stdio_server | PluginDefinition.gd; PluginManager.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `backend.working_dir` | manifest_field | yes | yes | — | PluginDefinition.gd; PluginManager.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `tools` | manifest_field | yes | yes | obs_controller, notes_helper, test_stdio_server, scansort | PluginDefinition.gd; PluginToolRegistry.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `tools[].name` | manifest_field | yes | yes | (same) | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| tools[].description | manifest_metadata | yes | yes | (same) | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| tools[].input_schema | manifest_metadata | yes | yes | obs_controller, notes_helper, scansort | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `skills` | manifest_field | yes | yes | cad | PluginDefinition.gd; cad/manifest.json | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui` | manifest_field | yes | yes | cad, scansort, presentation, obs_controller, hello_scene, test_paired_dsl | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.ipc_messages` | manifest_field | yes | yes | cad, obs_controller, hello_scene, test_paired_dsl | PluginDefinition.gd; PluginWebviewBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels` | manifest_field | yes | yes | cad, scansort, presentation, obs_controller, hello_scene, test_paired_dsl | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].name` | manifest_field | yes | yes | (same) | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].kind` | manifest_field | yes | yes | (same) | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].entry` | manifest_field | yes | yes | obs_controller | PluginDefinition.gd; PluginManagerPanel.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].entry_scene` | manifest_field | yes | yes | cad, scansort, presentation, hello_scene, test_paired_dsl | PluginDefinition.gd; PluginScenePanelHost.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].scripts` | manifest_field | yes | yes | (scene plugins) | PluginDefinition.gd; PluginScenePanelHost.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].file_extensions` | manifest_field | yes | yes | cad, presentation, hello_scene, test_paired_dsl | PluginDefinition.gd; PluginEditorRegistry.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].ipc_channels` | manifest_field | yes | yes | cad, obs_controller, hello_scene, test_paired_dsl | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].save_mode` | manifest_field | yes | yes | cad, scansort, presentation, hello_scene, test_paired_dsl | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].chrome.suppress` | manifest_field | yes | yes | hello_scene | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].fullscreen_capable` | manifest_field | yes | yes | obs_controller | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].multi_window` | manifest_field | yes | yes | obs_controller | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].render_mode` | manifest_field | yes | yes | cad, test_paired_dsl | PluginDefinition.gd; singleton_object.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].layout_hint` | manifest_field | yes | yes | cad, test_paired_dsl | PluginDefinition.gd; singleton_object.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `events` | manifest_field | yes | yes | obs_controller, scansort | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| events[].name | manifest_metadata | yes | yes | obs_controller, scansort | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| events[].payload_schema | manifest_metadata | yes | yes | obs_controller | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `state.schema` | manifest_field | yes | yes | obs_controller | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `editor_items` | manifest_field | yes | yes | cad, presentation, hello_scene, test_paired_dsl | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| editor_items[].id | manifest_metadata | yes | yes | (same) | PluginDefinition.gd; PluginEditorRegistry.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| editor_items[].name | manifest_metadata | yes | yes | cad, presentation, hello_scene | PluginEditorRegistry.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| editor_items[].panel | manifest_metadata | yes | yes | (same) | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| editor_items[].default_filename | manifest_metadata | yes | yes | (same) | PluginEditorRegistry.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| capabilities[] (top-level) | manifest_metadata | yes | yes | cad, presentation, hello_scene | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `project_state` | plugin_capability | yes | yes | cad, hello_scene | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#31-there-is-one-dialect) |
+| `host_owned_save` | plugin_capability | yes | yes | cad, presentation, hello_scene | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#31-there-is-one-dialect) |
+| `project_export` | plugin_capability | yes | yes | cad, hello_scene | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#31-there-is-one-dialect) |
+| `project_file` | manifest_field | yes | yes | cad, hello_scene | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `project_file.serialize_channel` | manifest_field | yes | yes | cad, hello_scene | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `project_file.deserialize_channel` | manifest_field | yes | yes | cad, hello_scene | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `project_export.collect_channel` | manifest_field | yes | yes | cad, hello_scene | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `project_export.apply_channel` | manifest_field | yes | yes | cad, hello_scene | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `permissions` | manifest_field | yes | yes | scansort, presentation, obs_controller, cad, notes_helper | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `permissions.host_capabilities` | manifest_field | yes | yes | scansort, presentation, obs_controller, notes_helper | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `permissions.network.mode` | manifest_field | yes | yes | obs_controller | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| permissions.network.ports | permission | **no** | **no** | obs_controller (declared, dropped) | PluginDefinition.gd; obs_controller/manifest.json | [reference](PLUGIN_DEVELOPER_GUIDE.md#13-permissions--security-model) |
+| `permissions.filesystem.mode` | manifest_field | yes | yes | scansort, notes_helper, obs_controller | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `permissions.filesystem.paths` | manifest_field | yes | yes | scansort, notes_helper, obs_controller | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| data_directory | manifest_metadata | yes | yes | cad, presentation, hello_scene, test_paired_dsl | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| autostart | manifest_metadata | yes | yes | cad, presentation, hello_scene, test_paired_dsl | PluginDefinition.gd; PluginManager.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| auto_reload | manifest_metadata | yes | yes | cad, presentation, hello_scene, test_paired_dsl | PluginDefinition.gd; PluginManager.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| class_names | manifest_metadata | yes | no | (host-populated) | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| STDIO transport / SubProcess.start | runtime | yes | no | all 8 | MCPServerConnection.gd; subprocess.cpp | [reference](PLUGIN_DEVELOPER_GUIDE.md#1-overview--plugin-anatomy) |
+| MCP initialize handshake | ipc | yes | no | all 8 | MCPServerConnection.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#6-html-panels--the-ipc-model) |
+| tools/call routing + namespacing | ipc | yes | no | cad, scansort, presentation, obs_controller, notes_helper, test_stdio_server | PluginToolRegistry.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#6-html-panels--the-ipc-model) |
+| PluginDB.install / install_plugin | lifecycle | yes | no | — | PluginDB.gd; PluginManager.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#9-transport--lifecycle) |
+| start/stop/restart/remove | lifecycle | yes | no | — | PluginManager.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#9-transport--lifecycle) |
+| Crash detection / CRASH_LOOP | lifecycle | yes | no | — | PluginManager.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#9-transport--lifecycle) |
+| PluginDefinition.State enum | state | yes | no | — | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#1-overview--plugin-anatomy) |
+| PluginManager lifecycle signals | event | yes | no | — | PluginManager.gd; singleton_object.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#8-events--state) |
+| tools_registered/unregistered signals | event | yes | no | — | PluginToolRegistry.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#8-events--state) |
+| Hot reload (auto_reload watch) | lifecycle | yes | no | — | PluginManager.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#9-transport--lifecycle) |
+| PluginDB persistence + boot reconstruction | lifecycle | yes | no | — | PluginDB.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#9-transport--lifecycle) |
+| PluginErrors success/error envelope | runtime | yes | no | presentation, scansort, cad, notes_helper, obs_controller | PluginErrors.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#1-overview--plugin-anatomy) |
+| Audit redaction | runtime | yes | no | — | CapabilityBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#1-overview--plugin-anatomy) |
+| window.minerva JS bridge (WRY + CEF) | ipc | yes | no | obs_controller | minerva_bridge.gd; cef_bridge.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#6-html-panels--the-ipc-model) |
+| HTML webview hosts (CEF preferred / WRY fallback) | ui_surface | yes | no | obs_controller | CefWebViewEditor.gd; WebViewEditor.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#1-overview--plugin-anatomy) |
+| PluginScenePanelHost (native mount) | ui_surface | yes | no | cad, scansort, presentation, hello_scene, test_paired_dsl | PluginScenePanelHost.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#1-overview--plugin-anatomy) |
+| MinervaPluginPanel + lifecycle hooks | lifecycle | yes | no | (scene plugins) | MinervaPluginPanel.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#9-transport--lifecycle) |
+| PluginEditorRegistry | registry | yes | no | cad, presentation, hello_scene, test_paired_dsl | PluginEditorRegistry.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#14-registry--release) |
+| Document state (canonicality model) | document_model | yes | no | cad, presentation, test_paired_dsl | CapabilityBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#12-document--state-model) |
+| JSON Pointer (RFC 6901) | document_model | yes | no | presentation | JsonPointer.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#12-document--state-model) |
+| JSON Patch (RFC 6902) | document_model | yes | no | presentation | JsonPatch.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#12-document--state-model) |
+| Blob storage / reference model | document_model | yes | no | presentation | PluginScenePanelBroker.gd; slide_model.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#12-document--state-model) |
+| Annotation model | document_model | yes | no | presentation, cad, hello_scene | presentation_tile_annotation_host.gd; cad/ui/CadAnnotationHost.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#12-document--state-model) |
+| Embedded Python runtime (go:embed PBS) | runtime | no (plugin-side) | no | cad | cad/internal/runtime/embed.go; extract.go | [reference](PLUGIN_DEVELOPER_GUIDE.md#1-overview--plugin-anatomy) |
+| build-python-runtime-bundle.sh + .lock | runtime | no (plugin-side) | no | cad | scripts/build-python-runtime-bundle.sh; cad/scripts/runtime-bundle.lock | [reference](PLUGIN_DEVELOPER_GUIDE.md#1-overview--plugin-anatomy) |
+| registry.json + regen_registry.py | registry | no (repo-side) | no | cad, scansort, presentation | registry.json; regen_registry.py | [reference](PLUGIN_DEVELOPER_GUIDE.md#14-registry--release) |
+| MarketplaceClient install pipeline | runtime | yes | no | cad, scansort, presentation | MarketplaceClient.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#1-overview--plugin-anatomy) |
+| Release tag + tarball naming | registry | no (repo-side) | no | cad, scansort, presentation | presentation.yml; regen_registry.py | [reference](PLUGIN_DEVELOPER_GUIDE.md#14-registry--release) |
+| save_mode=plugin_owned (UNIMPLEMENTED) | lifecycle | **no (stub)** | yes | — | Editor.gd (TODO, push_warning only) | [reference](PLUGIN_DEVELOPER_GUIDE.md#9-transport--lifecycle) |
+| minerva.call / minerva.createNote | ipc | yes | no | MultiMeter (canonical Sheets create) | minerva_bridge.gd; cef_bridge.gd; PluginWebviewBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#6-html-panels--the-ipc-model) |
+| localhost:9315 MCP HTTP server | runtime | yes | no | direct HTTP clients | MinervaMCPHttpServer.gd; separate from the native panel bridge | [reference](PLUGIN_DEVELOPER_GUIDE.md#1-overview--plugin-anatomy) |
+| elgato Stream Deck companion (separate substrate) | language | no (external) | no | elgato | plugins/elgato/manifest.json; src/index.ts | [reference](PLUGIN_DEVELOPER_GUIDE.md#1-overview--plugin-anatomy) |
+| `host.settings.get` | host_capability | yes | yes | — | CapabilityBroker `_handle_host_settings_get`; PluginSettingsStore.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.settings.list` | host_capability | yes | yes | — | CapabilityBroker `_handle_host_settings_list` | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.models.list_providers` | host_capability | yes | yes | — | CapabilityBroker `_handle_host_models_list_providers` | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.models.list_models` | host_capability | yes | yes | — | CapabilityBroker `_handle_host_models_list_models` | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.chat_providers.register` | host_capability | yes | yes | — | CapabilityBroker `_handle_host_chat_providers_register`; PluginChatProviderRegistry.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| host.chat_providers.unregister **(2026-08)** | host_api | yes | **no (rides the register grant — declaring it fails install)** | — | CapabilityBroker `_handle_host_chat_providers_unregister`; PluginDefinition `ALLOWED_HOST_CAPABILITIES` | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.project.current` | host_capability | yes | yes | — | CapabilityBroker `_handle_host_project_current` | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.project.open` | host_capability | yes | yes | — | CapabilityBroker `_handle_host_project_open` | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| PluginProvider (plugin-as-chat-provider) **(2026-08)** | runtime | yes | no | — | Providers/PluginProvider.gd `generate_content`, `_apply_result_to_bot` | [reference](PLUGIN_DEVELOPER_GUIDE.md#1-overview--plugin-anatomy) |
+| `settings` | manifest_field | yes | yes | — | PluginDefinition `SETTING_TYPES`, `validate()`; PluginSettingsStore.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `settings_title` | manifest_field | yes | yes | — | PluginSettingsStore `scope_tab` | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| setup{} (requires/steps) **(2026-08)** | manifest_metadata | yes | yes | 8 of 10: nametag-maker, pcb, presentation (go_build); 3d-gen, agent-relay, drive, movie-gen, scansort (cargo_build+copy). cad + codetools abstain — embedded-runtime build not expressible in v1 vocabulary | Setup/SetupSchema.gd, SetupPipeline.gd, SetupExecutors.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `setup` stripped from packed manifest **(2026-08)** | registry | n/a (repo-side) | n/a | every release workflow | .github/workflows/*.yml pack step; pcb/manifest_binary_tier_test.go | [reference](PLUGIN_DEVELOPER_GUIDE.md#14-registry--release) |
+| setup toolchain registry + preflight **(2026-08)** | runtime | yes | n/a | pcb | Setup/ToolchainRegistry.gd `TOOLS`, ToolchainProbe.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#1-overview--plugin-anatomy) |
+| install_lane (manifest \| marketplace) **(2026-08)** | manifest_metadata | yes | no (host-recorded) | all | PluginDefinition `LANE_MANIFEST`/`LANE_MARKETPLACE`, `resolve_install_lane` | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| release_targets **(2026-08)** | manifest_metadata | **no (repo/CI only)** | **no (parser ignores)** | all 10 | */manifest.json; scripts/regen_registry.py | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| tools[].executor: "panel" **(2026-08)** | manifest_metadata | yes | yes | pcb (76 of 88), cad | PluginToolRegistry; PluginDefinition `_from_dict_internal` | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| S_BUILDING / S_BUILD_FAILED / S_NEEDS_BINARY **(2026-08)** | state | yes | no | — | PluginManager.gd `S_BUILDING`…`S_NEEDS_BINARY` (**not** members of `PluginDefinition.State`) | [reference](PLUGIN_DEVELOPER_GUIDE.md#1-overview--plugin-anatomy) |
+| minerva_plugin_build_status **(2026-08)** | host_tool | yes | n/a | — | PluginMCPTools.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#1-overview--plugin-anatomy) |
+| minerva_plugin_setup_dry_run **(2026-08)** | host_tool | yes | n/a | — | PluginMCPTools.gd; Setup/SetupDryRun.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#1-overview--plugin-anatomy) |
+| minerva_get/set/list_preference(s) **(2026-08)** | host_tool | yes | n/a | — | MCP preference tools → PluginSettingsStore | [reference](PLUGIN_DEVELOPER_GUIDE.md#1-overview--plugin-anatomy) |
+| `_on_panel_apply_sync` | panel_hook | yes | no | pcb, cad | PluginScenePanelHost `invoke_apply_sync` | [reference](PLUGIN_DEVELOPER_GUIDE.md#71-panel-lifecycle-hooks-full-list) |
+| `_on_panel_create_note_request` | panel_hook | yes | no | — | PluginScenePanelHost `invoke_create_note` | [reference](PLUGIN_DEVELOPER_GUIDE.md#71-panel-lifecycle-hooks-full-list) |
+| `_on_panel_restore_from_note` | panel_hook | yes | no | — | PluginScenePanelHost `invoke_restore_from_note` | [reference](PLUGIN_DEVELOPER_GUIDE.md#71-panel-lifecycle-hooks-full-list) |
+| `_on_panel_render_for_llm` | panel_hook | yes | no | — | PluginScenePanelHost `invoke_render_for_llm` | [reference](PLUGIN_DEVELOPER_GUIDE.md#71-panel-lifecycle-hooks-full-list) |
+| `_on_panel_inject_toggle_changed` | panel_hook | yes | no | — | PluginScenePanelHost `invoke_inject_toggle` | [reference](PLUGIN_DEVELOPER_GUIDE.md#71-panel-lifecycle-hooks-full-list) |
+| panel hook `on_progress` **(2026-08)** | lifecycle | **partial — delivery only, no producer wiring** | no (implicit channel) | — | PluginScenePanelBroker `push_progress` (carries a TODO(integration)) | [reference](PLUGIN_DEVELOPER_GUIDE.md#9-transport--lifecycle) |
+| Annotation substrate v2 **(2026-08)** | document_model | yes | no | pcb, cad, hello_scene | src/Scripts/Services/Annotations/*; `get_annotation_host()` | [reference](PLUGIN_DEVELOPER_GUIDE.md#12-document--state-model) |
+| filesystem mode "unrestricted" **(2026-08)** | permission | yes | yes | — (no shipped plugin declares it) | PluginDefinition `filesystem_mode`; CapabilityBroker `_files_scope_check` | [reference](PLUGIN_DEVELOPER_GUIDE.md#13-permissions--security-model) |
+| `host.audio` | host_capability | yes | yes | — | PluginDefinition.ALLOWED_HOST_CAPABILITIES | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.chat.active` | host_capability | yes | yes | — | PluginDefinition.ALLOWED_HOST_CAPABILITIES | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.chat.input` | host_capability | yes | yes | — | PluginDefinition.ALLOWED_HOST_CAPABILITIES | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.core.session` | host_capability | yes | yes | — | PluginDefinition.ALLOWED_HOST_CAPABILITIES | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.notes.create_from_editor` | host_capability | yes | yes | — | PluginDefinition.ALLOWED_HOST_CAPABILITIES | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.notify` | host_capability | yes | yes | — | PluginDefinition.ALLOWED_HOST_CAPABILITIES | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.speech_log` | host_capability | yes | yes | — | PluginDefinition.ALLOWED_HOST_CAPABILITIES | [reference](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `mcp.proxy:` | capability_namespace | yes | yes | — | PluginDefinition.ALLOWED_HOST_CAPABILITY_NAMESPACES | [reference](PLUGIN_DEVELOPER_GUIDE.md#4-host-apis--capabilities-a-plugin-can-call) |
+| `secrets:` | capability_namespace | yes | yes | — | PluginDefinition.ALLOWED_HOST_CAPABILITY_NAMESPACES | [reference](PLUGIN_DEVELOPER_GUIDE.md#4-host-apis--capabilities-a-plugin-can-call) |
+| `live_reload` | plugin_capability | yes | yes | — | PluginDefinition.CAPABILITIES | [reference](PLUGIN_DEVELOPER_GUIDE.md#31-there-is-one-dialect) |
+| `plugin_dependencies` | plugin_capability | yes | yes | — | PluginDefinition.CAPABILITIES | [reference](PLUGIN_DEVELOPER_GUIDE.md#31-there-is-one-dialect) |
+| `backend` | manifest_field | yes | yes | — | PluginDefinition parser/validator | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `capabilities` | manifest_field | yes | yes | — | PluginDefinition parser/validator | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `knowledge` | manifest_field | yes | yes | — | PluginDefinition parser/validator | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `knowledge_project` | manifest_field | yes | yes | — | PluginDefinition parser/validator | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `log_stderr` | manifest_field | yes | yes | — | PluginDefinition parser/validator | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `panel_authority` | manifest_field | yes | yes | — | PluginDefinition parser/validator | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `permissions.filesystem` | manifest_field | yes | yes | — | PluginDefinition parser/validator | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `permissions.host_events` | manifest_field | yes | yes | — | PluginDefinition parser/validator | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `permissions.network` | manifest_field | yes | yes | — | PluginDefinition parser/validator | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `project_export` | manifest_field | yes | yes | — | PluginDefinition parser/validator | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `requires_plugins` | manifest_field | yes | yes | — | PluginDefinition parser/validator | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `setup` | manifest_field | yes | yes | — | PluginDefinition parser/validator | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `state` | manifest_field | yes | yes | — | PluginDefinition parser/validator | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `tools[].executor` | manifest_field | yes | yes | — | PluginDefinition parser/validator | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `tools[].tool_set` | manifest_field | yes | yes | — | PluginDefinition parser/validator | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].chrome` | manifest_field | yes | yes | — | PluginDefinition parser/validator | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].file_actions` | manifest_field | yes | yes | — | PluginDefinition parser/validator | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].native_save_extensions` | manifest_field | yes | yes | — | PluginDefinition parser/validator | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].write_guidance` | manifest_field | yes | yes | — | PluginDefinition parser/validator | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `_on_panel_capture_live_state` | panel_hook | yes | n/a | — | PluginScenePanelHost invocation sites | [reference](PLUGIN_DEVELOPER_GUIDE.md#71-panel-lifecycle-hooks-full-list) |
+| `_on_panel_load_request` | panel_hook | yes | n/a | — | PluginScenePanelHost invocation sites | [reference](PLUGIN_DEVELOPER_GUIDE.md#71-panel-lifecycle-hooks-full-list) |
+| `_on_panel_loaded` | panel_hook | yes | n/a | — | PluginScenePanelHost invocation sites | [reference](PLUGIN_DEVELOPER_GUIDE.md#71-panel-lifecycle-hooks-full-list) |
+| `_on_panel_redo_request` | panel_hook | yes | n/a | — | PluginScenePanelHost invocation sites | [reference](PLUGIN_DEVELOPER_GUIDE.md#71-panel-lifecycle-hooks-full-list) |
+| `_on_panel_restore_live_state` | panel_hook | yes | n/a | — | PluginScenePanelHost invocation sites | [reference](PLUGIN_DEVELOPER_GUIDE.md#71-panel-lifecycle-hooks-full-list) |
+| `_on_panel_save_request` | panel_hook | yes | n/a | — | PluginScenePanelHost invocation sites | [reference](PLUGIN_DEVELOPER_GUIDE.md#71-panel-lifecycle-hooks-full-list) |
+| `_on_panel_self_check` | panel_hook | yes | n/a | — | PluginScenePanelHost invocation sites | [reference](PLUGIN_DEVELOPER_GUIDE.md#71-panel-lifecycle-hooks-full-list) |
+| `_on_panel_undo_request` | panel_hook | yes | n/a | — | PluginScenePanelHost invocation sites | [reference](PLUGIN_DEVELOPER_GUIDE.md#71-panel-lifecycle-hooks-full-list) |
+| `_on_panel_unload` | panel_hook | yes | n/a | — | PluginScenePanelHost invocation sites | [reference](PLUGIN_DEVELOPER_GUIDE.md#71-panel-lifecycle-hooks-full-list) |
+| `res://Scripts/Services/Annotations/AnnotationV2Schema.gd` | host_path | yes | n/a | — | PluginGenerationStore.HOST_PATHS | [reference](PLUGIN_DEVELOPER_GUIDE.md#public-scene-sdk) |
+| `res://Scripts/Services/Annotations/BuiltinKinds.gd` | host_path | yes | n/a | — | PluginGenerationStore.HOST_PATHS | [reference](PLUGIN_DEVELOPER_GUIDE.md#public-scene-sdk) |
+| `res://Scripts/Services/Documents/DocumentBuffer.gd` | host_path | yes | n/a | — | PluginGenerationStore.HOST_PATHS | [reference](PLUGIN_DEVELOPER_GUIDE.md#public-scene-sdk) |
+| `res://Scripts/Services/Plugins/AtomicFile.gd` | host_path | yes | n/a | — | PluginGenerationStore.HOST_PATHS | [reference](PLUGIN_DEVELOPER_GUIDE.md#public-scene-sdk) |
+| `res://Scripts/Services/Plugins/MinervaPluginPanel.gd` | host_path | yes | n/a | — | PluginGenerationStore.HOST_PATHS | [reference](PLUGIN_DEVELOPER_GUIDE.md#public-scene-sdk) |
+| `res://Scripts/UI/Controls/responsive_container.gd` | host_path | yes | n/a | — | PluginGenerationStore.HOST_PATHS | [reference](PLUGIN_DEVELOPER_GUIDE.md#public-scene-sdk) |
+| `MinervaIPC.get_bulk_payload_limit` | sdk_method | yes | n/a | — | MinervaIPC; PluginToolRegistry; RequiredPlugins | [reference](PLUGIN_DEVELOPER_GUIDE.md#contextual-calls-and-cancellation) |
+| `MinervaIPC.request_bulk` | sdk_method | yes | n/a | — | MinervaIPC; PluginToolRegistry; RequiredPlugins | [reference](PLUGIN_DEVELOPER_GUIDE.md#contextual-calls-and-cancellation) |
+| `MinervaIPC.request_capability` | sdk_method | yes | n/a | — | MinervaIPC; PluginToolRegistry; RequiredPlugins | [reference](PLUGIN_DEVELOPER_GUIDE.md#contextual-calls-and-cancellation) |
+| `MinervaIPC.request_private` | sdk_method | yes | n/a | — | MinervaIPC; PluginToolRegistry; RequiredPlugins | [reference](PLUGIN_DEVELOPER_GUIDE.md#contextual-calls-and-cancellation) |
+| `RequiredPlugins.release_page` | sdk_method | yes | n/a | — | MinervaIPC; PluginToolRegistry; RequiredPlugins | [reference](PLUGIN_DEVELOPER_GUIDE.md#contextual-calls-and-cancellation) |
+| `RequiredPlugins.repository` | sdk_method | yes | n/a | — | MinervaIPC; PluginToolRegistry; RequiredPlugins | [reference](PLUGIN_DEVELOPER_GUIDE.md#contextual-calls-and-cancellation) |
+| `handle_tool` | sdk_method | yes | n/a | — | MinervaIPC; PluginToolRegistry; RequiredPlugins | [reference](PLUGIN_DEVELOPER_GUIDE.md#contextual-calls-and-cancellation) |
+| `handle_tool_with_context` | sdk_method | yes | n/a | — | MinervaIPC; PluginToolRegistry; RequiredPlugins | [reference](PLUGIN_DEVELOPER_GUIDE.md#contextual-calls-and-cancellation) |
+| `repo` | required_plugin_field | yes | n/a | — | RequiredPlugins.repository | [reference](PLUGIN_DEVELOPER_GUIDE.md#required-providers-and-readiness) |
 
 ---
 
