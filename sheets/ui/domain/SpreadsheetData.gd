@@ -863,6 +863,16 @@ func to_json_array(bounds: Rect2i = Rect2i(-1, -1, -1, -1)) -> Array:
 
 ## Load data from CSV string
 func from_csv(csv_text: String, delimiter: String = ",") -> void:
+	# Live consumers must see the complete import, not rescan every partial row.
+	var signals_were_blocked: bool = is_blocking_signals()
+	set_block_signals(true)
+	_load_csv_cells(csv_text, delimiter)
+	set_block_signals(signals_were_blocked)
+	structure_changed.emit()
+	data_changed.emit()
+
+
+func _load_csv_cells(csv_text: String, delimiter: String) -> void:
 	# Clear existing cells
 	cells.clear()
 
@@ -891,9 +901,6 @@ func from_csv(csv_text: String, delimiter: String = ",") -> void:
 		row_count = actual_rows
 
 	_init_metadata()
-
-	structure_changed.emit()
-	data_changed.emit()
 
 
 ## Parse a CSV line handling quoted fields
