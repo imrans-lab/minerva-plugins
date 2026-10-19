@@ -8,6 +8,12 @@ name: multimeter
 # compiled below only so a break there is visible early.
 
 on:
+  workflow_call:
+    inputs:
+      publish:
+        type: boolean
+        default: false
+        required: false
   push:
     branches: [main, "dcr/**"]
     paths:
@@ -155,7 +161,7 @@ jobs:
     name: Publish release
     concurrency: multimeter-release
     needs: [build, secret-scan]
-    if: github.event_name == 'workflow_dispatch' && inputs.publish && always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    if: ((github.event_name == 'workflow_dispatch' && inputs.publish) || (github.event_name == 'push' && github.ref_type == 'tag')) && always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -176,7 +182,10 @@ jobs:
         shell: bash
         run: |
           VERSION=$(python3 -c 'import json; print(json.load(open("multimeter/manifest.json"))["version"])')
-          if [ "$GITHUB_REF_NAME" = "main" ]; then
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            PRE="false"
+          elif [ "$GITHUB_REF_NAME" = "main" ]; then
             TAG="multimeter-v${VERSION}"
             PRE="false"
           else
@@ -187,7 +196,7 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "prerelease=$PRE" >> "$GITHUB_OUTPUT"
           echo "Computed: tag=$TAG prerelease=$PRE"
-          bash scripts/release-publish-guard.sh "$TAG" "$PRE"
+          bash scripts/release-publish-guard.sh "$TAG" "$PRE" multimeter
 
       - name: Publish GitHub Release
         if: steps.tag.outputs.publish == 'true'

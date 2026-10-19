@@ -1,0 +1,11 @@
+name: sheets tagged release
+'on':
+  push:
+    tags:
+    - sheets-v*
+permissions:
+  contents: write
+  actions: read
+jobs:
+  release:
+    uses: ./.github/workflows/sheets.yml

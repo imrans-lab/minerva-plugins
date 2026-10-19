@@ -1,0 +1,11 @@
+name: multimeter tagged release
+'on':
+  push:
+    tags:
+    - multimeter-v*
+permissions:
+  contents: write
+  actions: read
+jobs:
+  release:
+    uses: ./.github/workflows/multimeter.yml

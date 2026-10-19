@@ -1,13 +1,19 @@
 name: sheets
 
 on:
+  workflow_call:
+    inputs:
+      publish:
+        type: boolean
+        default: false
+        required: false
   push:
     branches: [main]
     paths: ["sheets/**", ".github/workflows/sheets.yml", ".go-version"]
   workflow_dispatch:
     inputs:
       publish:
-        description: Staging only; publishing is refused in B3
+        description: Publish a release after the on-demand gates
         type: boolean
         default: false
 
@@ -33,7 +39,7 @@ jobs:
           go build -o "$RUNNER_TEMP/sheets-plugin" .
 
   build:
-    if: github.event_name == 'workflow_dispatch'
+    if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag')
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     strategy:
@@ -58,9 +64,6 @@ jobs:
             goarch: universal
     steps:
       - uses: actions/checkout@v4
-      - name: Refuse publication
-        if: inputs.publish
-        run: exit 1
       - uses: actions/setup-go@v5
         with:
           go-version-file: .go-version
@@ -124,3 +127,56 @@ jobs:
           path: sheets/dist/sheets-*.tar.gz
           if-no-files-found: error
           retention-days: 14
+
+  secret-scan:
+    uses: ./.github/workflows/secret-scan.yml
+    permissions:
+      contents: read
+
+  release:
+    timeout-minutes: 10
+    concurrency: sheets-release
+    needs: [source-build, build, secret-scan]
+    if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag') && always() && ((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.publish)) && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: sheets-*
+          path: artifacts/
+          merge-multiple: true
+      - name: Compute tag and verify publication
+        id: tag
+        shell: bash
+        run: |
+          VERSION=$(python3 -c 'import json; print(json.load(open("sheets/manifest.json"))["version"])')
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            PRE="false"
+          elif [ "$GITHUB_REF_NAME" = main ]; then
+            TAG="sheets-v${VERSION}"
+            PRE="false"
+          else
+            SAFE_BRANCH=$(echo "$GITHUB_REF_NAME" | sed 's|/|-|g; s|[^a-zA-Z0-9_.-]|-|g')
+            TAG="sheets-v${VERSION}-branch-${SAFE_BRANCH}"
+            PRE="true"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRE" >> "$GITHUB_OUTPUT"
+          bash scripts/release-publish-guard.sh "$TAG" "$PRE" sheets
+      - name: Publish GitHub Release
+        if: steps.tag.outputs.publish == 'true'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          prerelease: ${{ steps.tag.outputs.prerelease == 'true' }}
+          target_commitish: ${{ github.sha }}
+          files: artifacts/sheets-*.tar.gz
+          generate_release_notes: true
+          fail_on_unmatched_files: true
