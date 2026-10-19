@@ -82,6 +82,8 @@ func _check_notifications(check: Callable, data_script: GDScript) -> void:
 	check.call("formula errors leave notifications restored and final model visible", not data.is_blocking_signals()
 		and snapshots.size() == 2 and not data.get_cell_if_exists(1, 0).error.is_empty()
 		and snapshots[0] == data.to_dict() and snapshots[1] == data.to_dict())
+	data.structure_changed.disconnect(record)
+	data.data_changed.disconnect(record)
 
 func _expected_model() -> Dictionary:
 	var cells: Dictionary = {}
