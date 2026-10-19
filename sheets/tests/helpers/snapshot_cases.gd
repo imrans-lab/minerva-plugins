@@ -43,7 +43,8 @@ func entries(native: Dictionary, check: Callable) -> Array[Dictionary]:
 	check.call("valid typed EMPTY cell with only background formatting is accepted", panel_script.validate(formatted))
 	var data: RefCounted = load(ProjectSettings.globalize_path("res://../../minerva-plugins/sheets/ui/domain/SpreadsheetData.gd")).new()
 	data.call("load_from_dict", formatted)
-	check.call("formatted EMPTY cell and chart load/save preserve the complete snapshot", JSON.parse_string(JSON.stringify(data.call("to_dict"))) == formatted)
+	check.call("formatted EMPTY cell and chart load/save preserve the complete snapshot", JSON.parse_string(JSON.stringify(data.call("to_dict")))
+		== JSON.parse_string(JSON.stringify(formatted)))
 	var invalid: Array[Dictionary] = []
 	for case: Array in NEGATIVES:
 		var entry: Dictionary = valid.duplicate(true)
