@@ -868,15 +868,21 @@ func to_json_array(bounds: Rect2i = Rect2i(-1, -1, -1, -1)) -> Array:
 	return result
 
 
-## Load data from CSV string
-func from_csv(csv_text: String, delimiter: String = ",") -> void:
+## Publish a bulk import only after its complete model is available.
+func bulk_load(fill: Callable) -> void:
 	# Live consumers must see the complete import, not rescan every partial row.
 	var signals_were_blocked: bool = is_blocking_signals()
 	set_block_signals(true)
-	_load_csv_cells(csv_text, delimiter)
+	fill.call()
 	set_block_signals(signals_were_blocked)
-	structure_changed.emit()
-	data_changed.emit()
+	if not signals_were_blocked:
+		structure_changed.emit()
+		data_changed.emit()
+
+
+## Load data from CSV string
+func from_csv(csv_text: String, delimiter: String = ",") -> void:
+	bulk_load(_load_csv_cells.bind(csv_text, delimiter))
 
 
 func _load_csv_cells(csv_text: String, delimiter: String) -> void:

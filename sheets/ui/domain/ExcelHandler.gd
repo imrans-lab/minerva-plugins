@@ -148,6 +148,10 @@ static func _parse_shared_strings(xml: String) -> PackedStringArray:
 
 ## Parse worksheet XML
 static func _parse_sheet(xml: String, shared_strings: PackedStringArray, data: SpreadsheetDataScript) -> void:
+	data.bulk_load(_load_sheet_cells.bind(xml, shared_strings, data))
+
+
+static func _load_sheet_cells(xml: String, shared_strings: PackedStringArray, data: SpreadsheetDataScript) -> void:
 	data.clear()
 
 	var parser := XMLParser.new()
