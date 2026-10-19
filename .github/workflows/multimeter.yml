@@ -79,7 +79,7 @@ jobs:
       - name: Go vet
         run: go vet ./...
       - name: Go vet + test (decoder table, no radio needed)
-        if: github.event_name == 'workflow_dispatch'
+        if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag')
         run: |
           go vet ./...
           go test -count=1 ./...
@@ -115,7 +115,7 @@ jobs:
         run: go build -o /dev/null .
 
       - name: Smoke (MCP handshake with the radio disabled)
-        if: github.event_name == 'workflow_dispatch'
+        if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag')
         env:
           MULTIMETER_NO_BLE: "1"
         run: python3 ../scripts/smoke/mcp_smoke.py "$PWD/build/multimeter-plugin"
