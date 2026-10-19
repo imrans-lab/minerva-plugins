@@ -29,6 +29,8 @@ func run(check: Callable, pane: EditorPane, manager: PluginManager, registry: Pl
 	for tool: String in ["minerva_create_plugin_editor", "minerva_open_file", "minerva_sheets_update_data", "minerva_sheets_get_data"]:
 		policy.grant_capability("sheets", "mcp.proxy:" + tool)
 	policy.grant_capability("sheets", "host.documents.list_open")
+	var dense_import: RefCounted = load(source.path_join("tests/helpers/dense_import_contract.gd")).new()
+	await dense_import.call("run", check, pane, registry)
 	var fixtures: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(source.path_join("tests/fixtures/tool-cases.json")))
 	var paths: Dictionary = {"$csv_path": ProjectSettings.globalize_path("res://test/fixtures/spreadsheet_contract/sample.csv"),
 		"$minsheet_path": ProjectSettings.globalize_path("res://test/fixtures/spreadsheet_contract/baseline.minsheet"),
