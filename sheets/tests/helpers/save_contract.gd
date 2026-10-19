@@ -28,13 +28,15 @@ func run(check: Callable, pane: EditorPane, host: Node) -> void:
 	DirAccess.make_dir_recursive_absolute(directory)
 	var manager: PluginManager = host.get("plugin_manager")
 	var definition: PluginDefinition = manager.get_db().get_by_id("sheets")
-	var original_panels: Array[Dictionary] = definition.ui_panels.duplicate(true)
 	var manifest: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(
 		ProjectSettings.globalize_path("res://../../minerva-plugins/sheets/manifest.json")))
+	# The metadata-owner anti-cases need their own genuinely non-opt-in provider;
+	# the real Sheets installation keeps its live-reload capability throughout.
+	manifest.id = "save_contract_non_optin"
+	manifest.capabilities.erase("live_reload")
 	manifest.ui.panels[0]["native_save_extensions"] = [".minsheet"]
 	var parsed: PluginDefinition = PluginDefinition.from_dict(manifest)
 	check.call("test manifest parses native subset for a non-live-reload provider", parsed != null and "live_reload" not in parsed.capabilities)
-	definition.ui_panels.assign(parsed.ui_panels)
 	var errors := SaveErrors.new()
 	OS.add_logger(errors)
 	for extension: String in ["csv", "tsv", "xlsx"]:
@@ -95,9 +97,11 @@ func run(check: Callable, pane: EditorPane, host: Node) -> void:
 	OS.remove_logger(errors)
 	manifest.ui.panels[0].erase("native_save_extensions")
 	parsed = PluginDefinition.from_dict(manifest)
-	definition.ui_panels.assign(parsed.ui_panels)
+	parsed.data_directory = definition.data_directory
+	check.call("legacy save-claim fixture installs a separate non-opt-in provider", manager.get_db().restore(parsed))
+	var legacy_definition: PluginDefinition = parsed
 	# Existing undeclared panels keep saving to their own imported extension.
-	var legacy: Editor = pane.add_plugin_scene_editor("sheets", "sheets_panel", "", "Undeclared", "")
+	var legacy: Editor = pane.add_plugin_scene_editor(manifest.id, "sheets_panel", "", "Undeclared", "")
 	var legacy_path := directory.path_join("legacy.csv")
 	check.call("undeclared native formats retain save-in-place", await legacy.save_file_to_disc(legacy_path)
 		and await legacy.prompt_close(true) and legacy.file == legacy_path and not legacy.get_node("FileDialog").visible)
@@ -106,9 +110,9 @@ func run(check: Callable, pane: EditorPane, host: Node) -> void:
 	manifest.ui.panels[0].erase("native_save_extensions")
 	manifest.ui.panels[0]["file_extensions"] = [".cad", ".pcb"]
 	parsed = PluginDefinition.from_dict(manifest)
-	definition.ui_panels.assign(parsed.ui_panels)
+	legacy_definition.ui_panels.assign(parsed.ui_panels)
 	legacy.free()
-	legacy = pane.add_plugin_scene_editor("sheets", "sheets_panel", "", "Scoped claims", "")
+	legacy = pane.add_plugin_scene_editor(manifest.id, "sheets_panel", "", "Scoped claims", "")
 	legacy.file = ""
 	var scoped: Dictionary = {}
 	_prompt(legacy, scoped)
@@ -120,7 +124,7 @@ func run(check: Callable, pane: EditorPane, host: Node) -> void:
 	legacy.free()
 	await tree.process_frame
 	check.call("editor closed during prompt writes no file", not FileAccess.file_exists(closed_destination))
-	definition.ui_panels.assign(original_panels)
+	check.call("legacy save-claim fixture removes its separate provider", manager.get_db().remove(manifest.id))
 	var frame_close: Editor = pane.add_plugin_scene_editor("sheets", "sheets_panel", "", "Frame close", "")
 	var frame_result: Dictionary = {}
 	_prompt(frame_close, frame_result)

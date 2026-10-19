@@ -125,12 +125,26 @@ func run(check: Callable, pane: EditorPane, manager: PluginManager, container: N
 			and not FileAccess.file_exists("user://refused-session.minsheet"))
 		_close(pane)
 
-	var panels: Array = definition.ui_panels.duplicate(true)
+	var panels: Array[Dictionary] = definition.ui_panels.duplicate(true)
 	definition.ui_panels[0]["kind"] = "html"
+	var selected: Array = await _open([legacy], pane)
+	var normalized: Array = _json(await container.call("serialize"))
+	check.call("valid last-good generation mounts and normalizes despite a changed DB definition", selected[0].pending_plugin_entry.is_empty()
+		and normalized[0].get("type") == Editor.Type.PLUGIN_SCENE
+		and _json(PluginScenePanelHost.invoke_save(selected[0].plugin_scene_root, {})) == _json(legacy.content))
+	definition.ui_panels = panels
+	_close(pane)
+	# Opt-in mounts use the captured generation manifest, not the mutable DB
+	# definition. Withhold one actual whitelisted file to make that mount fail.
+	var generation: Dictionary = manager.resolve_scene_generation("sheets", "sheets_panel")
+	var script_path: String = str(generation.directory).path_join("ui/SheetsPanel.gd")
+	var held_path: String = script_path + ".withheld-by-session-test"
+	check.call("unmountable fixture withholds the actual selected generation script", not FileAccess.file_exists(held_path)
+		and DirAccess.rename_absolute(script_path, held_path) == OK)
 	var failed_mount: Array = await _opaque(check, [legacy], pane, container)
 	check.call("installed but unmountable provider preserves complete entry", _json(await container.call("serialize")) == _json([legacy])
 		and not failed_mount[0].plugin_scene_root.get_meta("_minerva_plugin_panel_load_ok", true))
-	definition.ui_panels = panels
+	check.call("unmountable fixture restores the exact generation script", DirAccess.rename_absolute(held_path, script_path) == OK)
 	compatibility.retry(weakref(failed_mount[0]), manager)
 	await pane.Tabs.get_tree().process_frame
 	check.call("Retry after mount repair restores full model", failed_mount[0].pending_plugin_entry.is_empty()
