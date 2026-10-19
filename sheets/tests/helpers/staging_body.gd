@@ -76,7 +76,7 @@ func _run() -> void:
 		var package_log: Array = []
 		var package_code: int = OS.execute("python3", PackedStringArray([source.path_join("scripts/package.py"),
 			"linux-x86_64", source.path_join("sheets-plugin"), package_output]), package_log, true)
-		var unpack_code: int = OS.execute("tar", PackedStringArray(["-xf", package_output.path_join("sheets-0.1.0-linux-x86_64.tar.gz"), "-C", package_root]), package_log, true)
+		var unpack_code: int = OS.execute("tar", PackedStringArray(["-xf", package_output.path_join("sheets-%s-linux-x86_64.tar.gz" % definition.version), "-C", package_root]), package_log, true)
 		check("real source build packages into the shipped live-reload layout", package_code == 0 and unpack_code == 0
 			and FileAccess.get_sha256(package_root.path_join("ui/SheetsPanel.gd")) == FileAccess.get_sha256(source.path_join("ui/SheetsPanel.gd")))
 		definition.data_directory = package_root
