@@ -44,12 +44,11 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry) -> voi
 	await RenderingServer.frame_post_draw
 	var elapsed: int = Time.get_ticks_msec() - started
 	print("H1_DENSE_RENDER_END elapsed_ms=%d" % elapsed)
-	check.call("H1 real create and first rendered frame finish within ten seconds", result.get("success") == true and elapsed < 10000
+	check.call("H1 real create and first rendered frame finish within ten seconds", result.get("success") == true and result.get("rows_imported") == 10000 and elapsed < 10000
 		and sheet.cells_canvas.is_visible_in_tree() and sheet.cells_canvas.size.x > 0 and sheet.cells_canvas.size.y > 0)
 	check.call("H1 real AutoFilter UI remains subscribed", sheet.autofilter_ui != null and data.data_changed.is_connected(sheet.autofilter_ui._on_sheet_changed))
-	check.call("H1 all 200000 cells and final row survive import", data.cells.size() == 200000
-		and data.get_used_range() == Rect2i(0, 0, 20, 10000) and data.get_cell_value(9999, 19) == 10018)
-	check.call("H1 forward formula keeps its expression and recalculated value", data.get_cell_value(1, 2) == "=SUM(B2:B3)"
+	check.call("H1 complete model matches independently derived cells and metadata", data.to_dict() == _expected_model())
+	check.call("H1 forward formula keeps its expression and recalculated value", data.get_cell_if_exists(1, 2).formula == "=SUM(B2:B3)" and data.get_cell_value(1, 2) == 5
 		and data.get_cell_display(1, 2) == "5")
 	check.call("H1 opening creates no edit or undo history", not imported._plugin_scene_modified and not sheet.can_undo() and not sheet.can_redo())
 	check.call("H1 importing preserves every source byte", FileAccess.get_sha256(path) == CSV_SHA256)
@@ -77,3 +76,24 @@ func _check_notifications(check: Callable, data_script: GDScript) -> void:
 	data.from_csv("")
 	check.call("empty CSV restores notifications and publishes its final empty model", not data.is_blocking_signals()
 		and snapshots.size() == 2 and data.cells.is_empty())
+	snapshots.clear()
+	data.from_csv("A\n=1/0")
+	check.call("formula errors leave notifications restored and final model visible", not data.is_blocking_signals()
+		and snapshots.size() == 2 and not data.get_cell_if_exists(1, 0).error.is_empty()
+		and snapshots[0] == data.to_dict() and snapshots[1] == data.to_dict())
+
+func _expected_model() -> Dictionary:
+	var cells: Dictionary = {}
+	var rows: Array[Dictionary] = []
+	var columns: Array[Dictionary] = []
+	for row: int in range(10000):
+		rows.append({"height": 24.0, "is_header": row == 0})
+		for column: int in range(20):
+			var cell: Dictionary = {"value": "Column %d" % (column + 1), "type": 1} if row == 0 else {"value": float(row + column), "type": 2}
+			if row == 1 and column == 2:
+				cell = {"value": 5.0, "type": 4, "formula": "=SUM(B2:B3)"}
+			cells["%d,%d" % [row, column]] = cell
+	for column: int in range(26):
+		columns.append({"width": 100.0, "header_name": "", "is_date_column": false})
+	return {"version": 1, "row_count": 10000, "column_count": 26, "header_row_count": 1,
+		"frozen_rows": 0, "frozen_cols": 0, "columns": columns, "rows": rows, "cells": cells, "charts": []}
