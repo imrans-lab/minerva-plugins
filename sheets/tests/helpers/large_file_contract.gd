@@ -117,7 +117,7 @@ func run(check: Callable, pane: EditorPane, host: Node, registry: PluginToolRegi
 		return
 	started = Time.get_ticks_msec()
 	manager.stop_plugin("sheets")
-	var stopped: Dictionary = await registry.handle_tool_call("minerva_sheets_get_data", {"editor_name": editor.tab_title, "range": "B2:C3"})
+	var stopped: Dictionary = await registry.handle_tool_call("minerva_sheets_create_editor", {"name": "Stopped large-sheet provider"})
 	check.call("large sheet backend loss refuses visibly and retains full model", stopped.get("success") == false and ValueDomain.equal_json(_model(editor), expected))
 	var restarted: Dictionary = await manager.start_plugin("sheets")
 	var retried: Dictionary = await registry.handle_tool_call("minerva_sheets_get_data", {"editor_name": editor.tab_title, "range": "B2:C3"})

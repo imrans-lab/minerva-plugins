@@ -39,8 +39,8 @@ func run(check: Callable, pane: EditorPane, host: Node) -> void:
 	for native_path: String in [path, exported]:
 		var opened: Dictionary = host.call("open_file_at_path", native_path)
 		var reopened: Editor = pane.Tabs.get_current_tab_control()
-		await tree.process_frame
-		await tree.process_frame
+		# Full restoration deliberately recalculates after its existing 500 ms timer.
+		await tree.create_timer(0.6).timeout
 		var restored: Dictionary = PluginScenePanelHost.invoke_save(reopened.plugin_scene_root, {})
 		check.call(native_path.get_file() + " actual host file reopen preserves the full model", opened.get("ok") == true
 			and ValueDomain.equal_json(restored, model))

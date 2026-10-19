@@ -70,7 +70,8 @@ static func read_minsheet(path: String, document: Dictionary) -> Error:
 	if not dict is Dictionary:
 		return ERR_INVALID_DATA
 
-	document.merge(dict, true)
+	var parsed: Dictionary = dict
+	document.merge(parsed, true)
 	return OK
 
 

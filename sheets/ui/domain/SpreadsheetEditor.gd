@@ -2358,8 +2358,9 @@ func deserialize(data: Dictionary, notify_changes: bool = true) -> void:
 		canvas.queue_free()
 	chart_canvases.clear()
 
-	var restored_charts: Array = spreadsheet_data.charts.duplicate()
-	spreadsheet_data.charts.clear()
+	var restored_data: SpreadsheetDataScript = spreadsheet_data
+	var restored_charts: Array = restored_data.charts.duplicate()
+	restored_data.charts.clear()
 	for chart: SpreadsheetChartScript in restored_charts:
 		add_chart(chart, notify_changes)
 

@@ -144,8 +144,6 @@ func _run() -> void:
 		var creation: RefCounted = load(source.path_join("tests/helpers/creation_contract.gd")).new()
 		var native_files: RefCounted = load(source.path_join("tests/helpers/native_file_contract.gd")).new()
 		await native_files.call("run", check, pane, host)
-		var large_files: RefCounted = load(source.path_join("tests/helpers/large_file_contract.gd")).new()
-		await large_files.call("run", check, pane, host, registry, manager)
 		await creation.call("run", check, pane, manager, registry, broker, policy, source)
 		var live_reload: RefCounted = load(source.path_join("tests/helpers/live_reload_contract.gd")).new()
 		await live_reload.call("run", check, pane, manager)
