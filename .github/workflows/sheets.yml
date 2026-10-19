@@ -168,6 +168,9 @@ jobs:
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "prerelease=$PRE" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          fi
           bash scripts/release-publish-guard.sh "$TAG" "$PRE" sheets
       - name: Publish GitHub Release
         if: steps.tag.outputs.publish == 'true'

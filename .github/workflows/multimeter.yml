@@ -196,6 +196,9 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "prerelease=$PRE" >> "$GITHUB_OUTPUT"
           echo "Computed: tag=$TAG prerelease=$PRE"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          fi
           bash scripts/release-publish-guard.sh "$TAG" "$PRE" multimeter
 
       - name: Publish GitHub Release

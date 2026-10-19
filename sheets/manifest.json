@@ -1,7 +1,7 @@
 {
   "id": "sheets",
   "name": "Sheets",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Staging spreadsheet editor for Minerva, extracted alongside the builtin. It creates and edits native, CSV, TSV and XLSX sheets with data, styling, charts, AutoFilter, undo, snapshot notes and portable projects. Initial CSV creation uses two steps. Nudge export reports unavailable. Source installs require Go 1.25 or newer; archives include the backend.",
   "host_api_version": "2",
   "release_targets": [
