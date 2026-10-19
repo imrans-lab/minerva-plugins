@@ -28,7 +28,7 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry) -> voi
 	pane.Tabs.size = pane.Tabs.get_viewport_rect().size
 	print("H1_DENSE_CREATE_BEGIN ticks_ms=%d" % Time.get_ticks_msec())
 	var started: int = Time.get_ticks_msec()
-	var result: Dictionary = await registry.handle_tool_call("minerva_sheets_create_editor", {"file_path": path})
+	var result: Dictionary = await registry.handle_tool_call("minerva_sheets_create_editor", {"name": "H1 exact dense import", "file_path": path})
 	print("H1_DENSE_RPC_END elapsed_ms=%d result=%s" % [Time.get_ticks_msec() - started, JSON.stringify(result)])
 	var imported: Editor = null
 	for editor: Editor in pane.get_open_editors():
@@ -36,6 +36,7 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry) -> voi
 			imported = editor
 	check.call("H1 file-backed create leaves its real live panel mounted", imported != null and imported.plugin_scene_root != null)
 	if imported == null or imported.plugin_scene_root == null:
+		pane.Tabs.size = previous_size
 		return
 	# External panel types are dynamically loaded by the plugin generation.
 	var sheet = imported.plugin_scene_root.get("sheet")
