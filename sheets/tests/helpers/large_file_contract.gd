@@ -20,6 +20,8 @@ func _find(pane: EditorPane, title: String) -> Editor:
 
 func run(check: Callable, pane: EditorPane, host: Node, registry: PluginToolRegistry, manager: PluginManager) -> void:
 	var tree: SceneTree = pane.Tabs.get_tree()
+	var previous_size: Vector2 = pane.Tabs.size
+	pane.Tabs.size = pane.Tabs.get_viewport_rect().size
 	var folder := ProjectSettings.globalize_path("user://large-file-contract")
 	DirAccess.make_dir_recursive_absolute(folder)
 	var csv := folder.path_join("H1 10k Zoë.csv")
@@ -30,10 +32,12 @@ func run(check: Callable, pane: EditorPane, host: Node, registry: PluginToolRegi
 	var started: int = Time.get_ticks_msec()
 	var created: Dictionary = await registry.handle_tool_call("minerva_sheets_create_editor", {"name": "Large file sweep", "file_path": csv})
 	var editor: Editor = _find(pane, str(created.get("editor_name", "")))
+	print("LARGE_FILE_CREATE_RESULT ", JSON.stringify(created))
 	await RenderingServer.frame_post_draw
 	_within(check, "large CSV create and render", started)
 	check.call("large CSV create preserves the independent full model", editor != null and ValueDomain.equal_json(_model(editor), Dense.new()._expected_model()))
 	if editor == null:
+		pane.Tabs.size = previous_size
 		return
 	var panel: Node = editor.plugin_scene_root
 	var sheet: Node = panel.get("sheet")
@@ -114,6 +118,7 @@ func run(check: Callable, pane: EditorPane, host: Node, registry: PluginToolRegi
 	_within(check, "large native MCP create and render", started)
 	check.call("large native MCP create preserves complete model", editor != null and ValueDomain.equal_json(_model(editor), expected))
 	if editor == null:
+		pane.Tabs.size = previous_size
 		return
 	started = Time.get_ticks_msec()
 	manager.stop_plugin("sheets")
@@ -126,3 +131,4 @@ func run(check: Callable, pane: EditorPane, host: Node, registry: PluginToolRegi
 	var filter: Dictionary = await editor.plugin_scene_root.call("handle_tool", "minerva_sheets_autofilter_get", {"editor_name": editor.tab_title})
 	check.call("large sheet filter survives every boundary and backend restart", filter.get("success") == true and filter.get("visible_count") == 1)
 	editor.free()
+	pane.Tabs.size = previous_size
