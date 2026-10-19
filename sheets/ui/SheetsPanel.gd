@@ -65,12 +65,14 @@ func _on_panel_restore_live_state(state: Dictionary) -> bool:
 	var captured_history: Variant = state.get("history")
 	if not document is Dictionary or not captured_history is Dictionary:
 		return false
-	if not Snapshot.validate(document):
+	var document_data: Dictionary = document
+	var history_data: Dictionary = captured_history
+	if not Snapshot.validate(document_data):
 		return false
 	var history: SpreadsheetHistoryScript = sheet.history
-	if not history.restore_live_state(captured_history):
+	if not history.restore_live_state(history_data):
 		return false
-	sheet.deserialize(document)
+	sheet.deserialize(document_data, false)
 	_snapshot_restored = true
 	return true
 

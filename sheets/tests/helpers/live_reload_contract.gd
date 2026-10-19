@@ -24,6 +24,17 @@ func run(check: Callable, pane: EditorPane, manager: PluginManager) -> void:
 			and sheet.get_undo_count() == 2 and sheet.history.get_redo_count() == 1)
 		models.append(PluginScenePanelHost.invoke_save(editor.plugin_scene_root, {}))
 		editors.append(editor)
+	var clean: Editor = pane.add_plugin_scene_editor("sheets", "sheets_panel", null, "Clean chart witness", "create")
+	await tree.process_frame
+	clean.plugin_scene_root.get("sheet").set_content("A,B\n1,2")
+	var chart: Dictionary = await clean.plugin_scene_root.call("handle_tool", "minerva_sheets_add_chart",
+		{"editor_name": clean.plugin_panel_key, "x_range": "A1:A2", "series": ["B1:B2"]})
+	await tree.process_frame
+	await tree.process_frame
+	check.call("clean chart witness is produced by the real chart tool and host save", chart.get("success") == true
+		and await clean.save_file_to_disc(ProjectSettings.globalize_path("user://live-clean-chart.minsheet")))
+	var clean_model: Dictionary = PluginScenePanelHost.invoke_save(clean.plugin_scene_root, {})
+	check.call("chart witness is clean before reload", not clean._plugin_scene_modified and clean_model.charts.size() == 1)
 	var scene_path: String = definition.data_directory.path_join("ui/SheetsPanel.tscn")
 	var original: String = FileAccess.get_file_as_string(scene_path)
 	var scene_file := FileAccess.open(scene_path, FileAccess.WRITE)
@@ -31,6 +42,11 @@ func run(check: Callable, pane: EditorPane, manager: PluginManager) -> void:
 	scene_file.close()
 	var result: Dictionary = await manager.reload_scene_plugin("sheets")
 	check.call("packaged Sheets opts in and actually swaps the marker", manager.supports_scene_live_reload("sheets") and result.get("ok") == true)
+	await tree.process_frame
+	await tree.process_frame
+	check.call("clean chart-bearing panel stays clean after deferred live reconstruction", clean.plugin_scene_root.has_node("QualificationMarker")
+		and not clean._plugin_scene_modified and PluginScenePanelHost.invoke_save(clean.plugin_scene_root, {}) == clean_model)
+	clean.free()
 	for index: int in range(editors.size()):
 		var editor: Editor = editors[index]
 		var panel: Node = editor.plugin_scene_root

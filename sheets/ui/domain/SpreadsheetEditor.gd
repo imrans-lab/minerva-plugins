@@ -2132,7 +2132,7 @@ func _on_create_chart_confirmed() -> void:
 	chart_config_dialog.hide()
 
 
-func add_chart(chart: SpreadsheetChartScript) -> void:
+func add_chart(chart: SpreadsheetChartScript, notify_change: bool = true) -> void:
 	charts.append(chart)
 
 	# Also add to data model if not already there
@@ -2162,7 +2162,8 @@ func add_chart(chart: SpreadsheetChartScript) -> void:
 		var total_height := split_container.size.y
 		split_container.split_offset = int(total_height * 0.6)
 
-	content_changed.emit()
+	if notify_change:
+		content_changed.emit()
 
 
 func remove_chart(index: int) -> void:
@@ -2317,7 +2318,7 @@ func serialize() -> Dictionary:
 
 
 ## Override deserialize to restore charts
-func deserialize(data: Dictionary) -> void:
+func deserialize(data: Dictionary, notify_changes: bool = true) -> void:
 	print("[SpreadsheetEditor] deserialize() called, cells_canvas=%s" % cells_canvas)
 	# Ensure UI is built before deserializing (in case _ready hasn't run yet)
 	if cells_canvas == null:
@@ -2354,7 +2355,7 @@ func deserialize(data: Dictionary) -> void:
 	for chart_data in charts_data:
 		var chart := SpreadsheetChartScript.new()
 		chart.load_from_dict(chart_data)
-		add_chart(chart)
+		add_chart(chart, notify_changes)
 
 	if charts.size() > 0:
 		chart_panel.visible = true

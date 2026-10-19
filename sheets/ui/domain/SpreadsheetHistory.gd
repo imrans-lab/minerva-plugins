@@ -240,8 +240,8 @@ func restore_live_state(state: Dictionary) -> bool:
 		return false
 	var undo_entries: Array = state.undo
 	var redo_entries: Array = state.redo
-	var undo_actions: Array = _restore_stack(undo_entries)
-	var redo_actions: Array = _restore_stack(redo_entries)
+	var undo_actions: Array[HistoryAction] = _restore_stack(undo_entries)
+	var redo_actions: Array[HistoryAction] = _restore_stack(redo_entries)
 	max_history = state.max_history
 	_undo_stack = undo_actions
 	_redo_stack = redo_actions
@@ -264,8 +264,8 @@ static func _valid_stack(value: Variant) -> bool:
 	return true
 
 
-static func _restore_stack(stack: Array) -> Array:
-	var restored: Array = []
+static func _restore_stack(stack: Array) -> Array[HistoryAction]:
+	var restored: Array[HistoryAction] = []
 	for entry: Dictionary in stack:
 		var action_type: ActionType = entry.type
 		var action_data: Dictionary = entry.data
