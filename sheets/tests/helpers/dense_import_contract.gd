@@ -24,13 +24,12 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry) -> voi
 	file.close()
 	check.call("H1 fixture matches the immutable Windows CSV", FileAccess.get_sha256(path) == CSV_SHA256)
 	check.call("H1 uses a rendered display", DisplayServer.get_name() != "headless")
+	var previous_size: Vector2 = pane.Tabs.size
+	pane.Tabs.size = pane.Tabs.get_viewport_rect().size
 	print("H1_DENSE_CREATE_BEGIN ticks_ms=%d" % Time.get_ticks_msec())
 	var started: int = Time.get_ticks_msec()
 	var result: Dictionary = await registry.handle_tool_call("minerva_sheets_create_editor", {"file_path": path})
-	await RenderingServer.frame_post_draw
-	var elapsed: int = Time.get_ticks_msec() - started
-	print("H1_DENSE_CREATE_END elapsed_ms=%d result=%s" % [elapsed, JSON.stringify(result)])
-	check.call("H1 real create and first rendered frame finish within ten seconds", result.get("success") == true and elapsed < 10000)
+	print("H1_DENSE_RPC_END elapsed_ms=%d result=%s" % [Time.get_ticks_msec() - started, JSON.stringify(result)])
 	var imported: Editor = null
 	for editor: Editor in pane.get_open_editors():
 		if editor.file == path:
@@ -41,6 +40,12 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry) -> voi
 	# External panel types are dynamically loaded by the plugin generation.
 	var sheet = imported.plugin_scene_root.get("sheet")
 	var data = sheet.spreadsheet_data
+	sheet.cells_canvas.queue_redraw()
+	await RenderingServer.frame_post_draw
+	var elapsed: int = Time.get_ticks_msec() - started
+	print("H1_DENSE_RENDER_END elapsed_ms=%d" % elapsed)
+	check.call("H1 real create and first rendered frame finish within ten seconds", result.get("success") == true and elapsed < 10000
+		and sheet.cells_canvas.is_visible_in_tree() and sheet.cells_canvas.size.x > 0 and sheet.cells_canvas.size.y > 0)
 	check.call("H1 real AutoFilter UI remains subscribed", sheet.autofilter_ui != null and data.data_changed.is_connected(sheet.autofilter_ui._on_sheet_changed))
 	check.call("H1 all 200000 cells and final row survive import", data.cells.size() == 200000
 		and data.get_used_range() == Rect2i(0, 0, 20, 10000) and data.get_cell_value(9999, 19) == 10018)
@@ -49,6 +54,7 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry) -> voi
 	check.call("H1 opening creates no edit or undo history", not imported._plugin_scene_modified and not sheet.can_undo() and not sheet.can_redo())
 	check.call("H1 importing preserves every source byte", FileAccess.get_sha256(path) == CSV_SHA256)
 	imported.free()
+	pane.Tabs.size = previous_size
 	_check_notifications(check, data.get_script())
 
 func _check_notifications(check: Callable, data_script: GDScript) -> void:
