@@ -1882,6 +1882,13 @@ func _create_export_dialog() -> void:
 ## File→Import (_on_import_file_selected) and creation-time loading
 ## (Editor._load_spreadsheet_file). Returns OK or an Error.
 func load_file(path: String) -> Error:
+	if path.get_extension().to_lower() == "minsheet":
+		var document: Dictionary = {}
+		var result: Error = SpreadsheetFileHandlerScript.read_minsheet(path, document)
+		if result == OK:
+			deserialize(document)
+			content_changed.emit()
+		return result
 	var err := SpreadsheetFileHandlerScript.import_file(path, spreadsheet_data)
 	if err != OK:
 		return err
@@ -2351,10 +2358,9 @@ func deserialize(data: Dictionary, notify_changes: bool = true) -> void:
 		canvas.queue_free()
 	chart_canvases.clear()
 
-	var charts_data: Array = data.get("charts", [])
-	for chart_data in charts_data:
-		var chart := SpreadsheetChartScript.new()
-		chart.load_from_dict(chart_data)
+	var restored_charts: Array = spreadsheet_data.charts.duplicate()
+	spreadsheet_data.charts.clear()
+	for chart: SpreadsheetChartScript in restored_charts:
 		add_chart(chart, notify_changes)
 
 	if charts.size() > 0:

@@ -279,15 +279,15 @@ static func _generate_workbook_rels() -> String:
 
 ## Generate xl/sharedStrings.xml
 static func _generate_shared_strings(strings: PackedStringArray) -> String:
-	var xml := """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+	var fragments := PackedStringArray(["""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="%d" uniqueCount="%d">
-""" % [strings.size(), strings.size()]
+""" % [strings.size(), strings.size()]])
 
 	for s in strings:
-		xml += "<si><t>%s</t></si>\n" % _escape_xml(s)
+		fragments.append("<si><t>%s</t></si>\n" % _escape_xml(s))
 
-	xml += "</sst>"
-	return xml
+	fragments.append("</sst>")
+	return "".join(fragments)
 
 
 ## Generate xl/styles.xml (minimal)
@@ -315,10 +315,10 @@ static func _generate_styles() -> String:
 
 ## Generate xl/worksheets/sheet1.xml
 static func _generate_sheet(data: SpreadsheetDataScript, string_indices: Dictionary) -> String:
-	var xml := """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+	var fragments := PackedStringArray(["""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
 <sheetData>
-"""
+"""])
 
 	# Find actual data bounds
 	var max_row := 0
@@ -331,19 +331,19 @@ static func _generate_sheet(data: SpreadsheetDataScript, string_indices: Diction
 			max_col = maxi(max_col, parts[1].to_int() + 1)
 
 	for row in range(max_row):
-		xml += "<row r=\"%d\">\n" % (row + 1)
+		fragments.append("<row r=\"%d\">\n" % (row + 1))
 
 		for col in range(max_col):
 			var cell := data.get_cell_if_exists(row, col)
 			if cell and cell.type != SpreadsheetCellScript.CellType.EMPTY:
 				var ref := SpreadsheetDataScript.get_column_label(col) + str(row + 1)
-				xml += _generate_cell_xml(ref, cell, string_indices)
+				fragments.append(_generate_cell_xml(ref, cell, string_indices))
 
-		xml += "</row>\n"
+		fragments.append("</row>\n")
 
-	xml += """</sheetData>
-</worksheet>"""
-	return xml
+	fragments.append("""</sheetData>
+</worksheet>""")
+	return "".join(fragments)
 
 
 ## Generate XML for a single cell

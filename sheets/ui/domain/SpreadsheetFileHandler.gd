@@ -45,6 +45,15 @@ static func export_tsv(path: String, data: SpreadsheetDataScript) -> Error:
 
 ## Import native JSON format (.minsheet)
 static func import_minsheet(path: String, data: SpreadsheetDataScript) -> Error:
+	var document: Dictionary = {}
+	var result: Error = read_minsheet(path, document)
+	if result == OK:
+		data.load_from_dict(document)
+	return result
+
+
+## Read once for both data-only callers and the editor's full document restore.
+static func read_minsheet(path: String, document: Dictionary) -> Error:
 	var file := FileAccess.open(path, FileAccess.READ)
 	if not file:
 		return FileAccess.get_open_error()
@@ -61,7 +70,7 @@ static func import_minsheet(path: String, data: SpreadsheetDataScript) -> Error:
 	if not dict is Dictionary:
 		return ERR_INVALID_DATA
 
-	data.load_from_dict(dict)
+	document.merge(dict, true)
 	return OK
 
 

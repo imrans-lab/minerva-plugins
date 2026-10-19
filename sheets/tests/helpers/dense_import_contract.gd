@@ -3,7 +3,7 @@ extends RefCounted
 
 const CSV_SHA256: String = "82a066c19397d3885221438da1e0cb12519f82e591625d21cf792cb4c6f1d4e3"
 
-func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry) -> void:
+static func fixture_csv() -> String:
 	var lines: PackedStringArray = []
 	var header: PackedStringArray = []
 	for column: int in range(20):
@@ -14,7 +14,10 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry) -> voi
 		for column: int in range(20):
 			values.append("=SUM(B2:B3)" if row == 1 and column == 2 else str(row + column))
 		lines.append(",".join(values))
-	var csv: String = "\r\n".join(lines) + "\r\n"
+	return "\r\n".join(lines) + "\r\n"
+
+func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry) -> void:
+	var csv: String = fixture_csv()
 	var path: String = ProjectSettings.globalize_path("user://H1 10k rows Zoë.csv")
 	var file := FileAccess.open(path, FileAccess.WRITE)
 	check.call("H1 exact dense CSV fixture can be written", file != null)

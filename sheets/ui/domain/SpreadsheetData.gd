@@ -756,6 +756,9 @@ func to_dict() -> Dictionary:
 	var rows_arr := []
 	for meta in row_meta:
 		rows_arr.append(meta.to_dict())
+	var charts_data: Array[Dictionary] = []
+	for chart: SpreadsheetChartScript in charts:
+		charts_data.append(chart.to_dict())
 
 	var result := {
 		"version": 1,
@@ -767,7 +770,7 @@ func to_dict() -> Dictionary:
 		"columns": columns_arr,
 		"rows": rows_arr,
 		"cells": cells_dict,
-		"charts": []  # TODO: Serialize charts
+		"charts": charts_data
 	}
 	# Written only when a filter range exists, so unfiltered sheets save as before.
 	if autofilter.is_active():
@@ -813,7 +816,11 @@ func load_from_dict(data: Dictionary) -> void:
 
 	autofilter.load_from_dict(data.get("autofilter", {}))
 
-	# TODO: Load charts
+	charts.clear()
+	for chart_data: Dictionary in data.get("charts", []):
+		var chart := SpreadsheetChartScript.new()
+		chart.load_from_dict(chart_data)
+		charts.append(chart)
 
 
 ## Convert to CSV string
