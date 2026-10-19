@@ -11,8 +11,8 @@ unconfirmed it is called out explicitly and cross-referenced to
 > The marketplace registry is served from
 > `https://raw.githubusercontent.com/imrans-lab/minerva-plugins/main/registry.json`.
 
-> **Source basis:** the B6 host/plugin tuple (Minerva `96c0252a`, plugins
-> `1e558e5c`, Sheets release `sheets-v0.1.2`). This revision reconciles file
+> **Source basis:** the final B6 host/plugin tuple (Minerva `03810207`, plugins
+> `63fc8f8e`, Sheets release `sheets-v0.1.2`, MultiMeter `multimeter-v0.2.3`). This revision reconciles file
 > ownership, provider readiness, live generations and contextual calls through B6.
 > Final B7 release qualification records the final two repository revisions.
 
