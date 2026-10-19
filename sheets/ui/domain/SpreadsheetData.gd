@@ -744,10 +744,12 @@ func _adjust_formulas_for_column_insertion(inserted_col: int) -> void:
 ## Serialize to dictionary
 func to_dict() -> Dictionary:
 	var cells_dict := {}
+	var empty_cell: Dictionary = SpreadsheetCellScript.new().to_dict()
 	for key in cells:
-		var cell = cells[key]
-		if not cell.is_empty():
-			cells_dict[key] = cell.to_dict()
+		var cell: SpreadsheetCellScript = cells[key]
+		var serialized: Dictionary = cell.to_dict()
+		if not cell.is_empty() or serialized != empty_cell:
+			cells_dict[key] = serialized
 
 	var columns_arr := []
 	for meta in column_meta:
@@ -808,11 +810,16 @@ func load_from_dict(data: Dictionary) -> void:
 
 	# Load cells
 	cells.clear()
+	_cell_dependencies.clear()
+	_cell_references.clear()
 	var cells_dict: Dictionary = data.get("cells", {})
-	for key in cells_dict:
-		var cell = SpreadsheetCellScript.new()
+	for key: String in cells_dict:
+		var cell: SpreadsheetCellScript = SpreadsheetCellScript.new()
 		cell.load_from_dict(cells_dict[key])
 		cells[key] = cell
+		if cell.has_formula():
+			var position: Vector2i = parse_cell_key(key)
+			_setup_formula_dependencies(position.y, position.x, cell.formula)
 
 	autofilter.load_from_dict(data.get("autofilter", {}))
 

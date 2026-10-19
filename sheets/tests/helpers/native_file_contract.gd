@@ -82,3 +82,5 @@ func run(check: Callable, pane: EditorPane, host: Node) -> void:
 	imported.set_block_signals(false)
 	imported.structure_changed.disconnect(record)
 	imported.data_changed.disconnect(record)
+	var persistence := preload("native_persistence_contract.gd").new()
+	await persistence.run(check, pane, host)
