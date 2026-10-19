@@ -35,6 +35,16 @@ func run(check: Callable, pane: EditorPane, manager: PluginManager) -> void:
 		and await clean.save_file_to_disc(ProjectSettings.globalize_path("user://live-clean-chart.minsheet")))
 	var clean_model: Dictionary = PluginScenePanelHost.invoke_save(clean.plugin_scene_root, {})
 	check.call("chart witness is clean before reload", not clean._plugin_scene_modified and clean_model.charts.size() == 1)
+	var changes: Array[int] = [0]
+	var observe := func() -> void: changes[0] += 1
+	var clean_sheet: Control = clean.plugin_scene_root.get("sheet")
+	clean_sheet.connect("content_changed", observe)
+	clean_sheet.call("deserialize", clean_model)
+	await tree.process_frame
+	await tree.process_frame
+	check.call("ordinary deserialize and its add_chart keep default change notifications", changes[0] > 0 and clean._plugin_scene_modified)
+	clean_sheet.disconnect("content_changed", observe)
+	check.call("ordinary chart witness is clean again through host save", await clean.save_file_to_disc(clean.file) and not clean._plugin_scene_modified)
 	var scene_path: String = definition.data_directory.path_join("ui/SheetsPanel.tscn")
 	var original: String = FileAccess.get_file_as_string(scene_path)
 	var scene_file := FileAccess.open(scene_path, FileAccess.WRITE)
