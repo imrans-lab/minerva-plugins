@@ -533,10 +533,10 @@ func _update_scrollbar_ranges() -> void:
 	var total_width: float = cells_canvas.get_total_width()
 	var total_height: float = cells_canvas.get_total_height()
 
-	h_scrollbar.max_value = maxf(0, total_width - cells_canvas.size.x)
+	h_scrollbar.max_value = total_width
 	h_scrollbar.page = cells_canvas.size.x
 
-	v_scrollbar.max_value = maxf(0, total_height - cells_canvas.size.y)
+	v_scrollbar.max_value = total_height
 	v_scrollbar.page = cells_canvas.size.y
 
 

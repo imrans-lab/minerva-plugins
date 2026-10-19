@@ -53,6 +53,7 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry) -> voi
 		and data.get_cell_display(1, 2) == "5")
 	check.call("H1 preserves imported dirty state without edit history", imported._plugin_scene_modified and not sheet.can_undo() and not sheet.can_redo())
 	await _check_clipboard(check, sheet)
+	await _check_scroll(check, sheet)
 	check.call("H1 importing preserves every source byte", FileAccess.get_sha256(path) == CSV_SHA256)
 	imported.free()
 	pane.Tabs.size = previous_size
@@ -130,3 +131,57 @@ func _check_clipboard(check: Callable, sheet: Control) -> void:
 	check.call("H1 clipboard undo restores all prior cells", sheet.call("undo") and read.call() == before)
 	check.call("H1 clipboard redo restores exact Unicode values", sheet.call("redo") and read.call() == expected)
 	DisplayServer.clipboard_set(clipboard_before)
+
+func _send_key(canvas: Control, code: Key, control: bool = false) -> void:
+	canvas.grab_focus()
+	var event := InputEventKey.new()
+	event.keycode = code
+	event.ctrl_pressed = control
+	event.pressed = true
+	Input.parse_input_event(event)
+	var release := InputEventKey.new()
+	release.keycode = code
+	release.ctrl_pressed = control
+	Input.parse_input_event(release)
+	await canvas.get_tree().process_frame
+
+func _check_scroll(check: Callable, sheet: Control) -> void:
+	# Exact fixture geometry is independent of the scrollbar range calculation.
+	var canvas: Control = sheet.get("cells_canvas")
+	var horizontal: HScrollBar = sheet.get("h_scrollbar")
+	var vertical: VScrollBar = sheet.get("v_scrollbar")
+	var end: Vector2 = Vector2(2600, 240000) - canvas.size
+	horizontal.value = horizontal.max_value
+	vertical.value = vertical.max_value
+	canvas.queue_redraw()
+	await RenderingServer.frame_post_draw
+	check.call("H1 scrollbar end fully exposes final row and column without overscroll", canvas.get("scroll_offset").is_equal_approx(end)
+		and is_equal_approx(horizontal.value + canvas.size.x, 2600) and is_equal_approx(vertical.value + canvas.size.y, 240000))
+	horizontal.value = 0
+	vertical.value = 0
+	await _send_key(canvas, KEY_END, true)
+	check.call("H1 Ctrl End selects and exposes row10000 and column Z", sheet.get("current_row") == 9999
+		and sheet.get("current_col") == 25 and canvas.get("scroll_offset").is_equal_approx(end))
+	sheet.call("_move_to_cell", 9998, 25)
+	await _send_key(canvas, KEY_DOWN)
+	check.call("H1 keyboard Down reaches the same final row", sheet.get("current_row") == 9999 and canvas.get("scroll_offset").is_equal_approx(end))
+	vertical.value = end.y - 1
+	var wheel := InputEventMouseButton.new()
+	wheel.button_index = MOUSE_BUTTON_WHEEL_DOWN
+	wheel.pressed = true
+	wheel.position = canvas.get_global_rect().position + Vector2(10, 10)
+	wheel.global_position = wheel.position
+	Input.parse_input_event(wheel)
+	await sheet.get_tree().process_frame
+	check.call("H1 wheel clamps to the same final row without overscroll", is_equal_approx(vertical.value, end.y)
+		and canvas.get("scroll_offset").is_equal_approx(end))
+	# A small independent sheet exercises Range.page when content fits entirely.
+	var data = sheet.get("spreadsheet_data").get_script().new()
+	data.row_count = 2
+	data.column_count = 2
+	data.call("_init_metadata")
+	sheet.call("deserialize", data.to_dict())
+	horizontal.value = horizontal.max_value
+	vertical.value = vertical.max_value
+	check.call("H1 a sheet smaller than its viewport cannot scroll", horizontal.value == 0 and vertical.value == 0
+		and canvas.get("scroll_offset") == Vector2.ZERO)
