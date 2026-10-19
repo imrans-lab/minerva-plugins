@@ -59,3 +59,9 @@ func run(check: Callable, pane: EditorPane, host: Node) -> void:
 	DirAccess.make_dir_recursive_absolute(evidence)
 	var small_path := evidence.path_join("current-small.xlsx")
 	check.call("small XLSX baseline exports through the real archive writer", Excel.export_xlsx(small_path, small) == OK)
+	var comparator := ProjectSettings.globalize_path("res://../../minerva-plugins/sheets/tests/helpers/compare_xlsx.py")
+	var baseline := ProjectSettings.globalize_path("res://../../minerva-plugins/sheets/tests/fixtures/native-file-baseline.xlsx")
+	var comparison: Array = []
+	var compared: int = OS.execute("python3", PackedStringArray([comparator, baseline, small_path]), comparison, true)
+	print("XLSX_BYTE_COMPARISON ", comparison)
+	check.call("small XLSX retains every archive byte except ZIP clock fields", compared == 0)

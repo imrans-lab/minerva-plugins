@@ -1,0 +1,10 @@
+{
+  "producer": "Sheets ExcelHandler.export_xlsx before QR2",
+  "host": "bbf888fe6d37c37a1f8fe447b3b854c6e284671b",
+  "plugins": "2ad4dc47eb27844a35885b352595b2109472d6bf",
+  "job": "j20261019t054050-b4abd2",
+  "input": "src/test/fixtures/spreadsheet_contract/baseline.minsheet",
+  "input_operation": "Data.load_from_dict, recalculate_all, actual ExcelHandler.export_xlsx",
+  "sha256": "a9775b893c2d2e66daba765c487488ca2d1d93fdb98aebe4224f7d2d655906dc",
+  "comparison": "Every archive byte including payloads, CRCs, compression and lengths; exclude only the4DOS time/date bytes in each local/central header. Relay c5366."
+}

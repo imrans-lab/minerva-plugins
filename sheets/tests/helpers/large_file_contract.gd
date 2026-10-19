@@ -18,6 +18,14 @@ func _find(pane: EditorPane, title: String) -> Editor:
 			return editor
 	return null
 
+func _render(editor: Editor) -> void:
+	if editor == null:
+		return
+	var sheet: Node = editor.plugin_scene_root.get("sheet")
+	var canvas: Control = sheet.get("cells_canvas")
+	canvas.queue_redraw()
+	await RenderingServer.frame_post_draw
+
 func run(check: Callable, pane: EditorPane, host: Node, registry: PluginToolRegistry, manager: PluginManager) -> void:
 	var tree: SceneTree = pane.Tabs.get_tree()
 	var previous_size: Vector2 = pane.Tabs.size
@@ -33,7 +41,7 @@ func run(check: Callable, pane: EditorPane, host: Node, registry: PluginToolRegi
 	var created: Dictionary = await registry.handle_tool_call("minerva_sheets_create_editor", {"name": "Large file sweep", "file_path": csv})
 	var editor: Editor = _find(pane, str(created.get("editor_name", "")))
 	print("LARGE_FILE_CREATE_RESULT ", JSON.stringify(created))
-	await RenderingServer.frame_post_draw
+	await _render(editor)
 	_within(check, "large CSV create and render", started)
 	check.call("large CSV create preserves the independent full model", editor != null and ValueDomain.equal_json(_model(editor), Dense.new()._expected_model()))
 	if editor == null:
@@ -70,8 +78,8 @@ func run(check: Callable, pane: EditorPane, host: Node, registry: PluginToolRegi
 	editor.free()
 	started = Time.get_ticks_msec()
 	var opened: Dictionary = host.call("open_file_at_path", native)
-	await RenderingServer.frame_post_draw
 	editor = pane.Tabs.get_current_tab_control()
+	await _render(editor)
 	_within(check, "large native host reopen and render", started)
 	check.call("large native reopen keeps full model including chart and filter", opened.get("ok") == true and ValueDomain.equal_json(_model(editor), expected))
 	panel = editor.plugin_scene_root
@@ -95,8 +103,8 @@ func run(check: Callable, pane: EditorPane, host: Node, registry: PluginToolRegi
 			and ValueDomain.equal_json(_model(editor), expected) and FileAccess.get_sha256(csv) == Dense.CSV_SHA256)
 		started = Time.get_ticks_msec()
 		var imported: Dictionary = host.call("open_file_at_path", destination)
-		await RenderingServer.frame_post_draw
 		var copy: Editor = pane.Tabs.get_current_tab_control()
+		await _render(copy)
 		_within(check, "large host reimport " + extension, started)
 		var observed: Dictionary = _model(copy)
 		if extension == "minsheet":
@@ -114,7 +122,7 @@ func run(check: Callable, pane: EditorPane, host: Node, registry: PluginToolRegi
 	started = Time.get_ticks_msec()
 	created = await registry.handle_tool_call("minerva_sheets_create_editor", {"name": "Large native MCP reopen", "file_path": native})
 	editor = _find(pane, str(created.get("editor_name", "")))
-	await RenderingServer.frame_post_draw
+	await _render(editor)
 	_within(check, "large native MCP create and render", started)
 	check.call("large native MCP create preserves complete model", editor != null and ValueDomain.equal_json(_model(editor), expected))
 	if editor == null:
