@@ -24,7 +24,7 @@ import (
 const (
 	protocolVersion = "2024-11-05"
 	serverName      = "multimeter"
-	serverVersion   = "0.2.2"
+	serverVersion   = "0.2.3"
 	pluginID        = "multimeter"
 	eventReading    = "multimeter.reading"
 	eventDial       = "multimeter.dial_changed"

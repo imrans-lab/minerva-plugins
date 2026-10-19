@@ -1,7 +1,7 @@
 {
   "id": "multimeter",
   "name": "MultiMeter",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Read an OWON B41T+ Bluetooth digital multimeter live inside Minerva. Your AI agent can read the current measurement, watch trends, press the meter's buttons, and record readings to CSV; the panel shows the live value with a rolling graph. Needs the meter powered on with its Bluetooth enabled and a Bluetooth radio on this computer; nothing else to install.",
   "price": {
     "amount_minor": 0,
