@@ -27,14 +27,14 @@ func _open(entries: Array, pane: EditorPane) -> Array:
 	await pane.Tabs.get_tree().process_frame
 	return views
 
-func _opaque(check: Callable, original: Array, pane: EditorPane, container: Node) -> Array:
+func _opaque(check: Callable, original: Array, pane: EditorPane, container: Node, label: String = "") -> Array:
 	var entries: Array = _json(original)
 	var views: Array = []
 	for pass_index: int in 2:
 		_close(pane)
 		views = await _open(entries, pane)
 		entries = _json(await container.call("serialize"))
-		check.call("opaque complete entries survive save/reopen%d" % pass_index, entries == _json(original))
+		check.call(label + " opaque complete entries survive save/reopen%d" % pass_index, entries == _json(original))
 	return views
 
 func run(check: Callable, pane: EditorPane, manager: PluginManager, container: Node) -> void:
@@ -113,14 +113,16 @@ func run(check: Callable, pane: EditorPane, manager: PluginManager, container: N
 	_close(pane)
 	var cases: RefCounted = load(ProjectSettings.globalize_path("res://../../minerva-plugins/sheets/tests/helpers/snapshot_cases.gd")).new()
 	var invalid_entries: Array = cases.entries(native, check)
-	for entry: Dictionary in invalid_entries:
-		var refused_views: Array = await _opaque(check, [entry], pane, container)
+	for index: int in invalid_entries.size():
+		var entry: Dictionary = invalid_entries[index]
+		var label: String = cases.names[index]
+		var refused_views: Array = await _opaque(check, [entry], pane, container, label)
 		var refusal: Control = refused_views[0].plugin_scene_root
 		var labels: Array[Node] = refusal.find_children("*", "RichTextLabel", true, false)
-		check.call("refusal is mounted selectable with Retry before Save", refusal.is_inside_tree() and refusal.is_visible_in_tree()
+		check.call(label + " refusal is mounted selectable with Retry before Save", refusal.is_inside_tree() and refusal.is_visible_in_tree()
 			and labels.size() == 1 and labels[0].get("selection_enabled") == true
 			and refusal.find_children("*", "Button", true, false).size() == 1)
-		check.call("malformed/future snapshot remains opaque with no file write", _json(await container.call("serialize")) == _json([entry])
+		check.call(label + " malformed/future snapshot remains opaque with no file write", _json(await container.call("serialize")) == _json([entry])
 			and not await refused_views[0].save_file_to_disc("user://refused-session.minsheet")
 			and not FileAccess.file_exists("user://refused-session.minsheet"))
 		_close(pane)

@@ -41,6 +41,8 @@ static func _safe(input: Dictionary, example: Dictionary) -> bool:
 		if address != "%d,%d" % [row, col] or row < 0 or col < 0 or row >= rows or col >= cols: return false
 		if not cells[key] is Dictionary: return false
 		var cell: Dictionary = cells[key]
+		# Cell.to_dict always writes these; formatting fields are optional.
+		if not cell.has("type") or not cell.has("value"): return false
 		for info: Dictionary in prototype.get_property_list():
 			var name: String = info.name
 			if not cell.has(name) or name == "value": continue
@@ -51,12 +53,12 @@ static func _safe(input: Dictionary, example: Dictionary) -> bool:
 				if not Color.html_is_valid(html): return false
 			elif not _shape(cell[name], current): return false
 		if cell.has("value") and not _json_value(cell.value): return false
-		if cell.has("type"):
-			var kind: float = cell.type
-			if not Cell.CellType.values().has(int(kind)): return false
-			if int(kind) == Cell.CellType.FORMULA:
-				var formula: String = cell.get("formula", "")
-				if not formula.begins_with("="): return false
+		var kind: float = cell.type
+		if not Cell.CellType.values().has(int(kind)): return false
+		if int(kind) == Cell.CellType.EMPTY and (cell.value != "" or cell.get("formula", "") != ""): return false
+		if int(kind) == Cell.CellType.FORMULA:
+			var formula: String = cell.get("formula", "")
+			if not formula.begins_with("="): return false
 		if cell.has("alignment"):
 			var alignment: float = cell.alignment
 			if alignment > HORIZONTAL_ALIGNMENT_FILL: return false
