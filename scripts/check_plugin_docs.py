@@ -35,9 +35,10 @@ def sections(markdown: str) -> dict[str, str]:
     return result
 
 
-def check_documents(documents: dict[str, str]) -> list[str]:
+def check_documents(documents: dict[str, str], host_guide: str = "") -> list[str]:
     errors: list[str] = []
     anchors = {name: sections(text) for name, text in documents.items()}
+    indexes: dict[str, set[tuple[str, str]]] = {name: set() for name in documents}
     for name, text in documents.items():
         for target, fragment in re.findall(r"\]\(([^)\s#]*)#([^)]*)\)", text):
             target = target.removeprefix("./") or name
@@ -46,6 +47,9 @@ def check_documents(documents: dict[str, str]) -> list[str]:
             if target not in anchors or fragment not in anchors[target]:
                 errors.append(f"{name}: broken anchor: {target}#{fragment}")
         for line in text.splitlines():
+            for retired in RETIRED:
+                if retired in line and not re.search(r"\b(retired|unsupported|not called)\b", line, re.IGNORECASE):
+                    errors.append(f"{name}: retired hook claimed as supported: {retired}")
             if line.startswith("|"):
                 cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
                 if len(cells) >= 2 and cells[1] in CONTRACTS:
@@ -53,22 +57,34 @@ def check_documents(documents: dict[str, str]) -> list[str]:
                     if not reference:
                         errors.append(f"{name}: contract row needs a guide anchor: {cells[0]}")
                     token = re.search(r"`([^`]+)`", cells[0])
-                    if not token or token[1] not in documents.get("PLUGIN_DEVELOPER_GUIDE.md", ""):
+                    if not token or f"`{token[1]}`" not in documents.get("PLUGIN_DEVELOPER_GUIDE.md", ""):
                         errors.append(f"{name}: contract has no guide description: {cells[0]}")
-                for retired in RETIRED:
-                    if retired in line and not re.search(r"\b(retired|unsupported|not called)\b", line, re.IGNORECASE):
-                        errors.append(f"{name}: retired hook claimed as supported: {retired}")
+                    if token:
+                        entry = (cells[1], token[1])
+                        if entry in indexes[name]:
+                            errors.append(f"{name}: duplicate contract index row: {token[1]}")
+                        indexes[name].add(entry)
+    guide = indexes.get("PLUGIN_DEVELOPER_GUIDE.md", set())
+    ledger = indexes.get("PLUGIN_API_COVERAGE.md", set())
+    for category, symbol in sorted(guide - ledger):
+        errors.append(f"PLUGIN_DEVELOPER_GUIDE.md: documented but not in ledger: {category}: {symbol}")
+    for category, symbol in sorted(ledger - guide):
+        errors.append(f"PLUGIN_DEVELOPER_GUIDE.md: missing contract index row: {category}: {symbol}")
+    for fragment in re.findall(r"PLUGIN_DEVELOPER_GUIDE\.md#([^)]*)\)", host_guide):
+        if fragment not in anchors.get("PLUGIN_DEVELOPER_GUIDE.md", {}):
+            errors.append(f"host guide: broken anchor: PLUGIN_DEVELOPER_GUIDE.md#{fragment}")
     return errors
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plugins-root", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument("--host-guide", type=Path)
     args = parser.parse_args()
     try:
-        documents = {name: (args.plugins_root / "docs" / name).read_text() for name in
+        documents = {name: (args.plugins_root / "docs" / name).read_text(encoding="utf-8") for name in
                      ("PLUGIN_DEVELOPER_GUIDE.md", "PLUGIN_API_COVERAGE.md")}
-        errors = check_documents(documents)
+        errors = check_documents(documents, args.host_guide.read_text(encoding="utf-8") if args.host_guide else "")
     except OSError as error:
         print(f"Plugin docs: {error}", file=sys.stderr)
         return 1

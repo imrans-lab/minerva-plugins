@@ -336,6 +336,9 @@ Legend: **R** = required, **O** = optional. "Strict→null" means a violation ma
 | `project_export.collect_channel` | R* | string | — | Collect sidecar files for package export. |
 | `project_export.apply_channel` | R* | string | — | Apply unpacked sidecar paths on package import. |
 | `requires_plugins` | O | object[] | `[]` | Nonempty declarations require top-level `plugin_dependencies`. Each entry has `id`, strict SemVer `min_version`, and an `actions` array of canonical `minerva_<id>_*` provider tool names. Only required providers may be dependencies; self, duplicate, malformed and cyclic declarations refuse. Explicit null refuses. |
+| `requires_plugins[].id` | R* | string | — | Required-provider ID; unique, not the consumer itself. |
+| `requires_plugins[].min_version` | R* | string | — | Required strict SemVer minimum for the selected provider. |
+| `requires_plugins[].actions` | R* | string[] | — | Array of unique canonical tools owned by that provider; discovery verifies these before readiness. |
 | `permissions` | O | object | `{}` | `{host_capabilities[], network{}, filesystem{}}`. Unknown keys ignored. |
 | `permissions.host_capabilities` | O | string[] | `[]` | **The capability grant list.** See §4 + §13. |
 | `permissions.host_events` | O | string[] | `[]` | Subscriptions to allowed host events, separate from capability grants. The host delivers `minerva/host_event` notifications after admission. |
@@ -1018,7 +1021,7 @@ route-worker calls, and structured per-tool error messages, read
 production reference this pattern was extracted from.
 
 > **Reinstall gotcha:** manifest edits (including adding/changing
-> `executor`) are **not** picked up by `.gd`/`.tscn` hot reload. If you're
+> `executor`) are **not** picked up by `.gd`/`.tscn` live reload. If you're
 > iterating on an already-installed plugin, reinstall (or restart) it after
 > editing `manifest.json`, and reconnect any MCP client (`/mcp` in Claude
 > Code) so it re-fetches `tools/list` — otherwise it keeps calling the old
@@ -1500,7 +1503,7 @@ GitHub redirects) → `tar -xzf` → verify `SHA256SUMS` → read the **tarball-
 23. **Progress notifications are not routed yet** (§8). `on_progress` is safe to
     implement but nothing fires it today.
 24. **Panel-tool `input_schema` must require `editor_name`** (§7) — and manifest edits
-    need a reinstall, not a hot reload.
+    need a reinstall, not a scene live reload.
 
 ---
 
@@ -1742,3 +1745,162 @@ self-contained; you do not need a Minerva checkout to follow it.
 
 *See [`PLUGIN_API_COVERAGE.md`](./PLUGIN_API_COVERAGE.md) for the full audit matrix,
 the producer/consumer diffs, the requirement-bug ledger, and the open questions.*
+
+
+## 19. SDK declaration index
+
+These names are checked both ways against the ledger and, during explicit
+two-repository validation, the host source declarations. The references lead
+to the author-facing contract; the index does not add a separate API owner.
+The manifest census covers literal top-level parser reads, panel/tool fields
+and the `requires_plugins` validator. Nested `settings[]`, `editor_items[]`,
+`skills[]` and `setup` recipe fields are described above but are outside this
+census. IPC coverage is `request_*` plus `get_bulk_payload_limit`, rather than
+every SDK member.
+
+| Symbol | Contract | Author reference |
+|---|---|---|
+| `host.audio` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.chat.active` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.chat.input` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.chat_providers.register` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.core.session` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.dialogs.directory_picker` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.dialogs.file_picker` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.documents.get_blob` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.documents.get_node` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.documents.get_state` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.documents.list_open` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.documents.mark_dirty` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.documents.patch_state` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.documents.put_blob` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.documents.set_state` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.echo` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.editors.export` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.editors.list` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.editors.open` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.files.delete` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.files.exists` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.files.list` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.files.mkdir` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.files.move` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.files.read` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.files.stat` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.files.write` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.models.list_models` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.models.list_providers` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.notes.create_from_editor` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.notify` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.pdf.generate` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.permissions.grant_scope` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.project.current` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.project.open` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.providers.chat` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.settings.get` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.settings.list` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.speech_log` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.terminal.exec` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.terminal.list` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.terminal.read` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.terminal.wait` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `host.terminal.write` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#42-capability-reference) |
+| `mcp.proxy:` | capability_namespace | [guide](PLUGIN_DEVELOPER_GUIDE.md#4-host-apis--capabilities-a-plugin-can-call) |
+| `secrets:` | capability_namespace | [guide](PLUGIN_DEVELOPER_GUIDE.md#4-host-apis--capabilities-a-plugin-can-call) |
+| `host_owned_save` | plugin_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#31-there-is-one-dialect) |
+| `live_reload` | plugin_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#31-there-is-one-dialect) |
+| `plugin_dependencies` | plugin_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#31-there-is-one-dialect) |
+| `project_export` | plugin_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#31-there-is-one-dialect) |
+| `project_state` | plugin_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#31-there-is-one-dialect) |
+| `backend` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `backend.args` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `backend.entrypoint` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `backend.transport` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `backend.working_dir` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `capabilities` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `editor_items` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `events` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `host_api_version` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `id` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `knowledge` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `knowledge_project` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `log_stderr` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `name` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `panel_authority` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `permissions` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `permissions.filesystem` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `permissions.filesystem.mode` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `permissions.filesystem.paths` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `permissions.host_capabilities` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `permissions.host_events` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `permissions.network` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `permissions.network.mode` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `project_export` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `project_export.apply_channel` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `project_export.collect_channel` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `project_file` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `project_file.deserialize_channel` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `project_file.serialize_channel` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `requires_plugins` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `requires_plugins[].actions` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#required-providers-and-readiness) |
+| `requires_plugins[].id` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#required-providers-and-readiness) |
+| `requires_plugins[].min_version` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#required-providers-and-readiness) |
+| `settings` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `settings_title` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `setup` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `skills` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `state` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `state.schema` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `tools` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `tools[].executor` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `tools[].name` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `tools[].tool_set` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.ipc_messages` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].chrome` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].chrome.suppress` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].entry` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].entry_scene` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].file_actions` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].file_extensions` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].fullscreen_capable` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].ipc_channels` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].kind` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].layout_hint` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].multi_window` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].name` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].native_save_extensions` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].render_mode` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].save_mode` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].scripts` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `ui.panels[].write_guidance` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `version` | manifest_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `_on_panel_apply_sync` | panel_hook | [guide](PLUGIN_DEVELOPER_GUIDE.md#71-panel-lifecycle-hooks-full-list) |
+| `_on_panel_capture_live_state` | panel_hook | [guide](PLUGIN_DEVELOPER_GUIDE.md#71-panel-lifecycle-hooks-full-list) |
+| `_on_panel_create_note_request` | panel_hook | [guide](PLUGIN_DEVELOPER_GUIDE.md#71-panel-lifecycle-hooks-full-list) |
+| `_on_panel_inject_toggle_changed` | panel_hook | [guide](PLUGIN_DEVELOPER_GUIDE.md#71-panel-lifecycle-hooks-full-list) |
+| `_on_panel_load_request` | panel_hook | [guide](PLUGIN_DEVELOPER_GUIDE.md#71-panel-lifecycle-hooks-full-list) |
+| `_on_panel_loaded` | panel_hook | [guide](PLUGIN_DEVELOPER_GUIDE.md#71-panel-lifecycle-hooks-full-list) |
+| `_on_panel_redo_request` | panel_hook | [guide](PLUGIN_DEVELOPER_GUIDE.md#71-panel-lifecycle-hooks-full-list) |
+| `_on_panel_render_for_llm` | panel_hook | [guide](PLUGIN_DEVELOPER_GUIDE.md#71-panel-lifecycle-hooks-full-list) |
+| `_on_panel_restore_from_note` | panel_hook | [guide](PLUGIN_DEVELOPER_GUIDE.md#71-panel-lifecycle-hooks-full-list) |
+| `_on_panel_restore_live_state` | panel_hook | [guide](PLUGIN_DEVELOPER_GUIDE.md#71-panel-lifecycle-hooks-full-list) |
+| `_on_panel_save_request` | panel_hook | [guide](PLUGIN_DEVELOPER_GUIDE.md#71-panel-lifecycle-hooks-full-list) |
+| `_on_panel_self_check` | panel_hook | [guide](PLUGIN_DEVELOPER_GUIDE.md#71-panel-lifecycle-hooks-full-list) |
+| `_on_panel_undo_request` | panel_hook | [guide](PLUGIN_DEVELOPER_GUIDE.md#71-panel-lifecycle-hooks-full-list) |
+| `_on_panel_unload` | panel_hook | [guide](PLUGIN_DEVELOPER_GUIDE.md#71-panel-lifecycle-hooks-full-list) |
+| `res://Scripts/Services/Annotations/AnnotationV2Schema.gd` | host_path | [guide](PLUGIN_DEVELOPER_GUIDE.md#public-scene-sdk) |
+| `res://Scripts/Services/Annotations/BuiltinKinds.gd` | host_path | [guide](PLUGIN_DEVELOPER_GUIDE.md#public-scene-sdk) |
+| `res://Scripts/Services/Documents/DocumentBuffer.gd` | host_path | [guide](PLUGIN_DEVELOPER_GUIDE.md#public-scene-sdk) |
+| `res://Scripts/Services/Plugins/AtomicFile.gd` | host_path | [guide](PLUGIN_DEVELOPER_GUIDE.md#public-scene-sdk) |
+| `res://Scripts/Services/Plugins/MinervaPluginPanel.gd` | host_path | [guide](PLUGIN_DEVELOPER_GUIDE.md#public-scene-sdk) |
+| `res://Scripts/UI/Controls/responsive_container.gd` | host_path | [guide](PLUGIN_DEVELOPER_GUIDE.md#public-scene-sdk) |
+| `MinervaIPC.get_bulk_payload_limit` | sdk_method | [guide](PLUGIN_DEVELOPER_GUIDE.md#contextual-calls-and-cancellation) |
+| `MinervaIPC.request_bulk` | sdk_method | [guide](PLUGIN_DEVELOPER_GUIDE.md#contextual-calls-and-cancellation) |
+| `MinervaIPC.request_capability` | sdk_method | [guide](PLUGIN_DEVELOPER_GUIDE.md#contextual-calls-and-cancellation) |
+| `MinervaIPC.request_private` | sdk_method | [guide](PLUGIN_DEVELOPER_GUIDE.md#contextual-calls-and-cancellation) |
+| `RequiredPlugins.release_page` | sdk_method | [guide](PLUGIN_DEVELOPER_GUIDE.md#required-providers-and-readiness) |
+| `RequiredPlugins.repository` | sdk_method | [guide](PLUGIN_DEVELOPER_GUIDE.md#required-providers-and-readiness) |
+| `handle_tool` | sdk_method | [guide](PLUGIN_DEVELOPER_GUIDE.md#contextual-calls-and-cancellation) |
+| `handle_tool_with_context` | sdk_method | [guide](PLUGIN_DEVELOPER_GUIDE.md#contextual-calls-and-cancellation) |
+| `repo` | required_plugin_field | [guide](PLUGIN_DEVELOPER_GUIDE.md#required-providers-and-readiness) |

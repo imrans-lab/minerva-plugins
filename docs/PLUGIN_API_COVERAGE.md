@@ -137,7 +137,7 @@ they are not additional capability grants. Guide links are checked locally.
 | PluginDefinition.State enum | state | yes | no | — | PluginDefinition.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#1-overview--plugin-anatomy) |
 | PluginManager lifecycle signals | event | yes | no | — | PluginManager.gd; singleton_object.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#8-events--state) |
 | tools_registered/unregistered signals | event | yes | no | — | PluginToolRegistry.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#8-events--state) |
-| Hot reload (auto_reload watch) | lifecycle | yes | no | — | PluginManager.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#9-transport--lifecycle) |
+| `auto_reload` file watcher | lifecycle | yes | no | — | PluginManager.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#9-transport--lifecycle) |
 | PluginDB persistence + boot reconstruction | lifecycle | yes | no | — | PluginDB.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#9-transport--lifecycle) |
 | PluginErrors success/error envelope | runtime | yes | no | presentation, scansort, cad, notes_helper, obs_controller | PluginErrors.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#1-overview--plugin-anatomy) |
 | Audit redaction | runtime | yes | no | — | CapabilityBroker.gd | [reference](PLUGIN_DEVELOPER_GUIDE.md#1-overview--plugin-anatomy) |
@@ -211,6 +211,9 @@ they are not additional capability grants. Guide links are checked locally.
 | `permissions.network` | manifest_field | yes | yes | — | PluginDefinition parser/validator | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
 | `project_export` | manifest_field | yes | yes | — | PluginDefinition parser/validator | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
 | `requires_plugins` | manifest_field | yes | yes | — | PluginDefinition parser/validator | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
+| `requires_plugins[].actions` | manifest_field | yes | yes | — | PluginDefinition parser/validator | [reference](PLUGIN_DEVELOPER_GUIDE.md#required-providers-and-readiness) |
+| `requires_plugins[].id` | manifest_field | yes | yes | — | PluginDefinition parser/validator | [reference](PLUGIN_DEVELOPER_GUIDE.md#required-providers-and-readiness) |
+| `requires_plugins[].min_version` | manifest_field | yes | yes | — | PluginDefinition parser/validator | [reference](PLUGIN_DEVELOPER_GUIDE.md#required-providers-and-readiness) |
 | `setup` | manifest_field | yes | yes | — | PluginDefinition parser/validator | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
 | `state` | manifest_field | yes | yes | — | PluginDefinition parser/validator | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
 | `tools[].executor` | manifest_field | yes | yes | — | PluginDefinition parser/validator | [reference](PLUGIN_DEVELOPER_GUIDE.md#32-field-reference) |
@@ -238,8 +241,8 @@ they are not additional capability grants. Guide links are checked locally.
 | `MinervaIPC.request_bulk` | sdk_method | yes | n/a | — | MinervaIPC; PluginToolRegistry; RequiredPlugins | [reference](PLUGIN_DEVELOPER_GUIDE.md#contextual-calls-and-cancellation) |
 | `MinervaIPC.request_capability` | sdk_method | yes | n/a | — | MinervaIPC; PluginToolRegistry; RequiredPlugins | [reference](PLUGIN_DEVELOPER_GUIDE.md#contextual-calls-and-cancellation) |
 | `MinervaIPC.request_private` | sdk_method | yes | n/a | — | MinervaIPC; PluginToolRegistry; RequiredPlugins | [reference](PLUGIN_DEVELOPER_GUIDE.md#contextual-calls-and-cancellation) |
-| `RequiredPlugins.release_page` | sdk_method | yes | n/a | — | MinervaIPC; PluginToolRegistry; RequiredPlugins | [reference](PLUGIN_DEVELOPER_GUIDE.md#contextual-calls-and-cancellation) |
-| `RequiredPlugins.repository` | sdk_method | yes | n/a | — | MinervaIPC; PluginToolRegistry; RequiredPlugins | [reference](PLUGIN_DEVELOPER_GUIDE.md#contextual-calls-and-cancellation) |
+| `RequiredPlugins.release_page` | sdk_method | yes | n/a | — | MinervaIPC; PluginToolRegistry; RequiredPlugins | [reference](PLUGIN_DEVELOPER_GUIDE.md#required-providers-and-readiness) |
+| `RequiredPlugins.repository` | sdk_method | yes | n/a | — | MinervaIPC; PluginToolRegistry; RequiredPlugins | [reference](PLUGIN_DEVELOPER_GUIDE.md#required-providers-and-readiness) |
 | `handle_tool` | sdk_method | yes | n/a | — | MinervaIPC; PluginToolRegistry; RequiredPlugins | [reference](PLUGIN_DEVELOPER_GUIDE.md#contextual-calls-and-cancellation) |
 | `handle_tool_with_context` | sdk_method | yes | n/a | — | MinervaIPC; PluginToolRegistry; RequiredPlugins | [reference](PLUGIN_DEVELOPER_GUIDE.md#contextual-calls-and-cancellation) |
 | `repo` | required_plugin_field | yes | n/a | — | RequiredPlugins.repository | [reference](PLUGIN_DEVELOPER_GUIDE.md#required-providers-and-readiness) |
@@ -308,7 +311,7 @@ seventh language. `pcb` is the reference consumer. See the developer guide §17.
   consumable.
 - `host.fs.watch` / `host.fs.unwatch` / `host.fs.changed` — implemented; no surveyed
   plugin subscribes.
-- Install/start/stop/restart/remove lifecycle, crash-loop detection, hot-reload,
+- Install/start/stop/restart/remove lifecycle, crash-loop detection, auto_reload,
   PluginDB persistence — host machinery with no plugin-declared surface.
 - Audit redaction (`_audit_dispatch`) — host-only.
 - `capability:editor.request_save` (the `plugin_owned` save dispatch) — **referenced
@@ -492,8 +495,10 @@ seventh language. `pcb` is the reference consumer. See the developer guide §17.
 5. **The Minerva-side WebSocket endpoint elgato connects to (`ws://127.0.0.1:{port}`)**
    was not located in any plugin dir or producer extractor — its host implementation /
    registration is unconfirmed.
-6. **Is `host_api_version` intended to gain a future min-version gate**, or permanently
-   advisory? Any value parses today (cad ships int `1`, others string `"1"`).
+6. **`host_api_version` is an exact install/start gate.** `PluginDefinition`
+   converts the manifest value to a string, then `host_api_error()` requires
+   `"2"`; `PluginManager` checks it before install/start. Loading an old saved
+   record remains allowed, but that does not make an incompatible plugin runnable.
 7. **Latent `get_state` blob-strip bypass:** a FUTURE `paired_dsl` plugin emitting JSON
    `buffer_text` containing `{__blob__}` envelopes would skip the outbound strip walker
    in `get_state` (only `request_panel_state` runs it). Safe today (.mcad is plain-text
