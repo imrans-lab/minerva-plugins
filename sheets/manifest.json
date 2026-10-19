@@ -1053,6 +1053,7 @@
     }
   ],
   "capabilities": [
+    "live_reload",
     "project_state",
     "host_owned_save",
     "project_export"

@@ -218,3 +218,49 @@ func get_undo_count() -> int:
 ## Get the number of redoable actions
 func get_redo_count() -> int:
 	return _redo_stack.size()
+
+
+## Plain values cross generation boundaries; HistoryAction instances do not.
+func capture_live_state() -> Dictionary:
+	return {"version": 1, "max_history": max_history,
+		"undo": _capture_stack(_undo_stack), "redo": _capture_stack(_redo_stack)}
+
+
+static func _capture_stack(stack: Array) -> Array[Dictionary]:
+	var captured: Array[Dictionary] = []
+	for action: HistoryAction in stack:
+		captured.append({"type": action.type, "data": action.data.duplicate(true)})
+	return captured
+
+
+func restore_live_state(state: Dictionary) -> bool:
+	if state.get("version") != 1 or not state.get("max_history") is int or state.max_history < 0:
+		return false
+	if not _valid_stack(state.get("undo")) or not _valid_stack(state.get("redo")):
+		return false
+	var undo_actions: Array = _restore_stack(state.undo)
+	var redo_actions: Array = _restore_stack(state.redo)
+	max_history = state.max_history
+	_undo_stack = undo_actions
+	_redo_stack = redo_actions
+	undo_available_changed.emit(can_undo())
+	redo_available_changed.emit(can_redo())
+	return true
+
+
+static func _valid_stack(value: Variant) -> bool:
+	if not value is Array:
+		return false
+	for entry: Variant in value:
+		if not entry is Dictionary or not entry.get("type") is int or not entry.get("data") is Dictionary:
+			return false
+		if entry.type < ActionType.CELL_EDIT or entry.type > ActionType.AUTOFILTER:
+			return false
+	return true
+
+
+static func _restore_stack(stack: Array) -> Array:
+	var restored: Array = []
+	for entry: Dictionary in stack:
+		restored.append(HistoryAction.new(entry.type, entry.data.duplicate(true)))
+	return restored

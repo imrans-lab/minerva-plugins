@@ -26,6 +26,7 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry, chat_m
 	var editor: Editor = pane.add_plugin_scene_editor("sheets", "sheets_panel", null, "Read wire budget", "create")
 	await tree.process_frame
 	var data = editor.plugin_scene_root.call("get_sheet_data")
+	var live_tools: Script = editor.plugin_scene_root.get("_tools").get_script()
 	# Runtime load is required for the standalone runner's autoload context.
 	var connection = load("res://Scripts/Services/MCP/MCPServerConnection.gd").new("sheets-read-wire", "", MCPServerConnection.TransportType.STDIO)
 	connection.plugin_id = "sheets"
@@ -44,14 +45,14 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry, chat_m
 		while high - low > 1:
 			var middle: int = int((low + high) * 0.5)
 			data.set_cell_value(0, 0, unit.repeat(middle))
-			if Tools.read_data(data, args).get("success") == true:
+			if live_tools.read_data(data, args).get("success") == true:
 				low = middle
 			else:
 				high = middle
 		for over: bool in [false, true]:
 			data.set_cell_value(0, 0, unit.repeat(high if over else low))
 			var before: String = JSON.stringify(editor.plugin_scene_root.call("_on_panel_save_request"))
-			var direct: Dictionary = Tools.read_data(data, args)
+			var direct: Dictionary = live_tools.read_data(data, args)
 			var chat: Dictionary = await chat_manager.execute_tool("minerva_sheets_get_data", args)
 			var ordinary: Dictionary = await client.call_tool("minerva_sheets_get_data", args)
 			var browser: Dictionary = await _browser(tree, http.get_port(), client._http_transport.session, args)

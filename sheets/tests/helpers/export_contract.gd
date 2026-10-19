@@ -23,7 +23,8 @@ func run(check: Callable, pane: EditorPane) -> void:
 	var editor: Editor = pane.add_plugin_scene_editor("sheets", "sheets_panel", source, "Export source", "")
 	var panel: Node = editor.plugin_scene_root
 	var sheet: Node = panel.get("sheet")
-	var data: Data = sheet.get("spreadsheet_data")
+	# Live generations load their own model script, distinct from this test's preload.
+	var data = sheet.get("spreadsheet_data")
 	data.recalculate_all()
 	var model: Dictionary = PluginScenePanelHost.invoke_save(panel, {})
 	var dirty: bool = editor._plugin_scene_modified

@@ -68,6 +68,18 @@ func _run() -> void:
 	for extension: String in [".minsheet", ".csv", ".tsv", ".xlsx"]:
 		check(extension + " is claimed by the installed Sheets loader", host.plugin_editor_registry.resolve_file(extension).get("plugin_id") == "sheets")
 	if definition != null:
+		# Keep the real source installation/build above, then mount the exact public
+		# archive layout. Nonshipping test scripts intentionally fail the live guard.
+		var package_root := ProjectSettings.globalize_path("user://sheets-shipped-layout")
+		var package_output := ProjectSettings.globalize_path("user://sheets-archive")
+		DirAccess.make_dir_recursive_absolute(package_root)
+		var package_log: Array = []
+		var package_code: int = OS.execute("python3", PackedStringArray([source.path_join("scripts/package.py"),
+			"linux-x86_64", source.path_join("sheets-plugin"), package_output]), package_log, true)
+		var unpack_code: int = OS.execute("tar", PackedStringArray(["-xf", package_output.path_join("sheets-0.1.0-linux-x86_64.tar.gz"), "-C", package_root]), package_log, true)
+		check("real source build packages into the shipped live-reload layout", package_code == 0 and unpack_code == 0
+			and FileAccess.get_sha256(package_root.path_join("ui/SheetsPanel.gd")) == FileAccess.get_sha256(source.path_join("ui/SheetsPanel.gd")))
+		definition.data_directory = package_root
 		var started: Dictionary = await manager.start_plugin("sheets")
 		check("actual Sheets backend initializes", started.get("ok", false) == true)
 		manager.get_connection("sheets").tool_result_received.connect(_project_reply)
@@ -131,6 +143,8 @@ func _run() -> void:
 		await consumers.call("run", check, pane, registry, source, host)
 		var creation: RefCounted = load(source.path_join("tests/helpers/creation_contract.gd")).new()
 		await creation.call("run", check, pane, manager, registry, broker, policy, source)
+		var live_reload: RefCounted = load(source.path_join("tests/helpers/live_reload_contract.gd")).new()
+		await live_reload.call("run", check, pane, manager)
 
 
 		definition.class_names.assign(["WrongPrefix_Panel"])
@@ -227,8 +241,9 @@ func _hosting_contract(host: Node, pane: EditorPane, manager: PluginManager, plu
 			check("native frozen filter retains hidden cell content", not data.get("autofilter").is_row_visible(2)
 				and data.call("get_cell_display", 2, 0) == "hide")
 			var files: Script = load(plugin_source.path_join("ui/domain/SpreadsheetFileHandler.gd"))
+			var live_files: Script = load(data.get_script().resource_path.get_base_dir().path_join("SpreadsheetFileHandler.gd"))
 			var exported_path := ProjectSettings.globalize_path("user://cutover-frozen-native.minsheet")
-			check("native frozen model exports through plugin format owner", files.export_file(exported_path, data) == OK)
+			check("native frozen model exports through plugin format owner", live_files.export_file(exported_path, data) == OK)
 			var imported: RefCounted = data_script.new()
 			check("native frozen export reimports with its complete model", files.import_file(exported_path, imported) == OK
 				and values.equal_json(imported.call("to_dict"), model))

@@ -1,5 +1,7 @@
 # Sheets
 
+Development live reload preserves each open panel's undo and redo history through the optional transient-state hooks; saved spreadsheet files contain only document data. Marketplace updates load after restart.
+
 All 30 canonical tools declare `tool_set: "spreadsheet"`; saved spreadsheet presets retain their chat, search and HTTP membership across backend discovery.
 
 Staging extraction of Minerva's spreadsheet editor. This plugin is not in the

@@ -55,6 +55,18 @@ func get_sheet_data() -> RefCounted:
 func _on_panel_save_request() -> Dictionary:
 	return sheet.serialize()
 
+func _on_panel_capture_live_state() -> Dictionary:
+	return {"document": sheet.serialize(), "history": sheet.history.capture_live_state()}
+
+func _on_panel_restore_live_state(state: Dictionary) -> bool:
+	if not state.get("document") is Dictionary or not Snapshot.validate(state.document) or not state.get("history") is Dictionary:
+		return false
+	if not sheet.history.restore_live_state(state.history):
+		return false
+	sheet.deserialize(state.document)
+	_snapshot_restored = true
+	return true
+
 func _on_panel_load_request(document: Dictionary) -> void:
 	status.hide()
 	if get_document_action() in ["open", "import"] or (document.has("file_path") and not _snapshot_restored):

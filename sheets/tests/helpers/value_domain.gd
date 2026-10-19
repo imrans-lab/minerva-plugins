@@ -84,7 +84,8 @@ func run(check: Callable) -> void:
 
 func run_editor(check: Callable, sheet: Control) -> void:
 	var colors: Dictionary = {"text_color": Color(1, 1, 1, 0.999), "bg_color": Color(Color.TRANSPARENT, 0.001)}
-	var model: Data = sheet.get("spreadsheet_data")
+	# The mounted generation owns its model type; standalone oracles keep Data.
+	var model = sheet.get("spreadsheet_data")
 	model.set_cell_value(0, 0, "KEEP")
 	for field: String in colors:
 		sheet.call("format_cell_with_history", 0, 0, {field: colors[field]})
@@ -112,7 +113,7 @@ func run_editor(check: Callable, sheet: Control) -> void:
 		sheet.call(method, 2)
 		check.call("delete clamps active bounds " + str(columns), sheet.get("spreadsheet_data").get("frozen_cols" if columns else "frozen_rows") == 2)
 		check.call("delete undo succeeds " + str(columns), sheet.call("undo"))
-		var restored: Data = sheet.get("spreadsheet_data")
+		var restored = sheet.get("spreadsheet_data")
 		check.call("undo restores freeze and header metadata " + str(columns), restored.frozen_rows == 3 and restored.frozen_cols == 3 and restored.header_row_count == 3)
 		check.call("delete redo succeeds " + str(columns), sheet.call("redo"))
 		check.call("redo reclamps bound " + str(columns), restored.get("frozen_cols" if columns else "frozen_rows") == 2)
