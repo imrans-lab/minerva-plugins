@@ -52,6 +52,7 @@ func run(check: Callable, pane: EditorPane, registry: PluginToolRegistry) -> voi
 	check.call("H1 forward formula keeps its expression and recalculated value", data.get_cell_if_exists(1, 2).formula == "=SUM(B2:B3)" and data.get_cell_value(1, 2) == 5
 		and data.get_cell_display(1, 2) == "5")
 	check.call("H1 preserves imported dirty state without edit history", imported._plugin_scene_modified and not sheet.can_undo() and not sheet.can_redo())
+	await _check_clipboard(check, sheet)
 	check.call("H1 importing preserves every source byte", FileAccess.get_sha256(path) == CSV_SHA256)
 	imported.free()
 	pane.Tabs.size = previous_size
@@ -100,3 +101,32 @@ func _expected_model() -> Dictionary:
 		columns.append({"width": 100.0, "header_name": "", "is_date_column": false})
 	return {"version": 1, "row_count": 10000, "column_count": 26, "header_row_count": 1,
 		"frozen_rows": 0, "frozen_cols": 0, "columns": columns, "rows": rows, "cells": cells, "charts": []}
+
+func _check_clipboard(check: Callable, sheet: Control) -> void:
+	# Real clipboard and input dispatch under Xvfb; external panel type is dynamic.
+	var data = sheet.get("spreadsheet_data")
+	var read := func() -> Array: return [data.get_cell_value(4, 6), data.get_cell_value(4, 7), data.get_cell_value(5, 6), data.get_cell_value(5, 7)]
+	var before: Array = read.call()
+	var expected: Array = ["Zoë", "Ω", "漢字", 3.25]
+	var clipboard_before: String = DisplayServer.clipboard_get()
+	var text: String = "Zoë\tΩ\r\n漢字\t3.25"
+	DisplayServer.clipboard_set(text)
+	check.call("H1 real clipboard retains the exact CRLF tab Unicode fixture", DisplayServer.clipboard_get() == text)
+	sheet.set("current_row", 4)
+	sheet.set("current_col", 6)
+	sheet.get("cells_canvas").grab_focus()
+	await sheet.get_tree().process_frame
+	var key := InputEventKey.new()
+	key.keycode = KEY_V
+	key.ctrl_pressed = true
+	key.pressed = true
+	Input.parse_input_event(key)
+	var release := InputEventKey.new()
+	release.keycode = KEY_V
+	release.ctrl_pressed = true
+	Input.parse_input_event(release)
+	await sheet.get_tree().process_frame
+	check.call("H1 rendered native paste stores four exact cells without CR", read.call() == expected and sheet.call("get_undo_count") == 1)
+	check.call("H1 clipboard undo restores all prior cells", sheet.call("undo") and read.call() == before)
+	check.call("H1 clipboard redo restores exact Unicode values", sheet.call("redo") and read.call() == expected)
+	DisplayServer.clipboard_set(clipboard_before)

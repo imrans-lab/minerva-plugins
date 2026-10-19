@@ -1244,7 +1244,7 @@ func _paste_selection() -> void:
 	var new_cells: Dictionary = {}
 
 	for row_offset in range(lines.size()):
-		var line := lines[row_offset]
+		var line := lines[row_offset].trim_suffix("\r")
 		var values := line.split("\t")
 
 		for col_offset in range(values.size()):
