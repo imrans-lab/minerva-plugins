@@ -2,7 +2,7 @@ class_name Sheets_ToolUtils
 extends RefCounted
 ## Response/coercion contracts copied from the host; lookup is scoped to one
 ## mounted Sheets panel, with dependencies supplied by its host-facing root.
-const SpreadsheetEditorScript := preload("../domain/SpreadsheetEditor.gd")
+const SpreadsheetEditorScript := preload("domain/SpreadsheetEditor.gd")
 
 class EditorTarget:
 	extends RefCounted

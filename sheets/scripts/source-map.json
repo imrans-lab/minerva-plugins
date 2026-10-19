@@ -104,12 +104,14 @@
     {
       "source": "src/Scripts/Services/MCP/Modules/MCPSpreadsheetTools.gd",
       "destination": "ui/tools/MCPSpreadsheetTools.gd",
-      "git_blob": "db76c7fb993f32417eaa426704d360b23a6f6cdf"
+      "git_blob": "db76c7fb993f32417eaa426704d360b23a6f6cdf",
+      "current_destination": "ui/MCPSpreadsheetTools.gd"
     },
     {
       "source": "src/Scripts/Services/MCP/Modules/MCPSpreadsheetFilterTools.gd",
       "destination": "ui/tools/MCPSpreadsheetFilterTools.gd",
-      "git_blob": "e71ca9aca26190c18e1d4ae81c5ab17095f7d969"
+      "git_blob": "e71ca9aca26190c18e1d4ae81c5ab17095f7d969",
+      "current_destination": "ui/MCPSpreadsheetFilterTools.gd"
     },
     {
       "source": "src/test/test_spreadsheet_autofilter.gd",

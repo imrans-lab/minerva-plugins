@@ -3,15 +3,15 @@ extends RefCounted
 ## Plugin-local tool module for Spreadsheet and Chart domain tools.
 
 const ToolUtils := preload("tool_utils.gd")
-const SpreadsheetEditorScript := preload("../domain/SpreadsheetEditor.gd")
+const SpreadsheetEditorScript := preload("domain/SpreadsheetEditor.gd")
 var _sheet: SpreadsheetEditorScript
 var _matches_locator: Callable
 
-const SpreadsheetDataScript := preload("../domain/SpreadsheetData.gd")
-const SpreadsheetChartScript := preload("../domain/SpreadsheetChart.gd")
-const SpreadsheetFileHandlerScript := preload("../domain/SpreadsheetFileHandler.gd")
-const SpreadsheetCellScript := preload("../domain/SpreadsheetCell.gd")
-const ChartCanvasScript := preload("../domain/ChartCanvas.gd")
+const SpreadsheetDataScript := preload("domain/SpreadsheetData.gd")
+const SpreadsheetChartScript := preload("domain/SpreadsheetChart.gd")
+const SpreadsheetFileHandlerScript := preload("domain/SpreadsheetFileHandler.gd")
+const SpreadsheetCellScript := preload("domain/SpreadsheetCell.gd")
+const ChartCanvasScript := preload("domain/ChartCanvas.gd")
 
 
 func _init(sheet: SpreadsheetEditorScript = null, matches_locator: Callable = Callable()) -> void:

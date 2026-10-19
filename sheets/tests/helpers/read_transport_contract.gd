@@ -1,6 +1,6 @@
 extends RefCounted
 ## One response budget on real chat, HTTP, browser-control and backend IPC.
-const Tools := preload("../../ui/tools/MCPSpreadsheetTools.gd")
+const Tools := preload("../../ui/MCPSpreadsheetTools.gd")
 # Unmodified host serializer is the independent escaping/precision oracle.
 const WireJSON := preload("res://Scripts/Services/MCP/MCPJsonSerialization.gd")
 

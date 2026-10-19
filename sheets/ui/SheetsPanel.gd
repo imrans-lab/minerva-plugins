@@ -6,8 +6,8 @@ const SpreadsheetEditorScript := preload("domain/SpreadsheetEditor.gd")
 const SpreadsheetDataScript := preload("domain/SpreadsheetData.gd")
 const Snapshot := preload("snapshot.gd")
 const SheetRegistry := preload("sheet_registry.gd")
-const Tools := preload("tools/MCPSpreadsheetTools.gd")
-const FilterTools := preload("tools/MCPSpreadsheetFilterTools.gd")
+const Tools := preload("MCPSpreadsheetTools.gd")
+const FilterTools := preload("MCPSpreadsheetFilterTools.gd")
 var _tools: Tools
 var _filters: FilterTools
 var _loaded: bool = false

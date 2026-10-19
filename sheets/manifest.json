@@ -1009,9 +1009,9 @@
           "ui/domain/SpreadsheetFileHandler.gd",
           "ui/domain/SpreadsheetHistory.gd",
           "ui/domain/SpreadsheetRowGeometry.gd",
-          "ui/tools/MCPSpreadsheetTools.gd",
-          "ui/tools/MCPSpreadsheetFilterTools.gd",
-          "ui/tools/tool_utils.gd"
+          "ui/MCPSpreadsheetTools.gd",
+          "ui/MCPSpreadsheetFilterTools.gd",
+          "ui/tool_utils.gd"
         ],
         "native_save_extensions": [
           ".minsheet"

@@ -14,13 +14,13 @@ extends RefCounted
 ## minerva_sheets_get_data always returns every row, hidden ones included.
 
 const ToolUtils := preload("tool_utils.gd")
-const SpreadsheetEditorScript := preload("../domain/SpreadsheetEditor.gd")
+const SpreadsheetEditorScript := preload("domain/SpreadsheetEditor.gd")
 var _sheet: SpreadsheetEditorScript
 var _matches_locator: Callable
 
-const SpreadsheetDataScript := preload("../domain/SpreadsheetData.gd")
-const SpreadsheetHistoryScript := preload("../domain/SpreadsheetHistory.gd")
-const Actions := preload("../domain/SpreadsheetAutoFilterActions.gd")
+const SpreadsheetDataScript := preload("domain/SpreadsheetData.gd")
+const SpreadsheetHistoryScript := preload("domain/SpreadsheetHistory.gd")
+const Actions := preload("domain/SpreadsheetAutoFilterActions.gd")
 
 const DEFAULT_ROW_LIMIT := 2000
 

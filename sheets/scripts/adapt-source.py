@@ -16,6 +16,7 @@ class Source(TypedDict):
     destination: str
     git_blob: str
     uid: NotRequired[str]
+    current_destination: NotRequired[str]
 
 
 class SourceMap(TypedDict):
@@ -33,7 +34,7 @@ def original(root: Path, revision: str, name: str) -> str:
 def adapt(text: str, name: str, sources: list[Source], classes: dict[str, str]) -> str:
     """Change identifiers and resource locations without rewriting algorithms."""
     for item in sources:
-        target = item["destination"]
+        target = item.get("current_destination", item["destination"])
         relative = posixpath.relpath(target, posixpath.dirname(name))
         text = text.replace('"res://' + item["source"].removeprefix("src/") + '"',
                             '"' + relative + '"')
@@ -77,7 +78,7 @@ def main() -> None:
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     mapping: SourceMap = json.loads((root / "scripts/source-map.json").read_text())
-    inputs = {item["destination"]: original(root, mapping["copy_commit"], item["destination"])
+    inputs = {item.get("current_destination", item["destination"]): original(root, mapping["copy_commit"], item["destination"])
               for item in mapping["files"] if item["destination"].endswith((".gd", ".tscn"))}
     classes: dict[str, str] = {}
     for text in inputs.values():

@@ -20,7 +20,7 @@ const SpreadsheetHistoryScript := preload("../../ui/domain/SpreadsheetHistory.gd
 const Actions := preload("../../ui/domain/SpreadsheetAutoFilterActions.gd")
 ## Runtime loading preserves the copied --script fixture boundary. The module
 ## now uses its plugin-local helpers and does not require an autoload.
-const MODULE_PATH := "../../ui/tools/MCPSpreadsheetFilterTools.gd"
+const MODULE_PATH := "../../ui/MCPSpreadsheetFilterTools.gd"
 
 const EDITOR := "Tasks"
 const ROWS := 14
