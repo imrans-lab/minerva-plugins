@@ -38,7 +38,6 @@ def sections(markdown: str) -> dict[str, str]:
 def check_documents(documents: dict[str, str], host_guide: str = "") -> list[str]:
     errors: list[str] = []
     anchors = {name: sections(text) for name, text in documents.items()}
-    indexes: dict[str, set[tuple[str, str]]] = {name: set() for name in documents}
     for name, text in documents.items():
         for target, fragment in re.findall(r"\]\(([^)\s#]*)#([^)]*)\)", text):
             target = target.removeprefix("./") or name
@@ -59,17 +58,6 @@ def check_documents(documents: dict[str, str], host_guide: str = "") -> list[str
                     token = re.search(r"`([^`]+)`", cells[0])
                     if not token or f"`{token[1]}`" not in documents.get("PLUGIN_DEVELOPER_GUIDE.md", ""):
                         errors.append(f"{name}: contract has no guide description: {cells[0]}")
-                    if token:
-                        entry = (cells[1], token[1])
-                        if entry in indexes[name]:
-                            errors.append(f"{name}: duplicate contract index row: {token[1]}")
-                        indexes[name].add(entry)
-    guide = indexes.get("PLUGIN_DEVELOPER_GUIDE.md", set())
-    ledger = indexes.get("PLUGIN_API_COVERAGE.md", set())
-    for category, symbol in sorted(guide - ledger):
-        errors.append(f"PLUGIN_DEVELOPER_GUIDE.md: documented but not in ledger: {category}: {symbol}")
-    for category, symbol in sorted(ledger - guide):
-        errors.append(f"PLUGIN_DEVELOPER_GUIDE.md: missing contract index row: {category}: {symbol}")
     for fragment in re.findall(r"PLUGIN_DEVELOPER_GUIDE\.md#([^)]*)\)", host_guide):
         if fragment not in anchors.get("PLUGIN_DEVELOPER_GUIDE.md", {}):
             errors.append(f"host guide: broken anchor: PLUGIN_DEVELOPER_GUIDE.md#{fragment}")

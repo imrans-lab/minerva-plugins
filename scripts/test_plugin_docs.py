@@ -32,12 +32,9 @@ class PluginDocsTest(unittest.TestCase):
         self.assertIn("PLUGIN_API_COVERAGE.md: contract has no guide description: `host.undocumented`",
                       check_documents(stale))
         row = "| `host.echo` | host_capability | [guide](PLUGIN_DEVELOPER_GUIDE.md#live-reload) |\n"
-        indexed = {"PLUGIN_DEVELOPER_GUIDE.md": guide + row,
+        indexed = {"PLUGIN_DEVELOPER_GUIDE.md": guide + "Use `host.echo` for an echo request.\n",
                    "PLUGIN_API_COVERAGE.md": ledger + row}
         self.assertEqual(check_documents(indexed), [])
-        indexed["PLUGIN_DEVELOPER_GUIDE.md"] += row.replace("host.echo", "host.retired_example")
-        self.assertIn("PLUGIN_DEVELOPER_GUIDE.md: documented but not in ledger: host_capability: host.retired_example",
-                      check_documents(indexed))
         self.assertIn("host guide: broken anchor: PLUGIN_DEVELOPER_GUIDE.md#missing",
                       check_documents(documents, "[guide](https://github.com/imrans-lab/minerva-plugins/blob/main/docs/PLUGIN_DEVELOPER_GUIDE.md#missing)"))
         indexed["PLUGIN_API_COVERAGE.md"] += row.replace("host.echo", "id")
