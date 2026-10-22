@@ -35,7 +35,7 @@ jobs:
     name: Registry release and asset check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Full history so the generator can find git tags of the form
           # <plugin>-v*.
