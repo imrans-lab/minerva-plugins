@@ -80,7 +80,7 @@ dependencies = [
     #
     # LICENSE: MIT-CMU, read from the installed distribution's
     # License-Expression metadata. Permissive.
-    "pillow==12.3.0",
+    "pillow==13.0.0",
 ]
 
 [project.optional-dependencies]
