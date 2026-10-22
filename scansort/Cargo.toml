@@ -16,7 +16,7 @@ env_logger = "0.11"
 # Vault storage + crypto
 rusqlite = { version = "0.39", features = ["bundled"] }
 aes-gcm = "0.10"
-argon2 = "0.5"
+argon2 = "0.6"
 sha2 = "0.10"
 hmac = "0.12"
 pbkdf2 = { version = "0.12", features = ["simple"] }
