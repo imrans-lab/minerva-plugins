@@ -1,29 +1,29 @@
 {
-  "tag": "v0.3.0-rc.31",
-  "source": "7294e3e631f694f2b9863011fde8186731ecb9df",
-  "url": "https://github.com/imrans-lab/docket/releases/download/v0.3.0-rc.31/",
+  "tag": "v0.3.0-rc.32",
+  "source": "e57b4abd2f225116caef3b0c98292bcba30ff7b5",
+  "url": "https://github.com/imrans-lab/docket/releases/download/v0.3.0-rc.32/",
   "primary": "178DFC3E42D55743B01865265BC259EB7ED2C464",
   "signing": "A52DE21E0A5A1CA48F429CE7623C6CAEBA657B8F",
   "key_sha256": "a16924c6bea2d241bd47569ef45cf0c3b8a43d17dbe428fd4b3f78cc4b41c7dd",
   "platforms": {
     "linux-amd64": {
-      "asset": "docket-v0.3.0-rc.31-linux-x86_64.tar.gz",
-      "sha256": "6448b8bc5d4a8e221b08f6306906757bfbce9ef6cdb6e9231575d10bbc81e62a",
+      "asset": "docket-v0.3.0-rc.32-linux-x86_64.tar.gz",
+      "sha256": "d5fc9aa8acd65d47373b0f07ba1afb73e4e6d31492bc8664e9d0849527c4df54",
       "entrypoint": "docket.x86_64"
     },
     "windows-amd64": {
-      "asset": "docket-v0.3.0-rc.31-windows-x86_64.zip",
-      "sha256": "5c76d57a28983403cde2b41e665c040f00b88375d5b197f38fccaaea5bae3ff3",
+      "asset": "docket-v0.3.0-rc.32-windows-x86_64.zip",
+      "sha256": "3a98688bae801aa5e04cb78a3e8e8c599702fe80f0cd022e212499d58472a68b",
       "entrypoint": "Docket.exe"
     },
     "darwin-amd64": {
-      "asset": "docket-v0.3.0-rc.31-macos-universal.zip",
-      "sha256": "e768841f78658a3ef59b0a2a2373edb6f6d2687192a58da65882ec4fc3d4004e",
+      "asset": "docket-v0.3.0-rc.32-macos-universal.zip",
+      "sha256": "ac7aa5024e0614a96e9f5da4233d503ded138836893a704fa70e8d7b27e2a235",
       "entrypoint": "Docket.app/Contents/MacOS/Docket"
     },
     "darwin-arm64": {
-      "asset": "docket-v0.3.0-rc.31-macos-universal.zip",
-      "sha256": "e768841f78658a3ef59b0a2a2373edb6f6d2687192a58da65882ec4fc3d4004e",
+      "asset": "docket-v0.3.0-rc.32-macos-universal.zip",
+      "sha256": "ac7aa5024e0614a96e9f5da4233d503ded138836893a704fa70e8d7b27e2a235",
       "entrypoint": "Docket.app/Contents/MacOS/Docket"
     }
   }
