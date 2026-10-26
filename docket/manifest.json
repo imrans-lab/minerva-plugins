@@ -1,7 +1,7 @@
 {
   "id": "docket",
   "name": "Docket",
-  "version": "0.3.0-rc.30.plugin.2",
+  "version": "0.3.0-rc.31",
   "description": "One-shot launcher that attaches to the standalone Docket GUI or starts it detached. Requires Go 1.25 or newer and network access to official GitHub release hosts on first setup; launcher startup never downloads.",
   "price": {"amount_minor": 0, "currency": "USD"},
   "host_api_version": "2",
