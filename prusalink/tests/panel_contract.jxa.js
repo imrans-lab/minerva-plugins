@@ -15,6 +15,7 @@ function run(paths) {
   const bridge = read(paths[1]).split('<script>')[1].split('</script>')[0];
   const nodes = new Map(), notifications = [], requests = [];
   let configured = false, rejectSet = false, rejectNotify = false, nextId = 0;
+  let geometry = {axis_z_mm:15,total_height_mm:30,layer_height_mm:0.15};
   let state = 'PRINTING', thumbnailCalls = 0, interruptThumbnail = false;
   const listeners = new Map();
   function node() {
@@ -37,7 +38,7 @@ function run(paths) {
       let body={};
       if(tool.endsWith('_list_printers'))body={printers:configured?[printer]:[]};
       else if(tool.endsWith('_configure_printer')){configured=true;body=printer;}
-      else if(tool.endsWith('_status'))body={state,job_id:42,job_file:'part.bgcode',progress_percent:50,time_printing_s:100,time_remaining_s:100,axis_z_mm:15,total_height_mm:30,layer_height_mm:0.15,storage_available:true,thumbnail_ref:'/thumb/l/usb/part.bgcode'};
+      else if(tool.endsWith('_status'))body={state,job_id:42,job_file:'part.bgcode',progress_percent:50,time_printing_s:100,time_remaining_s:100,...geometry,storage_available:true,thumbnail_ref:'/thumb/l/usb/part.bgcode'};
       else if(tool.endsWith('_thumbnail')){
         thumbnailCalls++;
         if(interruptThumbnail){interruptThumbnail=false;document.visibilityState='hidden';body={available:true,mime:'image/png',reference:'/thumb/l/usb/part.bgcode',offset:0,total_bytes:24584,base64:'AAAA'.repeat(8192),next_offset:24576};}
@@ -68,6 +69,8 @@ function run(paths) {
     assert(!document.getElementById('message').className.includes('error'),'successful save does not show an error');
     assert(api.cards.get('printer1').layerText.textContent.includes('100 of 200'),'0.15 mm layer count preserved');
     assert(api.cards.get('printer1').image.hidden===false&&api.cards.get('printer1').placeholder.hidden===true,'successful thumbnail selects image');
+    geometry={axis_z_mm:0.9,total_height_mm:3,layer_height_mm:0.3};await api.status('printer1');
+    assert(api.cards.get('printer1').layerText.textContent.includes('3 of 10'),'fractional boundary does not add a layer');
     api.previousStates.clear();notifications.length=0;
     await api.notifyTransition(printer,'PRINTING');await api.notifyTransition(printer,'FINISHED');await api.notifyTransition(printer,'FINISHED');
     assert(notifications.length===1&&!api.notificationFailures.has('printer1'),'unwrapped notify {} succeeds once per transition');
