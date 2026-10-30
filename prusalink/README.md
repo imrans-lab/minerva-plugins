@@ -105,6 +105,19 @@ checks use public RFC example credentials to verify no-start/no-overwrite upload
 headers, streaming and the busy-start guard. These are protocol checks, not live
 vault/printer acceptance.
 
+On macOS, the panel regression check can execute the actual Minerva bridge source
+in JavaScriptCore with inert DOM/native adapters (no running Minerva or profile):
+
+```sh
+osascript -l JavaScript tests/panel_contract.jxa.js \
+  "$PWD/ui/panel.html" /path/to/Minerva/src/Scripts/UI/Controls/WebViewEditor/minerva_bridge.gd
+```
+
+It checks unwrapped capability results, notification deduplication, known layer
+counts and resuming interrupted thumbnails. It is not a visual browser test;
+actual image visibility and Minerva-tab polling suspension remain live acceptance
+checks.
+
 Live acceptance requires an operator: set via panel → restart and authenticate →
 change secret and authenticate with the new value → remove and confirm absence;
 check the actual password is absent from repo/config/logs/tool outputs. Upload a

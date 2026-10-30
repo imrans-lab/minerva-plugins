@@ -346,9 +346,9 @@ fn project_status(id: &str, data: &Value, job: &Value, storage: &Value) -> Resul
         job_id: current_id.or_else(|| job["id"].as_u64()),
         job_file: filename,
         thumbnail_ref: thumbnail_path(&file["refs"]["thumbnail"]),
-        axis_z_mm: number(&printer["axis_z"]),
-        total_height_mm: number(&file["meta"]["max_layer_z"]),
-        layer_height_mm: number(&file["meta"]["layer_height"]),
+        axis_z_mm: precise_number(&printer["axis_z"]),
+        total_height_mm: precise_number(&file["meta"]["max_layer_z"]),
+        layer_height_mm: precise_number(&file["meta"]["layer_height"]),
         fan_hotend_rpm: printer["fan_hotend"].as_u64(),
         fan_print_rpm: printer["fan_print"].as_u64(),
         speed_percent: number(&printer["speed"]),
@@ -377,11 +377,11 @@ fn thumbnail_path(value: &Value) -> Option<String> {
     }
     Some(path.to_owned())
 }
+fn precise_number(value: &Value) -> Option<f64> {
+    value.as_f64().filter(|n| n.is_finite())
+}
 fn number(value: &Value) -> Option<f64> {
-    value
-        .as_f64()
-        .filter(|n| n.is_finite())
-        .map(|n| (n * 10.0).round() / 10.0)
+    precise_number(value).map(|n| (n * 10.0).round() / 10.0)
 }
 fn ready(state: &str) -> Result<()> {
     if matches!(state, "IDLE" | "READY" | "FINISHED") {
@@ -453,15 +453,16 @@ mod tests {
 
     #[test]
     fn snapshots_project_optional_fields_without_crossing_job_boundaries() {
-        let data = json!({"printer":{"state":"PRINTING","temp_nozzle":214.94,"target_nozzle":215,"temp_bed":59.5,"target_bed":60,"axis_z":2.4,"fan_hotend":4200,"fan_print":3000,"flow":95,"speed":100},"job":{"id":42,"progress":25,"time_printing":100,"time_remaining":300}});
-        let job = json!({"id":42,"file":{"display_name":"Part.bgcode","refs":{"thumbnail":"/thumb/l/usb/part.bgcode"},"meta":{"max_layer_z":9.6,"layer_height":0.2}}});
+        let data = json!({"printer":{"state":"PRINTING","temp_nozzle":214.94,"target_nozzle":215,"temp_bed":59.5,"target_bed":60,"axis_z":15,"fan_hotend":4200,"fan_print":3000,"flow":95,"speed":100},"job":{"id":42,"progress":25,"time_printing":100,"time_remaining":300}});
+        let job = json!({"id":42,"file":{"display_name":"Part.bgcode","refs":{"thumbnail":"/thumb/l/usb/part.bgcode"},"meta":{"max_layer_z":30,"layer_height":0.15}}});
         let storage = json!({"storage_list":[{"path":"/usb/","available":true,"read_only":false,"free_space":1234}]});
         let snapshot = project_status("printer1", &data, &job, &storage).unwrap();
         assert_eq!(snapshot.nozzle_c, Some(214.9));
         assert_eq!(snapshot.time_remaining_s, Some(300));
         assert_eq!(snapshot.job_file.as_deref(), Some("Part.bgcode"));
-        assert_eq!(snapshot.total_height_mm, Some(9.6));
-        assert_eq!(snapshot.layer_height_mm, Some(0.2));
+        assert_eq!(snapshot.total_height_mm, Some(30.0));
+        assert_eq!(snapshot.axis_z_mm, Some(15.0));
+        assert_eq!(snapshot.layer_height_mm, Some(0.15));
         assert_eq!(snapshot.fan_hotend_rpm, Some(4200));
         assert!(snapshot.storage_available);
         let mut different = job;
