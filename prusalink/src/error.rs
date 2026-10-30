@@ -10,7 +10,7 @@ pub enum Error {
     MissingPassword,
     Protocol(&'static str),
     Http(u16),
-    Transport { mutation: bool },
+    Transport { mutation: bool, connection: bool },
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -23,8 +23,17 @@ impl fmt::Display for Error {
             Self::Http(507) => f.write_str("Printer storage unavailable; insert a USB stick"),
             Self::Http(409) => f.write_str("Printer refused the operation because its state changed or the file already exists"),
             Self::Http(status) => write!(f,"Printer returned HTTP {status}"),
-            Self::Transport { mutation: true } => f.write_str("Printer request failed; its outcome is unknown. Check the printer before retrying"),
-            Self::Transport { mutation: false } => f.write_str("Cannot reach the printer; check its host and network"),
+            Self::Transport { mutation, connection } => {
+                f.write_str(if *mutation {
+                    "Printer request failed; its outcome is unknown. Check the printer before retrying"
+                } else {
+                    "Cannot reach the printer; check its host and network"
+                })?;
+                if cfg!(target_os = "macos") && *connection {
+                    f.write_str(". If the printer answers from Terminal, allow Minerva under System Settings → Privacy & Security → Local Network.")?;
+                }
+                Ok(())
+            },
         }
     }
 }

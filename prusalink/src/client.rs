@@ -37,6 +37,16 @@ pub fn agent(timeout: Duration) -> ureq::Agent {
         .timeout(timeout)
         .build()
 }
+fn transport(error: ureq::Transport, mutation: bool) -> Error {
+    // Preserve the connection stage without exposing raw transport diagnostics.
+    Error::Transport {
+        mutation,
+        connection: matches!(
+            error.kind(),
+            ureq::ErrorKind::ConnectionFailed | ureq::ErrorKind::Dns
+        ),
+    }
+}
 fn response(
     result: std::result::Result<ureq::Response, ureq::Error>,
     mutation: bool,
@@ -44,7 +54,7 @@ fn response(
     match result {
         Ok(response) => Ok(response),
         Err(ureq::Error::Status(status, _)) => Err(Error::Http(status)),
-        Err(ureq::Error::Transport(_)) => Err(Error::Transport { mutation }),
+        Err(ureq::Error::Transport(error)) => Err(transport(error, mutation)),
     }
 }
 fn json(response: ureq::Response) -> Result<Value> {
@@ -107,7 +117,13 @@ impl Client {
                 }
                 Ok(response) if response.status() == 200 => continue,
                 Err(ureq::Error::Status(status, _)) => return Err(Error::Http(status)),
-                _ => return Err(Error::Transport { mutation: false }),
+                Err(ureq::Error::Transport(error)) => return Err(transport(error, false)),
+                _ => {
+                    return Err(Error::Transport {
+                        mutation: false,
+                        connection: false,
+                    })
+                }
             }
         }
         Err(Error::Protocol(
@@ -436,7 +452,7 @@ pub fn probe(host: &str) -> Result<Option<Discovered>> {
             .into_iter()
             .any(|h| Challenge::parse(h).is_ok_and(|c| c.realm == "Printer API")),
         Ok(response) if response.status() == 200 => json(response)?["text"] == "PrusaLink",
-        Err(ureq::Error::Transport(_)) => return Err(Error::Transport { mutation: false }),
+        Err(ureq::Error::Transport(error)) => return Err(transport(error, false)),
         _ => false,
     };
     let hostname = Url::parse(&host)
