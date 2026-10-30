@@ -50,7 +50,7 @@
     },
     {
       "name": "minerva_prusalink_configure_printer",
-      "description": "Add or edit nonsecret printer metadata. Passwords must be entered in the panel, never in tool arguments. Up to eight printers; omit slot to add, use its slot to edit.",
+      "description": "Add or edit nonsecret printer metadata. Set passwords directly in the panel, or through set_password whose arguments are logged. Up to eight printers; omit slot to add, use its slot to edit.",
       "input_schema": {
         "type": "object",
         "properties": {
