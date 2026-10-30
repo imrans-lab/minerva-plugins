@@ -1,0 +1,295 @@
+{
+  "id": "prusalink",
+  "name": "PrusaLink",
+  "version": "0.1.0",
+  "description": "Discover and connect to PrusaLink printers such as the Prusa XL, MK4 and Core One on your local network. Save printer passwords through Minerva\u2019s vault, read status and progress, upload G-code without starting a print by default, and explicitly start or stop jobs. Requires a reachable printer with PrusaLink enabled.",
+  "price": {
+    "amount_minor": 0,
+    "currency": "USD"
+  },
+  "host_api_version": "2",
+  "release_targets": [
+    "linux-x86_64",
+    "macos-universal",
+    "windows-x86_64"
+  ],
+  "backend": {
+    "transport": "stdio",
+    "entrypoint": "./prusalink-plugin",
+    "args": []
+  },
+  "tools": [
+    {
+      "name": "minerva_prusalink_discover",
+      "description": "Find PrusaLink printers without credentials. Probe supplied HTTP(S) hosts, or common prusa-*.local candidates plus a short mDNS browse. Reports matching hosts and unreachable probe counts.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "hosts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "maxItems": 32
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_prusalink_list_printers",
+      "description": "List configured printer ids, names, hosts, usernames and has_password. Never returns a password.",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_prusalink_configure_printer",
+      "description": "Add or edit nonsecret printer metadata. Passwords must be entered in the panel, never in tool arguments. Up to eight printers; omit slot to add, use its slot to edit.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "slot": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8
+          },
+          "name": {
+            "type": "string"
+          },
+          "host": {
+            "type": "string"
+          },
+          "user": {
+            "type": "string",
+            "default": "maker"
+          }
+        },
+        "required": [
+          "name",
+          "host"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_prusalink_remove_printer",
+      "description": "Remove a configured printer and delete its vault secret. Frees its slot and confirms exists:false. Does not change the physical printer.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "printer": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "printer"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_prusalink_status",
+      "description": "Read printer state, temperatures and targets, current job progress/timing/file, layer height, fans, speed/flow and USB storage. One status/job/storage snapshot; never polls. Credentials come privately from the vault.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "printer": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "printer"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_prusalink_upload",
+      "description": "Upload a nonempty .bgcode or .gcode file to USB storage without overwriting. Defaults to start:false. start:true starts printing and moves the machine; use only with explicit operator authorization. Refuses missing USB storage and unsafe start states.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "printer": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "start": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [
+          "printer",
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_prusalink_print",
+      "description": "START PRINTING an existing USB-relative .bgcode/.gcode file. This moves and heats the machine. Use only with explicit operator authorization. Requires IDLE, READY or FINISHED.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "printer": {
+            "type": "string"
+          },
+          "file": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "printer",
+          "file"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_prusalink_stop",
+      "description": "STOP the current print job. This changes a running machine and interrupts its print. Use only with explicit operator authorization. Requires PRINTING or PAUSED.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "printer": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "printer"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_prusalink_thumbnail",
+      "description": "Read a24KiB base64 chunk of the current job PNG/JPEG thumbnail (maximum512KiB), for panels within host IPC limits. Returns available:false if absent/404. Continue with next_offset and reference; never returns credentials.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "printer": {
+            "type": "string"
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 524288,
+            "default": 0
+          },
+          "reference": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "printer"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "permissions": {
+    "host_capabilities": [
+      "secrets:get:prusalink_printer1",
+      "secrets:set:prusalink_printer1",
+      "secrets:delete:prusalink_printer1",
+      "secrets:get:prusalink_printer2",
+      "secrets:set:prusalink_printer2",
+      "secrets:delete:prusalink_printer2",
+      "secrets:get:prusalink_printer3",
+      "secrets:set:prusalink_printer3",
+      "secrets:delete:prusalink_printer3",
+      "secrets:get:prusalink_printer4",
+      "secrets:set:prusalink_printer4",
+      "secrets:delete:prusalink_printer4",
+      "secrets:get:prusalink_printer5",
+      "secrets:set:prusalink_printer5",
+      "secrets:delete:prusalink_printer5",
+      "secrets:get:prusalink_printer6",
+      "secrets:set:prusalink_printer6",
+      "secrets:delete:prusalink_printer6",
+      "secrets:get:prusalink_printer7",
+      "secrets:set:prusalink_printer7",
+      "secrets:delete:prusalink_printer7",
+      "secrets:get:prusalink_printer8",
+      "secrets:set:prusalink_printer8",
+      "secrets:delete:prusalink_printer8",
+      "host.notify"
+    ]
+  },
+  "ui": {
+    "ipc_messages": [
+      "minerva_prusalink_discover",
+      "minerva_prusalink_list_printers",
+      "minerva_prusalink_configure_printer",
+      "minerva_prusalink_remove_printer",
+      "minerva_prusalink_status",
+      "capability:secrets:set:prusalink_printer1",
+      "capability:secrets:set:prusalink_printer2",
+      "capability:secrets:set:prusalink_printer3",
+      "capability:secrets:set:prusalink_printer4",
+      "capability:secrets:set:prusalink_printer5",
+      "capability:secrets:set:prusalink_printer6",
+      "capability:secrets:set:prusalink_printer7",
+      "capability:secrets:set:prusalink_printer8",
+      "minerva_prusalink_thumbnail",
+      "capability:host.notify"
+    ],
+    "panels": [
+      {
+        "name": "prusalink_panel",
+        "kind": "html",
+        "entry": "ui/panel.html",
+        "ipc_channels": [
+          "minerva_prusalink_discover",
+          "minerva_prusalink_list_printers",
+          "minerva_prusalink_configure_printer",
+          "minerva_prusalink_remove_printer",
+          "minerva_prusalink_status",
+          "capability:secrets:set:prusalink_printer1",
+          "capability:secrets:set:prusalink_printer2",
+          "capability:secrets:set:prusalink_printer3",
+          "capability:secrets:set:prusalink_printer4",
+          "capability:secrets:set:prusalink_printer5",
+          "capability:secrets:set:prusalink_printer6",
+          "capability:secrets:set:prusalink_printer7",
+          "capability:secrets:set:prusalink_printer8",
+          "minerva_prusalink_thumbnail",
+          "capability:host.notify"
+        ],
+        "fullscreen_capable": false,
+        "multi_window": false
+      }
+    ]
+  },
+  "autostart": false,
+  "auto_reload": false,
+  "log_stderr": true,
+  "setup": {
+    "requires": [
+      {
+        "tool": "cargo",
+        "min": "1.88"
+      }
+    ],
+    "steps": [
+      {
+        "type": "cargo_build",
+        "manifest_dir": ".",
+        "artifact": "target/release/prusalink-plugin"
+      },
+      {
+        "type": "copy",
+        "from": "target/release/prusalink-plugin",
+        "to": "prusalink-plugin"
+      }
+    ]
+  }
+}

@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PrusaLink</title>
+<style>
+:root{color-scheme:light dark;font:14px system-ui,sans-serif;background:#171b22;color:#edf0f5}*{box-sizing:border-box}body{margin:0;padding:22px;max-width:800px}h1{font-size:24px;margin:0 0 6px}p{color:#b7c0cd;line-height:1.5}h2{font-size:16px;margin:0 0 14px}form,.printer{background:#222833;border:1px solid #3b4555;border-radius:10px;padding:18px;margin:18px 0}label{display:block;margin:12px 0 5px;font-weight:600}input{width:100%;border:1px solid #586477;border-radius:6px;background:#141922;color:inherit;padding:10px;font:inherit}input:focus{outline:2px solid #f78a46;outline-offset:1px}.host-row,.buttons{display:flex;gap:8px;align-items:center}.host-row input{flex:1;min-width:0}button{font:inherit;padding:9px 13px;border:1px solid #69778c;border-radius:6px;background:#303a49;color:#f5f6f8;cursor:pointer}button.primary{background:#f78a46;color:#1c2027;border-color:#f78a46;font-weight:650}button:disabled{opacity:.5;cursor:default}.buttons{margin-top:16px;flex-wrap:wrap}.note{font-size:12px;margin:7px 0}.printer h3{font-size:16px;margin:0 0 5px}.printer p{margin:6px 0;overflow-wrap:anywhere}.status{font-variant-numeric:tabular-nums}.message{min-height:20px;white-space:pre-wrap;line-height:1.45}.error{color:#ffb4a9}.ok{color:#96e0af}#found{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}#empty{padding:12px 0}progress{width:100%;height:10px;accent-color:#f78a46}small{color:#b7c0cd}
+
+.card-head{display:flex;justify-content:space-between;align-items:center;gap:14px}.badge{border-radius:18px;padding:5px 11px;font-size:12px;background:#3b4555}.badge.printing{background:#634024;color:#ffd5ae}.badge.finished,.badge.ready{background:#254f3a;color:#b5f0cf}.badge.error{background:#652e34;color:#ffced0}.badge.paused,.badge.attention{background:#655425;color:#fff1b7}.dashboard{display:grid;grid-template-columns:140px 1fr;gap:20px;margin:20px 0}.ring{width:132px;height:132px;border-radius:50%;display:grid;place-items:center;background:conic-gradient(#f78a46 var(--progress,0%),#3b4555 0)}.ring-inner{width:110px;height:110px;border-radius:50%;background:#222833;display:grid;place-content:center;text-align:center}.ring strong{font-size:25px}.ring small{font-size:11px}.job{display:flex;gap:14px;align-items:center;margin-bottom:12px}.thumbnail,.placeholder{width:96px;height:96px;object-fit:contain;border-radius:8px;background:#171b22;flex:none}.placeholder{display:grid;place-content:center;text-align:center;color:#8997aa;font-size:12px}.job-name{font-weight:650;overflow-wrap:anywhere}.metrics{display:grid;grid-template-columns:1fr 1fr;gap:10px}.metric{background:#191f28;border-radius:7px;padding:9px}.metric small{display:block;font-size:11px;margin-bottom:4px}.temperature{display:flex;flex-wrap:wrap;gap:18px;font-variant-numeric:tabular-nums}.nozzle{color:#ffa567}.bed{color:#7ac8ff}.graph{width:100%;height:90px;margin:10px 0 0;display:block;background:#191f28;border-radius:6px}.warning{color:#ffdc8c}.layer{margin-top:12px}.layer progress{display:block;margin-top:6px}.updated{font-size:11px;color:#8d9aae;margin-top:12px}@media(max-width:530px){body{padding:12px}.dashboard{grid-template-columns:1fr}.ring{margin:auto}.metrics{grid-template-columns:1fr 1fr}.job{margin-top:4px}}
+</style>
+</head>
+<body>
+<h1>PrusaLink</h1>
+<p>Connect to printers on your local network. Passwords are saved in Minerva’s vault.</p>
+<form id="printer-form">
+<h2 id="form-title">Add a printer</h2>
+<label for="name">Name</label><input id="name" required maxlength="80" placeholder="Workshop XL">
+<label for="host">Printer host</label><div class="host-row"><input id="host" required placeholder="prusa-xl.local" autocomplete="off"><button id="discover" type="button">Discover</button></div>
+<div id="found"></div>
+<label for="user">Username</label><input id="user" required value="maker" maxlength="128" autocomplete="username">
+<label for="password">PrusaLink password</label><input id="password" type="password" autocomplete="new-password" placeholder="Enter the password shown on the printer">
+<p class="note">Find it on the printer under Settings → Network → PrusaLink. When editing, leave this blank to keep the saved password.</p>
+<div class="buttons"><button class="primary" id="save" type="submit">Save printer</button><button id="test" type="button" disabled>Test connection</button><button id="new" type="button">Add another</button></div>
+</form>
+<div id="message" class="message" role="status" aria-live="polite"></div>
+<h2>Printers</h2><div id="printers"></div><p id="empty">No printers configured yet.</p>
+<script>
+'use strict';
+const byId = id => document.getElementById(id);
+let editing = null;
+let printers = [];
+let polling = false;
+let timer = null;
+const cards = new Map();
+const checking = new Set();
+// Everything below is session memory. No telemetry, images or secrets persist.
+const histories = new Map();
+const previousStates = new Map();
+const notificationFailures = new Map();
+function element(tag, className = '', text = '') {
+  const node = document.createElement(tag); node.className = className; node.textContent = text; return node;
+}
+function duration(seconds) {
+  if (seconds == null) return '—';
+  const minutes = Math.max(0, Math.ceil(seconds / 60));
+  return minutes >= 60 ? Math.floor(minutes / 60) + 'h ' + minutes % 60 + 'm' : minutes + ' min';
+}
+function value(number, unit = '') { return number == null ? '—' : number + unit; }
+function temperature(actual, target) { return value(actual, '°') + ' / ' + value(target, '°C'); }
+function graph(canvas, samples) {
+  const width = canvas.width = Math.max(300, Math.round(canvas.clientWidth * 2));
+  const height = canvas.height = 180;
+  const ctx = canvas.getContext('2d'); if (!ctx || !samples.length) return;
+  const now = Date.now(); const numbers = samples.flatMap(s => s.values.filter(v => v != null));
+  const ceiling = Math.max(80, ...numbers) * 1.1;
+  ctx.strokeStyle = '#354052'; ctx.lineWidth = 1;
+  for (const fraction of [0.25, 0.5, 0.75]) {ctx.beginPath();ctx.moveTo(0,height*fraction);ctx.lineTo(width,height*fraction);ctx.stroke();}
+  ['#ffa567','#ffa567','#7ac8ff','#7ac8ff'].forEach((color,index) => {
+    ctx.strokeStyle=color;ctx.lineWidth=2;ctx.setLineDash(index%2 ? [8,6] : []);ctx.beginPath();let started=false;
+    for(const sample of samples){const v=sample.values[index];if(v==null){started=false;continue;}const x=width*(1-(now-sample.at)/600000);const y=height*(1-v/ceiling);if(started)ctx.lineTo(x,y);else ctx.moveTo(x,y);started=true;}ctx.stroke();
+  });ctx.setLineDash([]);
+}
+async function notifyTransition(printer, next) {
+  const previous = previousStates.get(printer.id); previousStates.set(printer.id, next);
+  if (!previous || previous === next || !['FINISHED','ERROR','PAUSED','ATTENTION'].includes(next)) return;
+  try {
+    const reply = await window.minerva.pluginIPC('capability:host.notify', {message: printer.name + ': ' + next, level: next === 'FINISHED' ? 'success' : next === 'ERROR' ? 'error' : 'warning'});
+    if (!reply || reply.success !== true) throw new Error();
+    notificationFailures.delete(printer.id);
+  } catch { notificationFailures.set(printer.id, 'Minerva notification could not be delivered. Check plugin permissions.'); }
+}
+function message(text, error = false) { byId('message').textContent = text; byId('message').className = 'message ' + (error ? 'error' : 'ok'); }
+function payload(reply) {
+  if (!reply || reply.success === false) throw new Error('Minerva could not complete the request. Check plugin permissions and the vault.');
+  let value = reply;
+  if (value && value.success === true && value.result) value = value.result;
+  if (value && Array.isArray(value.content)) {
+    const text = value.content.find(item => item.type === 'text');
+    try { value = text ? JSON.parse(text.text) : {}; } catch { throw new Error('The plugin returned an unreadable response.'); }
+  }
+  if ((reply && reply.isError) || (value && value.error)) throw new Error(value.error || 'The printer request failed.');
+  return value;
+}
+async function call(name, args = {}) {
+  let reply;
+  try { reply = await window.minerva.call('minerva_prusalink_' + name, args); }
+  catch { throw new Error('Minerva could not complete the request. Check that the PrusaLink plugin is running.'); }
+  return payload(reply);
+}
+function button(label, action) {
+  const element = document.createElement('button'); element.type = 'button'; element.textContent = label;
+  element.addEventListener('click', async () => { element.disabled = true; try { await action(); } catch (error) { message(error.message, true); } finally { element.disabled = false; } });
+  return element;
+}
+function edit(printer) {
+  editing = printer;
+  byId('name').value = printer.name; byId('host').value = printer.host; byId('user').value = printer.user;
+  byId('password').value = ''; byId('form-title').textContent = 'Edit printer'; byId('test').disabled = false;
+  byId('name').focus();
+}
+function reset() {
+  editing = null; byId('printer-form').reset(); byId('user').value = 'maker';
+  byId('form-title').textContent = 'Add a printer'; byId('test').disabled = true; byId('found').replaceChildren();
+}
+async function refreshList() {
+  const result = await call('list_printers'); printers = result.printers || [];
+  cards.clear(); byId('printers').replaceChildren(); byId('empty').hidden = printers.length !== 0;
+  const live = new Set(printers.map(p => p.id));
+  for(const map of [histories,previousStates,notificationFailures]) for(const id of map.keys()) if(!live.has(id)) map.delete(id);
+  for (const printer of printers) {
+    const card = element('section','printer');
+    const head = element('div','card-head'); const title = element('h3','',printer.name);
+    const badge = element('span','badge','Not checked');head.append(title,badge);
+    const address = element('p','',printer.host + ' · ' + printer.user);
+    const saved = element('small','',printer.has_password ? 'Password saved in vault' : 'Password not set');
+    const dashboard=element('div','dashboard');const ring=element('div','ring');const inner=element('div','ring-inner');
+    const percent=element('strong','','—');inner.append(percent,element('small','','complete'));ring.append(inner);
+    const details=element('div');const job=element('div','job');const placeholder=element('div','placeholder','No thumbnail');
+    const image=element('img','thumbnail');image.alt='Current print preview';image.hidden=true;
+    image.addEventListener('error',()=>{image.hidden=true;placeholder.hidden=false;});
+    const filename=element('span','job-name','No active job');job.append(placeholder,image,filename);
+    const metrics=element('div','metrics');const times={};
+    for(const [key,label] of [['printing','Printing for'],['left','Time left'],['done','Done at'],['fans','Hotend / print fan']]){
+      const metric=element('div','metric');const text=element('span','','—');metric.append(element('small','',label),text);metrics.append(metric);times[key]=text;
+    }
+    details.append(job,metrics);dashboard.append(ring,details);
+    const temps=element('div','temperature');const nozzle=element('span','nozzle','Nozzle —');const bed=element('span','bed','Bed —');temps.append(nozzle,bed);
+    const canvas=element('canvas','graph');canvas.setAttribute('role','img');canvas.setAttribute('aria-label','Nozzle and bed temperatures over the last ten minutes, solid actual and dashed target');
+    const legend=element('small','','Last 10 min · solid: actual · dashed: target');
+    const layer=element('div','layer');const layerText=element('span','','Layer height unavailable');const layerBar=element('progress');layerBar.max=100;layerBar.hidden=true;layer.append(layerText,layerBar);
+    const extras=element('p');const storage=element('p','warning');const warning=element('p','warning');const updated=element('p','updated','Waiting for status…');
+    const actions=element('div','buttons');
+    actions.append(button('Edit', () => edit(printer)), button('Test', async () => {await status(printer.id);message('Connection checked.');}), button('Remove', async () => {
+      const removed = await call('remove_printer', {printer: printer.id});
+      if (removed.exists !== false) throw new Error('The saved password could not be removed.');
+      if (editing && editing.id === printer.id) reset();
+      await refreshList(); message('Printer and its saved password removed.');
+    }));
+    card.append(head,address,saved,dashboard,temps,canvas,legend,layer,extras,storage,warning,updated,actions);
+    byId('printers').append(card);
+    cards.set(printer.id,{badge,ring,percent,times,filename,placeholder,image,nozzle,bed,canvas,layerText,layerBar,extras,storage,warning,updated,thumbnailKey:null});
+  }
+}
+async function status(id) {
+  if (checking.has(id)) return;
+  checking.add(id);
+  const card=cards.get(id);const printer=printers.find(p=>p.id===id);
+  try {
+    const r=await call('status',{printer:id});
+    // The card may have been replaced/removed while the request was in flight.
+    if(!card || cards.get(id)!==card || document.visibilityState==='hidden') return;
+    card.badge.textContent=r.state;card.badge.className='badge '+r.state.toLowerCase();
+    const progress=r.progress_percent==null?null:Math.max(0,Math.min(100,r.progress_percent));
+    card.percent.textContent=progress==null?'—':progress.toFixed(1)+'%';card.ring.style.setProperty('--progress',(progress||0)+'%');
+    card.times.printing.textContent=duration(r.time_printing_s);card.times.left.textContent=duration(r.time_remaining_s);
+    card.times.done.textContent=r.time_remaining_s!=null&&r.state==='PRINTING'?new Date(Date.now()+r.time_remaining_s*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'—';
+    card.times.fans.textContent=value(r.fan_hotend_rpm)+' / '+value(r.fan_print_rpm)+' rpm';
+    card.filename.textContent=r.job_file||'No active job';
+    card.nozzle.textContent='Nozzle '+temperature(r.nozzle_c,r.nozzle_target_c);card.bed.textContent='Bed '+temperature(r.bed_c,r.bed_target_c);
+    const now=Date.now();const samples=(histories.get(id)||[]).filter(s=>now-s.at<=600000);
+    samples.push({at:now,values:[r.nozzle_c,r.nozzle_target_c,r.bed_c,r.bed_target_c]});histories.set(id,samples.slice(-240));graph(card.canvas,samples);
+    const z=r.axis_z_mm,total=r.total_height_mm,lh=r.layer_height_mm;
+    card.layerText.textContent=z!=null?'Z '+z+' mm'+(total>0?' / '+total+' mm':''):'Layer height unavailable';
+    if(z!=null&&lh>0&&total>0) card.layerText.textContent+=' · approx. layer '+Math.min(Math.ceil(z/lh),Math.ceil(total/lh))+' of '+Math.ceil(total/lh);
+    card.layerBar.hidden=!(z!=null&&total>0);card.layerBar.value=total>0?Math.max(0,Math.min(100,z/total*100)):0;
+    card.extras.textContent=[r.speed_percent!=null&&r.speed_percent!==100?'Speed '+r.speed_percent+'%':'',r.flow_percent!=null&&r.flow_percent!==100?'Flow '+r.flow_percent+'%':''].filter(Boolean).join(' · ');
+    card.storage.textContent=!r.storage_available?'USB stick missing':r.storage_read_only?'USB stick is read-only':'';
+    card.updated.textContent='Updated '+new Date().toLocaleTimeString();card.updated.className='updated';
+    if(printer) await notifyTransition(printer,r.state);
+    card.warning.textContent=notificationFailures.get(id)||'';
+    const key=JSON.stringify([r.job_id,r.thumbnail_ref]);
+    if(key!==card.thumbnailKey){
+      card.thumbnailKey=key;card.placeholder.textContent='No thumbnail';card.image.hidden=true;card.image.removeAttribute('src');card.placeholder.hidden=false;
+      if(r.thumbnail_ref){try{
+        let offset=0,reference=null,mime=null,total=null;const pieces=[];
+        for(let chunk=0;chunk<22;chunk++){
+          if(cards.get(id)!==card||document.visibilityState==='hidden') break;
+          const args={printer:id,offset};if(reference!==null)args.reference=reference;
+          const thumbnail=await call('thumbnail',args);
+          if(!thumbnail.available) break;
+          if(thumbnail.offset!==offset||!['image/png','image/jpeg'].includes(thumbnail.mime)||thumbnail.total_bytes>524288||!/^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(thumbnail.base64)) throw new Error();
+          if(reference!==null&&(reference!==thumbnail.reference||mime!==thumbnail.mime||total!==thumbnail.total_bytes)) throw new Error();
+          reference=thumbnail.reference;mime=thumbnail.mime;total=thumbnail.total_bytes;pieces.push(thumbnail.base64);
+          if(thumbnail.next_offset==null){
+            // Every nonfinal chunk is divisible by three bytes, so base64 pieces concatenate.
+            if(cards.get(id)===card&&card.thumbnailKey===key){card.image.src='data:'+mime+';base64,'+pieces.join('');card.image.hidden=false;card.placeholder.hidden=true;}
+            break;
+          }
+          if(thumbnail.next_offset!==offset+24576) throw new Error();offset=thumbnail.next_offset;
+        }
+      }catch{card.placeholder.textContent='Preview unavailable';}}
+    }
+  } catch(error){
+    if(card&&cards.get(id)===card){card.updated.textContent=error.message;card.updated.className='updated error';card.badge.textContent='Unavailable';card.badge.className='badge error';}
+    throw error;
+  } finally {checking.delete(id);}
+}
+async function poll() {
+  if (polling || document.visibilityState === 'hidden') return;
+  polling = true;
+  try { for (const printer of printers) { if(document.visibilityState === 'hidden') break; try { await status(printer.id); } catch { /* The printer card displays the failure. */ } } }
+  finally { polling = false; }
+}
+byId('printer-form').addEventListener('submit', async event => {
+  event.preventDefault(); byId('save').disabled = true;
+  try {
+    const args = {name: byId('name').value, host: byId('host').value, user: byId('user').value};
+    if (editing) args.slot = editing.slot;
+    const configured = await call('configure_printer', args);
+    editing = configured;
+    if (byId('password').value !== '') {
+      try {
+        // This is host capability IPC, never an agent-facing tool argument.
+        const reply = await window.minerva.pluginIPC('capability:secrets:set:' + configured.secret_handle, {value: byId('password').value});
+        if (!reply || reply.success !== true) throw new Error();
+      } catch { throw new Error('Password could not be saved. Unlock Minerva’s vault and check the plugin permissions.'); }
+      finally { byId('password').value = ''; }
+    }
+    byId('form-title').textContent = 'Edit printer'; byId('test').disabled = false;
+    await refreshList(); message('Printer saved. Use Test connection to check it.'); await poll();
+  } catch (error) { message(error.message, true); }
+  finally { byId('save').disabled = false; }
+});
+byId('discover').addEventListener('click', async () => {
+  byId('discover').disabled = true; byId('found').replaceChildren();
+  try {
+    const host = byId('host').value.trim();
+    const result = await call('discover', host ? {hosts: [host]} : {});
+    for (const printer of result.printers) byId('found').append(button(printer.hostname, () => {
+      byId('host').value = printer.host; if (!byId('name').value) byId('name').value = printer.hostname;
+    }));
+    message(result.printers.length ? 'Choose a discovered printer.' : 'No printer found. Enter the hostname shown on its PrusaLink screen.');
+  } catch (error) { message(error.message, true); }
+  finally { byId('discover').disabled = false; }
+});
+byId('test').addEventListener('click', async () => { if (editing) { try { await status(editing.id); message('Connection checked.'); } catch (error) { message(error.message, true); } } });
+byId('new').addEventListener('click', reset);
+window.addEventListener('beforeunload', () => { if (timer !== null) clearInterval(timer); byId('password').value = ''; });
+async function connect() {
+  if (!window.minerva) { message('Waiting for Minerva…'); setTimeout(connect, 500); return; }
+  try { await refreshList(); await poll(); }
+  catch (error) { message(error.message, true); }
+  finally { if(timer===null) timer=setInterval(poll,5000); }
+}
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState!=='hidden') poll();});
+connect();
+</script>
+</body>
+</html>
