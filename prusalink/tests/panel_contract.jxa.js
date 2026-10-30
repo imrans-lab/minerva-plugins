@@ -14,6 +14,7 @@ function run(paths) {
   const panel = read(paths[0]).split('<script>')[1].split('</script>')[0];
   const bridge = read(paths[1]).split('<script>')[1].split('</script>')[0];
   const nodes = new Map(), notifications = [], requests = [];
+  let backendRunning = false;
   let configured = false, rejectSet = false, rejectNotify = false, nextId = 0;
   let geometry = {axis_z_mm:15,total_height_mm:30,layer_height_mm:0.15};
   let state = 'PRINTING', thumbnailCalls = 0, interruptThumbnail = false;
@@ -34,6 +35,7 @@ function run(paths) {
     const request=JSON.parse(encoded);requests.push(request.type);
     let result={},success=true;
     if(request.type==='minerva.call') {
+      if(!backendRunning){window.minerva._ipcReply({id:request.id,success:false,error_code:'policy_denied',error_message:'foreign mcp.proxy tool'});return;}
       const tool=request.payload.tool;
       let body={};
       if(tool.endsWith('_list_printers'))body={printers:configured?[printer]:[]};
@@ -61,6 +63,11 @@ function run(paths) {
   async function flush(){for(let i=0;i<20;i++)await Promise.resolve();}
   return (async()=>{
     await flush();
+    assert(document.getElementById('backend-status').textContent.includes('PrusaLink backend not running'),'stopped backend has a persistent diagnostic');
+    assert(!document.getElementById('retry-backend').hidden,'stopped backend offers Retry');
+    const unavailableCount=requests.length;await api.poll();assert(requests.length===unavailableCount,'unavailable backend does not silently poll');
+    backendRunning=true;await document.getElementById('retry-backend').handlers.get('click')();await flush();
+    assert(document.getElementById('backend-status').textContent==='PrusaLink backend connected.'&&document.getElementById('retry-backend').hidden,'Retry recovers after backend starts');
     for(const [id,value] of [['name','Lab'],['host','printer.invalid'],['user','maker'],['password','public-invalid-input']])document.getElementById(id).value=value;
     await document.getElementById('printer-form').handlers.get('submit')({preventDefault(){}});
     await flush();
@@ -84,6 +91,6 @@ function run(paths) {
     rejectSet=true;document.getElementById('password').value='public-invalid-input';
     await document.getElementById('printer-form').handlers.get('submit')({preventDefault(){}});
     assert(document.getElementById('message').className.includes('error')&&document.getElementById('password').value==='','rejected secret set is visible and field clears');
-    console.log('PASS panel contract: actual host bridge, save/notify fulfillment, transition deduplication, geometry and thumbnail resume; inert DOM/native adapters only');
+    console.log('PASS panel contract: stopped-backend diagnostic/retry, actual host bridge, save/notify fulfillment, transition deduplication, geometry and thumbnail resume; inert DOM/native adapters only');
   })().catch(error=>{console.log('FAIL panel contract: '+error.message);$.exit(1);});
 }

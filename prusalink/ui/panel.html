@@ -12,6 +12,8 @@
 <body>
 <h1>PrusaLink</h1>
 <p>Connect to printers on your local network. Passwords are saved in Minerva’s vault.</p>
+<div id="backend-status" class="message" role="status" aria-live="polite">Connecting to PrusaLink backend…</div>
+<button id="retry-backend" type="button" hidden>Retry connection</button>
 <form id="printer-form">
 <h2 id="form-title">Add a printer</h2>
 <label for="name">Name</label><input id="name" required maxlength="80" placeholder="Workshop XL">
@@ -31,6 +33,8 @@ let editing = null;
 let printers = [];
 let polling = false;
 let timer = null;
+let backendReady = false;
+let connecting = false;
 const cards = new Map();
 const checking = new Set();
 // Everything below is session memory. No telemetry, images or secrets persist.
@@ -108,7 +112,9 @@ function reset() {
   byId('form-title').textContent = 'Add a printer'; byId('test').disabled = true; byId('found').replaceChildren();
 }
 async function refreshList() {
-  const result = await call('list_printers'); printers = result.printers || [];
+  const result = await call('list_printers');
+  if (!result || !Array.isArray(result.printers)) throw new Error('PrusaLink backend returned no printer list.');
+  printers = result.printers;
   cards.clear(); byId('printers').replaceChildren(); byId('empty').hidden = printers.length !== 0;
   const live = new Set(printers.map(p => p.id));
   for(const map of [histories,previousStates,notificationFailures]) for(const id of map.keys()) if(!live.has(id)) map.delete(id);
@@ -201,7 +207,7 @@ async function status(id) {
   } finally {checking.delete(id);}
 }
 async function poll() {
-  if (polling || document.visibilityState === 'hidden') return;
+  if (!backendReady || polling || document.visibilityState === 'hidden') return;
   polling = true;
   try { for (const printer of printers) { if(document.visibilityState === 'hidden') break; try { await status(printer.id); } catch { /* The printer card displays the failure. */ } } }
   finally { polling = false; }
@@ -241,11 +247,30 @@ byId('test').addEventListener('click', async () => { if (editing) { try { await 
 byId('new').addEventListener('click', reset);
 window.addEventListener('beforeunload', () => { if (timer !== null) clearInterval(timer); byId('password').value = ''; });
 async function connect() {
-  if (!window.minerva) { message('Waiting for Minerva…'); setTimeout(connect, 500); return; }
-  try { await refreshList(); await poll(); }
-  catch (error) { message(error.message, true); }
-  finally { if(timer===null) timer=setInterval(poll,5000); }
+  if (connecting) return;
+  if (!window.minerva) {
+    byId('backend-status').textContent = 'Waiting for Minerva…';
+    setTimeout(connect, 500); return;
+  }
+  connecting = true; byId('retry-backend').disabled = true;
+  try {
+    await refreshList(); backendReady = true;
+    byId('backend-status').textContent = 'PrusaLink backend connected.';
+    byId('backend-status').className = 'message ok';
+    byId('retry-backend').hidden = true;
+    await poll();
+  } catch {
+    backendReady = false;
+    byId('backend-status').textContent = 'PrusaLink backend not running or unavailable. Start PrusaLink in Plugin Manager, then retry. If it is running, unlock the vault and check permissions.';
+    byId('backend-status').className = 'message error';
+    byId('retry-backend').hidden = false;
+    byId('empty').hidden = true;
+  } finally {
+    connecting = false; byId('retry-backend').disabled = false;
+    if(timer===null) timer=setInterval(poll,5000);
+  }
 }
+byId('retry-backend').addEventListener('click', connect);
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState!=='hidden'){for(const card of cards.values())if(card.image.hidden)card.thumbnailKey=null;poll();}});
 connect();
 </script>

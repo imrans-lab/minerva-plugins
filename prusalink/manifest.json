@@ -94,6 +94,28 @@
       }
     },
     {
+      "name": "minerva_prusalink_set_password",
+      "description": "Stores the PrusaLink password in Minerva's vault. Write-only; the password is never returned. Arguments are recorded in Minerva's tool-call log.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "printer": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "required": [
+          "printer",
+          "password"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "minerva_prusalink_status",
       "description": "Read printer state, temperatures and targets, current job progress/timing/file, layer height, fans, speed/flow and USB storage. One status/job/storage snapshot; never polls. Credentials come privately from the vault.",
       "input_schema": {

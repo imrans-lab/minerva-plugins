@@ -1,4 +1,4 @@
-//! MCP stdio boundary. Secret values only cross private host-capability IPC.
+//! MCP stdio boundary. Password writes are explicit and results never echo secrets.
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
@@ -43,10 +43,15 @@ impl Peer {
             .map(Some)
             .map_err(|_| Error::Invalid("Invalid JSON-RPC input"))
     }
-    fn capability(&mut self, operation: &str, printer: &Printer) -> Result<Value> {
+    fn capability(
+        &mut self,
+        operation: &str,
+        printer: &Printer,
+        arguments: Value,
+    ) -> Result<Value> {
         self.next_id += 1;
         let id = format!("prusalink-cap-{}", self.next_id);
-        self.send(&json!({"jsonrpc":"2.0","id":id,"method":"minerva/capability","params":{"capability":format!("secrets:{operation}:{}",printer.handle()),"args":{}}}))?;
+        self.send(&json!({"jsonrpc":"2.0","id":id,"method":"minerva/capability","params":{"capability":format!("secrets:{operation}:{}",printer.handle()),"args":arguments}}))?;
         while let Some(message) = self.read()? {
             if message["id"].as_str() == Some(&id) {
                 if message.get("error").is_some() {
@@ -74,7 +79,7 @@ impl Peer {
         Err(Error::Vault)
     }
     fn password(&mut self, printer: &Printer) -> Result<Option<Password>> {
-        let secret = self.capability("get", printer)?;
+        let secret = self.capability("get", printer, json!({}))?;
         if secret["exists"] == false {
             return Ok(None);
         }
@@ -95,6 +100,12 @@ struct DiscoverArgs {
 #[serde(deny_unknown_fields)]
 struct PrinterArgs {
     printer: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetPasswordArgs {
+    printer: String,
+    password: String,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -163,11 +174,27 @@ fn tool(peer: &mut Peer, store: &mut Store, name: &str, value: &Value) -> Result
                 json!({"id":printer.id(),"slot":printer.slot,"name":printer.name,"host":printer.host,"user":printer.user,"secret_handle":printer.handle()}),
             )
         }
+        "set_password" => {
+            let a: SetPasswordArgs = args(value)?;
+            let printer = store.get(&a.printer)?.clone();
+            if a.password.is_empty() || a.password.chars().count() > 4096 {
+                return Err(Error::Invalid("Password must contain1–4096 characters"));
+            }
+            peer.capability("set", &printer, json!({"value":a.password}))?;
+            // Verify the saved vault value, rather than authenticating a copy
+            // of the input. Probe failures never undo a successful vault write.
+            let probe: Result<()> = (|| {
+                let password = peer.password(&printer)?.ok_or(Error::MissingPassword)?;
+                Client::new(printer.clone(), password)?.status()?;
+                Ok(())
+            })();
+            Ok(json!({"printer":printer.id(),"saved":true,"auth_ok":probe.is_ok()}))
+        }
         "remove_printer" => {
             let a: PrinterArgs = args(value)?;
             let printer = store.get(&a.printer)?.clone();
             if peer.password(&printer)?.is_some() {
-                peer.capability("delete", &printer)?;
+                peer.capability("delete", &printer, json!({}))?;
             }
             if peer.password(&printer)?.is_some() {
                 return Err(Error::Vault);

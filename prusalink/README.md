@@ -16,7 +16,9 @@ cargo build --release --locked
 cp target/release/prusalink-plugin ./prusalink-plugin
 ```
 
-Open the PrusaLink panel, enter a display name and hostname such as
+Start PrusaLink in Plugin Manager after installation, then open its panel. If the
+backend is stopped or unavailable, the panel shows a message and Retry connection
+button; start it in Plugin Manager and retry. Enter a display name and hostname such as
 `prusa-xl.local`, username and the password shown under the printer's Network →
 PrusaLink settings. Save, then Test connection. Discover tries supplied hosts or
 common Prusa `.local` names and a short mDNS browse; some printers do not advertise
@@ -51,13 +53,16 @@ transition/history memory ends when the panel closes. Hidden panels stop polling
 ## Tools
 
 Runtime names are short; Minerva exposes them as `minerva_prusalink_<name>`.
-Every schema rejects extra arguments; no tool accepts or returns a password.
+Every schema rejects extra arguments. No tool returns a password. Only the
+write-only `set_password` tool accepts one; its arguments are recorded in Minerva's
+tool-call log. Use the panel when the agent should not receive the password.
 
 | Tool | Arguments | Result / effect |
 | --- | --- | --- |
 | `discover` | optional `hosts` (1–32 HTTP(S) hosts) | Matching PrusaLink hosts, probe/unreachable counts |
 | `list_printers` | none | Stable ids, names, hosts, users, `has_password` |
 | `configure_printer` | `name`, `host`, optional `user`, `slot` | Add/edit nonsecret metadata; returns fixed secret handle for panel IPC |
+| `set_password` | `printer`, `password` | Write-only vault save, then one authenticated status probe; returns only `printer`, `saved:true`, `auth_ok` |
 | `remove_printer` | `printer` | Deletes vault secret, verifies `exists:false`, removes metadata |
 | `status` | `printer` | Read-only snapshot of status, job and USB storage |
 | `thumbnail` | `printer`, optional `offset`, `reference` | Current-job raster chunk, or `available:false` |
@@ -86,11 +91,15 @@ OS plugin data directory:
 embedding/tests. No data is written to the installation or working directory.
 Malformed config is refused rather than overwritten.
 
-Passwords go directly from the password field through panel capability IPC to
+The panel sends passwords directly from its field through capability IPC to
 Minerva's vault under `prusalink_printer1`…`prusalink_printer8`. The backend uses
 private host capability requests to fetch the current secret afresh for each
-tool request; it never persists a password or puts one in agent-facing results,
-command arguments or logs. HTTP Digest is implemented from RFC 2617/7616 with
+tool request; it never persists a password or puts one in results, process command
+arguments or plugin logs. The explicit write-only `set_password` alternative sends
+the supplied value through the same vault capability, then authenticates using
+the saved vault value. A failed probe returns `saved:true, auth_ok:false`; a failed
+vault write returns an error. Tool arguments are recorded in Minerva's tool-call
+log, so that path does expose the supplied value to the agent and host log. HTTP Digest is implemented from RFC 2617/7616 with
 established MD5/SHA crates. Plain HTTP is supported for local printer firmware;
 HTTPS uses normal certificate verification. Redirects and environment proxies
 are disabled. Keep printer access on a trusted local network.
