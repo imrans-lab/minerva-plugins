@@ -113,12 +113,10 @@ static func run(panel, args: Dictionary, per_part: Callable,
 	var wait_ms := int(args.get("wait_ms", design_window_ms))
 	if handle.begins_with(DESIGN_TICKET_PREFIX):
 		return await _collect_run(panel, handle, wait_ms)
-	var required_mm := float(args.get("required_mm", 0.0))
-	if required_mm <= 0.0:
-		return {"success": false, "error": "check_design needs required_mm: "
-			+ "the gap you want between the solid and everything else, in "
-			+ "millimetres. It is what the clearance leg grades against; the "
-			+ "contacts the design MEANS to have go in expected_contacts."}
+	var argument_error: String = preload("check_arguments.gd").required_mm_error(args)
+	if not argument_error.is_empty():
+		return {"success": false, "error": argument_error}
+	var required_mm: float = float(args["required_mm"])
 	var key := _run_key(panel)
 	var running: Dictionary = _runs.get(key, {})
 	if not running.is_empty() and (running["reply"] as Dictionary).is_empty() \

@@ -208,10 +208,10 @@ func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
 	if not handle.is_empty():
 		return await _collect(handle, maxi(int(args.get("wait_ms", 0)), 0), panel)
 	_sweep_jobs()
-	var required_mm := float(args.get("required_mm", 0.0))
-	if required_mm <= 0.0:
-		return _no_clearance("a clearance check needs required_mm: the "
-			+ "distance you want between the solid and everything else")
+	var argument_error: String = preload("check_arguments.gd").required_mm_error(args)
+	if not argument_error.is_empty():
+		return _no_clearance(argument_error)
+	var required_mm: float = float(args["required_mm"])
 	var tolerance_mm := float(args.get("tolerance_mm", CLEARANCE_TOLERANCE_MM))
 	if tolerance_mm <= 0.0:
 		return _no_clearance("tolerance_mm must be greater than zero")

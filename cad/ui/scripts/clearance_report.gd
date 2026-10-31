@@ -433,8 +433,7 @@ func _buried_pairs(document: Dictionary, source: String, records: Array,
 		panel: Object, args: Dictionary = {}) -> Dictionary:
 	var out := {"fresh": false, "nodes": {}, "contacts": {}, "undecided": {},
 		"undecided_references": {}}
-	var scope := args.duplicate()
-	scope["source"] = source
+	var scope: Dictionary = _PartCache.measured_scope(source, args, document)
 	var digest: String = _PartCache.scope_digest(scope)
 	# A PART is measured against its own report, never the document's: the
 	# document's solid is the union of every binding, so a node buried in

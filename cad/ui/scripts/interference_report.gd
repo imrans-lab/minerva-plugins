@@ -461,7 +461,7 @@ func _report(pairs: Dictionary) -> Dictionary:
 		report["advisory"] = out.is_empty()
 	report["coverage"] = {"complete": not _coverage_limited,
 		"edges_reaching": _edges_reaching, "edges_cast": _edges_cast,
-		"edges_uncast": maxi(0, _edges_reaching - _edges_cast), "limits": _limits}
+		"edges_uncast": maxi(0, _edges_reaching - _edges_cast), "limits": Array(_limits)}
 	report["verdict"] = "fail" if not out.is_empty() else ("pass" if report["pass"] else "advisory")
 
 	return report
