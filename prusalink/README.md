@@ -60,8 +60,8 @@ tool-call log. Use the panel when the agent should not receive the password.
 | Tool | Arguments | Result / effect |
 | --- | --- | --- |
 | `discover` | optional `hosts` (1–32 HTTP(S) hosts) | Matching PrusaLink hosts, probe/unreachable counts |
-| `list_printers` | none | Stable ids, names, hosts, users, `has_password` |
-| `configure_printer` | `name`, `host`, optional `user`, `slot`, `slicing` | Add/edit nonsecret metadata; returns fixed secret handle for panel IPC |
+| `list_printers` | none | Stable ids, names, hosts, users, `has_password`, stored `slicing` mapping |
+| `configure_printer` | `name`, `host`, optional `user`, `slot`, `slicing` | Add/edit nonsecret metadata; returns stored `slicing` mapping and fixed secret handle for panel IPC without fetching a password |
 | `set_password` | `printer`, `password` | Write-only vault save, then one authenticated status probe; returns only `printer`, `saved:true`, `auth_ok` |
 | `remove_printer` | `printer` | Deletes vault secret, verifies `exists:false`, removes metadata |
 | `status` | `printer` | Read-only snapshot of status, job and USB storage |
@@ -69,6 +69,8 @@ tool-call log. Use the panel when the agent should not receive the password.
 | `upload` | `printer`, local `path`, optional `start:false` | Streams nonempty `.gcode`/`.bgcode` to USB, never overwrites; returns requested `remote_name` and encoded `remote_path` |
 | `print` | `printer`, USB-relative `file` | Starts an existing file; only IDLE/READY/FINISHED |
 | `stop` | `printer` | Stops current job id; only PRINTING/PAUSED |
+| `list_profiles` | `printer`, optional `verbose:false` | Compact names, counts, mapping/defaults, bed, version and hashes; `verbose:true` returns per-print material compatibility |
+| `slice` | `printer`, `input_path`, optional `print_profile`, `material_profile`, `extruder` | Local slicing to BGCode with receipts; no upload or print |
 
 Printer arguments accept stable `printer1`…`printer8` ids or unique display names.
 **`print`, `stop`, and `upload` with `start:true` change physical hardware. Obtain
@@ -163,7 +165,7 @@ printer-reported canonical or short filename. `file` remains compatible.
 
 ## Local slicing (macOS/Linux)
 
-`list_profiles {printer}` and `slice {printer,input_path,print_profile?,
+`list_profiles {printer,verbose?:false}` and `slice {printer,input_path,print_profile?,
 material_profile?,extruder?}` use an already installed PrusaSlicer. They never
 fetch a password, contact the printer, upload, or start a print. Upload and print
 remain separate tools requiring their own operator authorization.
@@ -183,11 +185,22 @@ Configure the printer's optional `slicing` object through `configure_printer`:
 ```
 
 Omitting the mapping preserves it only when the host remains the same. Changing
-host without a new mapping clears it. Existing configs remain readable, and
+host without a new mapping clears it. The configure reply echoes the stored
+mapping as `slicing` (or `null` when cleared), so preserved defaults are visible.
+Existing configs remain readable, and
 unmapped printers refuse slicing. The installed catalog must confirm the exact
 vendor/model/variant/profile and tool count. Its rectangular bed origin and size
-supply the center; other bed shapes fail rather than guessing. `list_profiles`
-returns compatible print/material combinations and the catalog/ executable hashes.
+supply the center; other bed shapes fail rather than guessing.
+
+`list_profiles` defaults to a compact reply. `mapping` contains the selected
+printer and configured print/material defaults; `profiles` contains sorted,
+deduplicated `print_profiles` and `material_profiles` names plus their counts.
+Material names are a union across print profiles: they do not imply that every
+print/material pair is compatible. Use `list_profiles {printer,verbose:true}`
+for the original full catalog, where each `profiles.print_profiles` row retains
+its exact compatible `filament_profiles`. Both modes return the bed, slicer
+version, executable/vendor hashes and private run directory.
+
 The configured defaults apply when slice arguments omit them. An override must
 appear in that printer's compatible catalog. `extruder` overrides are supported
 for STL only; 3MF projects retain embedded tool assignments.

@@ -104,6 +104,13 @@ struct PrinterArgs {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ListProfilesArgs {
+    printer: String,
+    #[serde(default)]
+    verbose: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SetPasswordArgs {
     printer: String,
     password: String,
@@ -151,22 +158,25 @@ fn args<T: DeserializeOwned>(value: &Value) -> Result<T> {
         .map_err(|_| Error::Invalid("Arguments do not match this tool's schema"))
 }
 
-fn row(printer: &Printer, has_password: bool) -> Value {
-    json!({"id":printer.id(),"slot":printer.slot,"name":printer.name,"host":printer.host,"user":printer.user,"has_password":has_password,"slicing":printer.slicing})
+fn row(printer: &Printer) -> Value {
+    json!({"id":printer.id(),"slot":printer.slot,"name":printer.name,"host":printer.host,"user":printer.user,"slicing":printer.slicing})
 }
 fn tool(peer: &mut Peer, store: &mut Store, name: &str, value: &Value) -> Result<Value> {
     match name {
         "list_profiles" => {
-            let a: PrinterArgs = args(value)?;
+            let a: ListProfilesArgs = args(value)?;
             let printer = store.get(&a.printer)?;
             let mapping = printer.slicing.as_ref().ok_or(Error::Invalid(
                 "Configure this printer's slicing mapping first",
             ))?;
-            serde_json::to_value(slicer::list_profiles(
-                mapping,
-                &config::data_directory()?.join("slicing"),
-            )?)
-            .map_err(|_| Error::Protocol("Cannot encode profile list"))
+            let listing =
+                slicer::list_profiles(mapping, &config::data_directory()?.join("slicing"))?;
+            let response = if a.verbose {
+                serde_json::to_value(listing)
+            } else {
+                serde_json::to_value(listing.compact())
+            };
+            response.map_err(|_| Error::Protocol("Cannot encode profile list"))
         }
         "slice" => {
             let a: slicer::SliceArgs = args(value)?;
@@ -190,16 +200,18 @@ fn tool(peer: &mut Peer, store: &mut Store, name: &str, value: &Value) -> Result
             let _: Empty = args(value)?;
             let mut printers = Vec::new();
             for printer in store.list() {
-                printers.push(row(printer, peer.password(printer)?.is_some()));
+                let mut reply = row(printer);
+                reply["has_password"] = json!(peer.password(printer)?.is_some());
+                printers.push(reply);
             }
             Ok(json!({"printers":printers,"capacity":config::SLOTS}))
         }
         "configure_printer" => {
             let a: ConfigureArgs = args(value)?;
             let printer = store.configure(a.slot, a.name, a.host, a.user, a.slicing)?;
-            Ok(
-                json!({"id":printer.id(),"slot":printer.slot,"name":printer.name,"host":printer.host,"user":printer.user,"secret_handle":printer.handle()}),
-            )
+            let mut reply = row(&printer);
+            reply["secret_handle"] = json!(printer.handle());
+            Ok(reply)
         }
         "set_password" => {
             let a: SetPasswordArgs = args(value)?;

@@ -1,4 +1,5 @@
 //! Local PrusaSlicer CLI boundary. No credentials or printer network requests.
+use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -147,6 +148,41 @@ pub struct PrintProfile {
 pub struct Profiles {
     pub printer_profile: String,
     pub print_profiles: Vec<PrintProfile>,
+}
+#[derive(Serialize)]
+pub struct ProfileSummary {
+    pub printer_profile: String,
+    pub print_profiles: Vec<String>,
+    pub material_profiles: Vec<String>,
+    pub print_profile_count: usize,
+    pub material_profile_count: usize,
+    pub compatibility: &'static str,
+}
+impl Profiles {
+    fn summary(&self) -> ProfileSummary {
+        let print_profiles: Vec<_> = self
+            .print_profiles
+            .iter()
+            .map(|profile| profile.name.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let material_profiles: Vec<_> = self
+            .print_profiles
+            .iter()
+            .flat_map(|profile| profile.filament_profiles.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        ProfileSummary {
+            printer_profile: self.printer_profile.clone(),
+            print_profile_count: print_profiles.len(),
+            material_profile_count: material_profiles.len(),
+            print_profiles,
+            material_profiles,
+            compatibility: "Material names are a union, not valid for every print profile. Request verbose:true for per-print compatible filament_profiles.",
+        }
+    }
 }
 
 pub struct Run {
@@ -439,14 +475,28 @@ fn cpu_seconds(value: &str) -> Option<f64> {
 }
 
 #[derive(Serialize)]
-pub struct ProfileListing {
+pub struct ProfileListing<P = Profiles> {
     pub mapping: SlicerConfig,
     pub bed: Bed,
-    pub profiles: Profiles,
+    pub profiles: P,
     pub version: String,
     pub executable_sha256: String,
     pub vendor_sha256: String,
     pub run_directory: PathBuf,
+}
+impl ProfileListing {
+    pub fn compact(self) -> ProfileListing<ProfileSummary> {
+        let profiles = self.profiles.summary();
+        ProfileListing {
+            mapping: self.mapping,
+            bed: self.bed,
+            profiles,
+            version: self.version,
+            executable_sha256: self.executable_sha256,
+            vendor_sha256: self.vendor_sha256,
+            run_directory: self.run_directory,
+        }
+    }
 }
 pub fn list_profiles(config: &SlicerConfig, root: &Path) -> Result<ProfileListing> {
     let run = Run::prepare(config, root)?;

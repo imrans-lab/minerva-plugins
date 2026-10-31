@@ -50,7 +50,7 @@
     },
     {
       "name": "minerva_prusalink_configure_printer",
-      "description": "Add or edit nonsecret printer metadata. Set passwords directly in the panel, or through set_password whose arguments are logged. Up to eight printers; omit slot to add, use its slot to edit. Optional slicing maps an installed PrusaSlicer vendor/model/variant/profile; omission preserves a same-host mapping and changing host clears it.",
+      "description": "Add or edit nonsecret printer metadata and return the stored slicing mapping plus the fixed secret_handle, without fetching a password. Set passwords directly in the panel, or through set_password whose arguments are logged. Up to eight printers; omit slot to add, use its slot to edit. Optional slicing maps an installed PrusaSlicer vendor/model/variant/profile; omission preserves a same-host mapping and changing host clears it.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -264,12 +264,17 @@
     },
     {
       "name": "minerva_prusalink_list_profiles",
-      "description": "List the installed PrusaSlicer profiles compatible with a configured printer mapping. Uses an isolated datadir; no credentials or printer requests. macOS/Linux.",
+      "description": "List installed PrusaSlicer profile names, counts, configured defaults, bed, version and hashes for a printer mapping. Compact by default: material names are a union, not valid for every print profile. Set verbose:true for the full per-print compatibility catalog. Uses an isolated datadir; no credentials or printer requests. macOS/Linux.",
       "input_schema": {
         "type": "object",
         "properties": {
           "printer": {
             "type": "string"
+          },
+          "verbose": {
+            "type": "boolean",
+            "default": false,
+            "description": "Return the full catalog with compatible filament_profiles for each print profile."
           }
         },
         "required": [
