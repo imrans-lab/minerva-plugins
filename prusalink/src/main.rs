@@ -123,6 +123,7 @@ struct ConfigureArgs {
     host: String,
     #[serde(default = "maker")]
     user: String,
+    slicing: Option<prusalink_plugin::slicer::SlicerConfig>,
 }
 fn maker() -> String {
     "maker".into()
@@ -169,7 +170,7 @@ fn tool(peer: &mut Peer, store: &mut Store, name: &str, value: &Value) -> Result
         }
         "configure_printer" => {
             let a: ConfigureArgs = args(value)?;
-            let printer = store.configure(a.slot, a.name, a.host, a.user)?;
+            let printer = store.configure(a.slot, a.name, a.host, a.user, a.slicing)?;
             Ok(
                 json!({"id":printer.id(),"slot":printer.slot,"name":printer.name,"host":printer.host,"user":printer.user,"secret_handle":printer.handle()}),
             )
