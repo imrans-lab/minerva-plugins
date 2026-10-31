@@ -119,8 +119,8 @@ func (s *server) releaseRequest(size int, collection bool) {
 }
 
 // shutdown cancels the process lifetime first. CommandContext closes the child
-// and its pipes even if startup or a frame write is blocked. Only a retired
-// pump permits bridge.Shutdown to become the final frame writer.
+// and its pipes even if startup or a frame write is blocked. The bridge still
+// verifies actual process and I/O retirement after the request pump joins.
 func (s *server) shutdown(ctx context.Context) error {
 	s.cancel()
 	requestsDone := make(chan struct{})
@@ -144,12 +144,8 @@ func (s *server) shutdown(ctx context.Context) error {
 		}
 	}
 	if s.worker != nil {
-		workerDone := make(chan struct{})
-		go func() { s.worker.Shutdown(workerShutdownTimeout); close(workerDone) }()
-		select {
-		case <-workerDone:
-		case <-ctx.Done():
-			return fmt.Errorf("finish worker shutdown: %w", ctx.Err())
+		if err := s.worker.ShutdownOwned(ctx); err != nil {
+			return fmt.Errorf("finish worker retirement: %w", err)
 		}
 	}
 	return nil

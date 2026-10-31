@@ -160,6 +160,7 @@ func emitHostNotify(level, message string, details interface{}) {
 type evaluation struct {
 	ctx    context.Context
 	cancel context.CancelFunc
+	ticket *workerTicket
 }
 
 type server struct {
@@ -276,6 +277,10 @@ func handleCancelEvalRegistryStub(_ context.Context, _ tools.WorkerCaller, _ jso
 // request_id was supplied — in that case cancellation is unavailable for the
 // request, but the call still proceeds with the parent context).
 func (s *server) beginEvaluateCancellable(parent context.Context, args json.RawMessage) (context.Context, string, error) {
+	return s.beginEvaluateWithTicket(parent, args, nil)
+}
+
+func (s *server) beginEvaluateWithTicket(parent context.Context, args json.RawMessage, ticket *workerTicket) (context.Context, string, error) {
 	var a struct {
 		RequestID string `json:"request_id"`
 	}
@@ -295,9 +300,10 @@ func (s *server) beginEvaluateCancellable(parent context.Context, args json.RawM
 	// cancel it before overwriting (defensive — request_ids are usec-keyed
 	// and unique in practice, but a re-entrant panel bug shouldn't leak).
 	if prior, ok := s.inflight[a.RequestID]; ok {
+		s.workerCalls().cancelEvaluation(prior.ctx, prior.ticket)
 		prior.cancel()
 	}
-	s.inflight[a.RequestID] = &evaluation{ctx: ctx, cancel: cancel}
+	s.inflight[a.RequestID] = &evaluation{ctx: ctx, cancel: cancel, ticket: ticket}
 	s.inflightMu.Unlock()
 	return ctx, a.RequestID, nil
 }
@@ -326,38 +332,54 @@ func (s *server) endEvaluateCancellable(ctx context.Context, key string) bool {
 // and cancels it. Unknown request_ids return ok=true with cancelled=false so
 // the panel can fire-and-forget.
 func (s *server) handleCancelEval(id json.RawMessage, args json.RawMessage) rpcResponse {
+	return s.prepareCancelEval(id, args)()
+}
+
+// Intent and fencing run inline on admission. Only the retirement/readiness
+// receipt waits off the dispatcher, so a later evaluate receives the new epoch.
+func (s *server) prepareCancelEval(id json.RawMessage, args json.RawMessage) func() rpcResponse {
 	var a struct {
 		RequestID string `json:"request_id"`
 	}
 	if err := json.Unmarshal(args, &a); err != nil {
-		return errResponse(id, -32602, fmt.Sprintf("cad.cancel_eval: parse args: %v", err))
+		return func() rpcResponse {
+			return errResponse(id, -32602, fmt.Sprintf("cad.cancel_eval: parse args: %v", err))
+		}
 	}
 	if a.RequestID == "" {
-		return errResponse(id, -32602, "cad.cancel_eval: request_id is required")
+		return func() rpcResponse { return errResponse(id, -32602, "cad.cancel_eval: request_id is required") }
 	}
 
 	cancelled := false
+	var stop *workerInterruption
 	s.inflightMu.Lock()
 	if current, ok := s.inflight[a.RequestID]; ok {
-		current.cancel()
-		delete(s.inflight, a.RequestID)
-		cancelled = true
+		stop, cancelled = s.workerCalls().cancelEvaluation(current.ctx, current.ticket)
+		if cancelled {
+			current.cancel()
+			delete(s.inflight, a.RequestID)
+		}
 	}
 	s.inflightMu.Unlock()
 
 	log.Printf("cad-plugin: cancel_eval request_id=%s cancelled=%v", a.RequestID, cancelled)
 
-	envelope := map[string]interface{}{
-		"ok":         true,
-		"request_id": a.RequestID,
-		"cancelled":  cancelled,
+	return func() rpcResponse {
+		envelope := s.workerCalls().interruptionResult(stop)
+		envelope["ok"] = true
+		envelope["request_id"] = a.RequestID
+		envelope["request_cancelled"] = cancelled
+		envelope["cancelled"] = cancelled && (stop == nil || envelope["native_stopped"] == true)
+		envelopeJSON, err := json.Marshal(envelope)
+		if err != nil {
+			return errResponse(id, -32603, fmt.Sprintf("encode cancellation receipt: %v", err))
+		}
+		return okResponse(id, map[string]interface{}{
+			"content": []map[string]interface{}{
+				{"type": "text", "text": string(envelopeJSON)},
+			},
+		})
 	}
-	envelopeJSON, _ := json.Marshal(envelope)
-	return okResponse(id, map[string]interface{}{
-		"content": []map[string]interface{}{
-			{"type": "text", "text": string(envelopeJSON)},
-		},
-	})
 }
 
 // workerFailureResponse renders a worker/spawn failure the way the panel and
@@ -437,7 +459,7 @@ func (s *server) prepareToolsCall(id json.RawMessage, params json.RawMessage) (f
 	}
 	ctx, key := s.ctx, ""
 	runner := s.workerCalls()
-	var caller tools.WorkerCaller = runner
+	var caller tools.WorkerCaller = runner.caller()
 	var ticket *workerTicket
 	if p.Name == "cad.evaluate" {
 		var err error
@@ -448,11 +470,13 @@ func (s *server) prepareToolsCall(id json.RawMessage, params json.RawMessage) (f
 			return nil, err
 		}
 		caller = ticket
-		ctx, key, err = s.beginEvaluateCancellable(ctx, p.Arguments)
+		ctx, key, err = s.beginEvaluateWithTicket(ctx, p.Arguments, ticket)
 		if err != nil {
 			ticket.releaseUnused()
 			return nil, err
 		}
+		// Superseding an active evaluation may have just advanced the epoch.
+		ticket.bindEpoch()
 	}
 	return func() rpcResponse {
 		if ticket != nil {
@@ -606,7 +630,9 @@ func (s *server) dispatch(enc *json.Encoder, msg *rpcRequest) bool {
 			if len(p.Arguments) > maxPayloadBytes {
 				send(enc, errResponse(msg.ID, -32602, "arguments exceed 8 MiB payload limit"))
 			} else {
-				send(enc, s.handleCancelEval(msg.ID, p.Arguments))
+				call := s.prepareCancelEval(msg.ID, p.Arguments)
+				s.tasks.Add(1)
+				go func() { defer s.tasks.Done(); send(enc, call()) }()
 			}
 			return true
 		}

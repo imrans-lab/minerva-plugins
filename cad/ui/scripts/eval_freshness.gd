@@ -122,6 +122,8 @@ static func outrun(tool_name: String, before: Dictionary,
 	if not bool(before.get("known", false)) or not bool(after.get("known", false)):
 		return false
 	return int(before.get("source_version", -1)) != int(after.get("source_version", -1)) \
+		or int(before.get("painted_attempt_id", 0)) != int(after.get("painted_attempt_id", 0)) \
+		or int(before.get("provenance", {}).get("process_epoch", 0)) != int(after.get("provenance", {}).get("process_epoch", 0)) \
 		or float(before.get("evaluated_at", 0.0)) != float(after.get("evaluated_at", 0.0)) \
 		or str(before.get("provenance", {}).get("reference_digest", "")) != str(after.get("provenance", {}).get("reference_digest", ""))
 
@@ -194,6 +196,9 @@ static func stamp(reply: Dictionary, freshness: Dictionary) -> Dictionary:
 		# the way to it — and only this field tells them apart.
 		reply["evaluation_status"] = str(freshness.get("evaluation_status", ""))
 	reply["buffer_version"] = int(freshness.get("buffer_version", -1))
+	for key: String in ["attempt_id", "painted_attempt_id", "process_epoch", "worker_state"]:
+		if freshness.has(key):
+			reply[key] = freshness[key]
 	# Never DOWNGRADES: the verb layer marks a reply stale for its own reason
 	# (the references re-posed under a measurement), and a document that is
 	# settled says nothing about that.

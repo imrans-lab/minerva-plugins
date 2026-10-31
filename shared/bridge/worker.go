@@ -94,8 +94,16 @@ type workerRun struct {
 	exitC      chan struct{} // closed after this run's cmd.Wait
 
 	// Correlation and exit result are guarded by Worker.mu.
-	inflight map[string]*inflightEntry
-	waitErr  error
+	inflight      map[string]*inflightEntry
+	waitErr       error
+	owned         bool
+	retiring      bool
+	retireC       chan struct{}
+	retireErr     error
+	writers       int
+	writersC      chan struct{}
+	lifetime      context.Context
+	crashRecorded bool
 }
 
 // Worker manages a single Python subprocess and the correlation of requests
@@ -126,8 +134,9 @@ type Worker struct {
 	ExtraEnv []string
 
 	// Current subprocess identity and generation counter (guarded by mu).
-	run        *workerRun
-	generation uint64
+	run               *workerRun
+	generation        uint64
+	retiredGeneration uint64
 
 	// Crash timestamps for circuit breaker (§2).
 	crashTimes []time.Time
@@ -191,6 +200,16 @@ func (w *Worker) recordCrash() {
 	w.crashTimes = append(fresh, time.Now())
 }
 
+func (w *Worker) recordRunCrashLocked(run *workerRun) {
+	if run.owned {
+		if run.crashRecorded || run.lifetime.Err() != nil {
+			return
+		}
+		run.crashRecorded = true
+	}
+	w.recordCrash()
+}
+
 // Start spawns the Python worker subprocess and waits for it to emit
 // worker.ready (§5). Returns once the worker is ready for requests.
 func (w *Worker) Start(ctx context.Context) error {
@@ -201,6 +220,10 @@ func (w *Worker) Start(ctx context.Context) error {
 
 // startLocked requires mu held.
 func (w *Worker) startLocked(ctx context.Context) error {
+	return w.startModeLocked(ctx, false)
+}
+
+func (w *Worker) startModeLocked(ctx context.Context, owned bool) error {
 	if w.isAliveLocked() {
 		return nil // Already running.
 	}
@@ -247,6 +270,9 @@ func (w *Worker) startLocked(ctx context.Context) error {
 		stderrC:    make(chan struct{}),
 		exitC:      make(chan struct{}),
 		inflight:   make(map[string]*inflightEntry),
+		owned:      owned,
+		writersC:   make(chan struct{}),
+		lifetime:   ctx,
 	}
 	w.run = run
 
@@ -277,20 +303,48 @@ func (w *Worker) startLocked(ctx context.Context) error {
 	select {
 	case <-run.readyC:
 		w.mu.Lock()
+		if owned && (w.run != run || run.retiring || !w.isAliveLocked()) {
+			if !run.retiring {
+				w.recordRunCrashLocked(run)
+			}
+			return &WorkerError{Kind: "crashed", Message: "worker exited before readiness was accepted"}
+		}
 		log.Printf("[bridge.Worker] worker ready (pid=%d)", run.cmd.Process.Pid)
 		return nil
 	case <-time.After(timeout):
 		w.mu.Lock()
 		log.Printf("[bridge.Worker] worker.ready timeout after %s — killing", timeout)
-		w.killLocked(run)
-		w.recordCrash()
+		if owned {
+			w.mu.Unlock()
+			retireCtx, cancel := context.WithTimeout(context.Background(), OwnedRetirementTimeout)
+			retireErr := w.RetireOwned(retireCtx, run.generation)
+			cancel()
+			w.mu.Lock()
+			if retireErr != nil {
+				return retireErr
+			}
+		} else {
+			w.killLocked(run)
+		}
+		w.recordRunCrashLocked(run)
 		return &WorkerError{
 			Kind:    "crashed",
 			Message: fmt.Sprintf("worker did not emit worker.ready within %s", timeout),
 		}
 	case <-ctx.Done():
 		w.mu.Lock()
-		w.killLocked(run)
+		if owned {
+			w.mu.Unlock()
+			retireCtx, cancel := context.WithTimeout(context.Background(), OwnedRetirementTimeout)
+			retireErr := w.RetireOwned(retireCtx, run.generation)
+			cancel()
+			w.mu.Lock()
+			if retireErr != nil {
+				return retireErr
+			}
+		} else {
+			w.killLocked(run)
+		}
 		return ctx.Err()
 	}
 }
@@ -306,7 +360,12 @@ func (w *Worker) reader(run *workerRun) {
 		if err != nil {
 			// EOF or pipe close — worker exited.
 			w.mu.Lock()
-			w.failInflightLocked(run, "crashed", "worker stdout closed unexpectedly")
+			if !run.retiring {
+				if run.owned {
+					w.recordRunCrashLocked(run)
+				}
+				w.failInflightLocked(run, "crashed", "worker stdout closed unexpectedly")
+			}
 			w.mu.Unlock()
 			return
 		}
@@ -414,9 +473,18 @@ func (w *Worker) killLocked(run *workerRun) {
 // Call sends a request to the worker and waits for the correlated response
 // (§4). It handles lazy spawn (§2) if the worker is not yet alive.
 func (w *Worker) Call(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
+	return w.call(ctx, 0, method, params)
+}
+
+func (w *Worker) call(ctx context.Context, generation uint64, method string, params json.RawMessage) (json.RawMessage, error) {
 	// Ensure worker is alive (lazy spawn, §2).
 	w.mu.Lock()
-	if !w.isAliveLocked() {
+	if generation != 0 {
+		if w.run == nil || w.run.generation != generation || w.run.retiring {
+			w.mu.Unlock()
+			return nil, &WorkerError{Kind: "cancelled", Message: "worker generation is no longer available"}
+		}
+	} else if !w.isAliveLocked() {
 		if err := w.startLocked(ctx); err != nil {
 			w.mu.Unlock()
 			return nil, err
@@ -454,19 +522,37 @@ func (w *Worker) Call(ctx context.Context, method string, params json.RawMessage
 	// misses a very-fast response.
 	ch := make(chan Response, 1)
 	w.mu.Lock()
+	if run.retiring {
+		w.mu.Unlock()
+		return nil, &WorkerError{Kind: "cancelled", Message: "worker generation is retiring"}
+	}
 	run.inflight[id] = &inflightEntry{ch: ch}
+	run.writers++
 	w.mu.Unlock()
 
 	// Write the framed request.
-	if err := WriteFrame(run.stdin, reqBytes); err != nil {
-		w.mu.Lock()
+	writeErr := WriteFrame(run.stdin, reqBytes)
+	w.mu.Lock()
+	run.writers--
+	if run.retiring && run.writers == 0 {
+		close(run.writersC)
+	}
+	if run.retiring {
+		delete(run.inflight, id)
+		w.mu.Unlock()
+		return nil, &WorkerError{Kind: "cancelled", Message: "worker generation interrupted"}
+	}
+	if writeErr != nil {
 		delete(run.inflight, id)
 		// Record a crash and clean up.
-		w.recordCrash()
-		w.killLocked(run)
+		w.recordRunCrashLocked(run)
+		if !run.owned {
+			w.killLocked(run)
+		}
 		w.mu.Unlock()
-		return nil, &WorkerError{Kind: "crashed", Message: fmt.Sprintf("write to worker: %v", err)}
+		return nil, &WorkerError{Kind: "crashed", Message: fmt.Sprintf("write to worker: %v", writeErr), cause: writeErr}
 	}
+	w.mu.Unlock()
 
 	// Wait for response, context cancellation, or worker crash.
 	select {
@@ -488,8 +574,12 @@ func (w *Worker) Call(ctx context.Context, method string, params json.RawMessage
 	case <-run.doneC:
 		w.mu.Lock()
 		delete(run.inflight, id)
-		w.recordCrash()
-		if w.run == run {
+		if run.retiring {
+			w.mu.Unlock()
+			return nil, &WorkerError{Kind: "cancelled", Message: "worker generation interrupted"}
+		}
+		w.recordRunCrashLocked(run)
+		if w.run == run && !run.owned {
 			w.run = nil
 		}
 		w.mu.Unlock()

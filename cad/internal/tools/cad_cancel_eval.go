@@ -17,7 +17,7 @@ import "encoding/json"
 // no-op (returns ok=true) so the panel can fire-and-forget when superseding.
 var CancelEval = ToolSpec{
 	Name:        "cad.cancel_eval",
-	Description: "Cancel the wait for an in-flight cad.evaluate keyed by request_id and discard its late result. Native Python/OCCT work continues to completion and keeps the serial worker slot. Unknown request_id is a no-op. Returns {ok:true, request_id, cancelled}.",
+	Description: "Cancel cad.evaluate by request_id. Queued cancellation never kills unrelated work. An active evaluation interrupts its exact native worker generation, cancels older queued worker calls, verifies process/I/O retirement, and eagerly starts one replacement. Later explicit requests retain their bounded queue admission. Unknown or completed request_id is a no-op. Returns request_cancelled, cancelled, native_stopped and worker_state; failure retains the real owner and refuses replacement. Caller cancellation alone does not prove native stop or readiness. Completed export artifacts survive.",
 	InputSchema: json.RawMessage(`{
 		"type": "object",
 		"properties": {

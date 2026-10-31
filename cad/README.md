@@ -122,17 +122,41 @@ before request scheduling. A capacity refusal leaves any previous evaluation
 with the same `request_id` intact. Canceling or
 replacing an evaluation releases its waiting RPC promptly and suppresses a
 late reply; cleanup from an older duplicate `request_id` cannot remove the new
-registration. Canceled queued evaluations are skipped before submission.
-**Cancellation does not interrupt native Python/OCCT computation.** A running
-operation continues to completion and holds the serial worker slot, so a new
-evaluation may wait for it. The original native-interruption acceptance
-criterion remains unmet; kill/restart and native cooperative cancellation are
-outside this implementation.
+registration. Cancelling a queued evaluation removes or skips only that request;
+it never kills an unrelated active export or a shared worker startup.
+
+An active evaluation cancellation fences its exact process generation and all
+older queued worker calls, including detached exports that have not reached the
+worker. These callers receive `cancelled`; genuinely later requests enter the
+new epoch and may wait in the same bounded queue. The bridge signals the owned
+process directly, independently of busy Python/OCCT or a blocked stdin write.
+The active reservation remains held until actual `Cmd.Wait` and all pipe owners
+retire. EOF and a successful kill syscall alone are insufficient. Retirement
+failure retains the real process owner, refuses replacement and reports failure.
+
+After verified retirement, exactly one eager replacement uses the existing
+`worker.ready` handshake, with a default 60-second deadline (configured by
+`MINERVA_WORKER_READY_TIMEOUT_SEC`). There is no automatic evaluation after reset
+and no indefinite restart retry. Intentional cancellation does not count against
+the three-crashes/60-second circuit breaker. A cancellation receipt distinguishes
+`request_cancelled`, `cancelled`, `native_stopped` and `worker_state`
+(`unchanged`, `retiring`, `recovering`, `ready` or `failed`); releasing a caller
+does not prove native stop or readiness. The two-second retirement budget is an
+operational target, not measured native CPU-stop evidence.
+
+Process caches disappear with their generation. Successful evaluations identify
+`provenance.process_epoch`. The panel retains its last painted mesh, references,
+annotations and completed snapshot alongside editable source. Cancelled or newer
+attempts remain explicitly stale, including selection/configuration changes at
+the same source version. Completed export artifacts and receipts remain valid.
+The next explicit evaluation provides its own source and settings to the fresh
+worker. Heavy native CPU-stop, no-orphan, Windows, editor and full-suite acceptance
+are still required; source checks do not establish those outcomes.
 
 EOF and explicit server shutdown cancel the subprocess lifetime, join request
-and export waiters, retire the runner, then invoke bridge cleanup. Cleanup has
+and export waiters, retire the runner, then verify owned bridge retirement. Cleanup has
 a separate 10-second deadline and reports an incomplete join. It never sends a
-second bridge frame while the runner is still writing. This process shutdown
+shutdown frame behind a busy writer. This process shutdown
 is separate from `cad.cancel_eval`.
 
 ## License

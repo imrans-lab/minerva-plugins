@@ -3,10 +3,15 @@ extends RefCounted
 var document_id := ""
 var completed: Dictionary = {}
 var _pending: Dictionary = {}
+var attempt_id: int = 0
+var worker_state: String = "unchanged"
+var process_epoch: int = 0
 
 func capture(panel: Node, source: String, version: int) -> Dictionary:
+	attempt_id += 1
 	_pending = {"source": source, "path": panel._document_path,
-		"document_id": document_id, "source_version": version}
+		"document_id": document_id, "source_version": version,
+		"attempt_id": attempt_id, "arguments": panel._model_views.arguments().duplicate(true)}
 	return _pending
 
 func attach(payload: Dictionary) -> void:
@@ -41,6 +46,8 @@ func painted(panel: Node, snapshot: Dictionary, result: Dictionary) -> void:
 	metadata["document_id"] = snapshot.document_id
 	metadata["reference_digest"] = str(panel.get_reference_digest()).sha256_text()
 	completed["provenance"] = metadata
+	process_epoch = int(metadata.get("process_epoch", 0))
+	worker_state = "ready"
 
 func freshness(panel: Node) -> Dictionary:
 	var status: String = str(panel._last_eval_result.get("status", ""))
@@ -54,9 +61,17 @@ func freshness(panel: Node) -> Dictionary:
 		"evaluation_status": status,
 		"stale": false,
 		"stale_reason": "",
+		"attempt_id": attempt_id,
+		"painted_attempt_id": int(completed.get("attempt_id", 0)),
+		"process_epoch": process_epoch,
+		"worker_state": worker_state,
 	}
 	if not out.provenance.is_empty():
 		out.provenance["reference_digest"] = str(panel.get_reference_digest()).sha256_text()
+	if worker_state in ["retiring", "recovering", "failed", "unverified"]:
+		out["stale"] = true
+		out["stale_reason"] = "The latest evaluation was cancelled; worker state is %s. The last painted model is retained. Build latest explicitly to refresh it." % worker_state
+		return out
 	if panel._dependencies.is_stale():
 		out["stale"] = true
 		out["dependency_changes"] = panel._dependencies.changed_paths.duplicate()
@@ -92,6 +107,12 @@ func freshness(panel: Node) -> Dictionary:
 	if not completed.is_empty() and str(completed.get("source", "")) != panel._current_source():
 		out["stale"] = true
 		out["stale_reason"] = "The current source differs from the completed model. Build latest and await evaluation."
+		return out
+	if not completed.is_empty() and (status in ["error", "timeout", "cancelled"] \
+			or attempt_id != int(completed.get("attempt_id", 0)) \
+			or completed.get("arguments", {}) != panel._model_views.arguments()):
+		out["stale"] = true
+		out["stale_reason"] = "The latest source, selection or configuration attempt has not painted. The displayed model is the last completed evaluation."
 		return out
 	if panel._evaluation_is_unsettled():
 		out["stale"] = true

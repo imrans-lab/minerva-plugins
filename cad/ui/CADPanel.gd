@@ -38,6 +38,7 @@ var _document_path: String = ""
 var _buffer_version: int = -1
 var _pending_dsl_text: String = ""
 var _inflight_request_id: String = ""
+var _cancel_sequence: int = 0
 
 ## The text the document-open path last dispatched an evaluation for. Opening a
 ## paired document delivers the source TWICE — once as a load request, once as
@@ -403,12 +404,52 @@ func _evaluate_document_open(text: String) -> void:
 func _cancel_inflight_eval_if_any() -> void:
 	if _inflight_request_id == "":
 		return
-	# Emit fire-and-forget — we don't need a reply correlation for the ack.
-	# Empty reply_id signals the IPC helper to drop the response. This is the
-	# one send that stays on the control lane: the bulk route exists to await
-	# a reply it minted, and a request id is bytes either way.
-	request.emit("cad.cancel_eval", {"request_id": _inflight_request_id}, "")
+	var cancelled_id: String = _inflight_request_id
+	_cancel_sequence += 1
 	_inflight_request_id = ""
+	_evaluation_state.worker_state = "retiring"
+	_last_eval_result = {"status": "cancelled", "request_id": cancelled_id,
+		"worker_state": "retiring", "native_stopped": false,
+		"ts": Time.get_unix_time_from_system()}
+	_show_eval_error("Evaluation cancelled. Waiting for the worker retirement and recovery receipt; the last painted model is retained.")
+	# Emit intent synchronously on the control lane before the caller can issue
+	# the next evaluate. The asynchronous receipt never re-runs source.
+	var reply_id: String = "cad.cancel_eval:%d" % Time.get_ticks_usec()
+	request.emit("cad.cancel_eval", {"request_id": cancelled_id}, reply_id)
+	_await_cancel_receipt(cancelled_id, reply_id, _cancel_sequence)
+
+
+func _await_cancel_receipt(cancelled_id: String, reply_id: String, sequence: int) -> void:
+	var ipc: Node = get_node_or_null("_MinervaIPC")
+	if ipc == null:
+		return
+	# The backend reports its configured ready timeout; a receipt can exceed
+	# this UI wait if the installation deliberately configures a longer one.
+	var reply: Dictionary = await ipc.await_reply(reply_id, 65000)
+	var payload: Dictionary = reply.get("result", {}) if reply.get("result", {}) is Dictionary else {}
+	var state: String = str(payload.get("worker_state", "unverified"))
+	# A newer successful paint has already established its own ready epoch.
+	if sequence != _cancel_sequence or str(_last_eval_result.get("status", "")) == "ok":
+		return
+	_evaluation_state.worker_state = state
+	if payload.has("replacement_epoch"):
+		_evaluation_state.process_epoch = int(payload.replacement_epoch)
+	if str(_last_eval_result.get("status", "")) == "pending":
+		_last_eval_result["worker_state"] = state
+		if state in ["failed", "unverified"]:
+			_show_eval_error("CAD worker recovery %s. The last painted model is retained; the latest evaluation has no ready worker." % state)
+		elif state == "ready" or state == "unchanged":
+			_hide_eval_error()
+	if str(_last_eval_result.get("request_id", "")) == cancelled_id:
+		_last_eval_result["worker_state"] = state
+		_last_eval_result["native_stopped"] = bool(payload.get("native_stopped", false))
+		var message: String = "Evaluation cancelled; worker %s. The last painted model is retained and stale." % state
+		if payload.has("error"):
+			var recovery_error: Variant = payload.error
+			message += " " + (str(recovery_error.get("message", "")) if recovery_error is Dictionary else str(recovery_error))
+		elif state == "unverified":
+			message += " " + str(reply.get("error_message", "The recovery receipt did not arrive; native stop and readiness are unverified."))
+		_show_eval_error(message)
 
 
 ## Lazily create the debounce timer and (re)start it. Each text_changed
@@ -674,7 +715,8 @@ func snapshot_extra(slot: String) -> Dictionary:
 		"face_count": faces.size(), "bounding_box": bounds, "units": "mm",
 	}
 	var freshness := evaluation_freshness()
-	for key: String in ["source_version", "buffer_version", "evaluated_at", "stale"]:
+	for key: String in ["source_version", "buffer_version", "evaluated_at", "stale", "stale_reason",
+			"attempt_id", "painted_attempt_id", "process_epoch", "worker_state"]:
 		result[key] = freshness.get(key)
 	return result
 
@@ -827,10 +869,13 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 	_last_eval_result = {
 		"status": "pending",
 		"request_id": request_id,
+		"worker_state": _evaluation_state.worker_state,
 		"ts": Time.get_unix_time_from_system(),
 	}
-	# A fresh evaluate supersedes any prior failure — clear a stale banner.
-	_hide_eval_error()
+	if _evaluation_state.worker_state in ["retiring", "recovering"]:
+		_show_eval_error("CAD worker is recovering. The latest evaluation is waiting; the last painted model is retained and stale.")
+	else:
+		_hide_eval_error()
 
 	# No fixed limit: a heavy document (many booleans, a cold build123d start)
 	# can take minutes, and an answer the worker computed must be painted
