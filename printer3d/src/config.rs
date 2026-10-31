@@ -25,7 +25,7 @@ impl Printer {
         format!("printer{}", self.slot)
     }
     pub fn handle(&self) -> String {
-        format!("prusalink_{}", self.id())
+        format!("printer3d_{}", self.id())
     }
 }
 #[derive(Default, Serialize, Deserialize)]
@@ -234,5 +234,5 @@ pub fn data_directory() -> Result<PathBuf> {
         PathBuf::from(std::env::var_os("HOME").ok_or(Error::Io("HOME is unavailable"))?)
             .join(".local/share")
     };
-    Ok(base.join("Minerva/plugins/prusalink"))
+    Ok(base.join("Minerva/plugins/printer3d"))
 }

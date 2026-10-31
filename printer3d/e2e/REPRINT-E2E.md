@@ -1,4 +1,4 @@
-# PrusaLink reprint E2E (happy path, Prusa XL)
+# 3D Printer reprint E2E (happy path, Prusa XL)
 
 One hand-run happy-path test. It covers the chain from a CAD plate to a physical part:
 `.mcad` → `.3mf` → slice → upload with `start:true` → PRINTING → FINISHED → parts confirmed by the owner.
@@ -25,7 +25,7 @@ An agent drives it through Minerva MCP tools. It adds no new automated test code
 
 - Never call `set_password` during the run. The password lives only in the vault, set beforehand through the panel.
 - Evidence holds tool replies verbatim. Before archiving, grep the evidence and the plugin stderr for the password. Expected: zero hits. Never type the password into a shell to do this check: let the owner run it, or use `read -s`.
-- Never record `Authorization`/Digest headers, vault payloads or websocket frames. Plugin stderr should hold only `prusalink upload phase=… elapsed_ms` lines.
+- Never record `Authorization`/Digest headers, vault payloads or websocket frames. Plugin stderr should hold only `printer3d upload phase=… elapsed_ms` lines.
 
 ## Steps
 
@@ -33,22 +33,22 @@ Evidence goes to `R/evidence.md`: each call, its reply, and an ISO timestamp.
 
 1. **CAD export.** `minerva_cad_export {editor_name:"angel-halo-child.mcad", part:"plate_v5", format:"3mf", path:"R/plate_v5.3mf", wait_ms:20000}`. If the reply is `status:pending`, collect it with `{editor_name, job_id}`.
    *Record:* the reply (source version and digest, output path) and `shasum -a 256 R/plate_v5.3mf`.
-2. **Printer config.** `minerva_prusalink_list_printers {}`.
+2. **Printer config.** `minerva_printer3d_list_printers {}`.
    *Record:* the XL row, without any secret.
-3. **Profiles.** `minerva_prusalink_list_profiles {printer:P, verbose:true}`.
+3. **Profiles.** `minerva_printer3d_list_profiles {printer:P, verbose:true}`.
    *Record:* version, executable_sha256, vendor_sha256, and the print/material pair used.
-4. **Slice.** `minerva_prusalink_slice {printer:P, input_path:"R/plate_v5.3mf"}`, using the mapping defaults.
+4. **Slice.** `minerva_printer3d_slice {printer:P, input_path:"R/plate_v5.3mf"}`, using the mapping defaults.
    *Record:* the full receipt and the wall time of the call.
    Then copy the output: `cp <output_path> "R/<Upload name>"` and record `shasum -a 256 "R/<Upload name>"`.
-5. **Pre-upload status.** `minerva_prusalink_status {printer:P}`. The owner confirms the bed is cleared and the filament matches `profiles_used.material_profile`.
+5. **Pre-upload status.** `minerva_printer3d_status {printer:P}`. The owner confirms the bed is cleared and the filament matches `profiles_used.material_profile`.
    *Record:* state, storage_available, storage_read_only, free_bytes.
    — **G1: wait for the owner's GO** —
-6. **Upload and start.** `minerva_prusalink_upload {printer:P, path:"R/<Upload name>", start:true}`, called exactly once.
+6. **Upload and start.** `minerva_printer3d_upload {printer:P, path:"R/<Upload name>", start:true}`, called exactly once.
    *Record:* the reply and the plugin stderr phase lines.
-7. **During print.** Within 2 min, call `minerva_prusalink_status {printer:P}`. Call it again at about 10 min.
+7. **During print.** Within 2 min, call `minerva_printer3d_status {printer:P}`. Call it again at about 10 min.
    *Record:* state, job_id, job_file, progress_percent, time_remaining_s.
    A transient `ATTENTION` in the first minutes is the known firmware-update nag. It times out by itself. Re-check after 2 min; this is not a failure.
-8. **Completion.** After about est_time_s, call `minerva_prusalink_status {printer:P}`.
+8. **Completion.** After about est_time_s, call `minerva_printer3d_status {printer:P}`.
    *Record:* final state and job_id. **G2:** the owner records "parts OK" or "parts NOT OK: <defect>", ideally with a photo, and the parts count.
 
 ## PASS criteria (all must hold)

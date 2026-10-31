@@ -30,7 +30,7 @@ function run(paths) {
     visibilityState:'visible',getElementById(id){if(!nodes.has(id))nodes.set(id,node());return nodes.get(id);},
     createElement(){return node();},addEventListener(event,handler){listeners.set(event,handler);}
   };
-  const printer={id:'printer1',slot:1,name:'Lab',host:'http://printer.invalid',user:'maker',has_password:true,secret_handle:'prusalink_printer1'};
+  const printer={id:'printer1',slot:1,name:'Lab',host:'http://printer.invalid',user:'maker',has_password:true,secret_handle:'printer3d_printer1'};
   const window = {addEventListener(){},sendIpcMessage(encoded){
     const request=JSON.parse(encoded);requests.push(request.type);
     let result={},success=true;
@@ -47,9 +47,9 @@ function run(paths) {
         else body={available:true,mime:'image/png',reference:'/thumb/l/usb/part.bgcode',offset:0,total_bytes:8,base64:'iVBORw0KGgo=',next_offset:null};
       } else throw new Error('Unexpected panel tool');
       result={content:[{type:'text',text:JSON.stringify(body)}]};
-    } else if(request.type==='capability:secrets:set:prusalink_printer1'){
+    } else if(request.type==='capability:secrets:set:printer3d_printer1'){
       assert(request.payload.value==='public-invalid-input','only test input enters inert secret transport');
-      success=!rejectSet;result={handle:'plugin/prusalink/prusalink_printer1',status:'created'};
+      success=!rejectSet;result={handle:'plugin/printer3d/printer3d_printer1',status:'created'};
     } else if(request.type==='capability:host.notify'){
       notifications.push(request.payload);success=!rejectNotify;result={};
     } else throw new Error('Unexpected native bridge request');
@@ -63,11 +63,11 @@ function run(paths) {
   async function flush(){for(let i=0;i<20;i++)await Promise.resolve();}
   return (async()=>{
     await flush();
-    assert(document.getElementById('backend-status').textContent.includes('PrusaLink backend not running'),'stopped backend has a persistent diagnostic');
+    assert(document.getElementById('backend-status').textContent.includes('3D Printer backend not running'),'stopped backend has a persistent diagnostic');
     assert(!document.getElementById('retry-backend').hidden,'stopped backend offers Retry');
     const unavailableCount=requests.length;await api.poll();assert(requests.length===unavailableCount,'unavailable backend does not silently poll');
     backendRunning=true;await document.getElementById('retry-backend').handlers.get('click')();await flush();
-    assert(document.getElementById('backend-status').textContent==='PrusaLink backend connected.'&&document.getElementById('retry-backend').hidden,'Retry recovers after backend starts');
+    assert(document.getElementById('backend-status').textContent==='3D Printer backend connected.'&&document.getElementById('retry-backend').hidden,'Retry recovers after backend starts');
     for(const [id,value] of [['name','Lab'],['host','printer.invalid'],['user','maker'],['password','public-invalid-input']])document.getElementById(id).value=value;
     await document.getElementById('printer-form').handlers.get('submit')({preventDefault(){}});
     await flush();

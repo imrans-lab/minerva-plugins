@@ -19,7 +19,7 @@ impl fmt::Display for Error {
             Self::Invalid(s) | Self::Io(s) | Self::Protocol(s) => f.write_str(s),
             Self::Config => f.write_str("Printer configuration is unreadable; restore the metadata file before making changes"),
             Self::Vault => f.write_str("Vault request failed; unlock Minerva's vault and check plugin permissions"),
-            Self::MissingPassword => f.write_str("Set the printer password in the PrusaLink panel"),
+            Self::MissingPassword => f.write_str("Set the printer password in the 3D Printer panel"),
             Self::Http(401) => f.write_str("Printer authentication failed; update the password in the panel"),
             Self::Http(507) => f.write_str("Printer storage unavailable; insert a USB stick"),
             Self::Http(409) => f.write_str("Printer refused the operation because its state changed or the file already exists"),

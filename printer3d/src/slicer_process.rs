@@ -126,7 +126,7 @@ mod unix {
     impl Drop for OwnedChild {
         fn drop(&mut self) {
             if self.owned && self.finish().is_err() {
-                eprintln!("prusalink slicer: owned process cleanup failed; outcome unknown");
+                eprintln!("printer3d slicer: owned process cleanup failed; outcome unknown");
             }
         }
     }

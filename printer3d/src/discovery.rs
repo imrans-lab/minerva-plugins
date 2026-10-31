@@ -48,7 +48,7 @@ pub fn discover(hosts: Option<Vec<String>>) -> Result<Discovery> {
     for host in candidates.into_iter().take(32) {
         handles.push(
             thread::Builder::new()
-                .name("prusalink-discover".into())
+                .name("printer3d-discover".into())
                 .spawn(move || probe(&host))
                 .map_err(|_| Error::Io("Cannot start discovery worker"))?,
         );

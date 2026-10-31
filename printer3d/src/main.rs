@@ -3,12 +3,12 @@ use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 
-use prusalink_plugin::client::{Client, Password};
-use prusalink_plugin::config::{self, Printer, Store};
-use prusalink_plugin::discovery;
-use prusalink_plugin::error::{Error, Result};
-use prusalink_plugin::slicer;
-use prusalink_plugin::slicing_autodetect;
+use printer3d_plugin::client::{Client, Password};
+use printer3d_plugin::config::{self, Printer, Store};
+use printer3d_plugin::discovery;
+use printer3d_plugin::error::{Error, Result};
+use printer3d_plugin::slicer;
+use printer3d_plugin::slicing_autodetect;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -52,7 +52,7 @@ impl Peer {
         arguments: Value,
     ) -> Result<Value> {
         self.next_id += 1;
-        let id = format!("prusalink-cap-{}", self.next_id);
+        let id = format!("printer3d-cap-{}", self.next_id);
         self.send(&json!({"jsonrpc":"2.0","id":id,"method":"minerva/capability","params":{"capability":format!("secrets:{operation}:{}",printer.handle()),"args":arguments}}))?;
         while let Some(message) = self.read()? {
             if message["id"].as_str() == Some(&id) {
@@ -132,7 +132,7 @@ struct ConfigureArgs {
     host: String,
     #[serde(default = "maker")]
     user: String,
-    slicing: Option<prusalink_plugin::slicer::SlicerConfig>,
+    slicing: Option<printer3d_plugin::slicer::SlicerConfig>,
     #[serde(default)]
     autodetect_slicing: bool,
     slicing_selection: Option<slicing_autodetect::Selections>,
@@ -320,11 +320,11 @@ fn tool(peer: &mut Peer, store: &mut Store, name: &str, value: &Value) -> Result
             let printer = store.get(&id)?.clone();
             let upload = matches!(&operation, Operation::Upload(..));
             if upload {
-                eprintln!("prusalink upload phase=vault_request");
+                eprintln!("printer3d upload phase=vault_request");
             }
             let password = peer.password(&printer)?.ok_or(Error::MissingPassword)?;
             if upload {
-                eprintln!("prusalink upload phase=vault_received");
+                eprintln!("printer3d upload phase=vault_received");
             }
             let mut client = Client::new(printer, password)?;
             match operation {
@@ -338,7 +338,7 @@ fn tool(peer: &mut Peer, store: &mut Store, name: &str, value: &Value) -> Result
                 Operation::Print(file) => client.print(&file),
             }
         }
-        _ => Err(Error::Invalid("Unknown PrusaLink tool")),
+        _ => Err(Error::Invalid("Unknown 3D Printer tool")),
     }
 }
 
@@ -346,7 +346,7 @@ fn tools() -> Result<Value> {
     let manifest: Value = serde_json::from_str(include_str!("../manifest.json"))
         .map_err(|_| Error::Protocol("Invalid plugin manifest"))?;
     let tools=manifest["tools"].as_array().ok_or(Error::Protocol("Missing manifest tools"))?.iter().map(|tool| {
-        let name=tool["name"].as_str().and_then(|s|s.strip_prefix("minerva_prusalink_")).ok_or(Error::Protocol("Invalid manifest namespace"))?;
+        let name=tool["name"].as_str().and_then(|s|s.strip_prefix("minerva_printer3d_")).ok_or(Error::Protocol("Invalid manifest namespace"))?;
         Ok(json!({"name":name,"description":tool["description"],"inputSchema":tool["input_schema"]}))
     }).collect::<Result<Vec<_>>>()?;
     Ok(json!({"tools":tools}))
@@ -362,7 +362,7 @@ fn response(peer: &mut Peer, store: &mut Store, request: Value) -> Result<()> {
     }
     let result = match request["method"].as_str() {
         Some("initialize") => Ok(
-            json!({"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"PrusaLink","version":env!("CARGO_PKG_VERSION")}}),
+            json!({"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"3D Printer","version":env!("CARGO_PKG_VERSION")}}),
         ),
         Some("ping") => Ok(json!({})),
         Some("tools/list") => tools(),
@@ -378,7 +378,7 @@ fn response(peer: &mut Peer, store: &mut Store, request: Value) -> Result<()> {
                     tool(
                         peer,
                         store,
-                        name.strip_prefix("minerva_prusalink_").unwrap_or(name),
+                        name.strip_prefix("minerva_printer3d_").unwrap_or(name),
                         &value,
                     )
                 });
@@ -429,7 +429,7 @@ fn serve() -> Result<()> {
 }
 fn main() {
     if let Err(error) = serve() {
-        eprintln!("prusalink: {error}");
+        eprintln!("printer3d: {error}");
         std::process::exit(1);
     }
 }

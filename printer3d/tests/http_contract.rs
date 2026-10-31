@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use prusalink_plugin::client::{Client, Password};
-use prusalink_plugin::config::Printer;
+use printer3d_plugin::client::{Client, Password};
+use printer3d_plugin::config::Printer;
 
 fn request(stream: &mut TcpStream) -> (String, Vec<u8>) {
     stream
@@ -106,7 +106,7 @@ fn file() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let path = std::env::temp_dir().join(format!("prusalink-public-protocol-{unique}.bgcode"));
+    let path = std::env::temp_dir().join(format!("printer3d-public-protocol-{unique}.bgcode"));
     std::fs::write(&path, b"public protocol bytes").unwrap();
     path
 }

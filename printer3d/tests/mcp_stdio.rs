@@ -36,8 +36,8 @@ fn manifest_stdio_metadata_and_private_vault_request_boundary() {
         .unwrap()
         .as_nanos();
     let directory =
-        std::env::temp_dir().join(format!("prusalink-mcp-{}-{unique}", std::process::id()));
-    let mut child = Command::new(env!("CARGO_BIN_EXE_prusalink-plugin"))
+        std::env::temp_dir().join(format!("printer3d-mcp-{}-{unique}", std::process::id()));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_printer3d-plugin"))
         .env("MINERVA_PLUGIN_DATA_DIR", &directory)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -52,7 +52,7 @@ fn manifest_stdio_metadata_and_private_vault_request_boundary() {
     );
     assert_eq!(
         receive(&mut output)["result"]["serverInfo"]["name"],
-        "PrusaLink"
+        "3D Printer"
     );
     send(
         &mut input,
@@ -65,7 +65,7 @@ fn manifest_stdio_metadata_and_private_vault_request_boundary() {
     assert_eq!(tools.len(), 12);
     assert_eq!(tools.len(), declared.len());
     for tool in tools {
-        let canonical = format!("minerva_prusalink_{}", tool["name"].as_str().unwrap());
+        let canonical = format!("minerva_printer3d_{}", tool["name"].as_str().unwrap());
         let definition = declared.iter().find(|t| t["name"] == canonical).unwrap();
         assert_eq!(tool["inputSchema"], definition["input_schema"]);
         assert_eq!(tool["inputSchema"]["additionalProperties"], false);
@@ -90,7 +90,7 @@ fn manifest_stdio_metadata_and_private_vault_request_boundary() {
     for slot in 1..=8 {
         for operation in ["get", "set", "delete"] {
             assert!(caps.contains(&json!(format!(
-                "secrets:{operation}:prusalink_printer{slot}"
+                "secrets:{operation}:printer3d_printer{slot}"
             ))));
         }
     }
@@ -119,13 +119,13 @@ fn manifest_stdio_metadata_and_private_vault_request_boundary() {
     );
     let configured = body(&receive(&mut output));
     assert_eq!(configured["id"], "printer1");
-    assert_eq!(configured["secret_handle"], "prusalink_printer1");
+    assert_eq!(configured["secret_handle"], "printer3d_printer1");
     send(&mut input, call(6, "list_printers", json!({})));
     let private = receive(&mut output);
     assert_eq!(private["method"], "minerva/capability");
     assert_eq!(
         private["params"]["capability"],
-        "secrets:get:prusalink_printer1"
+        "secrets:get:printer3d_printer1"
     );
     assert_eq!(private["params"]["args"], json!({}));
     // A host protocol response with NO credential: this is not live vault acceptance.
@@ -148,7 +148,7 @@ fn manifest_stdio_metadata_and_private_vault_request_boundary() {
     let set = receive(&mut output);
     assert_eq!(
         set["params"]["capability"],
-        "secrets:set:prusalink_printer1"
+        "secrets:set:printer3d_printer1"
     );
     assert_eq!(
         set["params"]["args"],
@@ -156,12 +156,12 @@ fn manifest_stdio_metadata_and_private_vault_request_boundary() {
     );
     send(
         &mut input,
-        json!({"jsonrpc":"2.0","id":set["id"],"result":{"success":true,"result":{"handle":"prusalink_printer1","status":"created"}}}),
+        json!({"jsonrpc":"2.0","id":set["id"],"result":{"success":true,"result":{"handle":"printer3d_printer1","status":"created"}}}),
     );
     let verify = receive(&mut output);
     assert_eq!(
         verify["params"]["capability"],
-        "secrets:get:prusalink_printer1"
+        "secrets:get:printer3d_printer1"
     );
     send(
         &mut input,
@@ -233,12 +233,12 @@ fn manifest_stdio_metadata_and_private_vault_request_boundary() {
     assert_eq!(save["params"]["args"], json!({"value":"Circle Of Life"}));
     send(
         &mut input,
-        json!({"jsonrpc":"2.0","id":save["id"],"result":{"success":true,"result":{"handle":"prusalink_printer1","status":"updated"}}}),
+        json!({"jsonrpc":"2.0","id":save["id"],"result":{"success":true,"result":{"handle":"printer3d_printer1","status":"updated"}}}),
     );
     let get = receive(&mut output);
     assert_eq!(
         get["params"]["capability"],
-        "secrets:get:prusalink_printer1"
+        "secrets:get:printer3d_printer1"
     );
     send(
         &mut input,

@@ -75,13 +75,13 @@ impl UploadDeadline {
     fn start(agent: ureq::Agent) -> Result<Self> {
         let (cancel, receiver) = mpsc::channel();
         let worker = thread::Builder::new()
-            .name("prusalink-upload-deadline".into())
+            .name("printer3d-upload-deadline".into())
             .spawn(move || {
                 if matches!(
                     receiver.recv_timeout(Duration::from_secs(20)),
                     Err(mpsc::RecvTimeoutError::Timeout)
                 ) {
-                    eprintln!("prusalink upload phase=network_deadline");
+                    eprintln!("printer3d upload phase=network_deadline");
                     agent.shutdown();
                 }
             })
@@ -99,7 +99,7 @@ impl Drop for UploadDeadline {
         let _ = self.cancel.send(());
         if let Some(worker) = self.worker.take() {
             if worker.join().is_err() {
-                eprintln!("prusalink upload phase=deadline_worker_failed");
+                eprintln!("printer3d upload phase=deadline_worker_failed");
             }
         }
     }
@@ -147,7 +147,7 @@ impl Client {
         if let Some(started) = self.upload_started {
             // Fixed phase names and elapsed time only: never paths, bodies or credentials.
             eprintln!(
-                "prusalink upload phase={phase} elapsed_ms={}",
+                "printer3d upload phase={phase} elapsed_ms={}",
                 started.elapsed().as_millis()
             );
         }

@@ -1,6 +1,9 @@
-# PrusaLink
+# 3D Printer
 
-Connect Minerva to local PrusaLink printers, including XL, MK4 and Core One.
+Slice, upload, start and monitor 3D prints from Minerva. Tested only with an Original Prusa XL (2-tool, input shaper) through the PrusaLink API, slicing with an installed PrusaSlicer.
+
+Not affiliated with or endorsed by Prusa Research. Prusa, PrusaLink and PrusaSlicer are trademarks of Prusa Research a.s.
+
 Enable PrusaLink on the printer and enter its generated password in the panel.
 The default username is `maker`. Local slicing uses an installed PrusaSlicer;
 Prusa Connect/cloud access is outside this plugin's scope.
@@ -13,10 +16,10 @@ For a manual source build:
 
 ```sh
 cargo build --release --locked
-cp target/release/prusalink-plugin ./prusalink-plugin
+cp target/release/printer3d-plugin ./printer3d-plugin
 ```
 
-Start PrusaLink in Plugin Manager after installation, then open its panel. If the
+Start 3D Printer in Plugin Manager after installation, then open its panel. If the
 backend is stopped or unavailable, the panel shows a message and Retry connection
 button; start it in Plugin Manager and retry. Enter a display name and hostname such as
 `prusa-xl.local`, username and the password shown under the printer's Network →
@@ -28,6 +31,15 @@ Eight printer slots have exact vault grants. Display names are editable. Leaving
 the password blank when editing retains the current secret. Remove deletes the
 slot's secret and confirms it is absent before freeing the slot. Unlock Minerva's
 vault if a secret operation fails.
+
+## Clean rename from PrusaLink
+
+This plugin uses the `printer3d` identity, a fresh default data directory and its
+own vault namespace. Re-add the printer once and set its password in the 3D Printer
+panel. No configuration, slicing data, passwords or grants carry over automatically.
+The old `prusalink` installation, configuration, data and vault keys remain intact.
+The old plugin can be removed later by an authorized operator; this rename performs
+no cleanup. `MINERVA_PLUGIN_DATA_DIR` remains an explicit user-selected override.
 
 ## Dashboard
 
@@ -52,7 +64,7 @@ transition/history memory ends when the panel closes. Hidden panels stop polling
 
 ## Tools
 
-Runtime names are short; Minerva exposes them as `minerva_prusalink_<name>`.
+Runtime names are short; Minerva exposes them as `minerva_printer3d_<name>`.
 Every schema rejects extra arguments. No tool returns a password. Only the
 write-only `set_password` tool accepts one; its arguments are recorded in Minerva's
 tool-call log. Use the panel when the agent should not receive the password.
@@ -85,16 +97,16 @@ controls.
 Only slot, display name, host and username are saved in `printers.json` under the
 OS plugin data directory:
 
-- macOS: `~/Library/Application Support/Minerva/plugins/prusalink`
-- Linux: `$XDG_DATA_HOME/Minerva/plugins/prusalink`, or `~/.local/share/...`
-- Windows: `%APPDATA%/Minerva/plugins/prusalink`
+- macOS: `~/Library/Application Support/Minerva/plugins/printer3d`
+- Linux: `$XDG_DATA_HOME/Minerva/plugins/printer3d`, or `~/.local/share/...`
+- Windows: `%APPDATA%/Minerva/plugins/printer3d`
 
 `MINERVA_PLUGIN_DATA_DIR` is an optional absolute-path override for isolated
 embedding/tests. No data is written to the installation or working directory.
 Malformed config is refused rather than overwritten.
 
 The panel sends passwords directly from its field through capability IPC to
-Minerva's vault under `prusalink_printer1`…`prusalink_printer8`. The backend uses
+Minerva's vault under `printer3d_printer1`…`printer3d_printer8`. The backend uses
 private host capability requests to fetch the current secret afresh when a tool
 needs authentication; it never persists a password or puts one in results, process command
 arguments or plugin logs. The explicit write-only `set_password` alternative sends

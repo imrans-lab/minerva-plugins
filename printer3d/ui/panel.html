@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PrusaLink</title>
+<title>3D Printer</title>
 <style>
 [hidden]{display:none!important}:root{color-scheme:light dark;font:14px system-ui,sans-serif;background:#171b22;color:#edf0f5}*{box-sizing:border-box}body{margin:0;padding:22px;max-width:800px}h1{font-size:24px;margin:0 0 6px}p{color:#b7c0cd;line-height:1.5}h2{font-size:16px;margin:0 0 14px}form,.printer{background:#222833;border:1px solid #3b4555;border-radius:10px;padding:18px;margin:18px 0}label{display:block;margin:12px 0 5px;font-weight:600}input{width:100%;border:1px solid #586477;border-radius:6px;background:#141922;color:inherit;padding:10px;font:inherit}input:focus{outline:2px solid #f78a46;outline-offset:1px}.host-row,.buttons{display:flex;gap:8px;align-items:center}.host-row input{flex:1;min-width:0}button{font:inherit;padding:9px 13px;border:1px solid #69778c;border-radius:6px;background:#303a49;color:#f5f6f8;cursor:pointer}button.primary{background:#f78a46;color:#1c2027;border-color:#f78a46;font-weight:650}button:disabled{opacity:.5;cursor:default}.buttons{margin-top:16px;flex-wrap:wrap}.note{font-size:12px;margin:7px 0}.printer h3{font-size:16px;margin:0 0 5px}.printer p{margin:6px 0;overflow-wrap:anywhere}.status{font-variant-numeric:tabular-nums}.message{min-height:20px;white-space:pre-wrap;line-height:1.45}.error{color:#ffb4a9}.ok{color:#96e0af}#found{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}#empty{padding:12px 0}progress{width:100%;height:10px;accent-color:#f78a46}small{color:#b7c0cd}
 
@@ -10,9 +10,11 @@
 </style>
 </head>
 <body>
-<h1>PrusaLink</h1>
-<p>Connect to printers on your local network. Passwords are saved in Minerva’s vault.</p>
-<div id="backend-status" class="message" role="status" aria-live="polite">Connecting to PrusaLink backend…</div>
+<h1>3D Printer</h1>
+<p>Slice, upload, start and monitor 3D prints from Minerva. Tested only with an Original Prusa XL (2-tool, input shaper) through the PrusaLink API, slicing with an installed PrusaSlicer.</p>
+<p class="note">Not affiliated with or endorsed by Prusa Research. Prusa, PrusaLink and PrusaSlicer are trademarks of Prusa Research a.s.</p>
+<p>Passwords are saved in Minerva’s vault.</p>
+<div id="backend-status" class="message" role="status" aria-live="polite">Connecting to 3D Printer backend…</div>
 <button id="retry-backend" type="button" hidden>Retry connection</button>
 <form id="printer-form">
 <h2 id="form-title">Add a printer</h2>
@@ -92,8 +94,8 @@ function payload(reply) {
 }
 async function call(name, args = {}) {
   let reply;
-  try { reply = await window.minerva.call('minerva_prusalink_' + name, args); }
-  catch { throw new Error('Minerva could not complete the request. Check that the PrusaLink plugin is running.'); }
+  try { reply = await window.minerva.call('minerva_printer3d_' + name, args); }
+  catch { throw new Error('Minerva could not complete the request. Check that the 3D Printer plugin is running.'); }
   return payload(reply);
 }
 function button(label, action) {
@@ -113,7 +115,7 @@ function reset() {
 }
 async function refreshList() {
   const result = await call('list_printers');
-  if (!result || !Array.isArray(result.printers)) throw new Error('PrusaLink backend returned no printer list.');
+  if (!result || !Array.isArray(result.printers)) throw new Error('3D Printer backend returned no printer list.');
   printers = result.printers;
   cards.clear(); byId('printers').replaceChildren(); byId('empty').hidden = printers.length !== 0;
   const live = new Set(printers.map(p => p.id));
@@ -255,13 +257,13 @@ async function connect() {
   connecting = true; byId('retry-backend').disabled = true;
   try {
     await refreshList(); backendReady = true;
-    byId('backend-status').textContent = 'PrusaLink backend connected.';
+    byId('backend-status').textContent = '3D Printer backend connected.';
     byId('backend-status').className = 'message ok';
     byId('retry-backend').hidden = true;
     await poll();
   } catch {
     backendReady = false;
-    byId('backend-status').textContent = 'PrusaLink backend not running or unavailable. Start PrusaLink in Plugin Manager, then retry. If it is running, unlock the vault and check permissions.';
+    byId('backend-status').textContent = '3D Printer backend not running or unavailable. Start 3D Printer in Plugin Manager, then retry. If it is running, unlock the vault and check permissions.';
     byId('backend-status').className = 'message error';
     byId('retry-backend').hidden = false;
     byId('empty').hidden = true;
