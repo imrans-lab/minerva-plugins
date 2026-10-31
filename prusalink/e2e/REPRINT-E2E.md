@@ -35,7 +35,7 @@ Evidence goes to `R/evidence.md`: each call, its reply, and an ISO timestamp.
    *Record:* the reply (source version and digest, output path) and `shasum -a 256 R/plate_v5.3mf`.
 2. **Printer config.** `minerva_prusalink_list_printers {}`.
    *Record:* the XL row, without any secret.
-3. **Profiles.** `minerva_prusalink_list_profiles {printer:P}`.
+3. **Profiles.** `minerva_prusalink_list_profiles {printer:P, verbose:true}`.
    *Record:* version, executable_sha256, vendor_sha256, and the print/material pair used.
 4. **Slice.** `minerva_prusalink_slice {printer:P, input_path:"R/plate_v5.3mf"}`, using the mapping defaults.
    *Record:* the full receipt and the wall time of the call.
