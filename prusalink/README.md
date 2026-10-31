@@ -106,7 +106,11 @@ PUT share a 20-second request budget rather than restarting the budget per phase
 Fixed upload phase names and elapsed milliseconds go to stderr, without paths,
 credentials or response bodies. A failed PUT has an unknown outcome: inspect the
 printer before retrying; the plugin never automatically replays the upload.
-This HTTP budget does not bound vault IPC, OS DNS resolution or local file I/O.
+A joined deadline worker shuts down this client's sockets after 20 seconds,
+including partial-write loops; the per-request budget bounds DNS and response
+reads. The deadline does not interrupt vault IPC or local file I/O. The transport
+uses pinned ureq 3.5.0 for its socket shutdown and request deadline APIs; no extra
+service or executable is required.
 Redirects and environment proxies
 are disabled. Keep printer access on a trusted local network.
 

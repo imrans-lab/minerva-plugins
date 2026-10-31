@@ -238,7 +238,14 @@ fn tool(peer: &mut Peer, store: &mut Store, name: &str, value: &Value) -> Result
                 _ => return Err(Error::Invalid("Unknown tool")),
             };
             let printer = store.get(&id)?.clone();
+            let upload = matches!(&operation, Operation::Upload(..));
+            if upload {
+                eprintln!("prusalink upload phase=vault_request");
+            }
             let password = peer.password(&printer)?.ok_or(Error::MissingPassword)?;
+            if upload {
+                eprintln!("prusalink upload phase=vault_received");
+            }
             let mut client = Client::new(printer, password)?;
             match operation {
                 Operation::Status => serde_json::to_value(client.status()?)

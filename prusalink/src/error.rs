@@ -10,6 +10,7 @@ pub enum Error {
     MissingPassword,
     Protocol(&'static str),
     Http(u16),
+    MutationHttp(u16),
     Transport { mutation: bool, connection: bool },
 }
 impl fmt::Display for Error {
@@ -22,6 +23,7 @@ impl fmt::Display for Error {
             Self::Http(401) => f.write_str("Printer authentication failed; update the password in the panel"),
             Self::Http(507) => f.write_str("Printer storage unavailable; insert a USB stick"),
             Self::Http(409) => f.write_str("Printer refused the operation because its state changed or the file already exists"),
+            Self::MutationHttp(status) => write!(f,"Printer returned HTTP {status}; its outcome is unknown. Check the printer before retrying"),
             Self::Http(status) => write!(f,"Printer returned HTTP {status}"),
             Self::Transport { mutation, connection } => {
                 f.write_str(if *mutation {

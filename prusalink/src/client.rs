@@ -2,11 +2,15 @@
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
 use serde::Serialize;
 use serde_json::Value;
+use ureq::http::{request::Builder, Response};
+use ureq::{AsSendBody, Body};
 use url::Url;
 
 use crate::config::{normalize_host, Printer};
@@ -25,41 +29,85 @@ impl Password {
 }
 
 pub fn agent(timeout: Duration) -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .redirects(0)
-        .try_proxy_from_env(false)
-        // No recycled connection means ureq cannot replay a stale-connection
-        // DELETE/PUT. Hardware mutations are never automatically retried.
+    ureq::Agent::config_builder()
+        .max_redirects(0)
+        .proxy(None)
+        .http_status_as_error(false)
         .max_idle_connections(0)
-        .timeout_connect(Duration::from_secs(3))
-        .timeout_read(Duration::from_secs(5))
-        .timeout_write(Duration::from_secs(15))
-        .timeout(timeout)
+        .timeout_connect(Some(Duration::from_secs(3)))
+        .timeout_per_read(Some(Duration::from_secs(5)))
+        .timeout_per_write(Some(Duration::from_secs(15)))
+        .timeout_global(Some(timeout))
         .build()
+        .new_agent()
 }
-fn transport(error: ureq::Transport, mutation: bool) -> Error {
-    // Preserve the connection stage without exposing raw transport diagnostics.
+fn transport(error: ureq::Error, mutation: bool) -> Error {
     Error::Transport {
         mutation,
         connection: matches!(
-            error.kind(),
-            ureq::ErrorKind::ConnectionFailed | ureq::ErrorKind::Dns
+            error,
+            ureq::Error::ConnectionFailed | ureq::Error::HostNotFound
         ),
     }
 }
 fn response(
-    result: std::result::Result<ureq::Response, ureq::Error>,
+    result: std::result::Result<Response<Body>, ureq::Error>,
     mutation: bool,
-) -> Result<ureq::Response> {
-    match result {
-        Ok(response) => Ok(response),
-        Err(ureq::Error::Status(status, _)) => Err(Error::Http(status)),
-        Err(ureq::Error::Transport(error)) => Err(transport(error, mutation)),
+) -> Result<Response<Body>> {
+    let response = result.map_err(|error| transport(error, mutation))?;
+    let status = response.status().as_u16();
+    if status >= 400 {
+        return Err(if mutation {
+            Error::MutationHttp(status)
+        } else {
+            Error::Http(status)
+        });
+    }
+    Ok(response)
+}
+
+/// Owns only this client's sockets; shutdown interrupts even partial-write loops.
+struct UploadDeadline {
+    cancel: mpsc::Sender<()>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+impl UploadDeadline {
+    fn start(agent: ureq::Agent) -> Result<Self> {
+        let (cancel, receiver) = mpsc::channel();
+        let worker = thread::Builder::new()
+            .name("prusalink-upload-deadline".into())
+            .spawn(move || {
+                if matches!(
+                    receiver.recv_timeout(Duration::from_secs(20)),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ) {
+                    eprintln!("prusalink upload phase=network_deadline");
+                    agent.shutdown();
+                }
+            })
+            .map_err(|_| Error::Io("Cannot start upload deadline"))?;
+        Ok(Self {
+            cancel,
+            worker: Some(worker),
+        })
     }
 }
-fn json(response: ureq::Response) -> Result<Value> {
+impl Drop for UploadDeadline {
+    fn drop(&mut self) {
+        // A finished/disconnected timer needs no cancellation. Always join so no
+        // deadline can fire against a later operation or retain owned sockets.
+        let _ = self.cancel.send(());
+        if let Some(worker) = self.worker.take() {
+            if worker.join().is_err() {
+                eprintln!("prusalink upload phase=deadline_worker_failed");
+            }
+        }
+    }
+}
+fn json(response: Response<Body>) -> Result<Value> {
     let mut bytes = Vec::new();
     response
+        .into_body()
         .into_reader()
         .take(1024 * 1024 + 1)
         .read_to_end(&mut bytes)
@@ -119,42 +167,59 @@ impl Client {
         }
         for path in ["/api/version", "/api/v1/status"] {
             self.upload_phase("authenticate");
-            match self
-                .agent
-                .get(&format!("{}{path}", self.printer.host))
-                .timeout(self.request_timeout()?)
-                .call()
-            {
-                Err(ureq::Error::Status(401, response)) => {
-                    for header in response.all("WWW-Authenticate") {
-                        if let Ok(challenge) = Challenge::parse(header) {
-                            if challenge.realm != "Printer API" {
-                                continue;
+            let request = ureq::http::Request::builder()
+                .method("GET")
+                .uri(format!("{}{path}", self.printer.host));
+            let result = self.execute(request, (), false, false)?;
+            match result.status().as_u16() {
+                401 => {
+                    for header in result.headers().get_all("WWW-Authenticate") {
+                        if let Ok(challenge) = header
+                            .to_str()
+                            .map_err(|_| Error::Protocol("Invalid authentication header"))
+                            .and_then(Challenge::parse)
+                        {
+                            if challenge.realm == "Printer API" {
+                                self.challenge = Some(challenge);
+                                return Ok(());
                             }
-                            self.challenge = Some(challenge);
-                            return Ok(());
                         }
                     }
                     return Err(Error::Protocol(
                         "Printer requires unsupported Digest authentication",
                     ));
                 }
-                Ok(response) if response.status() == 200 => continue,
-                Err(ureq::Error::Status(status, _)) => return Err(Error::Http(status)),
-                Err(ureq::Error::Transport(error)) => return Err(transport(error, false)),
-                _ => {
-                    return Err(Error::Transport {
-                        mutation: false,
-                        connection: false,
-                    })
-                }
+                200 => continue,
+                status => return Err(Error::Http(status)),
             }
         }
         Err(Error::Protocol(
             "Printer did not provide a PrusaLink Digest challenge",
         ))
     }
-    fn request(&mut self, method: &str, path: &str) -> Result<ureq::Request> {
+    fn execute<S: AsSendBody>(
+        &self,
+        request: Builder,
+        body: S,
+        mutation: bool,
+        check_status: bool,
+    ) -> Result<Response<Body>> {
+        let request = request
+            .body(body)
+            .map_err(|_| Error::Protocol("Cannot build printer request"))?;
+        let request = self
+            .agent
+            .configure_request(request)
+            .timeout_global(Some(self.request_timeout()?))
+            .build();
+        let result = self.agent.run(request);
+        if check_status {
+            response(result, mutation)
+        } else {
+            result.map_err(|error| transport(error, mutation))
+        }
+    }
+    fn request(&mut self, method: &str, path: &str) -> Result<Builder> {
         self.authenticate()?;
         self.nonce_count = self
             .nonce_count
@@ -172,12 +237,11 @@ impl Client {
             &self.cnonce,
             self.nonce_count,
         )?;
-        Ok(self
-            .agent
-            .request(method, &format!("{}{path}", self.printer.host))
-            .timeout(self.request_timeout()?)
-            .set("Authorization", &authorization)
-            .set("Accept", "application/json"))
+        Ok(ureq::http::Request::builder()
+            .method(method)
+            .uri(format!("{}{path}", self.printer.host))
+            .header("Authorization", &authorization)
+            .header("Accept", "application/json"))
     }
     fn get(&mut self, path: &str) -> Result<Value> {
         self.upload_phase(match path {
@@ -186,7 +250,8 @@ impl Client {
             "/api/v1/storage" => "storage",
             _ => "read",
         });
-        let response = response(self.request("GET", path)?.call(), false)?;
+        let request = self.request("GET", path)?;
+        let response = self.execute(request, (), false, true)?;
         if response.status() == 204 {
             return Ok(Value::Null);
         }
@@ -208,12 +273,14 @@ impl Client {
                 "Current job thumbnail changed; request it again",
             ));
         }
-        let response = match response(self.request("GET", &path)?.call(), false) {
+        let request = self.request("GET", &path)?;
+        let response = match self.execute(request, (), false, true) {
             Err(Error::Http(404)) => return Ok(serde_json::json!({"available":false})),
             other => other?,
         };
         let mut bytes = Vec::new();
         response
+            .into_body()
             .into_reader()
             .take(512 * 1024 + 1)
             .read_to_end(&mut bytes)
@@ -243,11 +310,14 @@ impl Client {
     pub fn upload(&mut self, path: &Path, start: bool) -> Result<Value> {
         // One shared network budget covers authentication, status reads and PUT.
         // Leave headroom for the host MCP deadline. Never replay a mutation.
+        let deadline = UploadDeadline::start(self.agent.clone())?;
         self.upload_started = Some(Instant::now());
         self.upload_phase("begin");
         let result = self.upload_inner(path, start);
         self.upload_phase(if result.is_ok() { "complete" } else { "failed" });
+        drop(deadline);
         self.upload_started = None;
+        self.agent = agent(Duration::from_secs(120));
         result
     }
     fn upload_inner(&mut self, path: &Path, start: bool) -> Result<Value> {
@@ -279,12 +349,12 @@ impl Client {
         }
         let request = self
             .request("PUT", &remote)?
-            .set("Content-Type", "application/octet-stream")
-            .set("Content-Length", &metadata.len().to_string())
-            .set("Print-After-Upload", if start { "?1" } else { "?0" })
-            .set("Overwrite", "?0");
+            .header("Content-Type", "application/octet-stream")
+            .header("Content-Length", &metadata.len().to_string())
+            .header("Print-After-Upload", if start { "?1" } else { "?0" })
+            .header("Overwrite", "?0");
         self.upload_phase("send");
-        let result = response(request.send(file), true)?;
+        let result = self.execute(request, file, true, true)?;
         self.upload_phase("response");
         if result.status() != 201 {
             return Err(Error::Protocol(
@@ -298,7 +368,8 @@ impl Client {
     pub fn print(&mut self, file: &str) -> Result<Value> {
         let path = file_path(file)?;
         ready(&self.status()?.state)?;
-        let result = response(self.request("POST", &path)?.call(), true)?;
+        let request = self.request("POST", &path)?;
+        let result = self.execute(request, (), true, true)?;
         if result.status() != 204 {
             return Err(Error::Protocol(
                 "Printer did not confirm print start; check the printer before retrying",
@@ -319,10 +390,8 @@ impl Client {
                     "Printer has no current job id; refusing to guess",
                 ))?,
         };
-        let result = response(
-            self.request("DELETE", &format!("/api/v1/job/{id}"))?.call(),
-            true,
-        )?;
+        let request = self.request("DELETE", &format!("/api/v1/job/{id}"))?;
+        let result = self.execute(request, (), true, true)?;
         if result.status() != 204 {
             return Err(Error::Protocol(
                 "Printer did not confirm stop; check the printer before retrying",
@@ -487,16 +556,18 @@ pub struct Discovered {
 }
 pub fn probe(host: &str) -> Result<Option<Discovered>> {
     let host = normalize_host(host)?;
-    let identity = match agent(Duration::from_secs(4))
-        .get(&format!("{host}/api/version"))
+    let result = agent(Duration::from_secs(4))
+        .get(format!("{host}/api/version"))
         .call()
-    {
-        Err(ureq::Error::Status(401, response)) => response
-            .all("WWW-Authenticate")
-            .into_iter()
-            .any(|h| Challenge::parse(h).is_ok_and(|c| c.realm == "Printer API")),
-        Ok(response) if response.status() == 200 => json(response)?["text"] == "PrusaLink",
-        Err(ureq::Error::Transport(error)) => return Err(transport(error, false)),
+        .map_err(|error| transport(error, false))?;
+    let identity = match result.status().as_u16() {
+        401 => result
+            .headers()
+            .get_all("WWW-Authenticate")
+            .iter()
+            .filter_map(|header| header.to_str().ok())
+            .any(|header| Challenge::parse(header).is_ok_and(|c| c.realm == "Printer API")),
+        200 => json(result)?["text"] == "PrusaLink",
         _ => false,
     };
     let hostname = Url::parse(&host)
