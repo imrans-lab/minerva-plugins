@@ -99,8 +99,8 @@ static func _flush_proof(interference: Dictionary, clearance: Dictionary,
 		var bound: float = float(pair.get("bound_mm", -INF))
 		if pair.get("pass", false) != true or not bool(pair.get("expected", false)) \
 				or not is_finite(measured) or measured < 0.0 \
-				or not is_finite(bound) or bound < 0.0 \
-				or float(pair.get("required_mm", INF)) != 0.0 \
+				or not is_finite(bound) \
+				or bound < float(declaration["declared_required_mm"]) \
 				or _ReplyShape.pair_uncertified(pair) \
 				or bool(pair.get("interference", false)) \
 				or bool(pair.get("containment_undecidable", false)):
