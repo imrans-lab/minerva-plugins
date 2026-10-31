@@ -50,7 +50,7 @@
     },
     {
       "name": "minerva_prusalink_configure_printer",
-      "description": "Add or edit nonsecret printer metadata and return the stored slicing mapping plus the fixed secret_handle, without fetching a password. Set passwords directly in the panel, or through set_password whose arguments are logged. Up to eight printers; omit slot to add, use its slot to edit. Optional slicing maps an installed PrusaSlicer vendor/model/variant/profile; omission preserves a same-host mapping and changing host clears it.",
+      "description": "Add or edit nonsecret printer metadata and echo stored slicing/secret_handle. Normal configure never fetches a password. Optional full slicing maps installed profiles. Explicit autodetect_slicing:true instead reads an existing matching slot's authenticated identity and installed catalog; slicing_selection resolves ambiguous choices without hand-typed app paths. Ambiguity returns configured:false, needed_fields and candidates without saving. Configure metadata and set password through panel first. Omission preserves same-host mapping; changing host clears it. Up to eight slots.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -114,13 +114,86 @@
               "tool_count"
             ],
             "additionalProperties": false
+          },
+          "autodetect_slicing": {
+            "type": "boolean",
+            "default": false,
+            "description": "Opt in to read-only authenticated identity and installed-catalog resolution. Requires an existing slot with matching host/user and a panel-stored password; mutually exclusive with slicing."
+          },
+          "slicing_selection": {
+            "type": "object",
+            "description": "Explicit catalog choices for autodetect_slicing:true. Unknown firmware codes require model_id. Names are exact; print/material defaults and nozzle/HF are never guessed. Paths default to the standard installed macOS app; override for other installs.",
+            "properties": {
+              "model_id": {
+                "type": "string"
+              },
+              "variant": {
+                "type": "string"
+              },
+              "tool_count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 16
+              },
+              "printer_profile": {
+                "type": "string"
+              },
+              "print_profile": {
+                "type": "string"
+              },
+              "material_profile": {
+                "type": "string"
+              },
+              "executable": {
+                "type": "string"
+              },
+              "vendor_ini": {
+                "type": "string"
+              },
+              "vendor_id": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
           }
         },
         "required": [
           "name",
           "host"
         ],
-        "additionalProperties": false
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "not": {
+              "required": [
+                "slicing",
+                "autodetect_slicing"
+              ],
+              "properties": {
+                "autodetect_slicing": {
+                  "const": true
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "required": [
+                "slicing_selection"
+              ]
+            },
+            "then": {
+              "required": [
+                "autodetect_slicing"
+              ],
+              "properties": {
+                "autodetect_slicing": {
+                  "const": true
+                }
+              }
+            }
+          }
+        ]
       }
     },
     {

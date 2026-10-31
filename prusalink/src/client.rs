@@ -126,6 +126,7 @@ pub struct Client {
     nonce_count: u32,
     cnonce: String,
     upload_started: Option<Instant>,
+    identity_started: Option<Instant>,
 }
 impl Client {
     pub fn new(printer: Printer, password: Password) -> Result<Self> {
@@ -137,6 +138,7 @@ impl Client {
             agent: agent(Duration::from_secs(120)),
             challenge: None,
             upload_started: None,
+            identity_started: None,
             nonce_count: 0,
             cnonce: nonce.iter().map(|b| format!("{b:02x}")).collect(),
         })
@@ -158,7 +160,13 @@ impl Client {
                 .ok_or(Error::Protocol(
                     "Upload preflight deadline exceeded; no upload was sent",
                 )),
-            None => Ok(Duration::from_secs(120)),
+            None => match self.identity_started {
+                Some(started) => Duration::from_secs(8)
+                    .checked_sub(started.elapsed())
+                    .filter(|remaining| !remaining.is_zero())
+                    .ok_or(Error::Protocol("Printer identity read deadline exceeded")),
+                None => Ok(Duration::from_secs(120)),
+            },
         }
     }
     fn authenticate(&mut self) -> Result<()> {
@@ -262,6 +270,35 @@ impl Client {
         let job = self.get("/api/v1/job")?;
         let storage = self.get("/api/v1/storage")?;
         project_status(&self.printer.id(), &data, &job, &storage)
+    }
+    /// Explicit configuration probe. Project only identity fields, never raw info/serials.
+    pub fn slicing_identity(&mut self) -> Result<SlicingIdentity> {
+        self.identity_started = Some(Instant::now());
+        let result = (|| {
+            let version = self.get("/api/version")?;
+            let info = match self.get("/api/v1/info") {
+                Err(Error::Http(404)) => Value::Null,
+                result => result?,
+            };
+            let version_printer = match version.get("printer") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(value))
+                    if !value.is_empty()
+                        && value.len() <= 256
+                        && !value.chars().any(char::is_control) =>
+                {
+                    Some(value.clone())
+                }
+                _ => return Err(Error::Protocol("Invalid reported printer identity")),
+            };
+            Ok(SlicingIdentity {
+                version_printer,
+                version_nozzle_diameter: identity_nozzle(&version)?,
+                info_nozzle_diameter: identity_nozzle(&info)?,
+            })
+        })();
+        self.identity_started = None;
+        result
     }
     pub fn thumbnail(&mut self, offset: usize, reference: Option<&str>) -> Result<Value> {
         let job = self.get("/api/v1/job")?;
@@ -397,6 +434,23 @@ impl Client {
             ));
         }
         Ok(serde_json::json!({"printer":self.printer.id(),"job_id":id,"stop_requested":true}))
+    }
+}
+
+#[derive(Serialize)]
+pub struct SlicingIdentity {
+    pub version_printer: Option<String>,
+    pub version_nozzle_diameter: Option<f64>,
+    pub info_nozzle_diameter: Option<f64>,
+}
+fn identity_nozzle(value: &Value) -> Result<Option<f64>> {
+    match value.get("nozzle_diameter") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_f64()
+            .filter(|value| value.is_finite() && *value > 0.0 && *value <= 2.0)
+            .map(Some)
+            .ok_or(Error::Protocol("Invalid reported nozzle diameter")),
     }
 }
 

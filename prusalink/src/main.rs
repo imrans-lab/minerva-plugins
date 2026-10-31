@@ -8,6 +8,7 @@ use prusalink_plugin::config::{self, Printer, Store};
 use prusalink_plugin::discovery;
 use prusalink_plugin::error::{Error, Result};
 use prusalink_plugin::slicer;
+use prusalink_plugin::slicing_autodetect;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -132,6 +133,9 @@ struct ConfigureArgs {
     #[serde(default = "maker")]
     user: String,
     slicing: Option<prusalink_plugin::slicer::SlicerConfig>,
+    #[serde(default)]
+    autodetect_slicing: bool,
+    slicing_selection: Option<slicing_autodetect::Selections>,
 }
 fn maker() -> String {
     "maker".into()
@@ -208,9 +212,46 @@ fn tool(peer: &mut Peer, store: &mut Store, name: &str, value: &Value) -> Result
         }
         "configure_printer" => {
             let a: ConfigureArgs = args(value)?;
-            let printer = store.configure(a.slot, a.name, a.host, a.user, a.slicing)?;
+            if (a.autodetect_slicing && a.slicing.is_some())
+                || (!a.autodetect_slicing && a.slicing_selection.is_some())
+            {
+                return Err(Error::Invalid("Use either slicing or autodetect_slicing:true; slicing_selection requires autodetect"));
+            }
+            let mut resolution = None;
+            let slicing = if a.autodetect_slicing {
+                const SETUP: &str = "Autodetect requires an existing slot with matching host/user: configure nonsecret metadata, set the password through the panel, then call configure_printer with that slot and autodetect_slicing:true";
+                let existing = store
+                    .list()
+                    .iter()
+                    .find(|printer| Some(printer.slot) == a.slot)
+                    .filter(|printer| printer.user == a.user.trim())
+                    .ok_or(Error::Invalid(SETUP))?;
+                if existing.host != config::normalize_host(&a.host)? {
+                    return Err(Error::Invalid(SETUP));
+                }
+                // Never send an old host's credential to a proposed replacement host.
+                let password = peer.password(existing)?.ok_or(Error::Invalid(SETUP))?;
+                let identity = Client::new(existing.clone(), password)?.slicing_identity()?;
+                let result = slicing_autodetect::resolve(
+                    a.slicing_selection.unwrap_or_default(),
+                    identity,
+                    &config::data_directory()?.join("slicing"),
+                )?;
+                let Some(mapping) = result.mapping.clone() else {
+                    return Ok(json!({"configured":false,"autodetect":result}));
+                };
+                resolution = Some(result);
+                Some(mapping)
+            } else {
+                a.slicing
+            };
+            let printer = store.configure(a.slot, a.name, a.host, a.user, slicing)?;
             let mut reply = row(&printer);
             reply["secret_handle"] = json!(printer.handle());
+            if let Some(resolution) = resolution {
+                reply["configured"] = json!(true);
+                reply["autodetect"] = json!(resolution);
+            }
             Ok(reply)
         }
         "set_password" => {

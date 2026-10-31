@@ -13,6 +13,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
+use crate::slicer_catalog::Catalog;
+
+pub(crate) fn identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'-')
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -30,11 +38,7 @@ pub struct SlicerConfig {
 impl SlicerConfig {
     pub fn validate(&self) -> Result<()> {
         for value in [&self.vendor_id, &self.model_id, &self.variant] {
-            if value.is_empty()
-                || !value
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'-')
-            {
+            if !identifier(value) {
                 return Err(Error::Invalid(
                     "Slicer vendor, model and variant must be simple identifiers",
                 ));
@@ -90,25 +94,54 @@ pub fn sha256(path: &Path) -> Result<String> {
 }
 
 #[derive(Deserialize)]
-struct Models {
-    printer_models: Vec<Model>,
+pub(crate) struct Models {
+    pub printer_models: Vec<Model>,
 }
 #[derive(Deserialize)]
-struct Model {
-    id: String,
-    vendor_id: String,
-    variants: Vec<Variant>,
+pub(crate) struct Model {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    pub vendor_id: String,
+    pub variants: Vec<Variant>,
 }
 #[derive(Deserialize)]
-struct Variant {
-    name: serde_json::Value,
-    printer_profiles: Vec<PrinterProfile>,
+pub(crate) struct Variant {
+    pub name: serde_json::Value,
+    pub printer_profiles: Vec<PrinterProfile>,
 }
 #[derive(Deserialize)]
-struct PrinterProfile {
-    name: String,
-    extruders_cnt: u8,
-    bed: Bed,
+pub(crate) struct PrinterProfile {
+    pub name: String,
+    pub extruders_cnt: u8,
+    pub bed: Bed,
+}
+impl Variant {
+    pub fn name(&self) -> String {
+        self.name
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.name.to_string())
+    }
+}
+impl Models {
+    /// Both manual and automatic mappings must identify exactly one catalog printer.
+    pub fn printer(&self, config: &SlicerConfig) -> Result<&PrinterProfile> {
+        let mut matching = self
+            .printer_models
+            .iter()
+            .filter(|model| model.id == config.model_id && model.vendor_id == config.vendor_id)
+            .flat_map(|model| &model.variants)
+            .filter(|variant| variant.name() == config.variant)
+            .flat_map(|variant| &variant.printer_profiles)
+            .filter(|profile| {
+                profile.name == config.printer_profile && profile.extruders_cnt == config.tool_count
+            });
+        match (matching.next(), matching.next()) {
+            (Some(profile), None) => Ok(profile),
+            _ => Err(Error::Invalid("Printer model, variant, tool count and profile must match the installed vendor catalog")),
+        }
+    }
 }
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Bed {
@@ -159,6 +192,15 @@ pub struct ProfileSummary {
     pub compatibility: &'static str,
 }
 impl Profiles {
+    pub(crate) fn compatible(&self, print: &str, material: &str) -> bool {
+        self.print_profiles.iter().any(|profile| {
+            profile.name == print
+                && profile
+                    .filament_profiles
+                    .iter()
+                    .any(|name| name == material)
+        })
+    }
     fn summary(&self) -> ProfileSummary {
         let print_profiles: Vec<_> = self
             .print_profiles
@@ -200,128 +242,29 @@ impl Run {
     pub fn prepare(config: &SlicerConfig, root: &Path) -> Result<Self> {
         let started = Instant::now();
         config.validate()?;
-        let mut nonce = [0_u8; 16];
-        getrandom::fill(&mut nonce).map_err(|_| Error::Io("OS randomness unavailable"))?;
-        fs::create_dir_all(root).map_err(|_| Error::Io("Cannot create slicer output root"))?;
-        let directory = root.join(nonce.iter().map(|b| format!("{b:02x}")).collect::<String>());
-        let mut builder = fs::DirBuilder::new();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        builder
-            .create(&directory)
-            .map_err(|_| Error::Io("Cannot create private slicer run"))?;
-        fs::create_dir(directory.join("vendor"))
-            .map_err(|_| Error::Io("Cannot create isolated slicer vendor directory"))?;
-        let executable = local_file(&config.executable)?;
-        let executable_sha256 = sha256(&executable)?;
-        let vendor_sha256 = sha256(&config.vendor_ini)?;
-        fs::copy(
+        let settings = format!(
+            "[vendor:{}]\nmodel:{} = {}\n",
+            config.vendor_id, config.model_id, config.variant
+        );
+        let catalog = Catalog::prepare(
+            &config.executable,
             &config.vendor_ini,
-            directory
-                .join("vendor")
-                .join(format!("{}.ini", config.vendor_id)),
-        )
-        .map_err(|_| Error::Io("Cannot copy slicer vendor profile"))?;
-        if sha256(
-            &directory
-                .join("vendor")
-                .join(format!("{}.ini", config.vendor_id)),
-        )? != vendor_sha256
-        {
-            return Err(Error::Io("Slicer vendor profile changed while copying"));
-        }
-        fs::write(
-            directory.join("PrusaSlicer.ini"),
-            format!(
-                "[vendor:{}]\nmodel:{} = {}\n",
-                config.vendor_id, config.model_id, config.variant
-            ),
-        )
-        .map_err(|_| Error::Io("Cannot write isolated slicer settings"))?;
-        let args = vec![
-            "--query-printer-models".into(),
-            "--output".into(),
-            directory.join("models.json").into_os_string(),
-        ];
-        run_cli(
-            &executable,
-            &directory,
-            "models",
-            args,
-            remaining(started)?,
-            true,
+            &config.vendor_id,
+            &settings,
+            root,
+            started,
         )?;
-        let models: Models = read_json(&directory.join("models.json"))?;
-        let matching: Vec<_> = models
-            .printer_models
-            .into_iter()
-            .filter(|m| m.id == config.model_id && m.vendor_id == config.vendor_id)
-            .flat_map(|m| m.variants)
-            .filter(|v| {
-                v.name
-                    .as_str()
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| v.name.to_string())
-                    == config.variant
-            })
-            .flat_map(|v| v.printer_profiles)
-            .filter(|p| p.name == config.printer_profile && p.extruders_cnt == config.tool_count)
-            .collect();
-        if matching.len() != 1 {
-            return Err(Error::Invalid("Printer model, variant, tool count and profile must match the installed vendor catalog"));
-        }
-        let bed = matching
-            .into_iter()
-            .next()
-            .ok_or(Error::Protocol("Missing slicer printer profile"))?
-            .bed;
+        let models = catalog.models()?;
+        let bed = models.printer(config)?.bed.clone();
         bed.center()?;
-        let args = vec![
-            "--printer-profile".into(),
-            config.printer_profile.clone().into(),
-            "--query-print-filament-profiles".into(),
-            "--output".into(),
-            directory.join("profiles.json").into_os_string(),
-        ];
-        run_cli(
-            &executable,
-            &directory,
-            "profiles",
-            args,
-            remaining(started)?,
-            true,
-        )?;
-        let profiles: Profiles = read_json(&directory.join("profiles.json"))?;
-        if profiles.printer_profile != config.printer_profile || profiles.print_profiles.is_empty()
-        {
-            return Err(Error::Protocol(
-                "Slicer returned an unexpected profile catalog",
-            ));
-        }
-        run_cli(
-            &executable,
-            &directory,
-            "version",
-            vec!["--help".into()],
-            remaining(started)?,
-            false,
-        )?;
-        let version = fs::read_to_string(directory.join("version.log"))
-            .map_err(|_| Error::Io("Cannot read slicer version"))?
-            .lines()
-            .next()
-            .filter(|line| line.starts_with("PrusaSlicer-") && line.len() < 256)
-            .ok_or(Error::Protocol("Unrecognized PrusaSlicer version"))?
-            .to_owned();
+        let profiles = catalog.profiles(&config.printer_profile)?;
+        let version = catalog.version()?;
         Ok(Self {
-            directory,
+            directory: catalog.directory,
             config: config.clone(),
-            executable,
-            executable_sha256,
-            vendor_sha256,
+            executable: catalog.executable,
+            executable_sha256: catalog.executable_sha256,
+            vendor_sha256: catalog.vendor_sha256,
             bed,
             profiles,
             started,
@@ -352,20 +295,6 @@ pub fn remaining(started: Instant) -> Result<u64> {
         .map(|left| left.as_secs().max(1))
         .ok_or(Error::Io("Slicer tool exceeded its 20 second total budget"))
 }
-fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
-    if fs::metadata(path)
-        .map_err(|_| Error::Io("Slicer did not produce its query output"))?
-        .len()
-        > 4 * 1024 * 1024
-    {
-        return Err(Error::Protocol("Slicer query output exceeds4MiB"));
-    }
-    serde_json::from_reader(
-        File::open(path).map_err(|_| Error::Io("Cannot read slicer query output"))?,
-    )
-    .map_err(|_| Error::Protocol("Invalid slicer query output"))
-}
-
 /// Bounded local child. Runs only on Unix, with an owned process group.
 pub fn run_cli(
     executable: &Path,
@@ -565,12 +494,7 @@ pub fn slice(config: &SlicerConfig, root: &Path, args: SliceArgs) -> Result<Slic
         .material_profile
         .as_ref()
         .unwrap_or(&config.material_profile);
-    let compatible = run
-        .profiles
-        .print_profiles
-        .iter()
-        .any(|p| p.name == *print && p.filament_profiles.contains(material));
-    if !compatible {
+    if !run.profiles.compatible(print, material) {
         return Err(Error::Invalid(
             "Print/material profiles are not compatible with this printer catalog",
         ));

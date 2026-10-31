@@ -2,8 +2,8 @@
 
 Connect Minerva to local PrusaLink printers, including XL, MK4 and Core One.
 Enable PrusaLink on the printer and enter its generated password in the panel.
-The default username is `maker`. Prusa Connect/cloud access and slicing are outside
-this plugin's scope.
+The default username is `maker`. Local slicing uses an installed PrusaSlicer;
+Prusa Connect/cloud access is outside this plugin's scope.
 
 ## Setup
 
@@ -61,7 +61,7 @@ tool-call log. Use the panel when the agent should not receive the password.
 | --- | --- | --- |
 | `discover` | optional `hosts` (1–32 HTTP(S) hosts) | Matching PrusaLink hosts, probe/unreachable counts |
 | `list_printers` | none | Stable ids, names, hosts, users, `has_password`, stored `slicing` mapping |
-| `configure_printer` | `name`, `host`, optional `user`, `slot`, `slicing` | Add/edit nonsecret metadata; returns stored `slicing` mapping and fixed secret handle for panel IPC without fetching a password |
+| `configure_printer` | `name`, `host`, optional `user`, `slot`, `slicing` or `autodetect_slicing:true`, `slicing_selection` | Add/edit nonsecret metadata; echo stored mapping and secret handle. Explicit autodetect reads identity/catalog and refuses ambiguous choices without saving |
 | `set_password` | `printer`, `password` | Write-only vault save, then one authenticated status probe; returns only `printer`, `saved:true`, `auth_ok` |
 | `remove_printer` | `printer` | Deletes vault secret, verifies `exists:false`, removes metadata |
 | `status` | `printer` | Read-only snapshot of status, job and USB storage |
@@ -95,8 +95,8 @@ Malformed config is refused rather than overwritten.
 
 The panel sends passwords directly from its field through capability IPC to
 Minerva's vault under `prusalink_printer1`…`prusalink_printer8`. The backend uses
-private host capability requests to fetch the current secret afresh for each
-tool request; it never persists a password or puts one in results, process command
+private host capability requests to fetch the current secret afresh when a tool
+needs authentication; it never persists a password or puts one in results, process command
 arguments or plugin logs. The explicit write-only `set_password` alternative sends
 the supplied value through the same vault capability, then authenticates using
 the saved vault value. A failed probe returns `saved:true, auth_ok:false`; a failed
@@ -170,7 +170,57 @@ material_profile?,extruder?}` use an already installed PrusaSlicer. They never
 fetch a password, contact the printer, upload, or start a print. Upload and print
 remain separate tools requiring their own operator authorization.
 
-Configure the printer's optional `slicing` object through `configure_printer`:
+Use `configure_printer` with `autodetect_slicing:true` to resolve installed paths
+and catalog choices. First configure nonsecret metadata and set the password
+through the panel. Then supply that existing `slot` and its matching `host` and
+`user`; autodetect never sends an old host's password to a replacement host.
+For example:
+
+```json
+{
+  "slot": 1, "name": "Workshop XL", "host": "http://prusa-xl.local", "user": "maker",
+  "autodetect_slicing": true,
+  "slicing_selection": {"model_id": "XL2IS", "variant": "0.4"}
+}
+```
+
+The optional, strict `slicing_selection` accepts exact `model_id`, `variant`,
+`tool_count`, `printer_profile`, `print_profile`, and `material_profile` choices.
+Missing or conflicting choices return `configured:false`, a reason,
+`autodetect.needed_fields`, and compact `autodetect.candidates`. Add the required
+selections and retry. Material candidates belong to the selected print profile.
+No metadata or prior slicing mapping changes until all choices resolve uniquely.
+An invalid call or failed probe/query also leaves configuration intact. Full
+`slicing` and `autodetect_slicing:true` are mutually exclusive; `slicing_selection`
+requires explicit autodetect. Ordinary configure never fetches a password.
+
+The standard macOS app at `/Applications/PrusaSlicer.app` supplies paths by default.
+Other macOS/Linux installs can select absolute `executable` and `vendor_ini` paths,
+plus `vendor_id` when it differs from the INI filename stem. Missing installs
+return needed path fields; nothing is downloaded. Manual full mappings remain
+available without identity probing.
+
+Autodetect alone reads `/api/version` and `/api/v1/info` through the existing
+Digest client and slot's vault handle, with an eight-second shared request
+deadline. The sanitized identity receipt retains only `version_printer`,
+`version_nozzle_diameter`, and `info_nozzle_diameter` from those endpoints. Info
+may be unavailable (404); identity fields are optional. Exact reported catalog
+model IDs or complete names constrain selection. Opaque firmware codes remain
+unverified evidence and require an explicit model ID; the reply then records
+`model_source:user_selection`. Recognized contradictory model/nozzle evidence
+refuses. Hostnames, serials and loaded filament never select a profile. No
+tool-count or HF report is assumed: exact catalog choices or explicit selections
+must resolve those fields. Print/material choices use exact compatibility, with
+no guessed defaults or first `default_materials` entry.
+
+Catalog discovery enables all model variants declared in a private copy of the
+installed vendor INI, then validates with the same isolated CLI queries used by
+manual slicing mappings. A successful auto reply includes `configured:true`, the
+stored `slicing`, identity provenance, hashes, version and private query directory.
+Its CLI work shares the existing 20-second budget and process limits. It never
+slices, uploads, starts a print, or edits GUI settings.
+
+Alternatively configure the optional full `slicing` object directly:
 
 ```json
 {
