@@ -82,9 +82,6 @@ func _refresh() -> void:
 	if panel == null or not is_instance_valid(panel):
 		return
 	var sidebar: Control = panel._wide_sidebar
-	if panel._wide_layout.visible:
-		_sidebar_width = sidebar.size.x
-	_sidebar_width = maxf(_sidebar_width, sidebar.get_combined_minimum_size().x)
 	var split: SplitContainer = panel._wide_layout
 	var grid: GridContainer = panel.get_node(GRID_PATH)
 	var gaps := Vector2(grid.get_theme_constant("h_separation"),
@@ -94,6 +91,13 @@ func _refresh() -> void:
 	var content: Control = grid.get_parent()
 	var split_gap: float = maxf(0.0, split.get_minimum_size().x
 		- content.get_combined_minimum_size().x - sidebar.get_combined_minimum_size().x)
+	# The sidebar may shrink inside its split region. The expanding content
+	# fills its region, so its bounds reveal the full allocation after a drag.
+	# Retain that allocation while wide is hidden; its nonexpanding second
+	# region keeps the same width across resizes until constrained by minima.
+	if split.visible and content.size.x > 0.0:
+		_sidebar_width = split.size.x - content.size.x - split_gap
+	_sidebar_width = maxf(_sidebar_width, sidebar.get_combined_minimum_size().x)
 	var was_single: bool = bool(_decision.get("is_single", false))
 	_decision = _Policy.choose(_preference, panel._responsive.size,
 		_sidebar_width, split_gap, gaps, was_single)
