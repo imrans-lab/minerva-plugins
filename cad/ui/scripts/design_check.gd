@@ -270,6 +270,12 @@ static func _legs_reply(panel, args: Dictionary, per_part: Callable,
 			await _unbusy(panel, clearance_args, per_part, clearance), clearance)
 	else:
 		clearance_reply = await _unbusy(panel, clearance_args, per_part, clearance)
+	if not handle.is_empty():
+		var ticket_error: String = _DesignContacts.ticket_error(
+			args, _legs(interference_reply), clearance_reply)
+		if not ticket_error.is_empty():
+			clearance_reply["design_scope_error"] = ticket_error
+			_unknown(state, ticket_error)
 	var clearance_rows: Array = _fold_clearance(clearance_reply, state)
 	state.evidence["clearance"] = clearance_reply
 	var satisfied_contacts: Array = _DesignContacts.reconcile(
