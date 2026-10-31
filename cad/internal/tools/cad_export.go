@@ -61,16 +61,24 @@ var exportFirstReply = 20 * time.Second
 // than any export, so only a job nobody came back for is ever swept.
 const exportJobKeep = 15 * time.Minute
 
+// These bound detached starts before argument copies or goroutines are made.
+// The worker runner and MCP request waiters have their own independent budgets.
+const (
+	maxPendingExports     = 16
+	maxPendingExportBytes = 32 << 20
+)
+
 // exportJob is one detached export. done is closed when the worker has
 // answered; result/err are then final and can be read by repeated collectors.
 type exportJob struct {
-	id       string
-	key      string
-	started  time.Time
-	finished time.Time
-	done     chan struct{}
-	result   json.RawMessage
-	err      error
+	inputBytes int
+	id         string
+	key        string
+	started    time.Time
+	finished   time.Time
+	done       chan struct{}
+	result     json.RawMessage
+	err        error
 }
 
 var (
@@ -128,7 +136,11 @@ func handleExportWith(ctx context.Context, params json.RawMessage,
 	} else {
 		key := exportJobKey(params)
 		var fresh bool
-		job, fresh = beginExportJob(key)
+		var err error
+		job, fresh, err = beginExportJob(key, len(params))
+		if err != nil {
+			return nil, err
+		}
 		if fresh {
 			pinned := append(json.RawMessage(nil), params...)
 			go func() {
@@ -208,17 +220,29 @@ func exportJobKey(params json.RawMessage) string {
 // beginExportJob returns the job for key, and whether it is new. An existing
 // job — running or finished — is joined rather than started again, so a
 // caller asking twice never sets a second copy of the same export going.
-func beginExportJob(key string) (*exportJob, bool) {
+func beginExportJob(key string, inputBytes int) (*exportJob, bool, error) {
 	exportMu.Lock()
 	defer exportMu.Unlock()
 	sweepExportJobsLocked()
 	if job, ok := exportJobs[key]; ok {
-		return job, false
+		return job, false, nil
 	}
-	job := &exportJob{id: fmt.Sprintf("export-%d-%d", time.Now().UnixNano(), exportSequence.Add(1)), key: key, started: time.Now(), done: make(chan struct{})}
+	pending, retainedBytes := 0, 0
+	for _, job := range exportHandles {
+		select {
+		case <-job.done:
+		default:
+			pending++
+			retainedBytes += job.inputBytes
+		}
+	}
+	if pending >= maxPendingExports || inputBytes > maxPendingExportBytes-retainedBytes {
+		return nil, false, &bridge.WorkerError{Kind: "busy", Message: "CAD detached export capacity reached; retry later"}
+	}
+	job := &exportJob{inputBytes: inputBytes, id: fmt.Sprintf("export-%d-%d", time.Now().UnixNano(), exportSequence.Add(1)), key: key, started: time.Now(), done: make(chan struct{})}
 	exportHandles[job.id] = job
 	exportJobs[key] = job
-	return job, true
+	return job, true, nil
 }
 
 // Collection releases the legacy request key so another start can write again.
@@ -269,4 +293,27 @@ func sweepExportJobsLocked() {
 		default:
 		}
 	}
+}
+
+// WaitExports joins already-created detached jobs. The server calls this only
+// after stopping admission and joining handlers, so no new job can be added.
+func WaitExports(ctx context.Context) error {
+	exportMu.Lock()
+	var done []<-chan struct{}
+	for _, job := range exportHandles {
+		select {
+		case <-job.done:
+		default:
+			done = append(done, job.done)
+		}
+	}
+	exportMu.Unlock()
+	for _, ch := range done {
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return fmt.Errorf("join detached CAD exports: %w", ctx.Err())
+		}
+	}
+	return nil
 }

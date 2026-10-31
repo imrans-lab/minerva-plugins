@@ -16,7 +16,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -158,16 +157,32 @@ func emitHostNotify(level, message string, details interface{}) {
 // Server-owned worker, tool registry and evaluation registrations
 // ---------------------------------------------------------------------------
 
+type evaluation struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
 type server struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	runnerMu                         sync.Mutex
+	runner                           *workerRunner
+	tasks                            sync.WaitGroup
+	admissionMu                      sync.Mutex
+	requestCount, requestBytes       int
+	collectionCount, collectionBytes int
+
 	worker     *bridge.Worker
 	registry   *tools.Registry
 	inflightMu sync.Mutex
 	// inflight maps request_id to its current evaluation cancellation.
-	inflight map[string]context.CancelFunc
+	inflight map[string]*evaluation
 }
 
 func newServer() *server {
-	return &server{inflight: make(map[string]context.CancelFunc)}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &server{ctx: ctx, cancel: cancel, inflight: make(map[string]*evaluation)}
 }
 
 // initWorker resolves the Python interpreter path and constructs the Worker.
@@ -266,7 +281,9 @@ func (s *server) beginEvaluateCancellable(parent context.Context, args json.RawM
 	}
 	// Tolerate missing/non-object args — old callers don't pass request_id.
 	if len(args) > 0 {
-		_ = json.Unmarshal(args, &a)
+		if err := json.Unmarshal(args, &a); err != nil {
+			return parent, "", nil
+		}
 	}
 	if a.RequestID == "" {
 		return parent, "", nil
@@ -278,27 +295,31 @@ func (s *server) beginEvaluateCancellable(parent context.Context, args json.RawM
 	// cancel it before overwriting (defensive — request_ids are usec-keyed
 	// and unique in practice, but a re-entrant panel bug shouldn't leak).
 	if prior, ok := s.inflight[a.RequestID]; ok {
-		prior()
+		prior.cancel()
 	}
-	s.inflight[a.RequestID] = cancel
+	s.inflight[a.RequestID] = &evaluation{ctx: ctx, cancel: cancel}
 	s.inflightMu.Unlock()
 	return ctx, a.RequestID, nil
 }
 
-// endEvaluateCancellable removes the inflight entry for key. Safe to call
-// when the key is absent (e.g. cancelled before completion).
-func (s *server) endEvaluateCancellable(key string) {
+// endEvaluateCancellable removes only this registration. Completion and cancel
+// linearize under inflightMu; a canceled or replaced request cannot publish a
+// late result, and its cleanup cannot erase a newer duplicate registration.
+func (s *server) endEvaluateCancellable(ctx context.Context, key string) bool {
 	if key == "" {
-		return
+		return ctx.Err() == nil
 	}
 	s.inflightMu.Lock()
-	if cancel, ok := s.inflight[key]; ok {
+	defer s.inflightMu.Unlock()
+	if current, ok := s.inflight[key]; ok && current.ctx == ctx {
+		valid := ctx.Err() == nil
 		// Cancel before delete to release any goroutine still awaiting the
 		// derived context. Cancelling an already-cancelled CancelFunc is a no-op.
-		cancel()
+		current.cancel()
 		delete(s.inflight, key)
+		return valid
 	}
-	s.inflightMu.Unlock()
+	return false
 }
 
 // handleCancelEval looks up the inflight entry for the supplied request_id
@@ -317,8 +338,8 @@ func (s *server) handleCancelEval(id json.RawMessage, args json.RawMessage) rpcR
 
 	cancelled := false
 	s.inflightMu.Lock()
-	if cancel, ok := s.inflight[a.RequestID]; ok {
-		cancel()
+	if current, ok := s.inflight[a.RequestID]; ok {
+		current.cancel()
 		delete(s.inflight, a.RequestID)
 		cancelled = true
 	}
@@ -337,25 +358,6 @@ func (s *server) handleCancelEval(id json.RawMessage, args json.RawMessage) rpcR
 			{"type": "text", "text": string(envelopeJSON)},
 		},
 	})
-}
-
-// ensureWorkerSpawned starts the Python worker under a process-lifetime
-// context.
-//
-// bridge.Worker spawns lazily inside Call and binds the subprocess to
-// whichever context reached Call first. A cad.evaluate carrying a request_id
-// runs under a per-request cancellable context, so letting it be the spawning
-// call ties the worker's life to that one request: cancelling it (the panel
-// closed) — or merely finishing it, since the cancel func is released on
-// return — kills the worker process. Whatever request is in flight beside it
-// then dies with "worker stdout closed unexpectedly" (kind=crashed).
-// Spawning here first means Call always finds a live worker and the
-// per-request context governs only the request.
-func (s *server) ensureWorkerSpawned() error {
-	if s.worker == nil || s.worker.IsAlive() {
-		return nil
-	}
-	return s.worker.Start(context.Background())
 }
 
 // workerFailureResponse renders a worker/spawn failure the way the panel and
@@ -420,55 +422,58 @@ func (s *server) handleToolsList(id json.RawMessage) rpcResponse {
 	})
 }
 
-func (s *server) handleToolsCall(id json.RawMessage, params json.RawMessage) rpcResponse {
-	// Parse the tools/call params envelope.
+// prepareToolsCall runs on the reader before scheduling, so a following
+// cancel cannot overtake evaluation registration. Its closure owns cleanup.
+func (s *server) prepareToolsCall(id json.RawMessage, params json.RawMessage) (func() rpcResponse, error) {
 	var p struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
 	}
 	if err := json.Unmarshal(params, &p); err != nil {
-		return errResponse(id, -32700, fmt.Sprintf("tools/call: parse params: %v", err))
+		return nil, fmt.Errorf("tools/call: parse params: %w", err)
 	}
-
-	log.Printf("cad-plugin: tools/call: %s", p.Name)
-
-	// cad.cancel_eval is a control-plane tool: it never reaches the worker.
-	// Intercept here so we can mutate the inflight map directly.
-	if p.Name == "cad.cancel_eval" {
-		return s.handleCancelEval(id, p.Arguments)
+	if len(p.Arguments) > maxPayloadBytes {
+		return nil, fmt.Errorf("tools/call: arguments exceed 8 MiB payload limit")
 	}
-
-	// Spawn the worker before deriving any per-request context so the
-	// subprocess never inherits one (see ensureWorkerSpawned).
-	if err := s.ensureWorkerSpawned(); err != nil {
-		return workerFailureResponse(id, p.Name, err)
-	}
-
-	ctx := context.Background()
-	// cad.evaluate may carry request_id for cancellation. If present, derive
-	// a cancellable context and register it; the cancel_eval handler will
-	// trip the cancel func, which propagates into bridge.Worker.Call as a
-	// kind=cancelled error.
+	ctx, key := s.ctx, ""
 	if p.Name == "cad.evaluate" {
-		cctx, key, perr := s.beginEvaluateCancellable(ctx, p.Arguments)
-		if perr != nil {
-			return errResponse(id, -32602, fmt.Sprintf("cad.evaluate: %v", perr))
-		}
-		ctx = cctx
-		if key != "" {
-			defer s.endEvaluateCancellable(key)
+		var err error
+		ctx, key, err = s.beginEvaluateCancellable(ctx, p.Arguments)
+		if err != nil {
+			return nil, err
 		}
 	}
+	return func() rpcResponse {
+		return s.handleToolsCall(ctx, id, p.Name, p.Arguments, key)
+	}, nil
+}
 
-	result, err, found := s.registry.Dispatch(ctx, s.worker, p.Name, p.Arguments)
+func (s *server) handleToolsCall(ctx context.Context, id json.RawMessage, toolName string, args json.RawMessage, key string) rpcResponse {
+	log.Printf("cad-plugin: tools/call: %s", toolName)
+	if toolName == "cad.cancel_eval" {
+		return s.handleCancelEval(id, args)
+	}
+	var result json.RawMessage
+	var err error
+	found := true
+	if ctx.Err() != nil {
+		err = cancelledError(ctx.Err())
+	} else {
+		result, err, found = s.registry.Dispatch(ctx, s.workerCalls(), toolName, args)
+	}
+	// Finalize identity before emitting success, errors or error notifications.
+	// A later cancel sees a completed registration and returns cancelled=false.
+	if !s.endEvaluateCancellable(ctx, key) {
+		return workerFailureResponse(id, toolName, cancelledError(context.Canceled))
+	}
 	if !found {
-		return errResponse(id, -32601, fmt.Sprintf("method not found: %s", p.Name))
+		return errResponse(id, -32601, fmt.Sprintf("method not found: %s", toolName))
 	}
 
 	if err != nil {
 		// Worker errors are returned as MCP tool result content (not MCP errors)
 		// so the LLM can inspect them. Only internal/protocol errors become MCP errors.
-		return workerFailureResponse(id, p.Name, err)
+		return workerFailureResponse(id, toolName, err)
 	}
 
 	// Wrap the raw result in {ok: true, result: <result>} so the panel-side
@@ -508,6 +513,8 @@ func workerErrorToast(toolName string, we *bridge.WorkerError) (level, message s
 		// A 3MF the writer refused. The message already names the defect
 		// class, its count and the part, so it goes to the user verbatim:
 		// "worker error" told the owner nothing they could act on.
+		return "warning", fmt.Sprintf("CAD plugin [%s]: %s", toolName, we.Message)
+	case "busy":
 		return "warning", fmt.Sprintf("CAD plugin [%s]: %s", toolName, we.Message)
 	case "timeout":
 		return "warning", fmt.Sprintf("CAD plugin [%s]: request timed out — %s", toolName, we.Message)
@@ -553,50 +560,73 @@ func isCriticalStderrLine(line string) bool {
 // Dispatch
 // ---------------------------------------------------------------------------
 
-func (s *server) dispatch(enc *json.Encoder, msg *rpcRequest) {
-	// Notifications have a null or absent id.  Per JSON-RPC 2.0, no response
-	// is sent for notifications.
+func (s *server) dispatch(enc *json.Encoder, msg *rpcRequest) bool {
 	isNotification := len(msg.ID) == 0 || string(msg.ID) == "null"
-
+	if msg.Method == "shutdown" {
+		log.Printf("cad-plugin: shutdown requested — stopping worker")
+		return false
+	}
+	if msg.Method == "notifications/initialized" {
+		log.Printf("cad-plugin: notifications/initialized (no-op)")
+		return true
+	}
+	if isNotification {
+		return true
+	}
 	switch msg.Method {
 	case "initialize":
-		if isNotification {
-			return
-		}
 		send(enc, handleInitialize(msg.ID))
-
-	case "notifications/initialized":
-		// No-op; Minerva sends this after receiving our initialize response.
-		log.Printf("cad-plugin: notifications/initialized (no-op)")
-
 	case "tools/list":
-		if isNotification {
-			return
-		}
 		send(enc, s.handleToolsList(msg.ID))
-
 	case "tools/call":
-		if isNotification {
-			return
+		// Control cancellation is inline and never consumes worker/task admission.
+		var p struct {
+			Name      string          `json:"name"`
+			Arguments json.RawMessage `json:"arguments"`
 		}
-		send(enc, s.handleToolsCall(msg.ID, msg.Params))
-
-	case "shutdown":
-		log.Printf("cad-plugin: shutdown requested — shutting down worker")
-		if s.worker != nil {
-			s.worker.Shutdown(workerShutdownTimeout)
+		if err := json.Unmarshal(msg.Params, &p); err != nil {
+			send(enc, errResponse(msg.ID, -32700, fmt.Sprintf("tools/call: parse params: %v", err)))
+			return true
 		}
-		log.Printf("cad-plugin: exiting")
-		os.Exit(0)
-
+		if p.Name == "cad.cancel_eval" {
+			if len(p.Arguments) > maxPayloadBytes {
+				send(enc, errResponse(msg.ID, -32602, "arguments exceed 8 MiB payload limit"))
+			} else {
+				send(enc, s.handleCancelEval(msg.ID, p.Arguments))
+			}
+			return true
+		}
+		// Reserve before registration, so refused requests cannot replace an eval.
+		collection := false
+		if p.Name == "cad.export" {
+			var a struct {
+				JobID string `json:"job_id"`
+			}
+			if err := json.Unmarshal(p.Arguments, &a); err == nil {
+				collection = a.JobID != ""
+			}
+		}
+		size := len(msg.Params) + len(msg.ID)
+		if !s.admitRequest(size, collection) {
+			send(enc, errResponse(msg.ID, -32000, "CAD request capacity reached; retry later"))
+			return true
+		}
+		call, err := s.prepareToolsCall(msg.ID, msg.Params)
+		if err != nil {
+			s.releaseRequest(size, collection)
+			send(enc, errResponse(msg.ID, -32602, err.Error()))
+			return true
+		}
+		s.tasks.Add(1)
+		go func() {
+			defer s.tasks.Done()
+			defer s.releaseRequest(size, collection)
+			send(enc, call())
+		}()
 	default:
-		if isNotification {
-			log.Printf("cad-plugin: unknown notification: %s (ignored)", msg.Method)
-			return
-		}
-		log.Printf("cad-plugin: unknown method: %s", msg.Method)
 		send(enc, errResponse(msg.ID, -32601, "Method not found: "+msg.Method))
 	}
+	return true
 }
 
 // ---------------------------------------------------------------------------
@@ -617,36 +647,15 @@ func main() {
 	s.initWorker()
 
 	enc := json.NewEncoder(os.Stdout)
-	scanner := bufio.NewScanner(os.Stdin)
-	// Increase scanner buffer to handle potentially large params.
-	scanner.Buffer(make([]byte, 1<<20), 1<<20)
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-
-		var msg rpcRequest
-		if err := json.Unmarshal(line, &msg); err != nil {
-			log.Printf("JSON parse error: %v", err)
-			send(enc, errResponse(json.RawMessage("null"), -32700, "Parse error"))
-			continue
-		}
-
-		s.dispatch(enc, &msg)
+	readErr := s.serve(s.ctx, os.Stdin, enc)
+	shutdownCtx, stopShutdown := context.WithTimeout(context.Background(), serverShutdownTimeout)
+	defer stopShutdown()
+	if err := s.shutdown(shutdownCtx); err != nil {
+		log.Printf("shutdown: %v", err)
 	}
-
-	if err := scanner.Err(); err != nil {
-		log.Printf("stdin read error: %v", err)
-		// Graceful worker shutdown before abnormal exit.
-		if s.worker != nil {
-			s.worker.Shutdown(workerShutdownTimeout)
-		}
+	if readErr != nil {
+		log.Printf("stdin read error: %v", readErr)
 		os.Exit(1)
 	}
-	log.Printf("stdin closed — exiting")
-	if s.worker != nil {
-		s.worker.Shutdown(workerShutdownTimeout)
-	}
+	log.Printf("stdin closed or shutdown requested — exiting")
 }

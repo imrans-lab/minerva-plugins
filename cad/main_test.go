@@ -205,7 +205,7 @@ func resetInflight(t *testing.T, s *server) {
 	s.inflightMu.Lock()
 	defer s.inflightMu.Unlock()
 	for k, c := range s.inflight {
-		c()
+		c.cancel()
 		delete(s.inflight, k)
 	}
 }
@@ -315,7 +315,7 @@ func TestEndEvaluateCancellable_RemovesEntry(t *testing.T) {
 	resetInflight(t, s)
 
 	args := json.RawMessage(`{"source":"x","request_id":"eval_end"}`)
-	_, key, _ := s.beginEvaluateCancellable(context.Background(), args)
+	ctx, key, _ := s.beginEvaluateCancellable(context.Background(), args)
 
 	s.inflightMu.Lock()
 	_, before := s.inflight[key]
@@ -324,7 +324,7 @@ func TestEndEvaluateCancellable_RemovesEntry(t *testing.T) {
 		t.Fatalf("setup: expected inflight registration")
 	}
 
-	s.endEvaluateCancellable(key)
+	s.endEvaluateCancellable(ctx, key)
 
 	s.inflightMu.Lock()
 	_, after := s.inflight[key]
@@ -370,5 +370,5 @@ func TestBeginEvaluateCancellable_DuplicateRequestIDCancelsPrior(t *testing.T) {
 	}
 
 	// Cleanup.
-	s.endEvaluateCancellable("eval_dup")
+	s.endEvaluateCancellable(ctxB, "eval_dup")
 }

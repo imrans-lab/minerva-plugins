@@ -14,6 +14,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -115,7 +116,11 @@ func useStubWorker(t *testing.T) *server {
 	s.initRegistry()
 	s.worker = bridge.New(python, dir, workerModule)
 	t.Cleanup(func() {
-		s.worker.Shutdown(workerShutdownTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), serverShutdownTimeout)
+		defer cancel()
+		if err := s.shutdown(ctx); err != nil {
+			t.Errorf("server shutdown: %v", err)
+		}
 	})
 	return s
 }
@@ -142,8 +147,11 @@ func callEvaluate(t *testing.T, s *server, requestID string, fail bool) (ok bool
 		t.Fatalf("marshal params: %v", err)
 	}
 
-	resp := s.handleToolsCall(json.RawMessage(`1`), params)
-	return decodeEnvelope(t, resp)
+	call, err := s.prepareToolsCall(json.RawMessage(`1`), params)
+	if err != nil {
+		return decodeEnvelope(t, errResponse(json.RawMessage(`1`), -32602, err.Error()))
+	}
+	return decodeEnvelope(t, call())
 }
 
 // decodeEnvelope pulls {ok, error.kind} out of an MCP tool result.
