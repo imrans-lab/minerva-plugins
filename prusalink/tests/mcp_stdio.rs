@@ -56,7 +56,7 @@ fn manifest_stdio_metadata_and_private_vault_request_boundary() {
     let tools = reply["result"]["tools"].as_array().unwrap();
     let manifest: Value = serde_json::from_str(include_str!("../manifest.json")).unwrap();
     let declared = manifest["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 10);
+    assert_eq!(tools.len(), 12);
     assert_eq!(tools.len(), declared.len());
     for tool in tools {
         let canonical = format!("minerva_prusalink_{}", tool["name"].as_str().unwrap());

@@ -7,6 +7,7 @@ use prusalink_plugin::client::{Client, Password};
 use prusalink_plugin::config::{self, Printer, Store};
 use prusalink_plugin::discovery;
 use prusalink_plugin::error::{Error, Result};
+use prusalink_plugin::slicer;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -151,10 +152,35 @@ fn args<T: DeserializeOwned>(value: &Value) -> Result<T> {
 }
 
 fn row(printer: &Printer, has_password: bool) -> Value {
-    json!({"id":printer.id(),"slot":printer.slot,"name":printer.name,"host":printer.host,"user":printer.user,"has_password":has_password})
+    json!({"id":printer.id(),"slot":printer.slot,"name":printer.name,"host":printer.host,"user":printer.user,"has_password":has_password,"slicing":printer.slicing})
 }
 fn tool(peer: &mut Peer, store: &mut Store, name: &str, value: &Value) -> Result<Value> {
     match name {
+        "list_profiles" => {
+            let a: PrinterArgs = args(value)?;
+            let printer = store.get(&a.printer)?;
+            let mapping = printer.slicing.as_ref().ok_or(Error::Invalid(
+                "Configure this printer's slicing mapping first",
+            ))?;
+            serde_json::to_value(slicer::list_profiles(
+                mapping,
+                &config::data_directory()?.join("slicing"),
+            )?)
+            .map_err(|_| Error::Protocol("Cannot encode profile list"))
+        }
+        "slice" => {
+            let a: slicer::SliceArgs = args(value)?;
+            let printer = store.get(&a.printer)?;
+            let mapping = printer.slicing.as_ref().ok_or(Error::Invalid(
+                "Configure this printer's slicing mapping first",
+            ))?;
+            serde_json::to_value(slicer::slice(
+                mapping,
+                &config::data_directory()?.join("slicing"),
+                a,
+            )?)
+            .map_err(|_| Error::Protocol("Cannot encode slice receipt"))
+        }
         "discover" => {
             let a: DiscoverArgs = args(value)?;
             serde_json::to_value(discovery::discover(a.hosts)?)

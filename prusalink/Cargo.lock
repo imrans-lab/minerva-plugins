@@ -336,6 +336,8 @@ name = "prusalink-plugin"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "crc32fast",
+ "flate2",
  "getrandom 0.3.4",
  "libc",
  "md-5",

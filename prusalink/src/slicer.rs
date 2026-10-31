@@ -295,6 +295,12 @@ impl Run {
     pub fn unchanged(&self) -> Result<()> {
         if sha256(&self.executable)? != self.executable_sha256
             || sha256(&self.config.vendor_ini)? != self.vendor_sha256
+            || sha256(
+                &self
+                    .directory
+                    .join("vendor")
+                    .join(format!("{}.ini", self.config.vendor_id)),
+            )? != self.vendor_sha256
         {
             return Err(Error::Io(
                 "Slicer executable or vendor profile changed during the run",
@@ -354,6 +360,9 @@ pub fn run_cli(
             .arg(directory)
             .arg("--threads")
             .arg("2")
+            .arg("--no-single-instance")
+            .arg("--post-process")
+            .arg("")
             .args(args)
             .stdin(Stdio::null())
             .stdout(
@@ -427,4 +436,171 @@ fn cpu_seconds(value: &str) -> Option<f64> {
                 .into_iter()
                 .fold(0.0, |total, part| total * 60.0 + part),
     )
+}
+
+#[derive(Serialize)]
+pub struct ProfileListing {
+    pub mapping: SlicerConfig,
+    pub bed: Bed,
+    pub profiles: Profiles,
+    pub version: String,
+    pub executable_sha256: String,
+    pub vendor_sha256: String,
+    pub run_directory: PathBuf,
+}
+pub fn list_profiles(config: &SlicerConfig, root: &Path) -> Result<ProfileListing> {
+    let run = Run::prepare(config, root)?;
+    run.unchanged()?;
+    remaining(run.started)?;
+    Ok(ProfileListing {
+        mapping: run.config,
+        bed: run.bed,
+        profiles: run.profiles,
+        version: run.version,
+        executable_sha256: run.executable_sha256,
+        vendor_sha256: run.vendor_sha256,
+        run_directory: run.directory,
+    })
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SliceArgs {
+    pub printer: String,
+    pub input_path: PathBuf,
+    pub print_profile: Option<String>,
+    pub material_profile: Option<String>,
+    pub extruder: Option<u8>,
+}
+#[derive(Serialize)]
+pub struct SliceReceipt {
+    pub output_path: PathBuf,
+    pub input_sha256: String,
+    pub output_sha256: String,
+    pub version: String,
+    pub executable_sha256: String,
+    pub vendor_sha256: String,
+    pub profiles_used: SlicerConfig,
+    pub center: String,
+    pub extruder: Option<u8>,
+    pub est_time_s: Option<u64>,
+    pub filament_g_per_tool: Option<Vec<f64>>,
+    pub metadata_source: &'static str,
+    pub complete: bool,
+}
+pub fn slice(config: &SlicerConfig, root: &Path, args: SliceArgs) -> Result<SliceReceipt> {
+    let input = local_file(&args.input_path)?;
+    let extension = input
+        .extension()
+        .and_then(|v| v.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !matches!(extension.as_str(), "3mf" | "stl")
+        || fs::metadata(&input)
+            .map_err(|_| Error::Io("Cannot inspect slicer input"))?
+            .len()
+            > 256 * 1024 * 1024
+    {
+        return Err(Error::Invalid(
+            "Slice needs a .3mf or .stl file up to256MiB",
+        ));
+    }
+    if let Some(tool) = args.extruder {
+        if tool == 0 || tool > config.tool_count || extension != "stl" {
+            return Err(Error::Invalid("Extruder override requires STL and a configured tool number;3MF retains embedded assignments"));
+        }
+    }
+    let mut run = Run::prepare(config, root)?;
+    let print = args.print_profile.as_ref().unwrap_or(&config.print_profile);
+    let material = args
+        .material_profile
+        .as_ref()
+        .unwrap_or(&config.material_profile);
+    let compatible = run
+        .profiles
+        .print_profiles
+        .iter()
+        .any(|p| p.name == *print && p.filament_profiles.contains(material));
+    if !compatible {
+        return Err(Error::Invalid(
+            "Print/material profiles are not compatible with this printer catalog",
+        ));
+    }
+    run.config.print_profile = print.clone();
+    run.config.material_profile = material.clone();
+    let center = run.bed.center()?;
+    let input_sha256 = sha256(&input)?;
+    let output = run.directory.join("output.bgcode");
+    let mut command: Vec<std::ffi::OsString> = vec![
+        "--printer-profile".into(),
+        config.printer_profile.clone().into(),
+        "--print-profile".into(),
+        print.into(),
+        "--material-profile".into(),
+        material.into(),
+        "--export-gcode".into(),
+        "--binary-gcode".into(),
+        "--center".into(),
+        center.clone().into(),
+        "--output".into(),
+        output.clone().into_os_string(),
+    ];
+    if let Some(tool) = args.extruder {
+        for flag in [
+            "--perimeter-extruder",
+            "--infill-extruder",
+            "--solid-infill-extruder",
+            "--support-material-extruder",
+            "--support-material-interface-extruder",
+            "--wipe-tower-extruder",
+        ] {
+            command.extend([flag.into(), tool.to_string().into()]);
+        }
+    }
+    command.push(input.clone().into_os_string());
+    run_cli(
+        &run.executable,
+        &run.directory,
+        "slice",
+        command,
+        remaining(run.started)?,
+        false,
+    )?;
+    run.unchanged()?;
+    if sha256(&input)? != input_sha256 {
+        return Err(Error::Io("Slicer input changed during the run"));
+    }
+    let mut header = [0_u8; 10];
+    let mut file =
+        File::open(&output).map_err(|_| Error::Io("Slicer did not produce BGCode output"))?;
+    file.read_exact(&mut header)
+        .map_err(|_| Error::Io("Slicer produced a truncated output"))?;
+    if &header[..4] != b"GCDE" {
+        return Err(Error::Protocol("Slicer output is not binary G-code"));
+    }
+    let estimates = crate::bgcode::estimates(&output, config.tool_count);
+    let receipt = SliceReceipt {
+        output_sha256: sha256(&output)?,
+        output_path: output,
+        input_sha256,
+        version: run.version,
+        executable_sha256: run.executable_sha256,
+        vendor_sha256: run.vendor_sha256,
+        profiles_used: run.config,
+        center,
+        extruder: args.extruder,
+        metadata_source: if estimates.is_some() {
+            "bgcode-v1-print-block-crc32"
+        } else {
+            "unavailable"
+        },
+        est_time_s: estimates.as_ref().and_then(|value| value.est_time_s),
+        filament_g_per_tool: estimates.and_then(|value| value.filament_g_per_tool),
+        complete: true,
+    };
+    remaining(run.started)?;
+    let bytes = serde_json::to_vec_pretty(&receipt)
+        .map_err(|_| Error::Protocol("Cannot encode slice receipt"))?;
+    fs::write(run.directory.join("receipt.json"), bytes)
+        .map_err(|_| Error::Io("Cannot save slice receipt"))?;
+    Ok(receipt)
 }
