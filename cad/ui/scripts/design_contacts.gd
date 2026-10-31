@@ -95,9 +95,11 @@ static func _flush_proof(interference: Dictionary, clearance: Dictionary,
 	if index < 0:
 		return {}
 	for pair: Dictionary in clearance.get("declared_clearance", []):
+		var measured: float = float(pair.get("min_mm", INF))
+		var bound: float = float(pair.get("bound_mm", -INF))
 		if pair.get("pass", false) != true or not bool(pair.get("expected", false)) \
-				or not bool(pair.get("touching", false)) \
-				or float(pair.get("min_mm", INF)) != 0.0 \
+				or not is_finite(measured) or measured < 0.0 \
+				or not is_finite(bound) or bound < 0.0 \
 				or float(pair.get("required_mm", INF)) != 0.0 \
 				or _ReplyShape.pair_uncertified(pair) \
 				or bool(pair.get("interference", false)) \
@@ -106,10 +108,14 @@ static func _flush_proof(interference: Dictionary, clearance: Dictionary,
 		var answered: Array = pair.get("expected_contact_indices", [])
 		if not answered.has(index) or _crosses_or_undecided(interference, pair):
 			continue
+		var kind: String = "touching" if bool(pair.get("touching", false)) else "gap"
 		return {"declaration_index": index, "reference": str(pair.get("reference", "")),
 			"node": str(pair.get("node", "")), "declared_required_mm": 0.0,
-			"min_mm": 0.0, "certified": true, "status": "satisfied",
-			"evidence": "same-check bounded clearance measured touching; fresh interference found no crossing"}
+			"min_mm": measured, "bound_mm": bound, "measured": kind,
+			"touching": bool(pair.get("touching", false)),
+			"certified": true, "status": "satisfied",
+			"evidence": ("same-check bounded clearance measured %s; "
+				+ "fresh interference found no crossing") % kind}
 	return {}
 
 

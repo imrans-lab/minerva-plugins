@@ -79,6 +79,7 @@ const DEFAULT_CLEARANCE_LIMIT: int = 10
 ## frames, is one minerva_cad_check_interference call away.
 const MAX_CROSSING_POINTS: int = 3
 
+const _PartScope: Script = preload("part_scope.gd")
 const _DesignContacts: Script = preload("design_contacts.gd")
 
 const _ReplyShape: Script = preload("reply_shape.gd")
@@ -356,7 +357,7 @@ static func _collect_window(panel, args: Dictionary, reply: Dictionary,
 		})
 		collected["part"] = str(row.get("part", ""))
 		rows[index] = collected
-	return reply
+	return _PartScope.aggregate(rows)
 
 
 ## The clearance tickets a reply has to carry, whichever shape they came in.
