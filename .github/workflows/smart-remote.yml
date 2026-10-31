@@ -45,7 +45,7 @@ jobs:
         shell: bash
         working-directory: smart-remote
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@1.93.0
@@ -125,7 +125,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: actions/download-artifact@v8
