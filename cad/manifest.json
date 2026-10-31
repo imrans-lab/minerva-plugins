@@ -753,7 +753,7 @@
           "parts": {"type": "array", "items": {"type": "string"}, "description": "Check these named DSL bindings instead of the shape the document evaluates to, one report per part: [\"bottom\", \"top\"]. Each is evaluated as the document with that binding as its trailing expression — the DSL's own render-target rule — so a two-shell enclosure is checked as an assembly instead of one half at a time. Default: the document's own render target, whose name comes back as 'part'."},
           "required_mm": {
             "type": "number",
-            "description": "The clearance you need, in millimetres. Every pair is judged against it and the reply's top-level 'pass' is true only when they all clear. Required to START a measurement; omit it when you are collecting a ticket."
+            "description": "The clearance you need, in millimetres: a finite number greater than or equal to zero; explicit 0 is valid. Every pair is judged against it and the reply's top-level 'pass' is true only when they all clear. Required to START a measurement; omit it when you are collecting a ticket."
           },
           "reference": {
             "type": "string",
@@ -968,7 +968,7 @@
           },
           "required_mm": {
             "type": "number",
-            "description": "The clearance you need, in millimetres. Every pair is judged against it and the reply's top-level 'pass' is true only when they all clear. Required on EVERY call, a ticket collection included: the ticket names the clearance leg only, and the interference and fastener legs are re-run and re-graded against this number."
+            "description": "The clearance you need, in millimetres: a finite number greater than or equal to zero; explicit 0 is valid. Every pair is judged against it and the reply's top-level 'pass' is true only when they all clear. Required on EVERY call, a ticket collection included: the ticket names the clearance leg only, and the interference and fastener legs are re-run and re-graded against this number."
           },
           "screws": {
             "type": "array",
@@ -1434,6 +1434,7 @@
           "ui/panel_tools_view.gd",
           "ui/scripts/contact_runs.gd",
           "ui/scripts/design_check.gd",
+          "ui/scripts/design_contacts.gd",
           "ui/scripts/eval_banner.gd",
           "ui/scripts/eval_freshness.gd",
           "ui/scripts/eval_reply.gd",

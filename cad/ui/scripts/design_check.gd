@@ -79,6 +79,8 @@ const DEFAULT_CLEARANCE_LIMIT: int = 10
 ## frames, is one minerva_cad_check_interference call away.
 const MAX_CROSSING_POINTS: int = 3
 
+const _DesignContacts: Script = preload("design_contacts.gd")
+
 const _ReplyShape: Script = preload("reply_shape.gd")
 
 ## The one window every part's clearance leg is collected against, in
@@ -227,6 +229,7 @@ static func _legs_reply(panel, args: Dictionary, per_part: Callable,
 		"tickets": {},
 		# Clearance rows excused on evidence the check could not certify.
 		"uncertified": [],
+		"declared_clearance": [],
 		# Established failures the legs counted but the rows do not show.
 		"failing_hidden": 0,
 		# A leg that measured geometry the document has moved past. The gate
@@ -269,6 +272,8 @@ static func _legs_reply(panel, args: Dictionary, per_part: Callable,
 		clearance_reply = await _unbusy(panel, clearance_args, per_part, clearance)
 	var clearance_rows: Array = _fold_clearance(clearance_reply, state)
 	state.evidence["clearance"] = clearance_reply
+	var satisfied_contacts: Array = _DesignContacts.reconcile(
+		_legs(interference_reply), _legs(clearance_reply), state)
 
 	var failing := interference_rows.size() + clearance_rows.size() \
 		+ fastener_rows.size()
@@ -293,6 +298,8 @@ static func _legs_reply(panel, args: Dictionary, per_part: Callable,
 		"failing_rows": failing,
 		"uncertified_rows": uncertified,
 		"uncertified": uncertified.size(),
+		"declared_clearance": state["declared_clearance"],
+		"satisfied_contacts": satisfied_contacts,
 		"hidden_counts": state["counts"],
 		"checks": state["checks"],
 		"verdict_note": "fail = a row below is wrong, or one the reply did "
@@ -502,11 +509,8 @@ static func _fold_interference(reply: Dictionary, state: Dictionary) -> Array:
 		# is not an upper bound, so the exclusion is advisory and the check
 		# says so with pass false and a reason; that is never folded to pass.
 		_fold_unproven(report, "interference", part, state)
-		var unmatched: Array = report.get("expected_contacts_unmatched", []) as Array
-		if not unmatched.is_empty():
-			_unknown(state, ("%d expected contact(s)%s matched nothing that "
-				+ "was measured — a declaration that has gone stale excuses "
-				+ "nothing") % [unmatched.size(), _of(part)])
+		# Unmatched declarations are reconciled after this run's clearance
+		# leg, which can prove a flush contact the ray walk did not cross.
 	_count(state, "interference_pairs", pairs)
 	_count(state, "interference_points", points)
 	_count(state, "interference_points_hidden", hidden)
@@ -542,23 +546,31 @@ static func _fold_clearance(reply: Dictionary, state: Dictionary) -> Array:
 			continue
 		total += int(report.get("pairs_total", 0))
 		hidden += int(report.get("pairs_hidden", 0))
+		var certified: bool = _DesignContacts.clearance_certified(report)
 		var shown := 0
 		for entry in (report.get("pairs", []) as Array):
 			var pair: Dictionary = (entry as Dictionary).duplicate(true)
 			if not part.is_empty():
 				pair["part"] = part
-			if _ReplyShape.pair_uncertified(pair):
+			if _ReplyShape.pair_uncertified(pair) or not certified:
 				(state["uncertified"] as Array).append(pair)
-				_unknown(state, ("a declared contact%s (%s/%s) is excused "
-					+ "on evidence the check could not certify; advisory, "
+				_unknown(state, ("a clearance pair%s (%s/%s) has "
+					+ "evidence the check could not certify; advisory, "
 					+ "not a failure") % [_of(part),
 					str(pair.get("reference", "")), str(pair.get("node", ""))])
+				continue
+			if pair.get("pass", null) == true:
+				if bool(pair.get("expected", false)):
+					(state["declared_clearance"] as Array).append(pair)
+				continue
+			if pair.get("pass", null) != false:
+				_unknown(state, "a clearance pair has no boolean verdict%s" % _of(part))
 				continue
 			rows.append(pair)
 			shown += 1
 		# A report the verb layer did not filter carries no pairs_failing;
 		# then the rows ARE every failing pair and the count is theirs.
-		var established := maxi(int(report.get("pairs_failing", shown)), shown)
+		var established: int = maxi(int(report.get("pairs_failing", shown)), shown) if certified else 0
 		failing += established
 		_hide_failing(state, established, shown)
 		if established == 0 and not bool(report.get("pass", false)) \

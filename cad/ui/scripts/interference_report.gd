@@ -433,6 +433,7 @@ func _report(pairs: Dictionary) -> Dictionary:
 			+ "rays when nothing crossed; everything else is an AABB test",
 	}
 	if not _expected.is_empty():
+		report["expected_contacts_digest"] = _Expected.declarations_digest(_expected)
 		report["expected_contacts"] = declared_rows
 		report["excluded_count"] = excluded
 		report["expected_contacts_unmatched"] = _Expected.unmatched(_expected,

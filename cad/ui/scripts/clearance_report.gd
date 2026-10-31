@@ -93,6 +93,7 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 			matched[index] = true
 		if declared >= 0:
 			pair["expected"] = true
+			pair["expected_contact_indices"] = answered.duplicate()
 			pair["required_mm"] = _Expected.required_mm(rule)
 			pair["note"] = _Expected.describe(rule) + _several(answered.size())
 			if rule["region"] != null:
@@ -330,9 +331,12 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 		"engine": str(envelope.get("engine", "")),
 		"cache": envelope.get("cache", {}),
 		"interference_join": _join_note(buried),
+		# Mechanical join identity, separate from the human-readable join note.
+		"interference_evidence": buried.get("evidence", {"fresh": false}),
 		"pairs": pairs,
 	}
 	if not expected.is_empty():
+		report["expected_contacts_digest"] = _Expected.declarations_digest(expected)
 		report["expected_contacts"] = declared_rows
 		report["excluded_count"] = excluded
 		report["expected_contacts_unmatched"] = _Expected.unmatched(expected,
@@ -489,6 +493,12 @@ func _buried_pairs(document: Dictionary, source: String, records: Array,
 				if moved else "reference colliders that have since been rebuilt")
 		return out
 	out["fresh"] = true
+	out["evidence"] = {
+		"fresh": true, "scope_digest": digest,
+		"records_digest": preload("eval_reply.gd").short_digest(
+			str(interference.get("records_digest", ""))),
+		"gauge_generation": generation,
+	}
 	var nodes: Dictionary = out["nodes"]
 	var contacts: Dictionary = out["contacts"]
 	for entry in (interference.get("pairs", []) as Array):
