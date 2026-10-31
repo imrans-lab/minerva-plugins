@@ -753,7 +753,7 @@
           "parts": {"type": "array", "items": {"type": "string"}, "description": "Check these named DSL bindings instead of the shape the document evaluates to, one report per part: [\"bottom\", \"top\"]. Each is evaluated as the document with that binding as its trailing expression — the DSL's own render-target rule — so a two-shell enclosure is checked as an assembly instead of one half at a time. Default: the document's own render target, whose name comes back as 'part'."},
           "required_mm": {
             "type": "number",
-            "description": "The clearance you need, in millimetres. Every pair is judged against it and the reply's top-level 'pass' is true only when they all clear. Required to START a measurement; omit it when you are collecting a ticket."
+            "description": "The clearance you need, in millimetres: a finite number greater than or equal to zero; explicit 0 is valid. Every pair is judged against it and the reply's top-level 'pass' is true only when they all clear. Required to START a measurement; omit it when you are collecting a ticket."
           },
           "reference": {
             "type": "string",
@@ -968,7 +968,7 @@
           },
           "required_mm": {
             "type": "number",
-            "description": "The clearance you need, in millimetres. Every pair is judged against it and the reply's top-level 'pass' is true only when they all clear. Required on EVERY call, a ticket collection included: the ticket names the clearance leg only, and the interference and fastener legs are re-run and re-graded against this number."
+            "description": "The clearance you need, in millimetres: a finite number greater than or equal to zero; explicit 0 is valid. Every pair is judged against it and the reply's top-level 'pass' is true only when they all clear. Required on EVERY call, a ticket collection included: the ticket names the clearance leg only, and the interference and fastener legs are re-run and re-graded against this number."
           },
           "screws": {
             "type": "array",
@@ -1242,7 +1242,7 @@
     },
     {
       "name": "minerva_cad_view_state",
-      "description": "Read-only snapshot of what the user is currently looking at in a live CAD editor: the responsive layout class (xs/sm/md/lg/xl), the active viewport pane id (top/front/right/iso in wide layout, or the narrow-layout single pane), the narrow-layout projection dropdown selection, and the active pane camera's orientation/zoom (view_preset, target [x,y,z] in mm, distance, yaw, pitch). Use this for SEE-context before deciding whether a minerva_snapshot is worth taking, or to confirm which pane a snapshot view=\"active\" call would capture.",
+      "description": "Read-only snapshot of what the user is currently looking at in a live CAD editor: the responsive width class (xs/sm/md/lg/xl), layout preference (auto/single/four), effective mode and reason, measured panel/available/grid/active-pane sizes and projected four-pane size in pixels, the active viewport pane id (top/front/right/iso in wide layout, or the narrow-layout single pane), the narrow-layout projection dropdown selection, and the active pane camera's orientation/zoom (view_preset, target [x,y,z] in mm, distance, yaw, pitch). Use this for SEE-context before deciding whether a minerva_snapshot is worth taking, or to confirm which pane a snapshot view=\"active\" call would capture.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
@@ -1434,6 +1434,7 @@
           "ui/panel_tools_view.gd",
           "ui/scripts/contact_runs.gd",
           "ui/scripts/design_check.gd",
+          "ui/scripts/design_contacts.gd",
           "ui/scripts/eval_banner.gd",
           "ui/scripts/eval_freshness.gd",
           "ui/scripts/eval_reply.gd",
@@ -1443,8 +1444,12 @@
           "ui/scripts/material_probe.gd",
           "ui/scripts/motion_check.gd",
           "ui/scripts/ortho_silhouette.gd",
-          "ui/scripts/part_cache.gd",
+          "ui/scripts/json_reply.gd",
+        "ui/scripts/check_arguments.gd",
+        "ui/scripts/part_cache.gd",
           "ui/scripts/part_scope.gd",
+        "ui/scripts/layout_policy.gd",
+        "ui/scripts/layout_controls.gd",
           "ui/scripts/posed_capture.gd",
           "ui/scripts/reference_pairs.gd",
           "ui/scripts/reference_profile.gd",

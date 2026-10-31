@@ -71,6 +71,15 @@ static func digest(source: String) -> String:
 	return hasher.finish().hex_encode()
 
 
+## Effective identity shared by measured report producers and clearance joins.
+## The caller supplies the source actually tessellated, never an empty verb arg.
+static func measured_scope(source: String, args: Dictionary, document: Dictionary = {}) -> Dictionary:
+	var model: Dictionary = document.get("model", {})
+	return {"source": source,
+		"selection": str(args.get("selection", model.get("selection", ""))),
+		"configuration": str(args.get("configuration", model.get("configuration", "")))}
+
+
 ## Identity of measured geometry, separate from the canonical source digest.
 static func scope_digest(args: Dictionary) -> String:
 	var source := str(args.get("source", ""))

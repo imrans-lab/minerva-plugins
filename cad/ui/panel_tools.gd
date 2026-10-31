@@ -131,6 +131,10 @@ const PAIR_VERBS: Array[String] = [
 
 
 static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
+	return preload("scripts/json_reply.gd").response(await _handle(panel, tool_name, args))
+
+
+static func _handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 	# A keyed export job already owns its source snapshot; collecting it
 	# neither reads nor rebuilds the panel's current document.
 	if tool_name == "minerva_cad_export" and not str(args.get("job_id", "")).is_empty():
@@ -668,6 +672,9 @@ static func _check_clearance(panel, args: Dictionary) -> Dictionary:
 		return _ok(_ReplyShape.filter_clearance(collected,
 			int(args.get("limit", 0)), bool(args.get("failing_only", false)),
 			str(args.get("detail", ""))))
+	var argument_error: String = preload("scripts/check_arguments.gd").required_mm_error(args)
+	if not argument_error.is_empty():
+		return _err(argument_error)
 	var asked := str(args.get("reference", ""))
 	if not asked.is_empty() and not _has_reference(panel, asked):
 		return _err("no reference named '%s' is mounted" % asked)
@@ -724,7 +731,9 @@ static func _ensure_part_interference(panel, args: Dictionary) -> void:
 	var source := str(args.get("source", ""))
 	if source.strip_edges().is_empty():
 		return
-	var kept: Dictionary = _PartCache.interference(panel, _PartCache.scope_digest(args))
+	var document: Dictionary = preload("scripts/evaluation_state.gd").document(panel, args)
+	var scope: Dictionary = _PartCache.measured_scope(source, args, document)
+	var kept: Dictionary = _PartCache.interference(panel, _PartCache.scope_digest(scope))
 	if not kept.is_empty() and int(kept.get("gauge_generation", -1)) == _gauge_generation(panel):
 		return
 	# UNDECLARED ON PURPOSE. A declared pair leaves the report's `pairs` for
@@ -737,7 +746,7 @@ static func _ensure_part_interference(panel, args: Dictionary) -> void:
 	await _check_interference(panel, {
 		"mesh": args.get("mesh", {}),
 		"source": source,
-		"selection": args.get("selection", ""), "configuration": args.get("configuration", ""),
+		"selection": scope["selection"], "configuration": scope["configuration"],
 	})
 
 

@@ -274,8 +274,10 @@ func _run(panel: Object, args: Dictionary, ticket: int = 0) -> Dictionary:
 	# A named part has a stamp — the digest of the source that evaluates to
 	# it — so its collider is welded once and swapped back in for the legs
 	# that follow. The document's own render target has none and rebuilds.
+	var measured_scope: Dictionary = _PartCache.measured_scope(scoped_source, args, document)
+	var measured_digest: String = _PartCache.scope_digest(measured_scope)
 	var triangles := build_solid(scoped_mesh, ticket,
-		_PartCache.scope_digest(args) if part_scoped else "")
+		measured_digest if part_scoped else "")
 	if triangles < 0:
 		return _nothing("another check holds this panel's geometry; nothing "
 			+ "was measured")
@@ -361,7 +363,9 @@ func _run(panel: Object, args: Dictionary, ticket: int = 0) -> Dictionary:
 	# document — can neither mark a node as buried nor clear one.
 	if bool(reply.get("checked", false)):
 		reply["source_digest"] = _source_digest(scoped_source)
-		reply["scope_digest"] = _PartCache.scope_digest(args)
+		reply["scope_digest"] = measured_digest
+		reply["measurement_scope"] = {"reference": reference_scope,
+			"node": str(args.get("node", ""))}
 		reply["records_digest"] = records_digest
 		reply["gauge_generation"] = gauge_generation
 		if colliders_rebuilt:

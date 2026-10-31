@@ -102,6 +102,15 @@ func freshness(panel: Node) -> Dictionary:
 	return out
 
 
+## Called only after the panel verifies that this evaluation still owns the
+## painted geometry. Replace the nested snapshot so an earlier reader keeps
+## the report it captured rather than observing a later write through it.
+func record_interference(report: Dictionary) -> void:
+	var last_eval: Dictionary = completed.get("last_eval", {}).duplicate(true)
+	last_eval["interference"] = report.duplicate(true)
+	completed["last_eval"] = last_eval
+
+
 ## Consumers receive one captured document for the whole operation. Text/note
 ## tools keep using get_document_state(), which always describes editable source.
 static func document(panel: Object, args: Dictionary = {}) -> Dictionary:

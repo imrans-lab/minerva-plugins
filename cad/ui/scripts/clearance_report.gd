@@ -91,12 +91,13 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 		var rule: Dictionary = expected[declared] if declared >= 0 else {}
 		for index in answered:
 			matched[index] = true
+			if (expected[int(index)] as Dictionary)["region"] != null:
+				pair["declared_region"] = true
 		if declared >= 0:
 			pair["expected"] = true
+			pair["expected_contact_indices"] = answered.duplicate()
 			pair["required_mm"] = _Expected.required_mm(rule)
 			pair["note"] = _Expected.describe(rule) + _several(answered.size())
-			if rule["region"] != null:
-				pair["declared_region"] = true
 		if overlapping.has(_pair_key(pair["reference"], pair["node"])):
 			# The worker measured surface to surface and found air between two
 			# faces; the interference check found this node crossing the solid
@@ -306,6 +307,12 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 			pair["advisory_pass"] = bool(pair["pass"]) and waived \
 				and bool(buried.get("fresh", false)) and not bool(buried.get("stale", false))
 			pair["pass"] = false
+	# Complete declared passing evidence travels independently of display
+	# limits; trimming a reply must never change design reconciliation.
+	var declared_clearance: Array = []
+	for pair: Dictionary in pairs:
+		if bool(pair.get("expected", false)) and pair.get("pass", false) == true:
+			declared_clearance.append(pair.duplicate(true))
 	var report := {
 		"checked": true,
 		"units": "mm",
@@ -330,9 +337,14 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 		"engine": str(envelope.get("engine", "")),
 		"cache": envelope.get("cache", {}),
 		"interference_join": _join_note(buried),
+		# Mechanical join identity, separate from the human-readable join note.
+		"interference_evidence": buried.get("evidence", {"fresh": false}),
+		"measurement_scope": envelope.get("measurement_scope", {}),
+		"declared_clearance": declared_clearance,
 		"pairs": pairs,
 	}
 	if not expected.is_empty():
+		report["expected_contacts_digest"] = _Expected.declarations_digest(expected)
 		report["expected_contacts"] = declared_rows
 		report["excluded_count"] = excluded
 		report["expected_contacts_unmatched"] = _Expected.unmatched(expected,
@@ -433,8 +445,7 @@ func _buried_pairs(document: Dictionary, source: String, records: Array,
 		panel: Object, args: Dictionary = {}) -> Dictionary:
 	var out := {"fresh": false, "nodes": {}, "contacts": {}, "undecided": {},
 		"undecided_references": {}}
-	var scope := args.duplicate()
-	scope["source"] = source
+	var scope: Dictionary = _PartCache.measured_scope(source, args, document)
 	var digest: String = _PartCache.scope_digest(scope)
 	# A PART is measured against its own report, never the document's: the
 	# document's solid is the union of every binding, so a node buried in
@@ -490,6 +501,12 @@ func _buried_pairs(document: Dictionary, source: String, records: Array,
 				if moved else "reference colliders that have since been rebuilt")
 		return out
 	out["fresh"] = true
+	out["evidence"] = {
+		"fresh": true, "scope_digest": digest,
+		"records_digest": preload("eval_reply.gd").short_digest(
+			str(interference.get("records_digest", ""))),
+		"gauge_generation": generation,
+	}
 	var nodes: Dictionary = out["nodes"]
 	var contacts: Dictionary = out["contacts"]
 	for entry in (interference.get("pairs", []) as Array):

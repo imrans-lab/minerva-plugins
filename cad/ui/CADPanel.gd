@@ -1065,6 +1065,7 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 		# A newer evaluation owns the banner now; this one paints nothing.
 		return
 	_last_eval_result["interference"] = interference
+	_evaluation_state.record_interference(interference)
 	var interference_line: String = _geometry_checks.status_line(interference)
 	if not interference_line.is_empty():
 		lines.append(interference_line)

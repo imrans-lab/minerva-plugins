@@ -93,6 +93,9 @@ const PAIR_ENTRY_BYTES: int = 16
 func check_reference_pairs(panel: Object, args: Dictionary = {}) -> Dictionary:
 	if panel == null or not is_instance_valid(panel):
 		return _no_pairs("the CAD panel is gone")
+	var argument_error: String = preload("check_arguments.gd").required_mm_error(args)
+	if not argument_error.is_empty():
+		return {"error": argument_error, "checked": false}
 	var declared: Dictionary = _Expected.parse(args)
 	if not (declared["errors"] as Array).is_empty():
 		return _no_pairs("expected_contacts: %s"
@@ -145,7 +148,7 @@ func check_reference_pairs(panel: Object, args: Dictionary = {}) -> Dictionary:
 	if ordered.size() > measured.size():
 		unmeasured_bound = float((ordered[measured.size()] as Dictionary)["bound_mm"])
 
-	var required_mm := float(args.get("required_mm", 0.0))
+	var required_mm: float = float(args["required_mm"])
 	var reply := await _ask_pairs(panel, targets, measured, required_mm,
 		int(args.get("max_contacts", 0)))
 	if reply.has("error"):

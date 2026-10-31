@@ -12,9 +12,9 @@ extends MinervaPluginPanel
 ## live here, and nothing here reaches back up.
 ##
 ## Layout — platform widgets:
-##   * ResponsiveContainer wraps the panel content. width_class drives a
-##     stack-style swap between WideLayout (4-view + sidebar HSplit) and
-##     NarrowLayout (single-view + projection dropdown + tools).
+##   * ResponsiveContainer supplies the available content rect. Layout controls
+##     choose WideLayout (4-view + sidebar HSplit) or NarrowLayout (single-view
+##     + projection dropdown + tools), automatically or by user preference.
 ##   * The platform AnnotationDockPane (auto-mounted via get_annotation_host())
 ##     provides annotation tooling. CADPanel owns only the CAD-specific edge
 ##     geometry inspector tree in the wide sidebar.
@@ -35,7 +35,7 @@ extends MinervaPluginPanel
 var plugin_id: String = "cad"
 
 const _CadAnnotationHostScript: Script = preload("CadAnnotationHost.gd")
-const _ResponsiveContainerScript: Script = preload("res://Scripts/UI/Controls/responsive_container.gd")
+const _LayoutControlsScript: Script = preload("scripts/layout_controls.gd")
 const _BuiltinKindsScript: Script = preload("res://Scripts/Services/Annotations/BuiltinKinds.gd")
 const _CadEdgeNumberKindScript: Script = preload("kinds/cad_edge_number_kind.gd")
 
@@ -99,6 +99,8 @@ var _responsive: Container = null
 ## Wide-layout (4-view + sidebar) and narrow-layout (single-view) roots.
 var _wide_layout: Control = null
 var _narrow_layout: Control = null
+var _layout_controls: RefCounted = null
+var _layout_applied: bool = false
 
 ## SubViewportContainers for the four CAD views in WIDE layout.
 var _top_view_container: SubViewportContainer = null
@@ -270,7 +272,7 @@ func _ready() -> void:
 	# but they refer to different SubViewports). _register_host_viewports()
 	# is re-called on every width-class transition so the active map always
 	# matches the visible layout.
-	_register_host_viewports(false)  # wide by default; corrected below in _apply_width_class
+	_register_host_viewports(false)  # corrected by the initial layout decision
 
 	# ── Build panel-root overlay Control spanning all SubViewportContainers ──
 	# Used as the panel_root reference so host.get_panes() can compute
@@ -315,7 +317,7 @@ func _ready() -> void:
 	_edge_sidebar.attach(self, _wide_sidebar)
 	_edge_sidebar.render(_edge_registry)
 
-	# ── Connect ResponsiveContainer width-class signal & apply initial mode
+	# ── Connect geometry-aware layout and annotation docking
 	_responsive.width_class_changed.connect(_on_width_class_changed)
 	for slot: Control in [get_node("ObjectDock/Annotations"), get_node("BottomDockSlot")]:
 		# The host sets RIGHT after mounting. As in PCB, correct the mode after
@@ -326,7 +328,8 @@ func _ready() -> void:
 	resized.connect(func(): call_deferred("_sync_annotation_dock"))
 	# Apply the initial layout state so the canvas is correctly placed
 	# even before the first resize transition fires.
-	_apply_width_class(_responsive.width_class)
+	_layout_controls = _LayoutControlsScript.new(self)
+	_layout_controls.wire()
 
 
 func get_annotation_host() -> RefCounted:
@@ -656,28 +659,20 @@ func view_unavailable_reason(view: String) -> String:
 	return _measurement.view_unavailable_reason(view)
 
 
-# ── Width-class handling ────────────────────────────────────────────────────
+# ── Layout handling ────────────────────────────────────────────────────────
 
 ## Called whenever the ResponsiveContainer crosses a breakpoint.
-func _on_width_class_changed(new_class: StringName) -> void:
-	_apply_width_class(new_class)
+func _on_width_class_changed(_new_class: StringName) -> void:
+	if _layout_controls != null:
+		_layout_controls.queue_refresh()
 
 
-## Apply the layout for the given width class. Idempotent.
-##   xs / sm  → narrow (single view + projection dropdown)
-##   md / lg / xl → wide (4-view 2×2 grid + edge-tree sidebar)
-##
-## WideLayout sizing: each viewport column has a 300 px minimum (.tscn) and
-## WideSidebar has a 220 px minimum, so the layout fits any panel width
-## ≥ 820 px. That covers all of MD (≥ 768) in the realistic case where the
-## substrate AnnotationDockPane is open (dock RIGHT activates at editor width
-## ≥ 1024 and consumes ~260 px, leaving the CAD plugin ~764+ px). NarrowLayout
-## kicks in below MD, where 4 ortho panes simply can't be useful.
-func _apply_width_class(cls: StringName) -> void:
-	var is_narrow := (
-		cls == _ResponsiveContainerScript.CLASS_XS
-		or cls == _ResponsiveContainerScript.CLASS_SM
-	)
+## Manual and automatic choices share this transition. Repeated geometry
+## notifications must not invalidate captures or reset the active pane.
+func _apply_layout(is_narrow: bool) -> void:
+	if _layout_applied and _narrow_layout.visible == is_narrow:
+		return
+	_layout_applied = true
 
 	if _wide_layout != null:
 		_wide_layout.visible = not is_narrow
@@ -698,7 +693,7 @@ func _apply_width_class(cls: StringName) -> void:
 
 
 ## Populate Cad_AnnotationHost's viewport map for the active layout. Called
-## from _ready() (initial state) and _apply_width_class() (transitions).
+## from _ready() (initial state) and _apply_layout() (transitions).
 func _register_host_viewports(is_narrow: bool) -> void:
 	if _annotation_host == null:
 		return
