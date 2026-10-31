@@ -94,17 +94,18 @@ impl Store {
                     "All eight printer slots are in use; remove one first",
                 ))?,
         };
+        let host = normalize_host(&host)?;
         let slicing = slicing.or_else(|| {
             self.config
                 .printers
                 .iter()
-                .find(|p| p.slot == slot)
+                .find(|p| p.slot == slot && p.host == host)
                 .and_then(|p| p.slicing.clone())
         });
         let printer = Printer {
             slot,
             name: name.trim().into(),
-            host: normalize_host(&host)?,
+            host,
             user: user.trim().into(),
             slicing,
         };

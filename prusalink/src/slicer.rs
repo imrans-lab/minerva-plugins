@@ -2,7 +2,9 @@
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::process::{Command, Stdio};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -331,20 +333,20 @@ pub fn run_cli(
     seconds: u64,
     query: bool,
 ) -> Result<()> {
-    #[cfg(not(unix))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = (executable, directory, phase, args, seconds, query);
-        return Err(Error::Invalid(
-            "Slicing needs a Unix host with ps and process-group limits",
-        ));
+        Err(Error::Invalid(
+            "Slicing requires macOS or Linux with owned process limits",
+        ))
     }
-    #[cfg(unix)]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
-        use std::os::unix::process::CommandExt;
+        let log_path = directory.join(format!("{phase}.log"));
         let log = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(directory.join(format!("{phase}.log")))
+            .open(&log_path)
             .map_err(|_| Error::Io("Cannot create slicer log"))?;
         let mut command = Command::new(executable);
         command
@@ -358,64 +360,71 @@ pub fn run_cli(
                 log.try_clone()
                     .map_err(|_| Error::Io("Cannot clone slicer log"))?,
             )
-            .stderr(log)
-            .process_group(0);
-        let mut child = command
-            .spawn()
-            .map_err(|_| Error::Io("Cannot start installed PrusaSlicer"))?;
+            .stderr(log);
+        let mut child = crate::slicer_process::OwnedChild::spawn(&mut command)?;
         let start = Instant::now();
         loop {
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|_| Error::Io("Cannot inspect slicer child"))?
+            let exited = child.exited()?;
+            let stats = Command::new("/bin/ps")
+                .args(["-axo", "pgid=,rss=,time="])
+                .output()
+                .ok()
+                .filter(|r| r.status.success())
+                .and_then(|r| String::from_utf8(r.stdout).ok());
+            let usage = stats.as_ref().and_then(|stats| {
+                let mut memory = 0_u64;
+                let mut cpu = 0.0;
+                for line in stats.lines() {
+                    let mut fields = line.split_whitespace();
+                    if fields.next()?.parse::<u32>().ok()? != child.id() {
+                        continue;
+                    }
+                    memory += fields.next()?.parse::<u64>().ok()?;
+                    cpu += cpu_seconds(fields.next()?)?;
+                }
+                Some((memory, cpu))
+            });
+            let log_bytes = fs::metadata(&log_path).map(|m| m.len()).unwrap_or(u64::MAX);
+            if start.elapsed() > Duration::from_secs(seconds)
+                || usage.is_none()
+                || usage.is_some_and(|(kb, cpu)| kb > 4 * 1024 * 1024 || cpu > 20.0)
+                || log_bytes > 16 * 1024 * 1024
             {
+                child.finish()?;
+                return Err(Error::Io(
+                    "Slicer time, CPU, memory, log limit or monitor failed; output is incomplete",
+                ));
+            }
+            if exited {
+                let status = child.finish()?; // Kill group before reaping, including success/error exits.
                 return if status.success() || (query && status.code() == Some(1)) {
                     Ok(())
                 } else {
                     Err(Error::Io("PrusaSlicer failed; inspect the private run log"))
                 };
             }
-            let rss = Command::new("/bin/ps")
-                .args(["-axo", "pgid=,rss="])
-                .output();
-            let rss = rss
-                .ok()
-                .filter(|r| r.status.success())
-                .and_then(|r| String::from_utf8(r.stdout).ok());
-            let memory = rss.as_ref().map(|s| {
-                s.lines()
-                    .filter_map(|line| {
-                        let mut v = line.split_whitespace();
-                        let group = v.next()?.parse::<u32>().ok()?;
-                        let kb = v.next()?.parse::<u64>().ok()?;
-                        (group == child.id()).then_some(kb)
-                    })
-                    .sum::<u64>()
-            });
-            let log_bytes = fs::metadata(directory.join(format!("{phase}.log")))
-                .map(|m| m.len())
-                .unwrap_or(u64::MAX);
-            if start.elapsed() > Duration::from_secs(seconds)
-                || memory.is_none()
-                || memory.is_some_and(|kb| kb > 4 * 1024 * 1024)
-                || log_bytes > 16 * 1024 * 1024
-            {
-                // The unreaped leader's PID cannot be reused. Only this child's
-                // explicitly created group is killed, never a discovered process.
-                let killed = Command::new("/bin/kill")
-                    .args(["-KILL", "--", &format!("-{}", child.id())])
-                    .status();
-                if !killed.is_ok_and(|s| s.success()) {
-                    child
-                        .kill()
-                        .map_err(|_| Error::Io("Cannot stop owned slicer child"))?;
-                }
-                child
-                    .wait()
-                    .map_err(|_| Error::Io("Cannot reap owned slicer child"))?;
-                return Err(Error::Io("Slicer time, memory, log limit or process monitor failed; output is incomplete"));
-            }
             thread::sleep(Duration::from_millis(100));
         }
     }
+}
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn cpu_seconds(value: &str) -> Option<f64> {
+    let (days, time) = value
+        .split_once('-')
+        .map(|(d, t)| Some((d.parse::<f64>().ok()?, t)))
+        .unwrap_or(Some((0.0, value)))?;
+    let parts: Vec<f64> = time
+        .split(':')
+        .map(str::parse)
+        .collect::<std::result::Result<_, _>>()
+        .ok()?;
+    if parts.is_empty() || parts.len() > 3 || parts.iter().any(|v| !v.is_finite() || *v < 0.0) {
+        return None;
+    }
+    Some(
+        days * 86400.0
+            + parts
+                .into_iter()
+                .fold(0.0, |total, part| total * 60.0 + part),
+    )
 }

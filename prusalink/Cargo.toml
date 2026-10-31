@@ -13,3 +13,6 @@ md-5 = "0.10"
 sha2 = "0.10"
 getrandom = "0.3"
 base64 = "0.22"
+
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+libc = "0.2"
