@@ -36,6 +36,9 @@ func wire() -> void:
 	panel._wide_sidebar.minimum_size_changed.connect(queue_refresh)
 	panel._wide_layout.minimum_size_changed.connect(queue_refresh)
 	panel._wide_layout.dragged.connect(_on_split_dragged)
+	panel._wide_layout.sort_children.connect(_on_split_sorted)
+	var content: Control = panel.get_node(GRID_PATH).get_parent()
+	content.resized.connect(queue_refresh)
 	_sync_buttons(panel)
 	queue_refresh()
 
@@ -69,6 +72,27 @@ func _on_split_dragged(_offset: int) -> void:
 	queue_refresh()
 
 
+## Sample allocations only after the split has fitted both children. A parent
+## resize may notify us before that deferred sort, while their sizes disagree.
+func _on_split_sorted() -> void:
+	var panel: Control = _owner.get_ref()
+	if panel == null or not is_instance_valid(panel):
+		return
+	var split: SplitContainer = panel._wide_layout
+	var content: Control = panel.get_node(GRID_PATH).get_parent()
+	var sidebar: Control = panel._wide_sidebar
+	if split.visible and content.size.x > 0.0:
+		_sidebar_width = maxf(sidebar.get_combined_minimum_size().x,
+			split.size.x - content.size.x - _split_gap(split, content, sidebar))
+	queue_refresh()
+
+
+## The split owns its themed grabber gap, including collapsed/touch modes.
+func _split_gap(split: SplitContainer, content: Control, sidebar: Control) -> float:
+	return maxf(0.0, split.get_minimum_size().x
+		- content.get_combined_minimum_size().x - sidebar.get_combined_minimum_size().x)
+
+
 func queue_refresh() -> void:
 	if _pending:
 		return
@@ -86,17 +110,10 @@ func _refresh() -> void:
 	var grid: GridContainer = panel.get_node(GRID_PATH)
 	var gaps := Vector2(grid.get_theme_constant("h_separation"),
 		grid.get_theme_constant("v_separation"))
-	# The split's own minimum includes its effective themed grabber gap,
-	# including collapsed/touch modes. This also works while wide is hidden.
 	var content: Control = grid.get_parent()
-	var split_gap: float = maxf(0.0, split.get_minimum_size().x
-		- content.get_combined_minimum_size().x - sidebar.get_combined_minimum_size().x)
-	# The sidebar may shrink inside its split region. The expanding content
-	# fills its region, so its bounds reveal the full allocation after a drag.
-	# Retain that allocation while wide is hidden; its nonexpanding second
-	# region keeps the same width across resizes until constrained by minima.
-	if split.visible and content.size.x > 0.0:
-		_sidebar_width = split.size.x - content.size.x - split_gap
+	var split_gap: float = _split_gap(split, content, sidebar)
+	# Retain the last coherent allocation while wide is hidden or awaiting a
+	# sort. Never combine a newly resized split with its old content bounds.
 	_sidebar_width = maxf(_sidebar_width, sidebar.get_combined_minimum_size().x)
 	var was_single: bool = bool(_decision.get("is_single", false))
 	_decision = _Policy.choose(_preference, panel._responsive.size,
