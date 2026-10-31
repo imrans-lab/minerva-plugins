@@ -39,6 +39,10 @@ var _buffer_version: int = -1
 var _pending_dsl_text: String = ""
 var _inflight_request_id: String = ""
 var _cancel_sequence: int = 0
+var _pending_cancel_receipts: Dictionary = {}
+var _recovery_receipt: Dictionary = {}
+var _recovery_receipt_sequence: int = 0
+var _paint_sequence: int = 0
 
 ## The text the document-open path last dispatched an evaluation for. Opening a
 ## paired document delivers the source TWICE — once as a load request, once as
@@ -406,20 +410,23 @@ func _cancel_inflight_eval_if_any() -> void:
 		return
 	var cancelled_id: String = _inflight_request_id
 	_cancel_sequence += 1
+	_pending_cancel_receipts[_cancel_sequence] = true
 	_inflight_request_id = ""
-	_evaluation_state.worker_state = "retiring"
+	if _evaluation_state.worker_state not in ["failed", "unverified"]:
+		_evaluation_state.worker_state = "retiring"
 	_last_eval_result = {"status": "cancelled", "request_id": cancelled_id,
-		"worker_state": "retiring", "native_stopped": false,
+		"worker_state": _evaluation_state.worker_state, "native_stopped": false,
 		"ts": Time.get_unix_time_from_system()}
 	_show_eval_error("Evaluation cancelled. Waiting for the worker retirement and recovery receipt; the last painted model is retained.")
 	# Emit intent synchronously on the control lane before the caller can issue
 	# the next evaluate. The asynchronous receipt never re-runs source.
 	var reply_id: String = "cad.cancel_eval:%d" % Time.get_ticks_usec()
 	request.emit("cad.cancel_eval", {"request_id": cancelled_id}, reply_id)
-	_await_cancel_receipt(cancelled_id, reply_id, _cancel_sequence)
+	_await_cancel_receipt(cancelled_id, reply_id, _cancel_sequence, _paint_sequence)
 
 
-func _await_cancel_receipt(cancelled_id: String, reply_id: String, sequence: int) -> void:
+func _await_cancel_receipt(cancelled_id: String, reply_id: String, sequence: int,
+		paint_sequence: int) -> void:
 	var ipc: Node = get_node_or_null("_MinervaIPC")
 	if ipc == null:
 		return
@@ -429,26 +436,37 @@ func _await_cancel_receipt(cancelled_id: String, reply_id: String, sequence: int
 	var payload: Dictionary = reply.get("result", {}) if reply.get("result", {}) is Dictionary else {}
 	var state: String = str(payload.get("worker_state", "unverified"))
 	# A newer successful paint has already established its own ready epoch.
-	if sequence != _cancel_sequence or str(_last_eval_result.get("status", "")) == "ok":
+	_pending_cancel_receipts.erase(sequence)
+	if paint_sequence != _paint_sequence:
 		return
+	# A queued-only cancellation says nothing about an earlier process reset.
+	# Keep that reset's receipt independently of which attempt was cancelled last.
+	if state != "unchanged" and sequence >= _recovery_receipt_sequence:
+		_recovery_receipt = payload.duplicate(true)
+		_recovery_receipt["worker_state"] = state
+		if state == "unverified":
+			_recovery_receipt["error"] = {"message": reply.get("error_message",
+				"The recovery receipt did not arrive; native stop and readiness are unverified.")}
+		_recovery_receipt_sequence = sequence
+	state = str(_recovery_receipt.get("worker_state", "unchanged"))
+	for pending_sequence: int in _pending_cancel_receipts:
+		if pending_sequence > _recovery_receipt_sequence and state not in ["failed", "unverified"]:
+			state = "retiring"
+			break
 	_evaluation_state.worker_state = state
-	if payload.has("replacement_epoch"):
-		_evaluation_state.process_epoch = int(payload.replacement_epoch)
-	if str(_last_eval_result.get("status", "")) == "pending":
-		_last_eval_result["worker_state"] = state
-		if state in ["failed", "unverified"]:
-			_show_eval_error("CAD worker recovery %s. The last painted model is retained; the latest evaluation has no ready worker." % state)
-		elif state == "ready" or state == "unchanged":
-			_hide_eval_error()
+	if _recovery_receipt.has("replacement_epoch"):
+		_evaluation_state.process_epoch = int(_recovery_receipt.replacement_epoch)
+	_last_eval_result["worker_state"] = state
 	if str(_last_eval_result.get("request_id", "")) == cancelled_id:
-		_last_eval_result["worker_state"] = state
 		_last_eval_result["native_stopped"] = bool(payload.get("native_stopped", false))
-		var message: String = "Evaluation cancelled; worker %s. The last painted model is retained and stale." % state
-		if payload.has("error"):
-			var recovery_error: Variant = payload.error
+	var status: String = str(_last_eval_result.get("status", ""))
+	if status == "pending" and state in ["ready", "unchanged"]:
+		_hide_eval_error()
+	elif status in ["pending", "cancelled"] or state in ["failed", "unverified"]:
+		var message: String = "Latest evaluation %s; worker %s. The last painted model is retained and stale." % [status, state]
+		if state == str(_recovery_receipt.get("worker_state", "")) and _recovery_receipt.has("error"):
+			var recovery_error: Variant = _recovery_receipt.error
 			message += " " + (str(recovery_error.get("message", "")) if recovery_error is Dictionary else str(recovery_error))
-		elif state == "unverified":
-			message += " " + str(reply.get("error_message", "The recovery receipt did not arrive; native stop and readiness are unverified."))
 		_show_eval_error(message)
 
 
@@ -1026,6 +1044,10 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 	# freshness stamp moves here and nowhere else.
 	_painted_buffer_version = int(snapshot.source_version)
 	_evaluation_state.painted(self, snapshot, eval_result)
+	_paint_sequence += 1
+	_pending_cancel_receipts.clear()
+	_recovery_receipt = {}
+	_recovery_receipt_sequence = _cancel_sequence
 	_reference_selection.set_records(preload("scripts/object_records.gd").build(eval_result, get_reference_state()))
 	_model_views.refresh()
 	_annotation_host.set_source_annotations(prepared_annotations.annotations,

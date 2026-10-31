@@ -74,6 +74,7 @@ type workerTicket struct {
 	owned     bool
 	epoch     uint64
 	completed bool
+	cancelled bool
 }
 
 // A request captures its epoch on admission, including detached exports whose
@@ -157,6 +158,10 @@ func (t *workerTicket) Call(ctx context.Context, method string, params json.RawM
 		r.mu.Unlock()
 		return nil, &bridge.WorkerError{Kind: "internal", Message: "CAD worker reservation already consumed"}
 	}
+	if t.cancelled {
+		r.mu.Unlock()
+		return nil, cancelledError(context.Canceled)
+	}
 	if err := ctx.Err(); err != nil {
 		r.mu.Unlock()
 		return nil, cancelledError(err)
@@ -218,6 +223,11 @@ func (r *workerRunner) cancelEvaluation(ctx context.Context, ticket *workerTicke
 	defer r.mu.Unlock()
 	if ticket != nil && ticket.completed {
 		return nil, false
+	}
+	// Startup commits the generation under this same mutex. Record intent
+	// before releasing it, even while the caller's context is still live.
+	if ticket != nil {
+		ticket.cancelled = true
 	}
 	queuedCount := len(r.queue)
 queuedScan:
@@ -336,7 +346,7 @@ func (r *workerRunner) run() {
 				continue
 			}
 			r.mu.Lock()
-			if task.epoch != r.epoch || r.failure != nil {
+			if task.ticket.cancelled || task.epoch != r.epoch || r.failure != nil {
 				err := r.failure
 				if err == nil {
 					err = cancelledError(context.Canceled)
@@ -360,7 +370,7 @@ func (r *workerRunner) run() {
 				generation, startErr = r.worker.StartOwned(r.ctx)
 				reply.err = startErr
 				r.mu.Lock()
-				if reply.err == nil && task.ctx.Err() == nil && task.epoch == r.epoch {
+				if reply.err == nil && !task.ticket.cancelled && task.ctx.Err() == nil && task.epoch == r.epoch {
 					task.generation = generation
 				} else if reply.err == nil {
 					reply.err = cancelledError(context.Canceled)
