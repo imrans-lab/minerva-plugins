@@ -17,6 +17,8 @@ pub struct Printer {
     pub name: String,
     pub host: String,
     pub user: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slicing: Option<crate::slicer::SlicerConfig>,
 }
 impl Printer {
     pub fn id(&self) -> String {
@@ -82,6 +84,7 @@ impl Store {
         name: String,
         host: String,
         user: String,
+        slicing: Option<crate::slicer::SlicerConfig>,
     ) -> Result<Printer> {
         let slot = match slot {
             Some(slot) => slot,
@@ -91,11 +94,20 @@ impl Store {
                     "All eight printer slots are in use; remove one first",
                 ))?,
         };
+        let host = normalize_host(&host)?;
+        let slicing = slicing.or_else(|| {
+            self.config
+                .printers
+                .iter()
+                .find(|p| p.slot == slot && p.host == host)
+                .and_then(|p| p.slicing.clone())
+        });
         let printer = Printer {
             slot,
             name: name.trim().into(),
-            host: normalize_host(&host)?,
+            host,
             user: user.trim().into(),
+            slicing,
         };
         validate_printer(&printer)?;
         if self
@@ -178,6 +190,9 @@ pub fn normalize_host(host: &str) -> Result<String> {
     Ok(url.to_string().trim_end_matches('/').into())
 }
 fn validate_printer(printer: &Printer) -> Result<()> {
+    if let Some(slicing) = &printer.slicing {
+        slicing.validate()?;
+    }
     if (1..=SLOTS as u8).any(|slot| {
         slot != printer.slot && printer.name.eq_ignore_ascii_case(&format!("printer{slot}"))
     }) {

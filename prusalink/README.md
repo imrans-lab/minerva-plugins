@@ -61,7 +61,7 @@ tool-call log. Use the panel when the agent should not receive the password.
 | --- | --- | --- |
 | `discover` | optional `hosts` (1–32 HTTP(S) hosts) | Matching PrusaLink hosts, probe/unreachable counts |
 | `list_printers` | none | Stable ids, names, hosts, users, `has_password` |
-| `configure_printer` | `name`, `host`, optional `user`, `slot` | Add/edit nonsecret metadata; returns fixed secret handle for panel IPC |
+| `configure_printer` | `name`, `host`, optional `user`, `slot`, `slicing` | Add/edit nonsecret metadata; returns fixed secret handle for panel IPC |
 | `set_password` | `printer`, `password` | Write-only vault save, then one authenticated status probe; returns only `printer`, `saved:true`, `auth_ok` |
 | `remove_printer` | `printer` | Deletes vault secret, verifies `exists:false`, removes metadata |
 | `status` | `printer` | Read-only snapshot of status, job and USB storage |
@@ -160,3 +160,58 @@ separators; existing traversal checks still apply. Digest authentication uses th
 same encoded URI sent on the wire. Upload's `remote_name` is the requested decoded
 filename and `remote_path` is its encoded API path; neither claims to be a
 printer-reported canonical or short filename. `file` remains compatible.
+
+## Local slicing (macOS/Linux)
+
+`list_profiles {printer}` and `slice {printer,input_path,print_profile?,
+material_profile?,extruder?}` use an already installed PrusaSlicer. They never
+fetch a password, contact the printer, upload, or start a print. Upload and print
+remain separate tools requiring their own operator authorization.
+
+Configure the printer's optional `slicing` object through `configure_printer`:
+
+```json
+{
+  "executable": "/Applications/PrusaSlicer.app/Contents/MacOS/PrusaSlicer",
+  "vendor_ini": "/Applications/PrusaSlicer.app/Contents/Resources/profiles/PrusaResearch.ini",
+  "vendor_id": "PrusaResearch", "model_id": "XL2IS", "variant": "0.4",
+  "tool_count": 2,
+  "printer_profile": "Original Prusa XL - 2T Input Shaper 0.4 nozzle",
+  "print_profile": "0.20mm SPEED @XLIS 0.4",
+  "material_profile": "Prusament PLA @XLIS"
+}
+```
+
+Omitting the mapping preserves it only when the host remains the same. Changing
+host without a new mapping clears it. Existing configs remain readable, and
+unmapped printers refuse slicing. The installed catalog must confirm the exact
+vendor/model/variant/profile and tool count. Its rectangular bed origin and size
+supply the center; other bed shapes fail rather than guessing. `list_profiles`
+returns compatible print/material combinations and the catalog/ executable hashes.
+The configured defaults apply when slice arguments omit them. An override must
+appear in that printer's compatible catalog. `extruder` overrides are supported
+for STL only; 3MF projects retain embedded tool assignments.
+
+Each call retains a private random directory under the plugin data directory's
+`slicing/`, with a copied vendor profile and minimal settings, query/log files,
+and (on success) `output.bgcode` and `receipt.json`. No GUI profile is edited.
+Explicit CLI options disable GUI single-instance forwarding and post-process
+hooks; only the export action runs. No shell interprets arguments. Input is a
+regular local `.3mf`/`.stl` up to256MiB; output uses a fresh owned path.
+
+Calls share a20second budget across catalog queries and slicing, leaving MCP
+response headroom. Each child inherits a20CPU-second limit, uses two slicer
+threads, and has its owned process group monitored for20CPU seconds,4GiB RSS
+and16MiB logs. The group is signalled before its leader is reaped, including on
+normal exit. OS file I/O and the local `ps` monitor are synchronous; these are
+monitored application limits, not a container guarantee. Unsupported hosts fail
+visibly. A limit/error leaves private evidence and incomplete output; nothing is
+retried or uploaded automatically. Inspect the run logs under `slicing/`.
+
+The result records input/output, executable and vendor hashes, exact profiles,
+center, version and completion. Metadata comes only from a bounded, CRC32-checked
+BGCode-v1 print block (plain INI or zlib). Supported duration and per-tool mass
+fields are returned as `est_time_s` and `filament_g_per_tool`;
+unsupported/missing metadata is unavailable/null, never inferred. Existing
+`flate2`/`crc32fast` dependencies are reused directly for decoding and checksums.
+Keep the output/receipt together. Cleanup is manual; the tool deletes no files.

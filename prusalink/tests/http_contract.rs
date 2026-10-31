@@ -95,6 +95,7 @@ fn client(listener: &TcpListener) -> Client {
             name: "Protocol test".into(),
             host: format!("http://{}", listener.local_addr().unwrap()),
             user: "Mufasa".into(),
+            slicing: None,
         },
         Password::new("Circle Of Life".into()).unwrap(),
     )
