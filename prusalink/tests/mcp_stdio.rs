@@ -7,6 +7,12 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+fn header_value<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
+    headers.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.eq_ignore_ascii_case(name).then(|| value.trim())
+    })
+}
 fn send(input: &mut impl Write, value: Value) {
     writeln!(input, "{value}").unwrap();
     input.flush().unwrap();
@@ -201,7 +207,7 @@ fn manifest_stdio_metadata_and_private_vault_request_boundary() {
             let headers=String::from_utf8(headers).unwrap();
             assert!(headers.starts_with(&format!("GET {path} HTTP/1.1\r\n")));
             assert!(!headers.contains("Circle Of Life"));
-            if path!="/api/version" { assert!(headers.contains("Authorization: Digest ")); }
+            if path!="/api/version" { assert!(header_value(&headers, "Authorization").is_some_and(|value| value.starts_with("Digest "))); }
             write!(stream,"HTTP/1.1 {code}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{extra}\r\n{body}",body.len()).unwrap();
             stream.flush().unwrap();
         }

@@ -33,6 +33,12 @@ fn request(stream: &mut TcpStream) -> (String, Vec<u8>) {
     stream.read_exact(&mut body).unwrap();
     (headers, body)
 }
+fn header_value<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
+    headers.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.eq_ignore_ascii_case(name).then(|| value.trim())
+    })
+}
 fn reply(stream: &mut TcpStream, code: &str, headers: &str, body: &str) {
     write!(stream, "HTTP/1.1 {code}\r\nConnection: close\r\nContent-Length: {}\r\nContent-Type: application/json\r\n{headers}\r\n{body}",body.len()).unwrap();
     stream.flush().unwrap();
@@ -48,7 +54,8 @@ fn exchange(listener: &TcpListener, path: &str, body: &str, challenge: bool) {
         assert!(!headers.contains("Authorization:"));
         reply(&mut stream,"401 Unauthorized","WWW-Authenticate: Digest realm=\"Printer API\", nonce=\"public-rfc-test-nonce\", qop=\"auth\", algorithm=MD5\r\n", "");
     } else {
-        assert!(headers.contains("Authorization: Digest "));
+        assert!(header_value(&headers, "Authorization")
+            .is_some_and(|value| value.starts_with("Digest ")));
         assert!(headers.contains(&format!("uri=\"{path}\"")));
         assert!(!headers.contains("Circle Of Life"));
         reply(
@@ -111,9 +118,12 @@ fn upload_streams_without_start_or_overwrite_and_busy_start_is_refused() {
         let (mut stream, _) = listener.accept().unwrap();
         let (headers, body) = request(&mut stream);
         assert!(headers.starts_with("PUT /api/v1/files/usb/"));
-        assert!(headers.contains("Print-After-Upload: ?0\r\n"));
-        assert!(headers.contains("Overwrite: ?0\r\n"));
-        assert!(headers.contains("Content-Type: application/octet-stream\r\n"));
+        assert_eq!(header_value(&headers, "Print-After-Upload"), Some("?0"));
+        assert_eq!(header_value(&headers, "Overwrite"), Some("?0"));
+        assert_eq!(
+            header_value(&headers, "Content-Type"),
+            Some("application/octet-stream")
+        );
         assert_eq!(body, b"public protocol bytes");
         reply(&mut stream, "201 Created", "", "");
     });

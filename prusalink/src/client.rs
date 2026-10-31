@@ -355,7 +355,6 @@ impl Client {
             .header("Overwrite", "?0");
         self.upload_phase("send");
         let result = self.execute(request, file, true, true)?;
-        self.upload_phase("response");
         if result.status() != 201 {
             return Err(Error::Protocol(
                 "Printer did not confirm the upload; inspect its file list before retrying",
