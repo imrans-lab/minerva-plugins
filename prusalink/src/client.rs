@@ -361,7 +361,7 @@ impl Client {
             ));
         }
         Ok(
-            serde_json::json!({"printer":self.printer.id(),"file":name,"uploaded":true,"start_requested":start,"overwrite":false}),
+            serde_json::json!({"printer":self.printer.id(),"file":name,"remote_name":name,"remote_path":remote,"uploaded":true,"start_requested":start,"overwrite":false}),
         )
     }
     pub fn print(&mut self, file: &str) -> Result<Value> {
@@ -534,18 +534,20 @@ pub fn file_path(file: &str) -> Result<String> {
             "Use a USB-relative .bgcode or .gcode file path without traversal",
         ));
     }
-    let mut url = Url::parse("http://printer.invalid/api/v1/files/usb/")
-        .map_err(|_| Error::Protocol("Internal printer path is invalid"))?;
-    {
-        let mut segments = url
-            .path_segments_mut()
-            .map_err(|_| Error::Protocol("Internal printer path is invalid"))?;
-        segments.pop_if_empty();
-        for segment in file.split('/') {
-            segments.push(segment);
+    // Encode each UTF-8 segment with RFC3986's unreserved set. In particular,
+    // '+' must be %2B because PrusaLink decodes a literal '+' as a space.
+    let mut path = String::from("/api/v1/files/usb");
+    for segment in file.split('/') {
+        path.push('/');
+        for byte in segment.bytes() {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+                path.push(char::from(byte));
+            } else {
+                path.push_str(&format!("%{byte:02X}"));
+            }
         }
     }
-    Ok(url.path().into())
+    Ok(path)
 }
 
 #[derive(Serialize)]

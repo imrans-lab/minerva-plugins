@@ -66,7 +66,7 @@ tool-call log. Use the panel when the agent should not receive the password.
 | `remove_printer` | `printer` | Deletes vault secret, verifies `exists:false`, removes metadata |
 | `status` | `printer` | Read-only snapshot of status, job and USB storage |
 | `thumbnail` | `printer`, optional `offset`, `reference` | Current-job raster chunk, or `available:false` |
-| `upload` | `printer`, local `path`, optional `start:false` | Streams nonempty `.gcode`/`.bgcode` to USB, never overwrites |
+| `upload` | `printer`, local `path`, optional `start:false` | Streams nonempty `.gcode`/`.bgcode` to USB, never overwrites; returns requested `remote_name` and encoded `remote_path` |
 | `print` | `printer`, USB-relative `file` | Starts an existing file; only IDLE/READY/FINISHED |
 | `stop` | `printer` | Stops current job id; only PRINTING/PAUSED |
 
@@ -151,3 +151,12 @@ source change.
 Protocol references: [PrusaLink OpenAPI](https://github.com/prusa3d/Prusa-Link-Web/blob/master/spec/openapi.yaml),
 [RFC 7616](https://www.rfc-editor.org/rfc/rfc7616.html),
 [RFC 2617](https://www.rfc-editor.org/rfc/rfc2617.html).
+
+
+Upload/print USB path segments percent-encode every UTF-8 byte outside the
+RFC3986 unreserved set (`A–Z a–z 0–9 - . _ ~`). A filename's literal `+` therefore
+travels as `%2B`, while spaces travel as `%20`. Folder separators remain route
+separators; existing traversal checks still apply. Digest authentication uses the
+same encoded URI sent on the wire. Upload's `remote_name` is the requested decoded
+filename and `remote_path` is its encoded API path; neither claims to be a
+printer-reported canonical or short filename. `file` remains compatible.
