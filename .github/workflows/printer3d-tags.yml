@@ -1,0 +1,11 @@
+name: printer3d tagged release
+'on':
+  push:
+    tags:
+    - printer3d-v*
+permissions:
+  contents: write
+  actions: read
+jobs:
+  release:
+    uses: ./.github/workflows/printer3d.yml

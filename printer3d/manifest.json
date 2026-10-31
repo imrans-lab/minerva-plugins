@@ -1,7 +1,7 @@
 {
   "id": "printer3d",
   "name": "3D Printer",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Slice, upload, start and monitor 3D prints from Minerva. Tested only with an Original Prusa XL (2-tool, input shaper) through the PrusaLink API, slicing with an installed PrusaSlicer.",
   "price": {
     "amount_minor": 0,

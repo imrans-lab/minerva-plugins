@@ -157,10 +157,46 @@ check the actual password is absent from repo/config/logs/tool outputs. Upload a
 small file with `start:false` and verify the physical printer is unchanged. Start
 and stop require fresh explicit operator go at that moment.
 
-The manifest declares free pricing and supported release targets. Registry
-selection includes this plugin, but a generated marketplace entry waits for the
-first real release tag/assets. Do not invent download URLs or publish from this
-source change.
+The manifest declares free pricing and three release targets: linux-x86_64,
+macos-universal and windows-x86_64. `.github/workflows/printer3d.yml` follows the
+Drive Rust-backend workflow: build native binaries (lipo on macOS), copy the HTML
+panel, omit source-only `setup` from the packed manifest, and package
+`printer3d-<version>-<target>.tar.gz` with `SHA256SUMS`. PrusaSlicer remains a
+separately installed application; it is not bundled.
+
+For an artifact-only build of the reviewed remote branch:
+
+```sh
+gh workflow run printer3d.yml --repo imrans-lab/minerva-plugins --ref main -f publish=false
+```
+
+After the required checks and owner's publishing GO, push an annotated
+manifest-matching tag, such as `printer3d-v0.1.1`. `printer3d-tags.yml` calls the
+same package workflow; dispatch/tag builds run the existing Cargo suite on Linux
+and the MCP handshake on each target before publication. The existing publication
+guard validates the annotated tag against the manifest and source commit. Manual
+non-main publishing produces a branch prerelease; stable manual dispatch preserves
+an existing tag and requires the annotated tag path for a new stable release.
+
+Registry selection already includes this plugin. Run `scripts/regen_registry.py`
+from the repository root only after the real release tag/assets exist, then commit
+the updated `registry.json`; source version changes alone do not create download
+URLs or advance the marketplace selection.
+
+### 0.1.1 release notes
+
+- PrusaLink is now named **3D Printer**, with plugin id `printer3d` and
+  `minerva_printer3d_*` tools. The external PrusaLink API and PrusaSlicer names are
+  retained.
+- Tested only with an Original Prusa XL (2-tool, input shaper) through the
+  PrusaLink API, slicing with an installed PrusaSlicer. This does not claim
+  compatibility with other printers.
+- Not affiliated with or endorsed by Prusa Research. Prusa, PrusaLink and
+  PrusaSlicer are trademarks of Prusa Research a.s.
+- Re-add the printer once in the 3D Printer panel and enter its password there.
+  Configuration, slicing mappings, passwords and grants do not migrate
+  automatically. The old `prusalink` installation, data and vault keys remain
+  intact; remove the old plugin only after verifying the new installation.
 
 Protocol references: [PrusaLink OpenAPI](https://github.com/prusa3d/Prusa-Link-Web/blob/master/spec/openapi.yaml),
 [RFC 7616](https://www.rfc-editor.org/rfc/rfc7616.html),
