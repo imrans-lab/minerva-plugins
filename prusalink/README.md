@@ -101,7 +101,13 @@ the saved vault value. A failed probe returns `saved:true, auth_ok:false`; a fai
 vault write returns an error. Tool arguments are recorded in Minerva's tool-call
 log, so that path does expose the supplied value to the agent and host log. HTTP Digest is implemented from RFC 2617/7616 with
 established MD5/SHA crates. Plain HTTP is supported for local printer firmware;
-HTTPS uses normal certificate verification. Redirects and environment proxies
+HTTPS uses normal certificate verification. Upload authentication, status reads and
+PUT share a 20-second request budget rather than restarting the budget per phase.
+Fixed upload phase names and elapsed milliseconds go to stderr, without paths,
+credentials or response bodies. A failed PUT has an unknown outcome: inspect the
+printer before retrying; the plugin never automatically replays the upload.
+This HTTP budget does not bound vault IPC, OS DNS resolution or local file I/O.
+Redirects and environment proxies
 are disabled. Keep printer access on a trusted local network.
 
 ## Validation and release

@@ -2,7 +2,7 @@
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use serde::Serialize;
@@ -77,6 +77,7 @@ pub struct Client {
     challenge: Option<Challenge>,
     nonce_count: u32,
     cnonce: String,
+    upload_started: Option<Instant>,
 }
 impl Client {
     pub fn new(printer: Printer, password: Password) -> Result<Self> {
@@ -87,18 +88,41 @@ impl Client {
             password,
             agent: agent(Duration::from_secs(120)),
             challenge: None,
+            upload_started: None,
             nonce_count: 0,
             cnonce: nonce.iter().map(|b| format!("{b:02x}")).collect(),
         })
+    }
+    fn upload_phase(&self, phase: &str) {
+        if let Some(started) = self.upload_started {
+            // Fixed phase names and elapsed time only: never paths, bodies or credentials.
+            eprintln!(
+                "prusalink upload phase={phase} elapsed_ms={}",
+                started.elapsed().as_millis()
+            );
+        }
+    }
+    fn request_timeout(&self) -> Result<Duration> {
+        match self.upload_started {
+            Some(started) => Duration::from_secs(20)
+                .checked_sub(started.elapsed())
+                .filter(|remaining| !remaining.is_zero())
+                .ok_or(Error::Protocol(
+                    "Upload preflight deadline exceeded; no upload was sent",
+                )),
+            None => Ok(Duration::from_secs(120)),
+        }
     }
     fn authenticate(&mut self) -> Result<()> {
         if self.challenge.is_some() {
             return Ok(());
         }
         for path in ["/api/version", "/api/v1/status"] {
+            self.upload_phase("authenticate");
             match self
                 .agent
                 .get(&format!("{}{path}", self.printer.host))
+                .timeout(self.request_timeout()?)
                 .call()
             {
                 Err(ureq::Error::Status(401, response)) => {
@@ -151,10 +175,17 @@ impl Client {
         Ok(self
             .agent
             .request(method, &format!("{}{path}", self.printer.host))
+            .timeout(self.request_timeout()?)
             .set("Authorization", &authorization)
             .set("Accept", "application/json"))
     }
     fn get(&mut self, path: &str) -> Result<Value> {
+        self.upload_phase(match path {
+            "/api/v1/status" => "status",
+            "/api/v1/job" => "job",
+            "/api/v1/storage" => "storage",
+            _ => "read",
+        });
         let response = response(self.request("GET", path)?.call(), false)?;
         if response.status() == 204 {
             return Ok(Value::Null);
@@ -210,6 +241,16 @@ impl Client {
     }
 
     pub fn upload(&mut self, path: &Path, start: bool) -> Result<Value> {
+        // One shared network budget covers authentication, status reads and PUT.
+        // Leave headroom for the host MCP deadline. Never replay a mutation.
+        self.upload_started = Some(Instant::now());
+        self.upload_phase("begin");
+        let result = self.upload_inner(path, start);
+        self.upload_phase(if result.is_ok() { "complete" } else { "failed" });
+        self.upload_started = None;
+        result
+    }
+    fn upload_inner(&mut self, path: &Path, start: bool) -> Result<Value> {
         let name = path
             .file_name()
             .and_then(|s| s.to_str())
@@ -225,6 +266,7 @@ impl Client {
         if start {
             ready(&status.state)?;
         }
+        self.upload_phase("open_file");
         let file =
             File::open(path).map_err(|_| Error::Io("Cannot open the requested G-code file"))?;
         let metadata = file
@@ -241,7 +283,9 @@ impl Client {
             .set("Content-Length", &metadata.len().to_string())
             .set("Print-After-Upload", if start { "?1" } else { "?0" })
             .set("Overwrite", "?0");
+        self.upload_phase("send");
         let result = response(request.send(file), true)?;
+        self.upload_phase("response");
         if result.status() != 201 {
             return Err(Error::Protocol(
                 "Printer did not confirm the upload; inspect its file list before retrying",
