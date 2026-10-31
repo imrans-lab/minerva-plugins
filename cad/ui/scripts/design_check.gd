@@ -547,6 +547,11 @@ static func _fold_clearance(reply: Dictionary, state: Dictionary) -> Array:
 		total += int(report.get("pairs_total", 0))
 		hidden += int(report.get("pairs_hidden", 0))
 		var certified: bool = _DesignContacts.clearance_certified(report)
+		if certified:
+			for declared: Dictionary in report.get("declared_clearance", []):
+				var evidence: Dictionary = declared.duplicate(true)
+				evidence["part"] = part
+				(state["declared_clearance"] as Array).append(evidence)
 		var shown := 0
 		for entry in (report.get("pairs", []) as Array):
 			var pair: Dictionary = (entry as Dictionary).duplicate(true)
@@ -560,8 +565,6 @@ static func _fold_clearance(reply: Dictionary, state: Dictionary) -> Array:
 					str(pair.get("reference", "")), str(pair.get("node", ""))])
 				continue
 			if pair.get("pass", null) == true:
-				if bool(pair.get("expected", false)):
-					(state["declared_clearance"] as Array).append(pair)
 				continue
 			if pair.get("pass", null) != false:
 				_unknown(state, "a clearance pair has no boolean verdict%s" % _of(part))

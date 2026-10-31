@@ -49,10 +49,13 @@ static func _flush_proof(interference: Dictionary, clearance: Dictionary,
 	if declarations.is_empty() \
 			or declarations != str(clearance.get("expected_contacts_digest", "")):
 		return {}
+	if not interference.has("measurement_scope") \
+			or interference["measurement_scope"] != clearance.get("measurement_scope", {}):
+		return {}
 	var index: int = int(declaration.get("declaration_index", -1))
 	if index < 0:
 		return {}
-	for pair: Dictionary in clearance.get("pairs", []):
+	for pair: Dictionary in clearance.get("declared_clearance", []):
 		if pair.get("pass", false) != true or not bool(pair.get("expected", false)) \
 				or not bool(pair.get("touching", false)) \
 				or float(pair.get("min_mm", INF)) != 0.0 \

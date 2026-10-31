@@ -364,6 +364,8 @@ func _run(panel: Object, args: Dictionary, ticket: int = 0) -> Dictionary:
 	if bool(reply.get("checked", false)):
 		reply["source_digest"] = _source_digest(scoped_source)
 		reply["scope_digest"] = measured_digest
+		reply["measurement_scope"] = {"reference": reference_scope,
+			"node": str(args.get("node", ""))}
 		reply["records_digest"] = records_digest
 		reply["gauge_generation"] = gauge_generation
 		if colliders_rebuilt:

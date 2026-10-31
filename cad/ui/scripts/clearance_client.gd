@@ -298,7 +298,9 @@ func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
 	}
 	# The quantization rides beside the request, not in it: the worker never
 	# sees it, and the reply is stamped with it here.
-	var bar := {"quantization_mm": quantization, "largest_coordinate_mm": largest}
+	var bar := {"quantization_mm": quantization, "largest_coordinate_mm": largest,
+		"measurement_scope": {"reference": str(args.get("reference", "")),
+			"node": str(args.get("node", ""))}}
 	var plan := _batch_targets(head, targets)
 	if plan.has("error"):
 		return _no_clearance(str(plan["error"]))

@@ -231,8 +231,7 @@ static func ungrade_regions(pairs: Array, declared_rows: Array) -> int:
 		ungraded += 1
 		for row_entry in declared_rows:
 			var declared_row: Dictionary = row_entry
-			if declared_row.has("region_mm") \
-					and bool(declared_row.get("excluded", false)) \
+			if bool(declared_row.get("excluded", false)) \
 					and str(declared_row.get("node", "")) == str(pair.get("node", "")) \
 					and str(declared_row.get("reference", "")) \
 						== str(pair.get("reference", "")):
