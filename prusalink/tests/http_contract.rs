@@ -51,7 +51,7 @@ fn exchange(listener: &TcpListener, path: &str, body: &str, challenge: bool) {
         "{headers}"
     );
     if challenge {
-        assert!(!headers.contains("Authorization:"));
+        assert!(header_value(&headers, "Authorization").is_none());
         reply(&mut stream,"401 Unauthorized","WWW-Authenticate: Digest realm=\"Printer API\", nonce=\"public-rfc-test-nonce\", qop=\"auth\", algorithm=MD5\r\n", "");
     } else {
         assert!(header_value(&headers, "Authorization")
