@@ -54,7 +54,7 @@ jobs:
         shell: bash
         working-directory: council
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -137,7 +137,7 @@ jobs:
         shell: bash
         working-directory: council
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -231,7 +231,7 @@ jobs:
       MINERVA_SHA: "0c289fe70a33453b03d983ec75e0eded03e1a723"
     steps:
       - name: Checkout minerva-plugins
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Minerva must end up as a SIBLING of the minerva-plugins checkout: the
       # suite preloads `res://../../minerva-plugins/council/...` resolved from
@@ -259,7 +259,7 @@ jobs:
           echo "Minerva host: $sha ($src)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Checkout Minerva (pinned)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: turnrocklabs/Minerva
           ref: ${{ steps.host.outputs.sha }}
@@ -296,7 +296,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Full history so the publish guard can see existing tags.
           fetch-depth: 0

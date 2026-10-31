@@ -41,7 +41,7 @@ jobs:
     name: Worker lifetime (race detector)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with:
           go-version-file: .go-version
@@ -92,7 +92,7 @@ jobs:
         shell: bash
         working-directory: cad
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -422,7 +422,7 @@ jobs:
       MINERVA_SHA: "50e1cf44627d277f28f11ad72429025dadb24cd0"
     steps:
       - name: Checkout minerva-plugins
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Minerva must end up as a SIBLING of the minerva-plugins checkout: the
       # suites preload `res://../../minerva-plugins/cad/...` resolved from
@@ -450,7 +450,7 @@ jobs:
           echo "Minerva host: $sha ($src)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Checkout Minerva (pinned)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: turnrocklabs/Minerva
           ref: ${{ steps.host.outputs.sha }}
@@ -495,7 +495,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -544,7 +544,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -596,7 +596,7 @@ jobs:
       run:
         working-directory: cad
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with:
           go-version-file: .go-version
