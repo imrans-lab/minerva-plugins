@@ -14,8 +14,6 @@ package tools
 import (
 	"context"
 	"encoding/json"
-
-	"github.com/imrans-lab/minerva-plugins/shared/bridge"
 )
 
 // CylindricalFeatures is the MCP tool spec for cad.cylindrical_features.
@@ -39,6 +37,6 @@ var CylindricalFeatures = ToolSpec{
 // bridge. The worker method name is "cylindrical_features" (no cad./mcad_
 // prefix). A DSL that does not evaluate, a document with no 3D part and a
 // missing OCCT binding are all returned as worker data errors, not MCP errors.
-func HandleCylindricalFeatures(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+func HandleCylindricalFeatures(ctx context.Context, w WorkerCaller, params json.RawMessage) (json.RawMessage, error) {
 	return w.Call(ctx, "cylindrical_features", params)
 }

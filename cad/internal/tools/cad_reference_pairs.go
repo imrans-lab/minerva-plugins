@@ -15,8 +15,6 @@ package tools
 import (
 	"context"
 	"encoding/json"
-
-	"github.com/imrans-lab/minerva-plugins/shared/bridge"
 )
 
 // ReferencePairs is the MCP tool spec for cad.reference_pairs.
@@ -54,6 +52,6 @@ var ReferencePairs = ToolSpec{
 
 // HandleReferencePairs dispatches a reference-pair request to the worker via
 // the bridge. The worker method name is "reference_pairs" (no cad. prefix).
-func HandleReferencePairs(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+func HandleReferencePairs(ctx context.Context, w WorkerCaller, params json.RawMessage) (json.RawMessage, error) {
 	return w.Call(ctx, "reference_pairs", params)
 }

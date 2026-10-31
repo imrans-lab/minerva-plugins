@@ -87,9 +87,9 @@ while True:
         write_frame({"id": req["id"], "ok": True, "result": {"shape_name": "shell"}})
 `
 
-// useStubWorker points the package-level worker and registry at a stub python
-// worker in a temp dir and restores them afterwards.
-func useStubWorker(t *testing.T) {
+// useStubWorker returns a server whose worker and registry point at a stub
+// python worker in a temp dir, shutting the worker down afterwards.
+func useStubWorker(t *testing.T) *server {
 	t.Helper()
 
 	python, err := exec.LookPath("python3")
@@ -111,18 +111,18 @@ func useStubWorker(t *testing.T) {
 		t.Fatalf("write stub __main__.py: %v", err)
 	}
 
-	prevWorker, prevRegistry := worker, registry
-	initRegistry()
-	worker = bridge.New(python, dir, workerModule)
+	s := newServer()
+	s.initRegistry()
+	s.worker = bridge.New(python, dir, workerModule)
 	t.Cleanup(func() {
-		worker.Shutdown(workerShutdownTimeout)
-		worker, registry = prevWorker, prevRegistry
+		s.worker.Shutdown(workerShutdownTimeout)
 	})
+	return s
 }
 
 // callEvaluate drives one cad.evaluate through the real MCP entry point and
 // returns the {ok, result|error} envelope the panel would decode.
-func callEvaluate(t *testing.T, requestID string, fail bool) (ok bool, kind string) {
+func callEvaluate(t *testing.T, s *server, requestID string, fail bool) (ok bool, kind string) {
 	t.Helper()
 
 	args := map[string]interface{}{
@@ -142,7 +142,7 @@ func callEvaluate(t *testing.T, requestID string, fail bool) (ok bool, kind stri
 		t.Fatalf("marshal params: %v", err)
 	}
 
-	resp := handleToolsCall(json.RawMessage(`1`), params)
+	resp := s.handleToolsCall(json.RawMessage(`1`), params)
 	return decodeEnvelope(t, resp)
 }
 
@@ -216,8 +216,8 @@ func TestReopenAfterInflightEvalIsNotCrashed(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			useStubWorker(t)
-			resetInflight(t)
+			s := useStubWorker(t)
+			resetInflight(t, s)
 
 			requestID := fmt.Sprintf("eval_%s", tc.name)
 			release := func() {}
@@ -230,9 +230,9 @@ func TestReopenAfterInflightEvalIsNotCrashed(t *testing.T) {
 					}
 				}
 				t.Cleanup(release)
-				worker.ExtraEnv = []string{"STUB_RELEASE_FILE=" + gate}
+				s.worker.ExtraEnv = []string{"STUB_RELEASE_FILE=" + gate}
 				started := make(chan struct{}, 1)
-				worker.StderrCallback = func(line string) {
+				s.worker.StderrCallback = func(line string) {
 					if line == "stub.request_started" {
 						started <- struct{}{}
 					}
@@ -244,7 +244,7 @@ func TestReopenAfterInflightEvalIsNotCrashed(t *testing.T) {
 					select {
 					case <-started:
 						args, _ := json.Marshal(map[string]string{"request_id": requestID})
-						handleCancelEval(json.RawMessage(`2`), args)
+						s.handleCancelEval(json.RawMessage(`2`), args)
 					case <-time.After(10 * time.Second):
 						t.Error("worker did not start evaluation before watchdog expired")
 					}
@@ -253,7 +253,7 @@ func TestReopenAfterInflightEvalIsNotCrashed(t *testing.T) {
 				close(cancelDone)
 			}
 
-			firstOK, firstKind := callEvaluate(t, requestID, tc.fail)
+			firstOK, firstKind := callEvaluate(t, s, requestID, tc.fail)
 			<-cancelDone
 			release()
 			if tc.cancelMidflight && firstKind != "cancelled" {
@@ -261,7 +261,7 @@ func TestReopenAfterInflightEvalIsNotCrashed(t *testing.T) {
 			}
 
 			// The reopened panel's FIRST evaluate, issued immediately after.
-			secondOK, secondKind := callEvaluate(t, "eval_reopened", false)
+			secondOK, secondKind := callEvaluate(t, s, "eval_reopened", false)
 			if secondKind == "crashed" {
 				t.Fatalf("reopened panel's first eval crashed (%q) — the worker was killed with the previous request", secondKind)
 			}

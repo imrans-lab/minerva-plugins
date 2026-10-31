@@ -16,8 +16,6 @@ package tools
 import (
 	"context"
 	"encoding/json"
-
-	"github.com/imrans-lab/minerva-plugins/shared/bridge"
 )
 
 // Clearance is the MCP tool spec for cad.clearance.
@@ -54,6 +52,6 @@ var Clearance = ToolSpec{
 // The worker method name is "clearance" (no cad./mcad_ prefix). A DSL that
 // does not evaluate, a blob that cannot be read and a missing geometry backend
 // are all returned as worker data errors, not as MCP errors.
-func HandleClearance(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+func HandleClearance(ctx context.Context, w WorkerCaller, params json.RawMessage) (json.RawMessage, error) {
 	return w.Call(ctx, "clearance", params)
 }

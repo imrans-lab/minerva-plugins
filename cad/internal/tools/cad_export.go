@@ -84,7 +84,7 @@ var (
 // The worker method name is "export" (no cad./mcad_ prefix).
 // DSL/IO errors are returned as data per design §8.2; only internal/python
 // errors propagate as Go errors.
-func HandleExport(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+func HandleExport(ctx context.Context, w WorkerCaller, params json.RawMessage) (json.RawMessage, error) {
 	return handleExportWith(ctx, params, func(callCtx context.Context, p json.RawMessage) (json.RawMessage, error) {
 		return w.Call(callCtx, "export", p)
 	})

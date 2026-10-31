@@ -16,8 +16,6 @@ package tools
 import (
 	"context"
 	"encoding/json"
-
-	"github.com/imrans-lab/minerva-plugins/shared/bridge"
 )
 
 // Material is the MCP tool spec for cad.material.
@@ -42,6 +40,6 @@ var Material = ToolSpec{
 // worker method name is "material" (no cad./mcad_ prefix). A DSL that does not
 // evaluate, a document with no closed solid and a missing OCCT binding are all
 // returned as worker data errors, not as MCP errors.
-func HandleMaterial(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+func HandleMaterial(ctx context.Context, w WorkerCaller, params json.RawMessage) (json.RawMessage, error) {
 	return w.Call(ctx, "material", params)
 }

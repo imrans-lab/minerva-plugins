@@ -10,8 +10,6 @@ package tools
 import (
 	"context"
 	"encoding/json"
-
-	"github.com/imrans-lab/minerva-plugins/shared/bridge"
 )
 
 // ListEdges is the MCP tool spec for mcad_list_edges.
@@ -31,6 +29,6 @@ var ListEdges = ToolSpec{
 // The worker method name is "list_edges" (no mcad_ prefix).
 // Parse/translate/occt errors are returned as data per §8.4,
 // not as MCP errors. Only internal/python errors propagate as Go errors.
-func HandleListEdges(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+func HandleListEdges(ctx context.Context, w WorkerCaller, params json.RawMessage) (json.RawMessage, error) {
 	return w.Call(ctx, "list_edges", params)
 }

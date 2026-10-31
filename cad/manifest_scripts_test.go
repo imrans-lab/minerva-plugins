@@ -197,9 +197,10 @@ func local(from string, ref string) (string, bool) {
 // constants — "cad.document" is a note schema — out of the check, and makes
 // the next route that ships without a declaration fail here.
 func TestPanelDispatchedChannelsAreDeclared(t *testing.T) {
-	initRegistry()
+	s := newServer()
+	s.initRegistry()
 	backend := map[string]bool{}
-	for _, spec := range registry.Specs() {
+	for _, spec := range s.registry.Specs() {
 		if strings.HasPrefix(spec.Name, "cad.") {
 			backend[spec.Name] = true
 		}

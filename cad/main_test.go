@@ -198,24 +198,25 @@ func TestSpawnFailureProducesToast(t *testing.T) {
 // Inflight cad.evaluate cancellation (DCR 019dfa66 §T6)
 // ---------------------------------------------------------------------------
 
-// resetInflight wipes the package-level inflight map between tests so prior
+// resetInflight wipes the server inflight map between tests so prior
 // state can't bleed across test cases.
-func resetInflight(t *testing.T) {
+func resetInflight(t *testing.T, s *server) {
 	t.Helper()
-	inflightMu.Lock()
-	defer inflightMu.Unlock()
-	for k, c := range inflight {
+	s.inflightMu.Lock()
+	defer s.inflightMu.Unlock()
+	for k, c := range s.inflight {
 		c()
-		delete(inflight, k)
+		delete(s.inflight, k)
 	}
 }
 
 // TestBeginEvaluateCancellable_NoRequestID confirms that args without a
 // request_id leave inflight untouched and return the parent context.
 func TestBeginEvaluateCancellable_NoRequestID(t *testing.T) {
-	resetInflight(t)
+	s := newServer()
+	resetInflight(t, s)
 	parent := context.Background()
-	ctx, key, err := beginEvaluateCancellable(parent, json.RawMessage(`{"source":"box(1,2,3)"}`))
+	ctx, key, err := s.beginEvaluateCancellable(parent, json.RawMessage(`{"source":"box(1,2,3)"}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -225,21 +226,22 @@ func TestBeginEvaluateCancellable_NoRequestID(t *testing.T) {
 	if ctx != parent {
 		t.Errorf("expected parent context returned when request_id absent")
 	}
-	inflightMu.Lock()
-	defer inflightMu.Unlock()
-	if len(inflight) != 0 {
-		t.Errorf("expected empty inflight, got %d entries", len(inflight))
+	s.inflightMu.Lock()
+	defer s.inflightMu.Unlock()
+	if len(s.inflight) != 0 {
+		t.Errorf("expected empty inflight, got %d entries", len(s.inflight))
 	}
 }
 
 // TestBeginEvaluateCancellable_RegistersAndCancels covers the happy path:
 // request_id present → inflight has the cancel func → cancel_eval trips it.
 func TestBeginEvaluateCancellable_RegistersAndCancels(t *testing.T) {
-	resetInflight(t)
+	s := newServer()
+	resetInflight(t, s)
 
 	parent := context.Background()
 	args := json.RawMessage(`{"source":"box(1,2,3)","request_id":"eval_123"}`)
-	ctx, key, err := beginEvaluateCancellable(parent, args)
+	ctx, key, err := s.beginEvaluateCancellable(parent, args)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -248,15 +250,15 @@ func TestBeginEvaluateCancellable_RegistersAndCancels(t *testing.T) {
 	}
 
 	// Verify inflight has the entry.
-	inflightMu.Lock()
-	_, ok := inflight[key]
-	inflightMu.Unlock()
+	s.inflightMu.Lock()
+	_, ok := s.inflight[key]
+	s.inflightMu.Unlock()
 	if !ok {
 		t.Fatalf("expected inflight[%s] to be registered", key)
 	}
 
 	// Cancel via the public handler — confirm the derived ctx fires Done.
-	resp := handleCancelEval(json.RawMessage(`1`),
+	resp := s.handleCancelEval(json.RawMessage(`1`),
 		json.RawMessage(`{"request_id":"eval_123"}`))
 	if resp.Error != nil {
 		t.Fatalf("cancel_eval errored: %v", resp.Error)
@@ -270,9 +272,9 @@ func TestBeginEvaluateCancellable_RegistersAndCancels(t *testing.T) {
 	}
 
 	// Inflight entry must be gone after cancel.
-	inflightMu.Lock()
-	_, stillThere := inflight[key]
-	inflightMu.Unlock()
+	s.inflightMu.Lock()
+	_, stillThere := s.inflight[key]
+	s.inflightMu.Unlock()
 	if stillThere {
 		t.Errorf("expected inflight[%s] removed after cancel_eval", key)
 	}
@@ -281,8 +283,9 @@ func TestBeginEvaluateCancellable_RegistersAndCancels(t *testing.T) {
 // TestHandleCancelEval_UnknownRequestIDIsNoop confirms that cancel_eval with
 // an unknown request_id returns ok:true cancelled:false (fire-and-forget safe).
 func TestHandleCancelEval_UnknownRequestIDIsNoop(t *testing.T) {
-	resetInflight(t)
-	resp := handleCancelEval(json.RawMessage(`1`),
+	s := newServer()
+	resetInflight(t, s)
+	resp := s.handleCancelEval(json.RawMessage(`1`),
 		json.RawMessage(`{"request_id":"never_existed"}`))
 	if resp.Error != nil {
 		t.Fatalf("cancel_eval errored: %v", resp.Error)
@@ -308,23 +311,24 @@ func TestHandleCancelEval_UnknownRequestIDIsNoop(t *testing.T) {
 
 // TestEndEvaluateCancellable_RemovesEntry confirms the cleanup path.
 func TestEndEvaluateCancellable_RemovesEntry(t *testing.T) {
-	resetInflight(t)
+	s := newServer()
+	resetInflight(t, s)
 
 	args := json.RawMessage(`{"source":"x","request_id":"eval_end"}`)
-	_, key, _ := beginEvaluateCancellable(context.Background(), args)
+	_, key, _ := s.beginEvaluateCancellable(context.Background(), args)
 
-	inflightMu.Lock()
-	_, before := inflight[key]
-	inflightMu.Unlock()
+	s.inflightMu.Lock()
+	_, before := s.inflight[key]
+	s.inflightMu.Unlock()
 	if !before {
 		t.Fatalf("setup: expected inflight registration")
 	}
 
-	endEvaluateCancellable(key)
+	s.endEvaluateCancellable(key)
 
-	inflightMu.Lock()
-	_, after := inflight[key]
-	inflightMu.Unlock()
+	s.inflightMu.Lock()
+	_, after := s.inflight[key]
+	s.inflightMu.Unlock()
 	if after {
 		t.Errorf("expected inflight[%s] removed by end", key)
 	}
@@ -334,17 +338,18 @@ func TestEndEvaluateCancellable_RemovesEntry(t *testing.T) {
 // defensive case where a stale entry exists for the same request_id —
 // the prior cancel func must be tripped before the new one overwrites it.
 func TestBeginEvaluateCancellable_DuplicateRequestIDCancelsPrior(t *testing.T) {
-	resetInflight(t)
+	s := newServer()
+	resetInflight(t, s)
 
 	parent := context.Background()
 	args := json.RawMessage(`{"source":"a","request_id":"eval_dup"}`)
-	ctxA, keyA, _ := beginEvaluateCancellable(parent, args)
+	ctxA, keyA, _ := s.beginEvaluateCancellable(parent, args)
 	if keyA != "eval_dup" {
 		t.Fatalf("setup: keyA=%s", keyA)
 	}
 
 	// Re-register under same id.
-	ctxB, keyB, _ := beginEvaluateCancellable(parent, args)
+	ctxB, keyB, _ := s.beginEvaluateCancellable(parent, args)
 	if keyB != "eval_dup" {
 		t.Fatalf("setup: keyB=%s", keyB)
 	}
@@ -365,5 +370,5 @@ func TestBeginEvaluateCancellable_DuplicateRequestIDCancelsPrior(t *testing.T) {
 	}
 
 	// Cleanup.
-	endEvaluateCancellable("eval_dup")
+	s.endEvaluateCancellable("eval_dup")
 }
