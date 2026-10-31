@@ -12,6 +12,7 @@ var _preference: String = "auto"
 var _preference_error: String = ""
 var _sidebar_width: float = 0.0
 var _pending: bool = false
+var _allocation_ready: bool = false
 var _decision: Dictionary = {}
 
 
@@ -35,6 +36,7 @@ func wire() -> void:
 	panel._wide_sidebar.resized.connect(queue_refresh)
 	panel._wide_sidebar.minimum_size_changed.connect(queue_refresh)
 	panel._wide_layout.minimum_size_changed.connect(queue_refresh)
+	panel._wide_layout.resized.connect(queue_refresh)
 	panel._wide_layout.dragged.connect(_on_split_dragged)
 	panel._wide_layout.sort_children.connect(_on_split_sorted)
 	var content: Control = panel.get_node(GRID_PATH).get_parent()
@@ -84,7 +86,8 @@ func _on_split_sorted() -> void:
 	if split.visible and content.size.x > 0.0:
 		_sidebar_width = maxf(sidebar.get_combined_minimum_size().x,
 			split.size.x - content.size.x - _split_gap(split, content, sidebar))
-	queue_refresh()
+		_allocation_ready = true
+	_schedule_refresh()
 
 
 ## The split owns its themed grabber gap, including collapsed/touch modes.
@@ -94,6 +97,11 @@ func _split_gap(split: SplitContainer, content: Control, sidebar: Control) -> fl
 
 
 func queue_refresh() -> void:
+	_allocation_ready = false
+	_schedule_refresh()
+
+
+func _schedule_refresh() -> void:
 	if _pending:
 		return
 	_pending = true
@@ -107,6 +115,12 @@ func _refresh() -> void:
 		return
 	var sidebar: Control = panel._wide_sidebar
 	var split: SplitContainer = panel._wide_layout
+	# Auto must not hide the split before a pending allocation can finish.
+	# A later split resize invalidates readiness even when a parent sort was
+	# queued before our refresh, so only its own completed sort releases this.
+	if _preference == "auto" and split.visible and not _allocation_ready:
+		split.queue_sort()
+		return
 	var grid: GridContainer = panel.get_node(GRID_PATH)
 	var gaps := Vector2(grid.get_theme_constant("h_separation"),
 		grid.get_theme_constant("v_separation"))
