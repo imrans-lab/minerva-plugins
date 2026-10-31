@@ -109,7 +109,7 @@ capacity refusal. Independent input-retention budgets are:
 | --- | ---: | ---: |
 | Ordinary MCP requests | 16 | 32 MiB |
 | Export collection requests | 8 | 8 MiB |
-| Active and queued worker calls | 16 | 32 MiB |
+| Reserved, active and queued worker calls | 16 | 32 MiB |
 | Unfinished detached exports | 16 | 32 MiB |
 
 These are separate owners and may retain separate copies of arguments. They
@@ -117,7 +117,9 @@ are not a combined process-memory limit. Existing completed export-result
 retention remains 15 minutes. Joining the same export does not reserve a
 second detached job.
 
-Evaluation cancellation is registered before request scheduling. Canceling or
+Evaluation first reserves actual worker capacity, then registers cancellation
+before request scheduling. A capacity refusal leaves any previous evaluation
+with the same `request_id` intact. Canceling or
 replacing an evaluation releases its waiting RPC promptly and suppresses a
 late reply; cleanup from an older duplicate `request_id` cannot remove the new
 registration. Canceled queued evaluations are skipped before submission.

@@ -436,19 +436,33 @@ func (s *server) prepareToolsCall(id json.RawMessage, params json.RawMessage) (f
 		return nil, fmt.Errorf("tools/call: arguments exceed 8 MiB payload limit")
 	}
 	ctx, key := s.ctx, ""
+	runner := s.workerCalls()
+	var caller tools.WorkerCaller = runner
+	var ticket *workerTicket
 	if p.Name == "cad.evaluate" {
 		var err error
+		// HandleEvaluate forwards these exact arguments in one worker Call.
+		// Reserve actual capacity before replacing/canceling a prior request.
+		ticket, err = runner.reserve(ctx, len(p.Arguments))
+		if err != nil {
+			return nil, err
+		}
+		caller = ticket
 		ctx, key, err = s.beginEvaluateCancellable(ctx, p.Arguments)
 		if err != nil {
+			ticket.releaseUnused()
 			return nil, err
 		}
 	}
 	return func() rpcResponse {
-		return s.handleToolsCall(ctx, id, p.Name, p.Arguments, key)
+		if ticket != nil {
+			defer ticket.releaseUnused()
+		}
+		return s.handleToolsCall(ctx, caller, id, p.Name, p.Arguments, key)
 	}, nil
 }
 
-func (s *server) handleToolsCall(ctx context.Context, id json.RawMessage, toolName string, args json.RawMessage, key string) rpcResponse {
+func (s *server) handleToolsCall(ctx context.Context, caller tools.WorkerCaller, id json.RawMessage, toolName string, args json.RawMessage, key string) rpcResponse {
 	log.Printf("cad-plugin: tools/call: %s", toolName)
 	if toolName == "cad.cancel_eval" {
 		return s.handleCancelEval(id, args)
@@ -459,7 +473,7 @@ func (s *server) handleToolsCall(ctx context.Context, id json.RawMessage, toolNa
 	if ctx.Err() != nil {
 		err = cancelledError(ctx.Err())
 	} else {
-		result, err, found = s.registry.Dispatch(ctx, s.workerCalls(), toolName, args)
+		result, err, found = s.registry.Dispatch(ctx, caller, toolName, args)
 	}
 	// Finalize identity before emitting success, errors or error notifications.
 	// A later cancel sees a completed registration and returns cancelled=false.
@@ -614,7 +628,12 @@ func (s *server) dispatch(enc *json.Encoder, msg *rpcRequest) bool {
 		call, err := s.prepareToolsCall(msg.ID, msg.Params)
 		if err != nil {
 			s.releaseRequest(size, collection)
-			send(enc, errResponse(msg.ID, -32602, err.Error()))
+			var we *bridge.WorkerError
+			if asWorkerErr(err, &we) {
+				send(enc, workerFailureResponse(msg.ID, p.Name, err))
+			} else {
+				send(enc, errResponse(msg.ID, -32602, err.Error()))
+			}
 			return true
 		}
 		s.tasks.Add(1)

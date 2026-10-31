@@ -48,23 +48,74 @@ func cancelledError(err error) *bridge.WorkerError {
 	return &bridge.WorkerError{Kind: "cancelled", Message: err.Error()}
 }
 
-func (r *workerRunner) Call(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
+// workerTicket owns one reservation until Call transfers it to the pump.
+// Ownership and release share the runner mutex with ordinary admission.
+type workerTicket struct {
+	runner *workerRunner
+	bytes  int
+	owned  bool
+}
+
+func (r *workerRunner) reserve(ctx context.Context, inputBytes int) (*workerTicket, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return nil, cancelledError(err)
 	}
+	if r.stopped || r.ctx.Err() != nil {
+		return nil, cancelledError(context.Canceled)
+	}
+	if r.count >= maxWorkerTasks || inputBytes > maxWorkerBytes-r.bytes {
+		return nil, &bridge.WorkerError{Kind: "busy", Message: "CAD worker queue capacity reached; retry later"}
+	}
+	r.count++
+	r.bytes += inputBytes
+	return &workerTicket{runner: r, bytes: inputBytes, owned: true}, nil
+}
+
+func (t *workerTicket) releaseUnused() {
+	r := t.runner
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	if t.owned {
+		t.owned = false
+		r.count--
+		r.bytes -= t.bytes
+	}
+}
+
+func (r *workerRunner) Call(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
+	ticket, err := r.reserve(ctx, len(params))
+	if err != nil {
+		return nil, err
+	}
+	return ticket.Call(ctx, method, params)
+}
+
+func (t *workerTicket) Call(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
+	defer t.releaseUnused()
+	r := t.runner
+	r.mu.Lock()
+	if !t.owned {
+		r.mu.Unlock()
+		return nil, &bridge.WorkerError{Kind: "internal", Message: "CAD worker reservation already consumed"}
+	}
+	if err := ctx.Err(); err != nil {
+		r.mu.Unlock()
+		return nil, cancelledError(err)
+	}
 	if r.stopped || r.ctx.Err() != nil {
 		r.mu.Unlock()
 		return nil, cancelledError(context.Canceled)
 	}
-	if r.count >= maxWorkerTasks || len(params) > maxWorkerBytes-r.bytes {
+	if len(params) != t.bytes {
 		r.mu.Unlock()
-		return nil, &bridge.WorkerError{Kind: "busy", Message: "CAD worker queue capacity reached; retry later"}
+		return nil, &bridge.WorkerError{Kind: "internal", Message: "CAD worker arguments changed after reservation"}
 	}
 	task := &workerTask{ctx: ctx, method: method, params: append(json.RawMessage(nil), params...), reply: make(chan workerReply, 1)}
-	r.count++
-	r.bytes += len(task.params)
-	// Capacity counts active plus queued work, so this send cannot block.
+	// Capacity counts reservations, active and queued work, so send cannot block.
+	// From this point only the pump releases the reservation, even if ctx ends.
+	t.owned = false
 	r.queue <- task
 	r.mu.Unlock()
 
