@@ -34,6 +34,7 @@ func wire() -> void:
 	panel._responsive.resized.connect(queue_refresh)
 	panel._wide_sidebar.resized.connect(queue_refresh)
 	panel._wide_sidebar.minimum_size_changed.connect(queue_refresh)
+	panel._wide_layout.minimum_size_changed.connect(queue_refresh)
 	panel._wide_layout.dragged.connect(_on_split_dragged)
 	_sync_buttons(panel)
 	queue_refresh()
@@ -88,9 +89,14 @@ func _refresh() -> void:
 	var grid: GridContainer = panel.get_node(GRID_PATH)
 	var gaps := Vector2(grid.get_theme_constant("h_separation"),
 		grid.get_theme_constant("v_separation"))
+	# The split's own minimum includes its effective themed grabber gap,
+	# including collapsed/touch modes. This also works while wide is hidden.
+	var content: Control = grid.get_parent()
+	var split_gap: float = maxf(0.0, split.get_minimum_size().x
+		- content.get_combined_minimum_size().x - sidebar.get_combined_minimum_size().x)
 	var was_single: bool = bool(_decision.get("is_single", false))
 	_decision = _Policy.choose(_preference, panel._responsive.size,
-		_sidebar_width, float(split.get_theme_constant("separation")), gaps, was_single)
+		_sidebar_width, split_gap, gaps, was_single)
 	panel._apply_layout(bool(_decision["is_single"]))
 
 
@@ -102,8 +108,12 @@ func state() -> Dictionary:
 	out["panel_px"] = [panel.size.x, panel.size.y]
 	var grid: Control = panel.get_node(GRID_PATH)
 	out["grid_px"] = [grid.size.x, grid.size.y]
-	var pane: Control = panel._single_view_container if panel._narrow_layout.visible \
-		else panel._iso_view_container
+	var pane: Control = panel._single_view_container
+	if not panel._narrow_layout.visible:
+		var panes: Dictionary = {"top": panel._top_view_container,
+			"front": panel._front_view_container, "right": panel._right_view_container,
+			"iso": panel._iso_view_container}
+		pane = panes.get(panel._active_viewport_id, panel._iso_view_container)
 	out["active_pane_px"] = [pane.size.x, pane.size.y]
 	out["preference_error"] = _preference_error
 	return out
