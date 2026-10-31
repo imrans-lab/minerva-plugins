@@ -1242,7 +1242,7 @@
     },
     {
       "name": "minerva_cad_view_state",
-      "description": "Read-only snapshot of what the user is currently looking at in a live CAD editor: the responsive layout class (xs/sm/md/lg/xl), the active viewport pane id (top/front/right/iso in wide layout, or the narrow-layout single pane), the narrow-layout projection dropdown selection, and the active pane camera's orientation/zoom (view_preset, target [x,y,z] in mm, distance, yaw, pitch). Use this for SEE-context before deciding whether a minerva_snapshot is worth taking, or to confirm which pane a snapshot view=\"active\" call would capture.",
+      "description": "Read-only snapshot of what the user is currently looking at in a live CAD editor: the responsive width class (xs/sm/md/lg/xl), layout preference (auto/single/four), effective mode and reason, measured panel/available/grid/active-pane sizes and projected four-pane size in pixels, the active viewport pane id (top/front/right/iso in wide layout, or the narrow-layout single pane), the narrow-layout projection dropdown selection, and the active pane camera's orientation/zoom (view_preset, target [x,y,z] in mm, distance, yaw, pitch). Use this for SEE-context before deciding whether a minerva_snapshot is worth taking, or to confirm which pane a snapshot view=\"active\" call would capture.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
@@ -1448,6 +1448,8 @@
         "ui/scripts/check_arguments.gd",
         "ui/scripts/part_cache.gd",
           "ui/scripts/part_scope.gd",
+        "ui/scripts/layout_policy.gd",
+        "ui/scripts/layout_controls.gd",
           "ui/scripts/posed_capture.gd",
           "ui/scripts/reference_pairs.gd",
           "ui/scripts/reference_profile.gd",
