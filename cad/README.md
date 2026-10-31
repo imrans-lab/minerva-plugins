@@ -42,10 +42,12 @@ The bridge tests exercise the subprocess lifecycle and take ~20 seconds.
 ## Release (per-platform binaries)
 
 The CAD workflow is dispatched explicitly; pushing a tag does not trigger its
-package build. On the reviewed remote branch, build artifacts without publishing:
+package build. Set `PLUGIN_RELEASE_REF` to the reviewed remote branch or tag and
+verify it names the release candidate. Use `main` only after that candidate has
+been integrated there. Build artifacts without publishing:
 
 ```bash
-gh workflow run cad.yml --repo imrans-lab/minerva-plugins --ref main -f publish=false
+gh workflow run cad.yml --repo imrans-lab/minerva-plugins --ref "${PLUGIN_RELEASE_REF:?Set the reviewed remote branch or tag}" -f publish=false
 ```
 
 After required acceptance and the owner's publishing GO, dispatch the same

@@ -164,10 +164,12 @@ panel, omit source-only `setup` from the packed manifest, and package
 `printer3d-<version>-<target>.tar.gz` with `SHA256SUMS`. PrusaSlicer remains a
 separately installed application; it is not bundled.
 
-For an artifact-only build of the reviewed remote branch:
+For an artifact-only build, set `PLUGIN_RELEASE_REF` to the reviewed remote
+branch or tag and verify it names the release candidate. Use `main` only after
+that candidate has been integrated there:
 
 ```sh
-gh workflow run printer3d.yml --repo imrans-lab/minerva-plugins --ref main -f publish=false
+gh workflow run printer3d.yml --repo imrans-lab/minerva-plugins --ref "${PLUGIN_RELEASE_REF:?Set the reviewed remote branch or tag}" -f publish=false
 ```
 
 After the required checks and owner's publishing GO, push an annotated
