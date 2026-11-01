@@ -185,7 +185,7 @@ func _snapshot(chat_id: String) -> Dictionary:
         var item: Object = histories[index]
         if int(item.get("Role")) not in [1, 2]:
             continue
-        live_reply = {"id": str(item.get_instance_id()), "error": str(item.get("Error")),
+        live_reply = {"id": str(item.get_instance_id()), "message_index": index, "error": str(item.get("Error")),
             "complete": bool(item.get("Complete"))}
         var rendered: Node = item.get("rendered_node")
         if is_instance_valid(rendered):
@@ -224,6 +224,11 @@ func _serve(request: Dictionary) -> void:
             result = await server.call("call_tool", str(request.tool), request.arguments)
         "snapshot":
             result = await _snapshot(str(request.chat_id))
+        "begin_turn":
+            var turn_history: Object = _history(str(request.chat_id))
+            turn_events.erase(str(request.chat_id))
+            if turn_history != null:
+                result = {"ok": true, "items": (turn_history.get("HistoryItemList") as Array).size()}
         "short_budget":
             var registry: Object = plugins.call("get_chat_provider_registry")
             var key: String = "plugin:%s:%s" % [config.plugin_id, config.entry_id]
@@ -356,6 +361,8 @@ class Crawl:
         self.phase = "setup"
         self.bound: tuple[str, str] | None = None
         self.reply_start = 0
+        self.history_start = 0
+        self.send_attempted = False
         self.backend: Mcp
 
     def wait(self, observation: Callable[[], T], seconds: float = 180) -> T:
@@ -419,6 +426,11 @@ class Crawl:
         self.bound = None
         self.reply_start = len(self.snapshot()["replies"])
         previous = self.receipt()[:2] if self.chat_id else ("", "")
+        begun = self.command("begin_turn", chat_id=self.chat_id)
+        if not begun.get("ok"):
+            raise RuntimeError("Unable to observe a fresh chat turn")
+        self.history_start = int(begun["items"])
+        self.send_attempted = True
         self.tool("minerva_send_message", chat_id=self.chat_id, message=text)
 
         def accepted() -> tuple[str, str] | None:
@@ -516,11 +528,15 @@ class Crawl:
                 and not snapshot["live_reply"].get("error")
                 and "passthrough_question_options" not in item.get("HcpData", {})
                 and snapshot["turn_event"].get("outcome") == "ok"
+                and snapshot["turn_event"].get("message_index") == snapshot["live_reply"].get("message_index")
+                and snapshot["live_reply"].get("message_index", -1) >= self.history_start
                 and snapshot["termination"] in {"", "completed"})
 
     def recover_bound(self) -> None:
         if self.bound is None:
-            raise RuntimeError("Accepted-send identity unknown; later rows cannot safely send")
+            if self.send_attempted:
+                raise RuntimeError("Accepted-send identity unknown; later rows cannot safely send")
+            return
         self.phase = "fixture_cleanup"
         thread, run = self.bound
         self.backend.tool("t3_thread_interrupt", threadId=thread, runId=run)
@@ -535,6 +551,7 @@ class Crawl:
                       ("R5", self.final_result), ("R6", self.pending))
         for row, operation in operations:
             self.active_row, self.phase = row, "start"
+            self.bound, self.send_attempted = None, False
             try:
                 operation()
             except (OSError, ValueError, KeyError, TypeError, RuntimeError,
@@ -611,7 +628,10 @@ class Crawl:
             a.get("kind") == "permission_request" and a.get("status") == "deferred"
             for a in replies[-1].get("activity", []) if isinstance(a, dict))
         error = snapshot["live_reply"].get("error", "")
-        visible = bool(error) and any(error in text for text in snapshot["reply_texts"])
+        error_visible = bool(error) and any(error in text and "permission" in text.lower()
+                                            and "defer" in text.lower() for text in snapshot["reply_texts"])
+        card = "\n".join(snapshot["activity_texts"]).lower()
+        visible = error_visible or ("permission" in card and "defer" in card)
         passed = requested and native_deferral and visible and not denied.exists()
         self.recover_bound()
         self.emit("R3", passed, native_request=requested, host_deferral=native_deferral,
@@ -626,7 +646,11 @@ class Crawl:
         self.wait(begun.exists, 180)
         pressed = self.command("stop", chat_id=self.chat_id).get("pressed", False)
         snapshot, state, _ = self.finish(thread, run)
-        host_cancelled = snapshot["turn_event"].get("outcome") == "cancelled"
+        event_index = snapshot["turn_event"].get("message_index", -2)
+        reply_index = snapshot["live_reply"].get("message_index", -1)
+        current_event = (event_index == reply_index and reply_index >= self.history_start) or (
+            event_index == -1 and reply_index < self.history_start)
+        host_cancelled = current_event and snapshot["turn_event"].get("outcome") == "cancelled"
         self.emit("R4", pressed and host_cancelled and state in {"cancelled", "interrupted"},
                   stop_button_pressed=pressed, backend_terminal=state,
                   host_cancelled=host_cancelled, termination=snapshot["termination"])
