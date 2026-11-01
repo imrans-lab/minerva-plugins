@@ -144,10 +144,17 @@ async function refreshList() {
     const extras=element('p');const storage=element('p','warning');const warning=element('p','warning');const updated=element('p','updated','Waiting for status…');
     const actions=element('div','buttons');
     actions.append(button('Edit', () => edit(printer)), button('Test', async () => {await status(printer.id);message('Connection checked.');}), button('Remove', async () => {
-      const removed = await call('remove_printer', {printer: printer.id});
-      if (removed.exists !== false) throw new Error('The saved password could not be removed.');
-      if (editing && editing.id === printer.id) reset();
-      await refreshList(); message('Printer and its saved password removed.');
+      let removeError = null;
+      try {
+        const removed = await call('remove_printer', {printer: printer.id});
+        if (removed.exists !== false) throw new Error('The saved password could not be removed.');
+        if (editing && editing.id === printer.id) reset();
+      } catch (error) { removeError = error; }
+      // The backend may finish after a timed-out mutation reply.
+      try { await refreshList(); }
+      catch (error) { throw new Error([removeError && removeError.message, error.message].filter(Boolean).join('\n')); }
+      if (removeError) throw removeError;
+      message('Printer and its saved password removed.');
     }));
     card.append(head,address,saved,dashboard,temps,canvas,legend,layer,extras,storage,warning,updated,actions);
     byId('printers').append(card);
@@ -221,15 +228,19 @@ byId('printer-form').addEventListener('submit', async event => {
     if (editing) args.slot = editing.slot;
     const configured = await call('configure_printer', args);
     editing = configured;
+    let passwordError = '';
     if (byId('password').value !== '') {
       try {
         // This is host capability IPC, never an agent-facing tool argument.
         await window.minerva.pluginIPC('capability:secrets:set:' + configured.secret_handle, {value: byId('password').value});
-          } catch { throw new Error('Password could not be saved. Unlock Minerva’s vault and check the plugin permissions.'); }
+      } catch { passwordError = 'Password could not be saved. Unlock Minerva’s vault and check the plugin permissions.'; }
       finally { byId('password').value = ''; }
     }
     byId('form-title').textContent = 'Edit printer'; byId('test').disabled = false;
-    await refreshList(); message('Printer saved. Use Test connection to check it.'); await poll();
+    try { await refreshList(); }
+    catch (error) { throw new Error([passwordError, error.message].filter(Boolean).join('\n')); }
+    if (passwordError) throw new Error(passwordError);
+    message('Printer saved. Use Test connection to check it.'); await poll();
   } catch (error) { message(error.message, true); }
   finally { byId('save').disabled = false; }
 });
