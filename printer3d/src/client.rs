@@ -2,7 +2,7 @@
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::{mpsc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -10,6 +10,8 @@ use base64::Engine;
 use serde::Serialize;
 use serde_json::Value;
 use ureq::http::{request::Builder, Response};
+use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver};
+use ureq::unversioned::transport::{DefaultConnector, NextTimeout};
 use ureq::{AsSendBody, Body};
 use url::Url;
 
@@ -29,6 +31,10 @@ impl Password {
 }
 
 pub fn agent(timeout: Duration) -> ureq::Agent {
+    agent_config(timeout).new_agent()
+}
+
+fn agent_config(timeout: Duration) -> ureq::config::Config {
     ureq::Agent::config_builder()
         .max_redirects(0)
         .proxy(None)
@@ -39,7 +45,27 @@ pub fn agent(timeout: Duration) -> ureq::Agent {
         .timeout_per_write(Some(Duration::from_secs(15)))
         .timeout_global(Some(timeout))
         .build()
-        .new_agent()
+}
+
+/// A Client addresses one configured printer, with redirects disabled. Reuse
+/// its first lookup even when the printer closes each HTTP connection.
+#[derive(Debug, Default)]
+struct ClientResolver {
+    addresses: OnceLock<ResolvedSocketAddrs>,
+}
+impl Resolver for ClientResolver {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        config: &ureq::config::Config,
+        timeout: NextTimeout,
+    ) -> std::result::Result<ResolvedSocketAddrs, ureq::Error> {
+        if let Some(addresses) = self.addresses.get() {
+            return Ok(addresses.clone());
+        }
+        let addresses = DefaultResolver::default().resolve(uri, config, timeout)?;
+        Ok(self.addresses.get_or_init(|| addresses).clone())
+    }
 }
 fn transport(error: ureq::Error, mutation: bool) -> Error {
     Error::Transport {
@@ -135,7 +161,11 @@ impl Client {
         Ok(Self {
             printer,
             password,
-            agent: agent(Duration::from_secs(120)),
+            agent: ureq::Agent::with_parts(
+                agent_config(Duration::from_secs(120)),
+                DefaultConnector::default(),
+                ClientResolver::default(),
+            ),
             challenge: None,
             upload_started: None,
             identity_started: None,
@@ -610,8 +640,43 @@ pub struct Discovered {
     pub hostname: String,
 }
 pub fn probe(host: &str) -> Result<Option<Discovered>> {
+    let started = Instant::now();
+    let timeout = Duration::from_secs(4);
     let host = normalize_host(host)?;
-    let result = agent(Duration::from_secs(4))
+    let mut endpoint = Url::parse(&host).map_err(|_| Error::Invalid("Invalid printer host"))?;
+    let hostname = endpoint
+        .host_str()
+        .map(str::to_owned)
+        .ok_or(Error::Invalid("Invalid printer host"))?;
+    if endpoint.scheme() == "http" && matches!(endpoint.host(), Some(url::Host::Domain(_))) {
+        let uri = host
+            .parse()
+            .map_err(|_| Error::Invalid("Invalid printer host"))?;
+        let addresses = DefaultResolver::default()
+            .resolve(
+                &uri,
+                &agent_config(timeout),
+                NextTimeout {
+                    after: timeout.into(),
+                    ..NextTimeout::default()
+                },
+            )
+            .map_err(|error| transport(error, false))?;
+        let address = addresses
+            .iter()
+            .find(|address| address.is_ipv4())
+            .ok_or(Error::Io("Printer host has no IPv4 address"))?;
+        endpoint
+            .set_ip_host(address.ip())
+            .map_err(|_| Error::Invalid("Invalid printer host"))?;
+    }
+    let host = endpoint.as_str().trim_end_matches('/').to_owned();
+    // Resolution and the numeric endpoint probe share the existing four seconds.
+    let remaining = timeout
+        .checked_sub(started.elapsed())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or(Error::Io("Printer discovery timed out"))?;
+    let result = agent(remaining)
         .get(format!("{host}/api/version"))
         .call()
         .map_err(|error| transport(error, false))?;
@@ -625,10 +690,6 @@ pub fn probe(host: &str) -> Result<Option<Discovered>> {
         200 => json(result)?["text"] == "PrusaLink",
         _ => false,
     };
-    let hostname = Url::parse(&host)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_owned))
-        .ok_or(Error::Invalid("Invalid printer host"))?;
     Ok(identity.then_some(Discovered { host, hostname }))
 }
 
