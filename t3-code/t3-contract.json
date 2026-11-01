@@ -1,0 +1,74 @@
+{
+  "t3_tag": "v0.1.6",
+  "t3_commit": "2359643cffa6ba9ee84d6f2694b935de54a8013e",
+  "node_engine": "^22.16 || ^23.11 || >=24.10",
+  "tools": {
+    "orchestrator_capabilities": [],
+    "t3_project_list": [
+      "cursor",
+      "limit"
+    ],
+    "t3_project_create": [
+      "title",
+      "workspaceRoot",
+      "createWorkspaceRootIfMissing",
+      "defaultModelSelection"
+    ],
+    "t3_thread_launch": [
+      "projectId",
+      "title",
+      "modelSelection",
+      "message",
+      "clientRequestId"
+    ],
+    "t3_thread_send": [
+      "threadId",
+      "message",
+      "mode",
+      "clientRequestId"
+    ],
+    "t3_thread_read": [
+      "threadId",
+      "view",
+      "limit",
+      "maxCharsPerItem",
+      "afterPosition",
+      "itemId",
+      "textOffset"
+    ],
+    "t3_thread_wait": [
+      "threadId",
+      "runId",
+      "timeoutMs"
+    ],
+    "t3_thread_interrupt": [
+      "threadId",
+      "runId",
+      "reason",
+      "clientRequestId"
+    ]
+  },
+  "required": {
+    "orchestrator_capabilities": [],
+    "t3_project_list": [],
+    "t3_project_create": [
+      "title"
+    ],
+    "t3_thread_launch": [
+      "title"
+    ],
+    "t3_thread_send": [
+      "threadId",
+      "message"
+    ],
+    "t3_thread_read": [
+      "threadId"
+    ],
+    "t3_thread_wait": [
+      "threadId"
+    ],
+    "t3_thread_interrupt": [
+      "threadId"
+    ]
+  }
+}

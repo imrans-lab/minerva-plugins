@@ -1,0 +1,167 @@
+{
+  "id": "t3_code",
+  "name": "T3 Code",
+  "version": "0.1.0",
+  "description": "Experimental Codex chat integration through an existing official T3 Code installation and your existing Codex login. The crawl targets Linux x86_64 and macOS arm64, with approvals deferred; Windows is unsupported. This Phase A shell reports prerequisites and refuses turns until its runtime is implemented.",
+  "price": {
+    "amount_minor": 0,
+    "currency": "USD"
+  },
+  "host_api_version": "2",
+  "release_targets": [
+    "linux-x86_64",
+    "macos-arm64"
+  ],
+  "backend": {
+    "transport": "stdio",
+    "entrypoint": "./t3-code-plugin",
+    "args": []
+  },
+  "tools": [
+    {
+      "name": "minerva_t3_code_generate",
+      "description": "Generate or resume a Codex turn for a bound Minerva chat. Phase A refuses with a visible setup/runtime-not-started error and never submits a prompt.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "chat_id": {
+            "type": "string",
+            "description": "Minerva chat identity."
+          },
+          "entry_id": {
+            "type": "string",
+            "description": "Registered provider entry, t3-code."
+          },
+          "operation_token": {
+            "type": "string",
+            "description": "Host-owned turn identity, reused on resume and cancel."
+          },
+          "text": {
+            "type": "string",
+            "description": "Newest user message; native thread owns prior context."
+          },
+          "resume": {
+            "type": "boolean"
+          },
+          "wait_budget_ms": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "chat_id",
+          "text"
+        ]
+      }
+    },
+    {
+      "name": "minerva_t3_code_cancel",
+      "description": "Interrupt the exact operation bound to this chat. Phase A reports not-started because no backend run exists.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "chat_id": {
+            "type": "string",
+            "description": "Minerva chat identity."
+          },
+          "entry_id": {
+            "type": "string",
+            "description": "Registered provider entry, t3-code."
+          },
+          "operation_token": {
+            "type": "string",
+            "description": "Host-owned turn identity, reused on resume and cancel."
+          }
+        },
+        "required": [
+          "chat_id"
+        ]
+      }
+    },
+    {
+      "name": "minerva_t3_code_status",
+      "description": "Read prerequisite diagnostics and the authoritative compatibility tuple. Returns thread_id/run_id empty and state not-started before any runtime turn; no bearer is exposed.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "chat_id": {
+            "type": "string",
+            "description": "Minerva chat identity."
+          }
+        }
+      }
+    }
+  ],
+  "settings_title": "T3 Code",
+  "settings": [
+    {
+      "key": "t3_binary",
+      "type": "string",
+      "label": "T3 executable",
+      "default": "t3",
+      "help": "Existing official T3 v0.1.6 only. This plugin never downloads or patches T3. See status for detected versions and copyable prerequisite errors."
+    },
+    {
+      "key": "node_binary",
+      "type": "string",
+      "label": "Node executable",
+      "default": "node",
+      "help": "T3 requires ^22.16 || ^23.11 || >=24.10. The owner chooses any installation or upgrade."
+    },
+    {
+      "key": "codex_binary",
+      "type": "string",
+      "label": "Codex executable",
+      "default": "codex",
+      "help": "Use the existing Codex CLI and login. No API key or billing-mode change is performed."
+    },
+    {
+      "key": "codex_home",
+      "type": "string",
+      "label": "Codex home",
+      "default": "~/.codex",
+      "help": "The owner-approved existing login is used in place. Credentials are never copied, moved or deleted."
+    },
+    {
+      "key": "t3_base_dir",
+      "type": "string",
+      "label": "Private T3 base directory",
+      "default": "{private}/t3",
+      "help": "Private T3 state is retained here: database, provider logs, attachments and checkpoints. {private} resolves to this plugin's per-user data directory; {workspace} is the saved Minerva project folder."
+    },
+    {
+      "key": "t3_token_file",
+      "type": "string",
+      "label": "Private MCP bearer file",
+      "default": "{private}/mcp-token",
+      "help": "Phase B stores an owned mcp-client bearer privately with mode 0600. Store only its path here. Public CLI issuance has an approval-required ceiling and explicit expiry; revocation is owned by the runtime."
+    },
+    {
+      "key": "minerva_mcp_endpoint",
+      "type": "string",
+      "label": "Minerva MCP endpoint",
+      "default": "",
+      "help": "The authorized Minerva MCP URL used by native Codex. {minerva_mcp} in other settings expands to this value. No Core or UGS connection is used. Supported tuple: plugin 0.1.0 / T3 v0.1.6 / Codex existing login in place / project-default mode, approval-required client ceiling. Detected tuple is authoritative in minerva_t3_code_status."
+    }
+  ],
+  "permissions": {
+    "host_capabilities": [
+      "host.chat_providers.register",
+      "host.settings.list",
+      "host.project.current"
+    ],
+    "filesystem": {
+      "mode": "unrestricted"
+    },
+    "network": {
+      "mode": "localhost"
+    }
+  },
+  "autostart": true,
+  "auto_reload": false,
+  "ui": {
+    "panels": [],
+    "ipc_messages": []
+  },
+  "editor_items": [],
+  "events": []
+}
