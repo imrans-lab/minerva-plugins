@@ -2,7 +2,7 @@
 //
 // cancel_eval is a control-plane tool that cancels an in-flight cad.evaluate
 // keyed by request_id. The handler logic lives in main.go (it needs access to
-// the inflight request_id → context.CancelFunc map maintained at the server
+// the evaluation registrations maintained at the server
 // level), so this file only declares the spec. main.go intercepts cancel_eval
 // in its dispatcher before delegating to the tool registry.
 package tools
@@ -17,7 +17,7 @@ import "encoding/json"
 // no-op (returns ok=true) so the panel can fire-and-forget when superseding.
 var CancelEval = ToolSpec{
 	Name:        "cad.cancel_eval",
-	Description: "Cancel an in-flight cad.evaluate keyed by request_id. Unknown request_id is a no-op. Returns {ok:true, request_id}.",
+	Description: "Cancel cad.evaluate by request_id. Queued cancellation never kills unrelated work. An active evaluation interrupts its exact native worker generation, cancels older queued worker calls, verifies process/I/O retirement, and eagerly starts one replacement. Later explicit requests retain their bounded queue admission. Unknown or completed request_id is a no-op. Returns request_cancelled, cancelled, native_stopped and worker_state; failure retains the real owner and refuses replacement. Caller cancellation alone does not prove native stop or readiness. Completed export artifacts survive.",
 	InputSchema: json.RawMessage(`{
 		"type": "object",
 		"properties": {

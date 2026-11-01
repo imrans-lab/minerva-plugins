@@ -15,8 +15,6 @@ package tools
 import (
 	"context"
 	"encoding/json"
-
-	"github.com/imrans-lab/minerva-plugins/shared/bridge"
 )
 
 // Evaluate is the MCP tool spec for cad.evaluate.
@@ -39,6 +37,6 @@ var Evaluate = ToolSpec{
 // The worker method name is "evaluate" (no cad./mcad_ prefix).
 // Parse/translate/occt errors are returned as data per design §8.2,
 // not as MCP errors. Only internal/python errors propagate as Go errors.
-func HandleEvaluate(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+func HandleEvaluate(ctx context.Context, w WorkerCaller, params json.RawMessage) (json.RawMessage, error) {
 	return w.Call(ctx, "evaluate", params)
 }

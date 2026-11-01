@@ -481,7 +481,7 @@ is available-but-unused.
 | `host.editors.list` | none | `{editors:[{..., export_formats}]}` (hides internal editors) | `host.editors.list` | — |
 | `host.editors.export` | `editor_name`, `format` (req) | `{mime, size, content}` (base64) | `host.editors.export` | presentation (`format:"png"`) |
 | `host.editors.open` | `path` (req) | `{tab_name, kind, plugin_id, panel_name, path, was_already_open}` | `host.editors.open` | presentation |
-| `host.providers.chat` | `messages` (req array of `{role, text\|content, images?}`); `model` XOR `model_spec`; `provider`/`max_tokens`/`temperature` | OpenAI-shape `{model, choices, usage, provider, cost_usd, free}` | `host.providers.chat` (+budget/key/opt-out) | scansort |
+| `host.providers.chat` | `messages` (req array of `{role, text\|content, images?}`); `model` XOR `model_spec`; `provider`/`max_tokens`/`temperature` | OpenAI-shape `{model, choices, usage, provider, cost_usd, free}`; model-chat uses async jobs, including cold loads, when advertised (classic fallback for `MODEL_NOT_PERMITTED` / `ASYNC_UNAVAILABLE`). The capability still waits for completion: long-running MCP tools must return a local job ID and expose a result tool to stay within the outer 30 s deadline. Plugin stop cancels outstanding provider jobs. | `host.providers.chat` (+budget/key/opt-out) | scansort, book_scanner |
 | `host.core.session` | none | `{ws_url, token, client_id}` | `host.core.session` | gen3d, movie_gen |
 | `host.settings.get` | `key` (req) | `{key, value}` (schema default when unset) | `host.settings.get` | — |
 | `host.settings.list` | none | `{fields:[{key, type, label, default?, options?, help?, value}]}` | `host.settings.list` | — |

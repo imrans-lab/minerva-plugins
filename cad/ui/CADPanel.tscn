@@ -299,6 +299,21 @@ layout_mode = 2
 custom_minimum_size = Vector2(32, 32)
 tooltip_text = "Pick a mesh file and add a mesh() reference line to the document."
 
+[node name="LayoutChoice" type="OptionButton" parent="ResponsiveContainer/WideLayout/WideSidebar/BuildControls"]
+layout_mode = 2
+custom_minimum_size = Vector2(110, 32)
+fit_to_longest_item = false
+clip_text = true
+tooltip_text = "Choose the CAD view layout"
+item_count = 3
+selected = 0
+popup/item_0/text = "Auto"
+popup/item_0/id = 0
+popup/item_1/text = "Single view"
+popup/item_1/id = 1
+popup/item_2/text = "Four views"
+popup/item_2/id = 2
+
 [node name="ReferencePanel" type="VBoxContainer" parent="ResponsiveContainer/WideLayout/WideSidebar"]
 layout_mode = 2
 size_flags_horizontal = 3
@@ -364,6 +379,21 @@ tooltip_text = "Build latest"
 layout_mode = 2
 custom_minimum_size = Vector2(32, 32)
 tooltip_text = "Import mesh — pick a mesh file and add a mesh() reference line to the document."
+
+[node name="LayoutChoice" type="OptionButton" parent="ResponsiveContainer/NarrowLayout/BuildControls"]
+layout_mode = 2
+custom_minimum_size = Vector2(110, 32)
+fit_to_longest_item = false
+clip_text = true
+tooltip_text = "Choose the CAD view layout"
+item_count = 3
+selected = 0
+popup/item_0/text = "Auto"
+popup/item_0/id = 0
+popup/item_1/text = "Single view"
+popup/item_1/id = 1
+popup/item_2/text = "Four views"
+popup/item_2/id = 2
 
 [node name="SingleView" type="SubViewportContainer" parent="ResponsiveContainer/NarrowLayout"]
 layout_mode = 2

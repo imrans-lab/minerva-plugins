@@ -64,6 +64,15 @@ type WorkerError struct {
 	// rather than enumerated here — which is what carries them across the Go
 	// tool boundary instead of dropping them as unknown struct fields.
 	Extra map[string]json.RawMessage `json:"-"`
+	cause error
+}
+
+// Unwrap retains local I/O and context errors without putting them on the wire.
+func (e *WorkerError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
 }
 
 // workerErrorFields are the keys WorkerError models itself; everything else in

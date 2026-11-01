@@ -1,0 +1,218 @@
+name: printer3d
+
+# Plugin dir is `printer3d`; plugin id (manifest) is `printer3d`, so the binary
+# is `printer3d-plugin`, release tarballs are `printer3d-<version>-<target>.tar.gz`,
+# and the release tag is `printer3d-v<version>` (regen_registry.py keys off id).
+on:
+  workflow_call:
+    inputs:
+      publish:
+        type: boolean
+        default: false
+        required: false
+  push:
+    branches: [main, "dcr/**"]
+    paths:
+      - "printer3d/**"
+      - ".github/workflows/printer3d.yml"
+      - "scripts/**"
+  pull_request:
+    paths:
+      - "printer3d/**"
+      - ".github/workflows/printer3d.yml"
+      - "scripts/**"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish a release after the on-demand gates
+        type: boolean
+        default: false
+
+env:
+  PYTHONUTF8: "1"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    timeout-minutes: 10
+    name: printer3d (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            runs-on: ubuntu-22.04
+            rust-targets: ""
+            ext: ""
+          - target: macos-universal
+            runs-on: macos-15
+            rust-targets: "x86_64-apple-darwin,aarch64-apple-darwin"
+            ext: ""
+          - target: windows-x86_64
+            runs-on: windows-2022
+            rust-targets: ""
+            ext: ".exe"
+    runs-on: ${{ matrix.runs-on }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: printer3d
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: printer3d -> target
+          key: ${{ matrix.target }}
+
+      - name: Build (native)
+        if: matrix.target != 'macos-universal'
+        run: cargo build --release --locked
+
+      - name: Build (macOS universal — lipo x86_64 + arm64)
+        if: matrix.target == 'macos-universal'
+        run: |
+          cargo build --release --locked --target x86_64-apple-darwin
+          cargo build --release --locked --target aarch64-apple-darwin
+          mkdir -p target/release
+          lipo -create \
+            target/x86_64-apple-darwin/release/printer3d-plugin \
+            target/aarch64-apple-darwin/release/printer3d-plugin \
+            -output target/release/printer3d-plugin
+          lipo -info target/release/printer3d-plugin
+
+      - name: Cargo test (linux-x86_64 only — Linux is the source of truth)
+        if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag') && (matrix.target == 'linux-x86_64')
+        run: cargo test --release --locked
+
+      - name: Smoke
+        if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag')
+        run: python3 ../scripts/smoke/mcp_smoke.py target/release/printer3d-plugin${{ matrix.ext }}
+
+      - name: Pack release tarball
+        run: |
+          PLATFORM="${{ matrix.target }}"
+          VERSION=$(python3 -c 'import json; print(json.load(open("manifest.json"))["version"])')
+          mkdir -p dist
+          PACKDIR="dist/printer3d-${VERSION}-${PLATFORM}"
+          mkdir -p "$PACKDIR"
+          cp target/release/printer3d-plugin${{ matrix.ext }} "$PACKDIR/"
+          # Binary tier (pcb/manifest_binary_tier_test.go): the PACKED manifest
+          # must not carry the source-tier `setup` stanza. The repo manifest
+          # declares how to build this plugin from a checkout; the tarball
+          # ships that build's output, and a host predating Minerva's
+          # install-lane split would run the stanza against source that was
+          # never packaged. Strip it here — SHA256SUMS below covers the
+          # stripped file, so integrity still checks out.
+          python3 -c "import json,sys; m=json.load(open('manifest.json')); m.pop('setup',None); json.dump(m,open(sys.argv[1],'w'),indent=2)" "$PACKDIR/manifest.json"
+          # Ship the HTML panel declared by ui.panels[].entry; the host loads
+          # it from the installed archive, not the source checkout.
+          cp -r ui "$PACKDIR/"
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd "$PACKDIR" && find . -type f ! -name SHA256SUMS -print0 \
+              | xargs -0 sha256sum | sed 's| \./| |' > SHA256SUMS)
+          else
+            (cd "$PACKDIR" && find . -type f ! -name SHA256SUMS -print0 \
+              | xargs -0 shasum -a 256 | sed 's| \./| |' > SHA256SUMS)
+          fi
+          tar -czf "dist/printer3d-${VERSION}-${PLATFORM}.tar.gz" -C "$PACKDIR" .
+          # The listing is diagnostic only, so it must never fail the step.
+          # Piping tar into `head` lets head close the pipe at line 30 while tar
+          # is still streaming a large archive; tar then dies on EPIPE and
+          # `set -o pipefail` fails the pack. Write the whole listing to a file
+          # and head the file instead: tar always runs to completion, so a
+          # truncated or corrupt archive still fails here, but a listing longer
+          # than 30 entries never does.
+          LISTING="dist/printer3d-${VERSION}-${PLATFORM}.contents.txt"
+          tar -tzf "dist/printer3d-${VERSION}-${PLATFORM}.tar.gz" > "$LISTING"
+          echo "Packed contents ($(wc -l < "$LISTING") entries, first 30):"
+          head -30 "$LISTING"
+          ls -la "dist/printer3d-${VERSION}-${PLATFORM}.tar.gz"
+          python3 ../scripts/verify-packed-manifest.py manifest.json "$PACKDIR/manifest.json"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: printer3d-${{ matrix.target }}
+          path: printer3d/dist/printer3d-*-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  secret-scan:
+    # The shared scan over the exact commit range; a release cannot publish
+    # without it passing for this SHA.
+    uses: ./.github/workflows/secret-scan.yml
+    permissions:
+      contents: read
+
+  release:
+    timeout-minutes: 60
+    name: Publish release
+    needs: [build, secret-scan]
+    if: (github.event_name == 'workflow_dispatch' || github.ref_type == 'tag') && always() && ((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.publish)) && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all matrix tarballs
+        uses: actions/download-artifact@v8
+        with:
+          pattern: printer3d-*
+          path: artifacts/
+          merge-multiple: true
+
+      - name: List downloaded artifacts
+        run: ls -la artifacts/
+
+      - name: Compute tag + prerelease flag
+        id: tag
+        shell: bash
+        run: |
+          VERSION=$(python3 -c 'import json; print(json.load(open("printer3d/manifest.json"))["version"])')
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            PRE="false"
+          elif [ "$GITHUB_REF_NAME" = "main" ]; then
+            TAG="printer3d-v${VERSION}"
+            PRE="false"
+          else
+            SAFE_BRANCH=$(echo "$GITHUB_REF_NAME" | sed 's|/|-|g; s|[^a-zA-Z0-9_.-]|-|g')
+            TAG="printer3d-v${VERSION}-branch-${SAFE_BRANCH}"
+            PRE="true"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRE" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          fi
+          bash scripts/release-publish-guard.sh "$TAG" "$PRE" printer3d
+          echo "Computed: tag=$TAG prerelease=$PRE"
+
+      - name: Publish GitHub Release
+        if: steps.tag.outputs.publish == 'true'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          prerelease: ${{ steps.tag.outputs.prerelease == 'true' }}
+          target_commitish: ${{ github.sha }}
+          files: artifacts/printer3d-*.tar.gz
+          generate_release_notes: true
+          fail_on_unmatched_files: true

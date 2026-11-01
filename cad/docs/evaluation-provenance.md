@@ -9,6 +9,9 @@ the source that produced visible geometry.
 Every panel-tool reply (except build control itself) carries available source and
 buffer versions, evaluation time/status, stale state, and `provenance` containing
 source SHA-256, document identity, tessellation settings, and a reference-set digest.
+Successful worker evaluations also carry `process_epoch`; panel freshness carries
+attempt and painted-attempt identities. These distinguish a cancelled or failed
+selection/configuration attempt even when the source version did not change.
 The reference digest covers loaded content stamps, units, axes and poses. Individual
 content stamps are available through the reference inspection surface. A backend
 without these fields is reported without invented settings or document identity.

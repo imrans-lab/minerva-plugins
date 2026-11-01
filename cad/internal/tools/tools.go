@@ -8,8 +8,6 @@ package tools
 import (
 	"context"
 	"encoding/json"
-
-	"github.com/imrans-lab/minerva-plugins/shared/bridge"
 )
 
 // ToolSpec describes an MCP tool for the tools/list response.
@@ -19,10 +17,16 @@ type ToolSpec struct {
 	InputSchema json.RawMessage `json:"inputSchema"`
 }
 
+// WorkerCaller is the worker operation used by tool handlers. The server owns
+// subprocess lifecycle; handlers only submit calls.
+type WorkerCaller interface {
+	Call(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error)
+}
+
 // ToolHandlerFunc is the signature for an MCP tool handler.
 // params is the raw JSON params from the tools/call "arguments" field.
 // Returns a JSON result payload or an error.
-type ToolHandlerFunc func(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error)
+type ToolHandlerFunc func(ctx context.Context, w WorkerCaller, params json.RawMessage) (json.RawMessage, error)
 
 type entry struct {
 	spec    ToolSpec
@@ -56,7 +60,7 @@ func (r *Registry) Specs() []ToolSpec {
 
 // Dispatch looks up and calls the handler for the named tool.
 // Returns (nil, nil) if the name is not found (caller should return method-not-found).
-func (r *Registry) Dispatch(ctx context.Context, w *bridge.Worker, name string, params json.RawMessage) (json.RawMessage, error, bool) {
+func (r *Registry) Dispatch(ctx context.Context, w WorkerCaller, name string, params json.RawMessage) (json.RawMessage, error, bool) {
 	for _, e := range r.entries {
 		if e.spec.Name == name {
 			result, err := e.handler(ctx, w, params)

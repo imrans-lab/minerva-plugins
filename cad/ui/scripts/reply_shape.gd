@@ -145,7 +145,8 @@ static func filter_clearance(report: Dictionary, limit: int,
 ## violation, and a caller folding rows into a verdict keeps them apart.
 static func pair_uncertified(pair: Dictionary) -> bool:
 	return bool(pair.get("excused_uncertified", false)) \
-		or bool(pair.get("ungraded_outside_region", false))
+		or bool(pair.get("ungraded_outside_region", false)) \
+		or bool(pair.get("containment_undecidable", false))
 
 
 ## Did this pair clear the gap it had to keep?

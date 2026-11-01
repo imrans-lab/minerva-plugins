@@ -285,6 +285,7 @@ func _set_pane_mesh_visible(mesh_root_path: String, visible_flag: bool) -> void:
 ## Public introspection surface backing minerva_cad_view_state, reached through
 ## CADPanel.get_view_state(). Surfaces layout/camera state the panel already
 ## tracks — width_class (which ResponsiveContainer breakpoint is active),
+## layout preference/decision and measured content/pane dimensions,
 ## active_viewport_id (which pane
 ## an agent's minerva_snapshot view="active" would capture), the
 ## narrow-mode projection dropdown selection, and the active pane's camera
@@ -307,6 +308,7 @@ func view_state() -> Dictionary:
 	return {
 		"width_class": String(_panel._responsive.width_class) if _panel._responsive != null else "",
 		"is_narrow_layout": _panel._narrow_layout.visible if _panel._narrow_layout != null else false,
+		"layout": _panel._layout_controls.state() if _panel._layout_controls != null else {},
 		"active_viewport_id": _panel._active_viewport_id,
 		"projection_preset": _panel._current_projection_preset(),
 		"pane_projections": _panel.get_pane_presets(),

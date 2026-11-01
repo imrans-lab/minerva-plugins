@@ -9,8 +9,6 @@ package tools
 import (
 	"context"
 	"encoding/json"
-
-	"github.com/imrans-lab/minerva-plugins/shared/bridge"
 )
 
 // Validate is the MCP tool spec for mcad_validate.
@@ -29,6 +27,6 @@ var Validate = ToolSpec{
 // HandleValidate dispatches a validate request to the worker via the bridge.
 // Parse/translate errors are returned as data (ok=true, errors=[...]) per §8.3,
 // not as MCP errors. Only internal/python errors propagate as Go errors.
-func HandleValidate(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+func HandleValidate(ctx context.Context, w WorkerCaller, params json.RawMessage) (json.RawMessage, error) {
 	return w.Call(ctx, "validate", params)
 }

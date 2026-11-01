@@ -1,0 +1,488 @@
+{
+  "id": "printer3d",
+  "name": "3D Printer",
+  "version": "0.1.1",
+  "description": "Slice, upload, start and monitor 3D prints from Minerva. Tested only with an Original Prusa XL (2-tool, input shaper) through the PrusaLink API, slicing with an installed PrusaSlicer.",
+  "price": {
+    "amount_minor": 0,
+    "currency": "USD"
+  },
+  "host_api_version": "2",
+  "release_targets": [
+    "linux-x86_64",
+    "macos-universal",
+    "windows-x86_64"
+  ],
+  "backend": {
+    "transport": "stdio",
+    "entrypoint": "./printer3d-plugin",
+    "args": []
+  },
+  "tools": [
+    {
+      "name": "minerva_printer3d_discover",
+      "description": "Find PrusaLink printers without credentials. Probe supplied HTTP(S) hosts, or common prusa-*.local candidates plus a short mDNS browse. Reports matching hosts and unreachable probe counts.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "hosts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "maxItems": 32
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_printer3d_list_printers",
+      "description": "List configured printer ids, names, hosts, usernames and has_password. Never returns a password.",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_printer3d_configure_printer",
+      "description": "Add or edit nonsecret printer metadata and echo stored slicing/secret_handle. Normal configure never fetches a password. Optional full slicing maps installed profiles. Explicit autodetect_slicing:true instead reads an existing matching slot's authenticated identity and installed catalog; slicing_selection resolves ambiguous choices without hand-typed app paths. Ambiguity returns configured:false, needed_fields and candidates without saving. Configure metadata and set password through panel first. Omission preserves same-host mapping; changing host clears it. Up to eight slots.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "slot": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8
+          },
+          "name": {
+            "type": "string"
+          },
+          "host": {
+            "type": "string"
+          },
+          "user": {
+            "type": "string",
+            "default": "maker"
+          },
+          "slicing": {
+            "type": "object",
+            "properties": {
+              "executable": {
+                "type": "string"
+              },
+              "vendor_ini": {
+                "type": "string"
+              },
+              "vendor_id": {
+                "type": "string"
+              },
+              "model_id": {
+                "type": "string"
+              },
+              "variant": {
+                "type": "string"
+              },
+              "printer_profile": {
+                "type": "string"
+              },
+              "print_profile": {
+                "type": "string"
+              },
+              "material_profile": {
+                "type": "string"
+              },
+              "tool_count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 16
+              }
+            },
+            "required": [
+              "executable",
+              "vendor_ini",
+              "vendor_id",
+              "model_id",
+              "variant",
+              "printer_profile",
+              "print_profile",
+              "material_profile",
+              "tool_count"
+            ],
+            "additionalProperties": false
+          },
+          "autodetect_slicing": {
+            "type": "boolean",
+            "default": false,
+            "description": "Opt in to read-only authenticated identity and installed-catalog resolution. Requires an existing slot with matching host/user and a panel-stored password; mutually exclusive with slicing."
+          },
+          "slicing_selection": {
+            "type": "object",
+            "description": "Explicit catalog choices for autodetect_slicing:true. Unknown firmware codes require model_id. Names are exact; print/material defaults and nozzle/HF are never guessed. Paths default to the standard installed macOS app; override for other installs.",
+            "properties": {
+              "model_id": {
+                "type": "string"
+              },
+              "variant": {
+                "type": "string"
+              },
+              "tool_count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 16
+              },
+              "printer_profile": {
+                "type": "string"
+              },
+              "print_profile": {
+                "type": "string"
+              },
+              "material_profile": {
+                "type": "string"
+              },
+              "executable": {
+                "type": "string"
+              },
+              "vendor_ini": {
+                "type": "string"
+              },
+              "vendor_id": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "name",
+          "host"
+        ],
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "not": {
+              "required": [
+                "slicing",
+                "autodetect_slicing"
+              ],
+              "properties": {
+                "autodetect_slicing": {
+                  "const": true
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "required": [
+                "slicing_selection"
+              ]
+            },
+            "then": {
+              "required": [
+                "autodetect_slicing"
+              ],
+              "properties": {
+                "autodetect_slicing": {
+                  "const": true
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "minerva_printer3d_remove_printer",
+      "description": "Remove a configured printer and delete its vault secret. Frees its slot and confirms exists:false. Does not change the physical printer.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "printer": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "printer"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_printer3d_set_password",
+      "description": "Stores the PrusaLink password in Minerva's vault. Write-only; the password is never returned. Arguments are recorded in Minerva's tool-call log.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "printer": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "required": [
+          "printer",
+          "password"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_printer3d_status",
+      "description": "Read printer state, temperatures and targets, current job progress/timing/file, layer height, fans, speed/flow and USB storage. One status/job/storage snapshot; never polls. Credentials come privately from the vault.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "printer": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "printer"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_printer3d_upload",
+      "description": "Upload a nonempty .bgcode or .gcode file to USB storage without overwriting. Defaults to start:false. start:true starts printing and moves the machine; use only with explicit operator authorization. Refuses missing USB storage and unsafe start states.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "printer": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "start": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [
+          "printer",
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_printer3d_print",
+      "description": "START PRINTING an existing USB-relative .bgcode/.gcode file. This moves and heats the machine. Use only with explicit operator authorization. Requires IDLE, READY or FINISHED.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "printer": {
+            "type": "string"
+          },
+          "file": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "printer",
+          "file"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_printer3d_stop",
+      "description": "STOP the current print job. This changes a running machine and interrupts its print. Use only with explicit operator authorization. Requires PRINTING or PAUSED.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "printer": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "printer"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_printer3d_thumbnail",
+      "description": "Read a24KiB base64 chunk of the current job PNG/JPEG thumbnail (maximum512KiB), for panels within host IPC limits. Returns available:false if absent/404. Continue with next_offset and reference; never returns credentials.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "printer": {
+            "type": "string"
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 524288,
+            "default": 0
+          },
+          "reference": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "printer"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_printer3d_list_profiles",
+      "description": "List installed PrusaSlicer profile names, counts, configured defaults, bed, version and hashes for a printer mapping. Compact by default: material names are a union, not valid for every print profile. Set verbose:true for the full per-print compatibility catalog. Uses an isolated datadir; no credentials or printer requests. macOS/Linux.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "printer": {
+            "type": "string"
+          },
+          "verbose": {
+            "type": "boolean",
+            "default": false,
+            "description": "Return the full catalog with compatible filament_profiles for each print profile."
+          }
+        },
+        "required": [
+          "printer"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_printer3d_slice",
+      "description": "Slice a local3MF/STL through installed PrusaSlicer to an owned BGCode path with file/profile receipts and metadata. Does not upload or print. macOS/Linux;20s total budget. Extruder override is STL-only;3MF tool assignments are retained.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "printer": {
+            "type": "string"
+          },
+          "input_path": {
+            "type": "string"
+          },
+          "print_profile": {
+            "type": "string"
+          },
+          "material_profile": {
+            "type": "string"
+          },
+          "extruder": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 16
+          }
+        },
+        "required": [
+          "printer",
+          "input_path"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "permissions": {
+    "host_capabilities": [
+      "secrets:get:printer3d_printer1",
+      "secrets:set:printer3d_printer1",
+      "secrets:delete:printer3d_printer1",
+      "secrets:get:printer3d_printer2",
+      "secrets:set:printer3d_printer2",
+      "secrets:delete:printer3d_printer2",
+      "secrets:get:printer3d_printer3",
+      "secrets:set:printer3d_printer3",
+      "secrets:delete:printer3d_printer3",
+      "secrets:get:printer3d_printer4",
+      "secrets:set:printer3d_printer4",
+      "secrets:delete:printer3d_printer4",
+      "secrets:get:printer3d_printer5",
+      "secrets:set:printer3d_printer5",
+      "secrets:delete:printer3d_printer5",
+      "secrets:get:printer3d_printer6",
+      "secrets:set:printer3d_printer6",
+      "secrets:delete:printer3d_printer6",
+      "secrets:get:printer3d_printer7",
+      "secrets:set:printer3d_printer7",
+      "secrets:delete:printer3d_printer7",
+      "secrets:get:printer3d_printer8",
+      "secrets:set:printer3d_printer8",
+      "secrets:delete:printer3d_printer8",
+      "host.notify"
+    ]
+  },
+  "ui": {
+    "ipc_messages": [
+      "minerva_printer3d_discover",
+      "minerva_printer3d_list_printers",
+      "minerva_printer3d_configure_printer",
+      "minerva_printer3d_remove_printer",
+      "minerva_printer3d_status",
+      "capability:secrets:set:printer3d_printer1",
+      "capability:secrets:set:printer3d_printer2",
+      "capability:secrets:set:printer3d_printer3",
+      "capability:secrets:set:printer3d_printer4",
+      "capability:secrets:set:printer3d_printer5",
+      "capability:secrets:set:printer3d_printer6",
+      "capability:secrets:set:printer3d_printer7",
+      "capability:secrets:set:printer3d_printer8",
+      "minerva_printer3d_thumbnail",
+      "capability:host.notify"
+    ],
+    "panels": [
+      {
+        "name": "printer3d_panel",
+        "kind": "html",
+        "entry": "ui/panel.html",
+        "ipc_channels": [
+          "minerva_printer3d_discover",
+          "minerva_printer3d_list_printers",
+          "minerva_printer3d_configure_printer",
+          "minerva_printer3d_remove_printer",
+          "minerva_printer3d_status",
+          "capability:secrets:set:printer3d_printer1",
+          "capability:secrets:set:printer3d_printer2",
+          "capability:secrets:set:printer3d_printer3",
+          "capability:secrets:set:printer3d_printer4",
+          "capability:secrets:set:printer3d_printer5",
+          "capability:secrets:set:printer3d_printer6",
+          "capability:secrets:set:printer3d_printer7",
+          "capability:secrets:set:printer3d_printer8",
+          "minerva_printer3d_thumbnail",
+          "capability:host.notify"
+        ],
+        "fullscreen_capable": false,
+        "multi_window": false
+      }
+    ]
+  },
+  "autostart": false,
+  "auto_reload": false,
+  "log_stderr": true,
+  "setup": {
+    "requires": [
+      {
+        "tool": "cargo",
+        "min": "1.88"
+      }
+    ],
+    "steps": [
+      {
+        "type": "cargo_build",
+        "manifest_dir": ".",
+        "artifact": "target/release/printer3d-plugin"
+      },
+      {
+        "type": "copy",
+        "from": "target/release/printer3d-plugin",
+        "to": "printer3d-plugin"
+      }
+    ]
+  }
+}

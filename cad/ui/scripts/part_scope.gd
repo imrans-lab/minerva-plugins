@@ -167,14 +167,6 @@ static func per_part(panel, args: Dictionary, verb: Callable,
 		return single
 
 	var rows: Array = []
-	var failed := 0
-	# The legs that answered without measuring anything, named for pass_reason.
-	var unmeasured: Array[String] = []
-	# The legs that measured but carry no verdict of their own. A material row
-	# reports what is there and grades nothing, so there is no pass to fold —
-	# and reading the missing key as true made every parts= material call
-	# answer pass:true whatever it found.
-	var ungraded: Array[String] = []
 	for entry in wanted:
 		var part := str(entry)
 		# RE-GATED PER LEG. A part evaluates in the worker and its check stands
@@ -189,21 +181,15 @@ static func per_part(panel, args: Dictionary, verb: Callable,
 			var refused := {"part": part, "checked": false,
 				"reason": str(standing.get("stale_reason", "")), "stale": true}
 			rows.append(refused)
-			unmeasured.append(_unmeasured_leg(part, refused))
-			failed += 1
 			continue
 		var resolved: Dictionary = await resolve(panel, part, args)
 		if resolved.has("error"):
 			var unresolved := {"part": part, "checked": false,
 				"reason": str(resolved["error"])}
 			rows.append(unresolved)
-			unmeasured.append(_unmeasured_leg(part, unresolved))
-			failed += 1
 			continue
 		if not bool(resolved.get("model", {}).get("physical", true)):
 			rows.append({"part": part, "checked": false, "reason": "Presentation-only configuration cannot pass physical validation"})
-			unmeasured.append(part + ": presentation-only configuration")
-			failed += 1
 			continue
 		var scoped: Dictionary = args.duplicate()
 		scoped.erase("parts")
@@ -217,19 +203,35 @@ static func per_part(panel, args: Dictionary, verb: Callable,
 		var one: Dictionary = await fresh.call(panel, scoped, verb)
 		one["part"] = part
 		rows.append(one)
+	return aggregate(rows)
+
+
+## Fold the current per-part replies after measurement or ticket collection.
+## No ticket-time verdict survives after its row has been replaced.
+static func aggregate(rows: Array) -> Dictionary:
+	var failed := 0
+	# The legs that answered without measuring anything, named for pass_reason.
+	var unmeasured: Array[String] = []
+	# The legs that measured but carry no verdict of their own. A material row
+	# reports what is there and grades nothing, so there is no pass to fold —
+	# and reading the missing key as true made every parts= material call
+	# answer pass:true whatever it found.
+	var ungraded: Array[String] = []
+	for row: Dictionary in rows:
+		var part: String = str(row.get("part", ""))
 		# A LEG THAT MEASURED NOTHING IS NOT A PASS. A check that hands back a
 		# ticket answers `checked: false` and carries no verdict at all, so
 		# reading its missing `pass` as true let the aggregate say the design
 		# cleared before a single number existed. Absent `checked` still
 		# defaults to true — only a leg that SAYS it measured nothing counts.
-		if not bool(one.get("checked", true)):
-			unmeasured.append(_unmeasured_leg(part, one))
+		if not bool(row.get("checked", true)):
+			unmeasured.append(_unmeasured_leg(part, row))
 			failed += 1
-		elif not bool(one.get("success", true)):
+		elif not bool(row.get("success", true)):
 			failed += 1
-		elif not one.has("pass"):
+		elif not row.has("pass"):
 			ungraded.append(part)
-		elif not bool(one.get("pass", true)):
+		elif not bool(row.get("pass", true)):
 			failed += 1
 	# NO VERDICT IS NOT A PASS. A verb whose legs grade nothing aggregates to
 	# null rather than true: absent evidence and cleared evidence are

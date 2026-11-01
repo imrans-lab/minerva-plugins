@@ -231,8 +231,7 @@ static func ungrade_regions(pairs: Array, declared_rows: Array) -> int:
 		ungraded += 1
 		for row_entry in declared_rows:
 			var declared_row: Dictionary = row_entry
-			if declared_row.has("region_mm") \
-					and bool(declared_row.get("excluded", false)) \
+			if bool(declared_row.get("excluded", false)) \
 					and str(declared_row.get("node", "")) == str(pair.get("node", "")) \
 					and str(declared_row.get("reference", "")) \
 						== str(pair.get("reference", "")):
@@ -252,12 +251,29 @@ static func unmatched(entries: Array, matched: Dictionary) -> Array:
 			continue
 		var entry: Dictionary = entries[index]
 		out.append({
+			"declaration_index": index,
 			"reference": str(entry["reference"]),
 			"node": str(entry["node"]),
 			"declared_required_mm": float(entry["required_mm"]),
 			"note": "no measured contact matched this declaration",
 		})
 	return out
+
+
+## Identity for a ticket's captured declarations, including regions and order.
+## Indices from another request must never satisfy the current declaration.
+static func declarations_digest(entries: Array) -> String:
+	var values: Array = []
+	for entry: Dictionary in entries:
+		var region: Variant = entry["region"]
+		var box: Array = []
+		if region != null:
+			var bounds: AABB = region
+			box = [bounds.position.x, bounds.position.y, bounds.position.z,
+				bounds.end.x, bounds.end.y, bounds.end.z]
+		values.append([str(entry["reference"]), str(entry["node"]),
+			float(entry["required_mm"]), box])
+	return JSON.stringify(values).sha256_text()
 
 
 ## Does this node path answer to the filter? Same rule as every other node=

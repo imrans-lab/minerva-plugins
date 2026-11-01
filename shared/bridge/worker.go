@@ -79,6 +79,33 @@ type inflightEntry struct {
 	ch chan Response
 }
 
+// workerRun owns the resources and callbacks of one subprocess. Its identity
+// and resource references do not change when Worker starts another process.
+type workerRun struct {
+	generation uint64
+	cmd        *exec.Cmd
+	stdin      io.WriteCloser
+	stdoutPipe io.ReadCloser
+	stderrPipe io.ReadCloser
+	stdout     *bufio.Reader
+	readyC     chan struct{} // closed by this run's worker.ready notification
+	doneC      chan struct{} // closed when this run's reader exits
+	stderrC    chan struct{} // closed when this run's stderr pump exits
+	exitC      chan struct{} // closed after this run's cmd.Wait
+
+	// Correlation and exit result are guarded by Worker.mu.
+	inflight      map[string]*inflightEntry
+	waitErr       error
+	owned         bool
+	retiring      bool
+	retireC       chan struct{}
+	retireErr     error
+	writers       int
+	writersC      chan struct{}
+	lifetime      context.Context
+	crashRecorded bool
+}
+
 // Worker manages a single Python subprocess and the correlation of requests
 // to responses. It is safe for concurrent use from multiple goroutines.
 type Worker struct {
@@ -106,26 +133,13 @@ type Worker struct {
 	// construction time by the plugin's own main, never from host input.
 	ExtraEnv []string
 
-	// Subprocess state (guarded by mu).
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout *bufio.Reader
+	// Current subprocess identity and generation counter (guarded by mu).
+	run               *workerRun
+	generation        uint64
+	retiredGeneration uint64
 
 	// Crash timestamps for circuit breaker (§2).
 	crashTimes []time.Time
-
-	// In-flight request correlation table (guarded by mu).
-	inflight map[string]*inflightEntry
-
-	// readyC is closed when the worker emits worker.ready (or hits timeout).
-	// It is recreated each time the worker is spawned.
-	readyC chan struct{}
-
-	// doneC is closed when the reader goroutine exits (worker crashed/stopped).
-	doneC chan struct{}
-
-	// exitC closes after cmd.Wait reaps this process.
-	exitC chan struct{}
 }
 
 // New creates a Worker that will spawn `python -m <workerModule>` using the
@@ -136,7 +150,6 @@ func New(pythonPath, workerDir, workerModule string) *Worker {
 		pythonPath:   pythonPath,
 		workerDir:    workerDir,
 		workerModule: workerModule,
-		inflight:     make(map[string]*inflightEntry),
 	}
 }
 
@@ -149,11 +162,11 @@ func (w *Worker) IsAlive() bool {
 
 // isAliveLocked requires mu held.
 func (w *Worker) isAliveLocked() bool {
-	if w.cmd == nil {
+	if w.run == nil {
 		return false
 	}
 	select {
-	case <-w.exitC:
+	case <-w.run.exitC:
 		return false
 	default:
 		return true
@@ -187,6 +200,16 @@ func (w *Worker) recordCrash() {
 	w.crashTimes = append(fresh, time.Now())
 }
 
+func (w *Worker) recordRunCrashLocked(run *workerRun) {
+	if run.owned {
+		if run.crashRecorded || run.lifetime.Err() != nil {
+			return
+		}
+		run.crashRecorded = true
+	}
+	w.recordCrash()
+}
+
 // Start spawns the Python worker subprocess and waits for it to emit
 // worker.ready (§5). Returns once the worker is ready for requests.
 func (w *Worker) Start(ctx context.Context) error {
@@ -197,6 +220,10 @@ func (w *Worker) Start(ctx context.Context) error {
 
 // startLocked requires mu held.
 func (w *Worker) startLocked(ctx context.Context) error {
+	return w.startModeLocked(ctx, false)
+}
+
+func (w *Worker) startModeLocked(ctx context.Context, owned bool) error {
 	if w.isAliveLocked() {
 		return nil // Already running.
 	}
@@ -230,49 +257,94 @@ func (w *Worker) startLocked(ctx context.Context) error {
 		return fmt.Errorf("bridge.Worker.Start: exec: %w", err)
 	}
 
-	w.cmd = cmd
-	w.stdin = stdinPipe
-	w.stdout = bufio.NewReaderSize(stdoutPipe, 1<<20)
-	w.readyC = make(chan struct{})
-	w.doneC = make(chan struct{})
-	w.exitC = make(chan struct{})
+	w.generation++
+	run := &workerRun{
+		generation: w.generation,
+		cmd:        cmd,
+		stdin:      stdinPipe,
+		stdoutPipe: stdoutPipe,
+		stderrPipe: stderrPipe,
+		stdout:     bufio.NewReaderSize(stdoutPipe, 1<<20),
+		readyC:     make(chan struct{}),
+		doneC:      make(chan struct{}),
+		stderrC:    make(chan struct{}),
+		exitC:      make(chan struct{}),
+		inflight:   make(map[string]*inflightEntry),
+		owned:      owned,
+		writersC:   make(chan struct{}),
+		lifetime:   ctx,
+	}
+	w.run = run
 
 	// Pump stderr to parent stderr with [worker] prefix (§5).
-	go pumpStderr(stderrPipe, w.StderrCallback)
+	stderrCallback := w.StderrCallback
+	go func() {
+		defer close(run.stderrC)
+		pumpStderr(run.stderrPipe, stderrCallback)
+	}()
 
 	// Reader goroutine: consumes frames from stdout and dispatches (§4).
-	go w.reader()
+	go w.reader(run)
 
 	// Wait for cmd.Wait() to reap the process.
-	exitC := w.exitC
 	go func() {
-		cmd.Wait() //nolint:errcheck
-		close(exitC)
+		err := run.cmd.Wait()
+		w.mu.Lock()
+		run.waitErr = err
+		w.mu.Unlock()
+		close(run.exitC)
 	}()
 
 	// Release mu while we wait for ready — reader goroutine holds its own lock
 	// for map ops only, so this is safe.
-	readyC := w.readyC
 	w.mu.Unlock()
 
 	timeout := readyTimeout()
 	select {
-	case <-readyC:
+	case <-run.readyC:
 		w.mu.Lock()
-		log.Printf("[bridge.Worker] worker ready (pid=%d)", w.cmd.Process.Pid)
+		if owned && (w.run != run || run.retiring || !w.isAliveLocked()) {
+			if !run.retiring {
+				w.recordRunCrashLocked(run)
+			}
+			return &WorkerError{Kind: "crashed", Message: "worker exited before readiness was accepted"}
+		}
+		log.Printf("[bridge.Worker] worker ready (pid=%d)", run.cmd.Process.Pid)
 		return nil
 	case <-time.After(timeout):
 		w.mu.Lock()
 		log.Printf("[bridge.Worker] worker.ready timeout after %s — killing", timeout)
-		w.killLocked()
-		w.recordCrash()
+		if owned {
+			w.mu.Unlock()
+			retireCtx, cancel := context.WithTimeout(context.Background(), OwnedRetirementTimeout)
+			retireErr := w.RetireOwned(retireCtx, run.generation)
+			cancel()
+			w.mu.Lock()
+			if retireErr != nil {
+				return retireErr
+			}
+		} else {
+			w.killLocked(run)
+		}
+		w.recordRunCrashLocked(run)
 		return &WorkerError{
 			Kind:    "crashed",
 			Message: fmt.Sprintf("worker did not emit worker.ready within %s", timeout),
 		}
 	case <-ctx.Done():
 		w.mu.Lock()
-		w.killLocked()
+		if owned {
+			w.mu.Unlock()
+			retireCtx, cancel := context.WithTimeout(context.Background(), OwnedRetirementTimeout)
+			retireErr := w.RetireOwned(retireCtx, run.generation)
+			cancel()
+			w.mu.Lock()
+			if retireErr != nil {
+				return retireErr
+			}
+		} else {
+			w.killLocked(run)
+		}
 		return ctx.Err()
 	}
 }
@@ -280,33 +352,30 @@ func (w *Worker) startLocked(ctx context.Context) error {
 // reader is the goroutine that reads framed responses from stdout and
 // dispatches them to the in-flight correlation table (§4).
 // It also handles notifications (worker.ready, log, progress).
-func (w *Worker) reader() {
-	defer close(w.doneC)
+func (w *Worker) reader(run *workerRun) {
+	defer close(run.doneC)
 
 	for {
-		w.mu.Lock()
-		stdout := w.stdout
-		w.mu.Unlock()
-
-		if stdout == nil {
-			return
-		}
-
-		body, err := ReadFrame(stdout)
+		body, err := ReadFrame(run.stdout)
 		if err != nil {
 			// EOF or pipe close — worker exited.
 			w.mu.Lock()
-			w.failInflightLocked("crashed", "worker stdout closed unexpectedly")
+			if !run.retiring {
+				if run.owned {
+					w.recordRunCrashLocked(run)
+				}
+				w.failInflightLocked(run, "crashed", "worker stdout closed unexpectedly")
+			}
 			w.mu.Unlock()
 			return
 		}
 
-		w.handleFrame(body)
+		w.handleFrame(run, body)
 	}
 }
 
 // handleFrame dispatches a single incoming frame.
-func (w *Worker) handleFrame(body []byte) {
+func (w *Worker) handleFrame(run *workerRun, body []byte) {
 	// Detect notification vs response by presence of "id" field.
 	var probe struct {
 		ID     string `json:"id"`
@@ -319,7 +388,7 @@ func (w *Worker) handleFrame(body []byte) {
 
 	if probe.ID == "" {
 		// Notification.
-		w.handleNotification(body, probe.Method)
+		w.handleNotification(run, body, probe.Method)
 		return
 	}
 
@@ -331,9 +400,9 @@ func (w *Worker) handleFrame(body []byte) {
 	}
 
 	w.mu.Lock()
-	entry, ok := w.inflight[resp.ID]
+	entry, ok := run.inflight[resp.ID]
 	if ok {
-		delete(w.inflight, resp.ID)
+		delete(run.inflight, resp.ID)
 	}
 	w.mu.Unlock()
 
@@ -345,12 +414,10 @@ func (w *Worker) handleFrame(body []byte) {
 }
 
 // handleNotification handles Python→Go notifications (§4).
-func (w *Worker) handleNotification(body []byte, method string) {
+func (w *Worker) handleNotification(run *workerRun, body []byte, method string) {
 	switch method {
 	case "worker.ready":
-		w.mu.Lock()
-		rc := w.readyC
-		w.mu.Unlock()
+		rc := run.readyC
 		if rc != nil {
 			select {
 			case <-rc:
@@ -376,8 +443,8 @@ func (w *Worker) handleNotification(body []byte, method string) {
 
 // failInflightLocked cancels all pending in-flight requests with the given
 // error kind and message. Requires mu held.
-func (w *Worker) failInflightLocked(kind, message string) {
-	for id, entry := range w.inflight {
+func (w *Worker) failInflightLocked(run *workerRun, kind, message string) {
+	for id, entry := range run.inflight {
 		entry.ch <- Response{
 			ID: id,
 			OK: false,
@@ -386,35 +453,48 @@ func (w *Worker) failInflightLocked(kind, message string) {
 				Message: message,
 			},
 		}
-		delete(w.inflight, id)
+		delete(run.inflight, id)
 	}
 }
 
 // killLocked sends SIGKILL to the worker process group. Requires mu held.
-func (w *Worker) killLocked() {
-	if w.cmd == nil || w.cmd.Process == nil {
+func (w *Worker) killLocked(run *workerRun) {
+	if run == nil || run.cmd.Process == nil {
 		return
 	}
 	// Kill entire process group to catch any grandchildren (Unix);
 	// terminates the bare process on Windows.
-	_ = terminateProcessGroup(w.cmd.Process, sigKill)
-	w.cmd = nil
-	w.stdin = nil
-	w.stdout = nil
+	_ = terminateProcessGroup(run.cmd.Process, sigKill)
+	if w.run == run {
+		w.run = nil
+	}
 }
 
 // Call sends a request to the worker and waits for the correlated response
 // (§4). It handles lazy spawn (§2) if the worker is not yet alive.
 func (w *Worker) Call(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
+	return w.call(ctx, 0, method, params)
+}
+
+func (w *Worker) call(ctx context.Context, generation uint64, method string, params json.RawMessage) (json.RawMessage, error) {
 	// Ensure worker is alive (lazy spawn, §2).
 	w.mu.Lock()
-	if !w.isAliveLocked() {
+	if generation != 0 {
+		if w.run == nil || w.run.generation != generation || w.run.retiring {
+			w.mu.Unlock()
+			return nil, &WorkerError{Kind: "cancelled", Message: "worker generation is no longer available"}
+		}
+	} else if !w.isAliveLocked() {
 		if err := w.startLocked(ctx); err != nil {
 			w.mu.Unlock()
 			return nil, err
 		}
 	}
+	run := w.run
 	w.mu.Unlock()
+	if run == nil {
+		return nil, &WorkerError{Kind: "crashed", Message: "worker not running"}
+	}
 
 	id := NextID()
 
@@ -442,30 +522,37 @@ func (w *Worker) Call(ctx context.Context, method string, params json.RawMessage
 	// misses a very-fast response.
 	ch := make(chan Response, 1)
 	w.mu.Lock()
-	w.inflight[id] = &inflightEntry{ch: ch}
+	if run.retiring {
+		w.mu.Unlock()
+		return nil, &WorkerError{Kind: "cancelled", Message: "worker generation is retiring"}
+	}
+	run.inflight[id] = &inflightEntry{ch: ch}
+	run.writers++
 	w.mu.Unlock()
 
 	// Write the framed request.
+	writeErr := WriteFrame(run.stdin, reqBytes)
 	w.mu.Lock()
-	stdin := w.stdin
-	w.mu.Unlock()
-
-	if stdin == nil {
-		w.mu.Lock()
-		delete(w.inflight, id)
-		w.mu.Unlock()
-		return nil, &WorkerError{Kind: "crashed", Message: "worker not running"}
+	run.writers--
+	if run.retiring && run.writers == 0 {
+		close(run.writersC)
 	}
-
-	if err := WriteFrame(stdin, reqBytes); err != nil {
-		w.mu.Lock()
-		delete(w.inflight, id)
+	if run.retiring {
+		delete(run.inflight, id)
+		w.mu.Unlock()
+		return nil, &WorkerError{Kind: "cancelled", Message: "worker generation interrupted"}
+	}
+	if writeErr != nil {
+		delete(run.inflight, id)
 		// Record a crash and clean up.
-		w.recordCrash()
-		w.killLocked()
+		w.recordRunCrashLocked(run)
+		if !run.owned {
+			w.killLocked(run)
+		}
 		w.mu.Unlock()
-		return nil, &WorkerError{Kind: "crashed", Message: fmt.Sprintf("write to worker: %v", err)}
+		return nil, &WorkerError{Kind: "crashed", Message: fmt.Sprintf("write to worker: %v", writeErr), cause: writeErr}
 	}
+	w.mu.Unlock()
 
 	// Wait for response, context cancellation, or worker crash.
 	select {
@@ -481,16 +568,20 @@ func (w *Worker) Call(ctx context.Context, method string, params json.RawMessage
 		// Remove inflight entry; the worker may still finish — we discard the
 		// result per §4 (v1 cancellation is deadline-only).
 		w.mu.Lock()
-		delete(w.inflight, id)
+		delete(run.inflight, id)
 		w.mu.Unlock()
 		return nil, &WorkerError{Kind: "cancelled", Message: ctx.Err().Error()}
-	case <-w.doneC:
+	case <-run.doneC:
 		w.mu.Lock()
-		delete(w.inflight, id)
-		w.recordCrash()
-		w.cmd = nil
-		w.stdin = nil
-		w.stdout = nil
+		delete(run.inflight, id)
+		if run.retiring {
+			w.mu.Unlock()
+			return nil, &WorkerError{Kind: "cancelled", Message: "worker generation interrupted"}
+		}
+		w.recordRunCrashLocked(run)
+		if w.run == run && !run.owned {
+			w.run = nil
+		}
 		w.mu.Unlock()
 		return nil, &WorkerError{Kind: "crashed", Message: "worker process exited mid-request"}
 	}
@@ -505,37 +596,33 @@ func (w *Worker) Shutdown(timeout time.Duration) {
 		w.mu.Unlock()
 		return
 	}
-	stdin := w.stdin
-	doneC := w.doneC
+	run := w.run
 	w.mu.Unlock()
 
 	// Send graceful shutdown request.
-	if stdin != nil {
+	if run.stdin != nil {
 		shutdownReq := &Request{ID: NextID(), Method: "shutdown"}
 		reqBytes, _ := MarshalRequest(shutdownReq)
-		_ = WriteFrame(stdin, reqBytes)
-		_ = stdin.Close()
+		_ = WriteFrame(run.stdin, reqBytes)
+		_ = run.stdin.Close()
 	}
 
 	// Wait for worker to exit cleanly.
 	select {
-	case <-doneC:
+	case <-run.doneC:
 		log.Printf("[bridge.Worker] worker shut down cleanly")
 		return
 	case <-time.After(timeout):
 	}
 
 	// Graceful window elapsed — send SIGTERM then SIGKILL.
-	w.mu.Lock()
-	cmd := w.cmd
-	w.mu.Unlock()
-
+	cmd := run.cmd
 	if cmd != nil && cmd.Process != nil {
 		log.Printf("[bridge.Worker] worker did not exit in %s — sending SIGTERM", timeout)
 		_ = terminateProcessGroup(cmd.Process, sigTerm)
 
 		select {
-		case <-doneC:
+		case <-run.doneC:
 			log.Printf("[bridge.Worker] worker exited after SIGTERM")
 			return
 		case <-time.After(sigkillDelay):
@@ -547,15 +634,15 @@ func (w *Worker) Shutdown(timeout time.Duration) {
 
 	// Best-effort wait.
 	select {
-	case <-doneC:
+	case <-run.doneC:
 	case <-time.After(2 * time.Second):
 		log.Printf("[bridge.Worker] worker still alive after SIGKILL — giving up")
 	}
 
 	w.mu.Lock()
-	w.cmd = nil
-	w.stdin = nil
-	w.stdout = nil
+	if w.run == run {
+		w.run = nil
+	}
 	w.mu.Unlock()
 }
 
