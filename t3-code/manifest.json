@@ -96,9 +96,9 @@
     {
       "key": "t3_binary",
       "type": "string",
-      "label": "T3 executable",
+      "label": "Existing native T3 executable",
       "default": "t3",
-      "help": "Existing official T3 v0.1.6 only. This plugin never downloads or patches T3. See status for detected versions and copyable prerequisite errors."
+      "help": "Completed official T3 v0.1.6 CLI installation only. Phase A reads the native executable header and adjacent .install-complete marker; it never runs T3 or its npm/installer launcher. If PATH t3 is a script, select the existing runtime/versions/0.1.6/t3 binary. No download, patch or upgrade."
     },
     {
       "key": "node_binary",

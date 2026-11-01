@@ -3,6 +3,7 @@
 use semver::Version;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -196,6 +197,64 @@ fn version(path: &str) -> Result<Version, String> {
         .ok_or_else(|| format!("Cannot read a version from {path} --version."))
 }
 
+fn installed_t3(path: &str) -> Result<(PathBuf, Version), String> {
+    let requested = Path::new(path);
+    let located = if requested.is_absolute() || requested.components().count() > 1 {
+        requested.to_owned()
+    } else {
+        std::env::var_os("PATH").into_iter().flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+            .map(|directory| directory.join(requested)).find(|candidate| candidate.is_file())
+            .ok_or("T3 is not installed on PATH. Ask the owner to choose an installation, then set its native executable in T3 Code preferences.")?
+    };
+    let executable = located.canonicalize().map_err(|_| {
+        format!(
+            "Existing T3 executable is unavailable: {}. No installer was run.",
+            located.display()
+        )
+    })?;
+    let mut file = std::fs::File::open(&executable)
+        .map_err(|e| format!("Cannot inspect existing T3 executable: {e}"))?;
+    let mut magic = [0u8; 4];
+    file.read_exact(&mut magic)
+        .map_err(|_| "Existing T3 executable is incomplete; no installer was run")?;
+    let native = if cfg!(target_os = "linux") {
+        magic == *b"\x7fELF"
+    } else {
+        matches!(
+            magic,
+            [0xcf, 0xfa, 0xed, 0xfe]
+                | [0xfe, 0xed, 0xfa, 0xcf]
+                | [0xca, 0xfe, 0xba, 0xbe]
+                | [0xca, 0xfe, 0xba, 0xbf]
+        )
+    };
+    if !native {
+        return Err("T3 points to a launcher or script. Phase A never executes it: npm launchers can install on --version. Set the already-installed native runtime executable from a completed official CLI installation (runtime/versions/<version>/t3).".into());
+    }
+    let parent = executable
+        .parent()
+        .ok_or("Existing T3 executable has no installation directory")?;
+    let marker = std::fs::read_to_string(parent.join(".install-complete"))
+        .map_err(|_| "Existing T3 runtime has no readable .install-complete marker. Choose a completed official CLI installation; no installer was run.")?;
+    let version = Version::parse(marker.trim())
+        .map_err(|_| "Existing T3 installation marker has an invalid version")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if file
+            .metadata()
+            .map_err(|e| e.to_string())?
+            .permissions()
+            .mode()
+            & 0o111
+            == 0
+        {
+            return Err("Existing native T3 runtime is not executable. Ask the owner to repair the installation.".into());
+        }
+    }
+    Ok((executable, version))
+}
+
 pub fn inspect(settings: &Settings, contract: &Contract) -> Result<Value, String> {
     let mut errors = Vec::new();
     if !(cfg!(target_os = "linux") && cfg!(target_arch = "x86_64")
@@ -221,12 +280,20 @@ pub fn inspect(settings: &Settings, contract: &Contract) -> Result<Value, String
         errors.push("Set the authorized Minerva MCP endpoint in T3 Code preferences before enabling native Minerva tools.".into());
     }
     let mut versions = BTreeMap::new();
-    for (name, path) in [("t3", &t3), ("node", &node), ("codex", &codex)] {
+    let mut t3_executable = None;
+    match installed_t3(&t3) {
+        Ok((executable, found)) => {
+            if format!("v{found}") != contract.t3_tag {
+                errors.push(format!("Installed T3 marker is {found}; this plugin requires {}. Choose the supported completed installation.", contract.t3_tag));
+            }
+            versions.insert("t3", found.to_string());
+            t3_executable = Some(executable);
+        }
+        Err(error) => errors.push(error),
+    }
+    for (name, path) in [("node", &node), ("codex", &codex)] {
         match version(path) {
             Ok(found) => {
-                if name == "t3" && format!("v{found}") != contract.t3_tag {
-                    errors.push(format!("Installed T3 is {found}; this plugin requires {}. Choose the supported existing install.", contract.t3_tag));
-                }
                 if name == "node"
                     && (!found.pre.is_empty()
                         || !((found.major == 22 && found.minor >= 16)
@@ -249,6 +316,7 @@ pub fn inspect(settings: &Settings, contract: &Contract) -> Result<Value, String
         "thread_id": "", "run_id": "", "provider": "codex", "t3_tag": contract.t3_tag,
         "endpoint": "", "base_dir": base_dir, "codex_home": codex_home,
         "workspace": settings.workspace, "t3_token_file": token_file,
+        "t3_executable": t3_executable, "t3_version_source": "official install-complete marker; T3 not executed",
         "prerequisites_ok": errors.is_empty(), "errors": errors,
         "compatibility": contract.compatibility(json!(versions)),
         "runtime_message": "Phase B is pending the owner's T3 installation decision. No T3 server or agent has been started.",

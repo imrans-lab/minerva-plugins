@@ -24,7 +24,7 @@ Preferences has a **T3 Code** tab. Paths name existing executables; they are pas
 
 | Setting | Meaning |
 | --- | --- |
-| `t3_binary` | Existing official T3 v0.1.6 executable; no download, patch or upgrade. |
+| `t3_binary` | Existing native executable from a completed official T3 v0.1.6 CLI installation; launcher scripts are refused without execution. |
 | `node_binary` | Node satisfying `^22.16 || ^23.11 || >=24.10`. |
 | `codex_binary` | Existing Codex CLI. |
 | `codex_home` | Explicit owner-approved login home, default `~/.codex`, used in place. Credentials are never copied, moved or deleted. |
@@ -34,7 +34,7 @@ Preferences has a **T3 Code** tab. Paths name existing executables; they are pas
 
 `{private}` resolves to this plugin's per-user data directory (`$XDG_DATA_HOME/Minerva/plugins/t3_code` or `~/.local/share/Minerva/plugins/t3_code` on Linux; `~/Library/Application Support/Minerva/plugins/t3_code` on macOS). It is separate from the installed plugin. `{workspace}` is the folder of the saved `.minproj`; an unsaved project refuses. `{minerva_mcp}` expands to the declared endpoint setting. The acceptance driver can supply absolute paths under its disposable root.
 
-`minerva_t3_code_status(chat_id)` returns `state: not-started`, `ready: false`, empty `thread_id`, `run_id` and `endpoint`, prerequisite errors, and an authoritative `compatibility` tuple. Static supported values appear in settings help; detected versions are not editable preferences. Phase A's version and `codex login status` probes are bounded and use the selected Codex home; they do not log command output or credentials. A prerequisite failure never triggers an installer or changes authentication/billing modes.
+`minerva_t3_code_status(chat_id)` returns `state: not-started`, `ready: false`, empty `thread_id`, `run_id` and `endpoint`, prerequisite errors, and an authoritative `compatibility` tuple. Static supported values appear in settings help; detected versions are not editable preferences. Phase A reads the resolved native T3 file header and adjacent `.install-complete` version marker without executing any T3 code. An npm/installer launcher or incomplete installation refuses with a copyable prerequisite error: even `t3 --version` can otherwise install a runtime. The detected T3 version is explicitly labelled as marker-derived. Existing Node/Codex version and `codex login status` probes are bounded and use the selected Codex home; they do not log command output or credentials. A prerequisite failure never triggers an installer or changes authentication/billing modes.
 
 The entry declares `newest_only`, `resumable`, `interrupt_in_place`, generate and cancel tools. Phase A accepts no operation; cancel truthfully returns `cancelled: false, state: not-started`. Completed activity later uses core's generic `HcpData.activity[]` contract, with no T3 UI branch.
 
