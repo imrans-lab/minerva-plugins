@@ -42,6 +42,17 @@ impl Slot {
             .map(|c| c.contains(token))
             .map_err(|_| Fault::new("lock_failed", "Cancel lock failed."))
     }
+
+    fn stopped_run(&self, chat: &Chat, run: &str) -> Result<bool> {
+        let tokens = self
+            .cancellations
+            .lock()
+            .map_err(|_| Fault::new("lock_failed", "Cancel lock failed."))?;
+        Ok(chat
+            .operations
+            .iter()
+            .any(|o| o.run_id.as_deref() == Some(run) && tokens.contains(&o.token)))
+    }
 }
 
 pub struct Engine {
@@ -84,6 +95,7 @@ impl Engine {
                 "workspace":chat.workspace,"permission":crate::runtime::permission(&chat.mode),"model_selection":chat.model,
                 "thread_lost":chat.lost,"outcome_unknown":op.is_some_and(|o|o.attempted && !o.accepted && !o.refused),
                 "deferred":op.is_some_and(|o|o.deferred),"refused":op.is_some_and(|o|o.refused),
+                "delivered_via":op.and_then(|o|o.delivered_via.as_deref()),
                 "operation_token":op.map(|o|o.token.as_str()).unwrap_or("")})
         } else {
             json!({"thread_id":"","run_id":""})
@@ -271,6 +283,12 @@ impl Engine {
             if let Some(reply) = chat.operations.last().and_then(|o| o.reply.as_ref()) {
                 let mut reply = reply.clone();
                 reply["operation_token"] = json!(token);
+                if self.honor_stop(&slot, &chat, chat.operations.len() - 1, &runtime)? {
+                    return Err(Fault::held(
+                        "cancelled",
+                        "Stop is recorded for the bound run. No question answer was submitted.",
+                    ));
+                }
                 chat.operations
                     .last_mut()
                     .ok_or_else(|| Fault::new("invalid_state", "Operation was not stored."))?
@@ -308,9 +326,7 @@ impl Engine {
                 )
             })?
             .to_owned();
-        if slot.cancelled(token)? {
-            turn::interrupt(&runtime, &chat.thread_id, operation)?;
-        }
+        self.honor_stop(&slot, &chat, index, &runtime)?;
         let budget = args["wait_budget_ms"]
             .as_u64()
             .filter(|ms| *ms > 0)
@@ -372,7 +388,17 @@ impl Engine {
     }
 
     fn new_input_gate(&self, slot: &Slot, chat: &mut Chat, runtime: &Runtime) -> Result<()> {
-        if chat.question.is_some() {
+        if let Some(question) = &chat.question {
+            if slot.stopped_run(chat, &question.run_id)? {
+                if let Some(index) = chat
+                    .operations
+                    .iter()
+                    .rposition(|o| o.run_id.as_deref() == Some(&question.run_id))
+                {
+                    self.honor_stop(slot, chat, index, runtime)?;
+                    return Err(held_prior(&chat.operations[index]));
+                }
+            }
             return Ok(());
         }
         let Some(index) = chat
@@ -383,7 +409,34 @@ impl Engine {
             return Ok(());
         };
         if let Some(run) = chat.operations[index].run_id.clone() {
+            self.honor_stop(slot, chat, index, runtime)?;
             let status = turn::wait(runtime, &chat.thread_id, &run, 1)?;
+            if status == "completed" {
+                let snapshot = Snapshot::read(&runtime.client, &chat.thread_id, &run)?;
+                let final_reply = turn::settled_reply(&status, &snapshot);
+                let mut notice = Fault::held("prior_run_completed",format!("Earlier turn finished in T3 while this chat was waiting; its answer:\n\n{}\n\nNew text was not submitted. Your next message can proceed.",snapshot.answer_notice()));
+                notice.prior_operation =
+                    Some((chat.operations[index].token.clone(), Some(run.clone())));
+                for operation in chat
+                    .operations
+                    .iter_mut()
+                    .filter(|o| o.run_id.as_deref() == Some(&run))
+                {
+                    operation.settled = true;
+                    operation.deferred = false;
+                    operation.terminal_state = Some(status.clone());
+                    if operation.accepted {
+                        let mut reply = final_reply.clone();
+                        reply["operation_token"] = json!(operation.token);
+                        operation.reply = Some(reply);
+                        operation.delivered_via = Some("held_notice".into());
+                    } else if !operation.refused {
+                        operation.reply = Some(Fault::new("outcome_unknown","The bound run completed, but this answer's acceptance was never confirmed. It is not replayed.").reply());
+                    }
+                }
+                slot.publish(&self.store, chat)?;
+                return Err(notice);
+            }
             if matches!(
                 status.as_str(),
                 "cancelled" | "interrupted" | "failed" | "rolled_back"
@@ -402,6 +455,8 @@ impl Engine {
                                 .reply();
                         reply["operation_token"] = json!(operation.token);
                         operation.reply = Some(reply);
+                    } else if !operation.refused {
+                        operation.reply = Some(Fault::new("outcome_unknown","The bound run ended, but this answer's acceptance was never confirmed. It is not replayed.").reply());
                     }
                 }
                 return slot.publish(&self.store, chat);
@@ -456,6 +511,7 @@ impl Engine {
             deferred: false,
             question_backup: None,
             terminal_state: None,
+            delivered_via: None,
         };
         if let Some(mut question) = chat.question.clone() {
             let snapshot = Snapshot::read(&runtime.client, &chat.thread_id, &question.run_id)?;
@@ -551,22 +607,15 @@ impl Engine {
         if retry && op.retries >= 1 {
             return Err(Fault::new("outcome_unknown","The one safe same-session retry is exhausted. Reconcile in T3; no new message was submitted."));
         }
-        if slot.cancelled(&op.token)? {
-            return Err(Fault::held(
-                "cancelled",
-                "Stop was recorded before submission. Nothing was sent.",
-            ));
-        }
-        turn::verify_workspace(
-            runtime,
-            chat,
-            if op.tool == "t3_thread_launch" {
-                Some(string(&op.arguments, "projectId")?)
-            } else {
-                None
-            },
-        )?;
+        let launch_project = if op.tool == "t3_thread_launch" {
+            Some(string(&op.arguments, "projectId")?.to_owned())
+        } else {
+            None
+        };
         let request_id = op.request_id.clone();
+        self.check_stop_before_send(slot, chat, index, runtime, retry)?;
+        turn::verify_workspace(runtime, chat, launch_project.as_deref())?;
+        self.check_stop_before_send(slot, chat, index, runtime, retry)?;
         if retry {
             for operation in chat
                 .operations
@@ -582,6 +631,7 @@ impl Engine {
         }
         chat.operations[index].attempted = true;
         slot.publish(&self.store, chat)?;
+        self.check_stop_before_send(slot, chat, index, runtime, retry)?;
         let op = &chat.operations[index];
         let result = match runtime.client.tool(&op.tool, op.arguments.clone()) {
             Ok(result) => result,
@@ -634,8 +684,73 @@ impl Engine {
             operation.accepted = true;
             operation.question_backup = None;
         }
-        // Accepted run identity is durable BEFORE the first wait/read.
-        slot.publish(&self.store, chat)
+        // Publish before waiting. Stop cleanup still runs if publication
+        // fails: the local, returned run ID is authoritative for interrupt.
+        let published = slot.publish(&self.store, chat);
+        let cleanup = self.honor_stop(slot, chat, index, runtime).map(|_| ());
+        match (published, cleanup) {
+            (Err(mut storage), Err(cancel)) => {
+                storage
+                    .text
+                    .push_str(&format!(" Stop cleanup also failed: {}", cancel.text));
+                Err(storage)
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
+
+    fn honor_stop(
+        &self,
+        slot: &Slot,
+        chat: &Chat,
+        index: usize,
+        runtime: &Runtime,
+    ) -> Result<bool> {
+        let operation = &chat.operations[index];
+        let Some(run) = operation.run_id.as_deref() else {
+            return Ok(false);
+        };
+        if !slot.stopped_run(chat, run)? {
+            return Ok(false);
+        }
+        turn::interrupt(runtime, &chat.thread_id, operation)?;
+        Ok(true)
+    }
+
+    fn check_stop_before_send(
+        &self,
+        slot: &Slot,
+        chat: &mut Chat,
+        index: usize,
+        runtime: &Runtime,
+        retry: bool,
+    ) -> Result<()> {
+        let operation = &chat.operations[index];
+        let run_stopped = if let Some(run) = operation.run_id.as_deref() {
+            slot.stopped_run(chat, run)?
+        } else {
+            false
+        };
+        let stopped = slot.cancelled(&operation.token)? || run_stopped;
+        if !stopped {
+            return Ok(());
+        }
+        self.honor_stop(slot, chat, index, runtime)?;
+        let fault = Fault::held("cancelled","Stop was recorded. No further request was sent; any earlier uncertain receipt remains unresolved.");
+        if !retry {
+            let operation = &mut chat.operations[index];
+            operation.refused = true;
+            operation.settled = true;
+            if operation.tool == "t3_pending_request" {
+                chat.question = operation.question_backup.clone();
+            }
+            let mut reply = fault.reply();
+            reply["operation_token"] = json!(operation.token);
+            operation.reply = Some(reply);
+            slot.publish(&self.store, chat)?;
+        }
+        Err(fault)
     }
 
     pub fn cancel(&self, settings: &Settings, contract: &Contract, args: &Value) -> Result<Value> {
@@ -693,7 +808,7 @@ fn wake(peer: &Peer, cause: &str, chat: &str, thread: &str, token: &str) -> Resu
 }
 
 fn held_prior(operation: &Operation) -> Fault {
-    let mut fault = Fault::held("prior_operation",format!("New text was not submitted. Prior operation {} (run {}) is unfinished or unconfirmed. Resume that original operation token, or finish/stop it in T3 and reconcile it before sending new text.",operation.token,operation.run_id.as_deref().unwrap_or("unconfirmed")));
+    let mut fault = Fault::held("prior_operation",format!("New text was not submitted. Prior operation {} (run {}) is unfinished or unconfirmed. Finish or stop it in T3, then retry your message. An unconfirmed receipt needs reconciliation in T3 or a fresh chat.",operation.token,operation.run_id.as_deref().unwrap_or("unconfirmed")));
     fault.prior_operation = Some((operation.token.clone(), operation.run_id.clone()));
     fault
 }

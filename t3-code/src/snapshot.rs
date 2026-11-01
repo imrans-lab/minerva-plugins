@@ -140,6 +140,10 @@ impl Snapshot {
             .join("\n\n")
     }
 
+    pub fn answer_notice(&self) -> String {
+        activity_detail(&self.answer())
+    }
+
     pub fn activity(&self) -> Vec<Value> {
         self.items.iter().filter_map(|item| {
             let kind = item["type"].as_str()?;

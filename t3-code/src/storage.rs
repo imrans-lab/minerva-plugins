@@ -29,6 +29,7 @@ pub struct Operation {
     pub deferred: bool,
     pub question_backup: Option<Question>,
     pub terminal_state: Option<String>,
+    pub delivered_via: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

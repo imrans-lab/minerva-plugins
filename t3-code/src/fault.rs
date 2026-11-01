@@ -48,7 +48,8 @@ impl Fault {
             reply["prior_operation_token"] = json!(token);
             reply["prior_run_id"] = json!(run);
             reply["hold_reason"] = json!(format!(
-                "prior_operation:{token}:{}",
+                "{}:{token}:{}",
+                self.code,
                 run.as_deref().unwrap_or("unconfirmed")
             ));
         }
