@@ -111,7 +111,7 @@ impl Client {
         let mut response = request.send_json(&payload).map_err(|_| Fault::new("outcome_unknown", "T3 MCP transport failed. A mutation may have been accepted; its receipt is retained."))?;
         let status = response.status().as_u16();
         if matches!(status, 401 | 403) {
-            return Err(Fault::new("auth_required", "T3 MCP authentication expired or was refused. Explicit reissue changes the namespace; unknown sends must be reconciled, never replayed blindly."));
+            return Err(Fault::refused("auth_required", "T3 MCP authentication expired or was refused. Explicit reissue changes the namespace; unknown sends must be reconciled, never replayed blindly."));
         }
         if !(200..300).contains(&status) {
             return Err(Fault::new("outcome_unknown", format!("T3 MCP HTTP {status}. Mutation outcome is unconfirmed; no automatic new-session resend.")));
@@ -134,11 +134,9 @@ impl Client {
             .with_config()
             .limit(8 * 1024 * 1024)
             .read_to_string()
-            .map_err(|_| {
-                Fault::new(
-                    "outcome_unknown",
-                    "Cannot read a bounded T3 MCP response; retain the mutation receipt.",
-                )
+            .map_err(|error| match error {
+                ureq::Error::BodyExceedsLimit(_) => Fault::new("response_too_large", "T3 MCP response exceeds8MiB. No partial result is used; retain any mutation receipt."),
+                _ => Fault::new("outcome_unknown", "Cannot read the T3 MCP response; retain any mutation receipt."),
             })?;
         let Some(id) = id else {
             return Ok(Value::Null);
@@ -170,7 +168,19 @@ impl Client {
                 )
             })?;
         if reply.get("error").is_some() {
-            return Err(Fault::new("rpc_refused", "T3 refused the MCP request. The retained receipt is not treated as an accepted run."));
+            return Err(
+                if matches!(reply["error"]["code"].as_i64(), Some(-32601 | -32602)) {
+                    Fault::refused(
+                        "rpc_refused",
+                        "T3 rejected the MCP method/arguments before dispatch.",
+                    )
+                } else {
+                    Fault::new(
+                        "outcome_unknown",
+                        "T3 returned an internal RPC error; dispatch acceptance is unconfirmed.",
+                    )
+                },
+            );
         }
         reply
             .get("result")
@@ -214,18 +224,40 @@ impl Client {
             || result.get("code").is_some() && result.get("message").is_some()
         {
             let code = result["code"].as_str().unwrap_or("tool_refused");
-            return Err(Fault::new(
-                if matches!(code, "thread_not_found" | "not_found") {
-                    "thread_lost"
+            let label = if matches!(code, "thread_not_found" | "not_found") {
+                "thread_lost"
+            } else {
+                "tool_refused"
+            };
+            let text = if label == "thread_lost" {
+                "The bound T3 thread was lost. Start a new Minerva chat for a fresh thread; retained history will not be reconstructed.".to_owned()
+            } else {
+                format!("T3 tool {name} refused ({code}). Check the bound thread in T3; no replacement or permission broadening is automatic.")
+            };
+            // These public error codes describe checks before dispatch. A
+            // generic orchestration_error can follow a committed mutation.
+            return Err(
+                if matches!(
+                    code,
+                    "capability_denied"
+                        | "parent_not_active"
+                        | "provider_unavailable"
+                        | "model_unavailable"
+                        | "runtime_mode_escalation_denied"
+                        | "interaction_mode_escalation_denied"
+                        | "thread_not_found"
+                        | "run_not_found"
+                        | "thread_not_sendable"
+                        | "thread_not_interruptible"
+                        | "invalid_request"
+                        | "thread_credential_required"
+                        | "target_required"
+                ) {
+                    Fault::refused(label, text)
                 } else {
-                    "tool_refused"
+                    Fault::new(label, text)
                 },
-                if matches!(code, "thread_not_found" | "not_found") {
-                    "The bound T3 thread was lost. Start a new Minerva chat for a fresh thread; retained history will not be reconstructed.".to_owned()
-                } else {
-                    format!("T3 tool {name} refused ({code}). Check the bound thread in T3; no replacement or permission broadening is automatic.")
-                },
-            ));
+            );
         }
         Ok(result)
     }

@@ -16,8 +16,9 @@ pub struct Snapshot {
 
 impl Snapshot {
     pub fn read(client: &Client, thread: &str, run: &str) -> Result<Self> {
+        //20 *8000 chars leaves room for JSON escaping within the8MiB HTTP cap.
         let mut arguments =
-            json!({"threadId":thread,"view":"activity","limit":100,"maxCharsPerItem":50000});
+            json!({"threadId":thread,"view":"activity","limit":20,"maxCharsPerItem":8000});
         let mut items = Vec::new();
         let mut positions = BTreeSet::new();
         let mut detail = Value::Null;
@@ -65,7 +66,7 @@ impl Snapshot {
                     if seen_offsets.len() > 1000 || text.len() > 16 * 1024 * 1024 {
                         return Err(Fault::new("read_bound", "T3 item exceeds the bounded read. No incomplete answer is presented as final."));
                     }
-                    let more = client.tool("t3_thread_read", json!({"threadId":thread,"view":"activity","itemId":item_id,"textOffset":next,"maxCharsPerItem":50000}))?;
+                    let more = client.tool("t3_thread_read", json!({"threadId":thread,"view":"activity","itemId":item_id,"textOffset":next,"maxCharsPerItem":8000}))?;
                     let part = more["items"]
                         .as_array()
                         .and_then(|rows| {
@@ -145,7 +146,7 @@ impl Snapshot {
             if matches!(kind, "assistant_message" | "user_message" | "reasoning") { return None; }
             let text = item["text"].as_str().unwrap_or("");
             let mut value = json!({"kind":kind,"label":item["title"].as_str().filter(|s|!s.is_empty()).unwrap_or(kind),
-                "status":item["status"].as_str().unwrap_or("unknown"),"detail":text});
+                "status":item["status"].as_str().unwrap_or("unknown"),"detail":activity_detail(text)});
             if kind == "file_change" { value["path"] = json!(text.lines().next().unwrap_or("")); }
             Some(value)
         }).collect()
@@ -156,7 +157,7 @@ impl Snapshot {
             v["type"] == "approval_request"
                 && matches!(
                     v["status"].as_str(),
-                    Some("pending" | "waiting" | "in_progress")
+                    Some("pending" | "waiting" | "running")
                 )
         })
     }
@@ -167,4 +168,17 @@ fn read_budget(deadline: Instant) -> Result<()> {
         return Err(Fault::new("read_bound","The snapshot exceeded its30-second read budget. The accepted run receipt is retained; no incomplete transcript is final."));
     }
     Ok(())
+}
+
+fn activity_detail(text: &str) -> String {
+    const LIMIT: usize = 4096;
+    const SUFFIX: &str = "\n[Activity detail truncated; full output remains in T3.]";
+    if text.len() <= LIMIT {
+        return text.to_owned();
+    }
+    let mut end = LIMIT - SUFFIX.len();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{}", &text[..end], SUFFIX)
 }

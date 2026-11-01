@@ -68,6 +68,9 @@ impl Settings {
             .values
             .get(key)
             .ok_or_else(|| format!("Missing plugin setting {key}"))?;
+        if raw.contains("{workspace}") && self.workspace.as_os_str().is_empty() {
+            return Err(format!("Setting {key} uses {{workspace}}, but the Minerva project is unsaved. Save a .minproj or choose an explicit private path; no root-relative fallback is used."));
+        }
         let endpoint = self
             .values
             .get("minerva_mcp_endpoint")

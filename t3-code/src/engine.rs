@@ -42,6 +42,18 @@ impl Slot {
             .map(|c| c.contains(token))
             .map_err(|_| Fault::new("lock_failed", "Cancel lock failed."))
     }
+
+    fn cancelled_request(&self, chat: &Chat, index: usize) -> Result<bool> {
+        let tokens = self
+            .cancellations
+            .lock()
+            .map_err(|_| Fault::new("lock_failed", "Cancel lock failed."))?;
+        Ok(chat
+            .operations
+            .iter()
+            .filter(|o| o.request_id == chat.operations[index].request_id)
+            .any(|o| tokens.contains(&o.token)))
+    }
 }
 
 pub struct Engine {
@@ -82,7 +94,9 @@ impl Engine {
             let op = chat.operations.last();
             json!({"thread_id":chat.thread_id,"run_id":op.and_then(|o|o.run_id.as_deref()).unwrap_or(""),
                 "workspace":chat.workspace,"permission":crate::runtime::permission(&chat.mode),"model_selection":chat.model,
-                "thread_lost":chat.lost,"outcome_unknown":op.is_some_and(|o|o.attempted && !o.accepted),
+                "thread_lost":chat.lost,"outcome_unknown":op.is_some_and(|o|o.attempted && !o.accepted && !o.refused),
+                "deferred":op.is_some_and(|o|o.deferred),"refused":op.is_some_and(|o|o.refused),
+                "resumed_previous":op.is_some_and(|o|o.resumed_previous),
                 "operation_token":op.map(|o|o.token.as_str()).unwrap_or("")})
         } else {
             json!({"thread_id":"","run_id":""})
@@ -99,17 +113,16 @@ impl Engine {
         let mut result = self.generate_inner(peer, settings, contract, args);
         if let Err(fault) = &mut result {
             // An I/O/JSON error after a submitted request must never tell the
-            // host's notify ledger that the original message was held.
+            // host's notify ledger that the original message was held. A new
+            // message used to observe that prior receipt was itself held.
             if let Some(id) = args["chat_id"].as_str() {
-                if let Some(mut chat) = self.slot(id)?.chat()? {
-                    if chat.operations.iter().any(|o| {
-                        o.token == args["operation_token"].as_str().unwrap_or("") && o.attempted
+                if let Some(chat) = self.slot(id)?.chat()? {
+                    if let Some(operation) = chat.operations.iter().find(|o| {
+                        o.token == args["operation_token"].as_str().unwrap_or("")
+                            && o.attempted
+                            && !o.refused
                     }) {
-                        fault.held = false;
-                    }
-                    if fault.code == "question_expired" {
-                        chat.question = None;
-                        self.slot(id)?.publish(&self.store, &chat)?;
+                        fault.held = operation.resumed_previous;
                     }
                 }
             }
@@ -156,7 +169,7 @@ impl Engine {
         let _gate = slot.generate.try_lock().map_err(|_|Fault::held("chat_busy","A generate call already owns this chat. Resume its operation instead of sending concurrently."))?;
         let saved = slot.chat()?;
         let runtime = self.runtimes.get(settings,contract).map_err(|mut fault| {
-            if saved.as_ref().is_some_and(|c|c.operations.iter().any(|o|o.token == token && o.attempted)) {
+            if saved.as_ref().is_some_and(|c|c.operations.iter().any(|o|o.token == token && o.attempted && !o.refused)) {
                 fault.held = false;
                 fault.text.push_str(" The original operation may already be accepted; its receipt remains authoritative.");
             }
@@ -206,7 +219,11 @@ impl Engine {
                     "This operation token already names different input. No new prompt was sent.",
                 ));
             }
-            if let Some(reply) = &chat.operations[index].reply {
+            if let Some(reply) = chat.operations[index]
+                .reply
+                .as_ref()
+                .filter(|reply| chat.operations[index].settled || reply["kind"] == "question")
+            {
                 if reply["kind"] == "question" {
                     if index + 1 != chat.operations.len() {
                         return Err(Fault::held("question_expired","That question operation has been retired. Use the current request card."));
@@ -225,6 +242,9 @@ impl Engine {
                     )?;
                 }
                 return Ok(reply.clone());
+            }
+            if index + 1 != chat.operations.len() {
+                return Err(Fault::held("operation_superseded","A later host call now observes this operation. Use the current operation token; no prompt was resent."));
             }
             index
         } else {
@@ -269,7 +289,7 @@ impl Engine {
                 )
             })?
             .to_owned();
-        if slot.cancelled(token)? {
+        if slot.cancelled_request(&chat, index)? {
             turn::interrupt(&runtime, &chat.thread_id, operation)?;
         }
         let budget = args["wait_budget_ms"]
@@ -288,7 +308,8 @@ impl Engine {
         } else if snapshot.permission_pending() {
             let mut activity = snapshot.activity();
             activity.push(json!({"kind":"permission_request","label":"Permission required in T3 Code","status":"deferred"}));
-            json!({"kind":"error","code":"permission_deferred","text":"T3 Code needs permission. Approval handling is deferred in crawl; answer in T3 or stop this run. The sandbox was not broadened.","activity":activity,"cause":"input_requested"})
+            chat.operations[index].deferred = true;
+            json!({"kind":"error","code":"permission_deferred","deferred":true,"held":chat.operations[index].resumed_previous,"hold_reason":"permission_deferred","text":"T3 Code needs permission. Approval handling is deferred in crawl; answer in T3 or stop this run. Resume or the next message observes this exact run. The sandbox was not broadened.","activity":activity,"cause":"input_requested"})
         } else if status == "waiting" {
             if let Some(question) =
                 questions::discover(&runtime.client, &snapshot, &chat.thread_id, &run)?
@@ -304,7 +325,21 @@ impl Engine {
             pending(token, &status)
         };
         reply["operation_token"] = json!(token);
-        if reply["kind"] != "pending" {
+        reply["resumed_previous"] = json!(chat.operations[index].resumed_previous);
+        if chat.operations[index].settled {
+            let request = chat.operations[index].request_id.clone();
+            for operation in chat
+                .operations
+                .iter_mut()
+                .filter(|o| o.request_id == request)
+            {
+                let mut final_reply = reply.clone();
+                final_reply["operation_token"] = json!(operation.token);
+                operation.reply = Some(final_reply);
+                operation.settled = true;
+                operation.deferred = false;
+            }
+        } else if reply["kind"] == "question" {
             chat.operations[index].reply = Some(reply.clone());
         }
         slot.publish(&self.store, &chat)?;
@@ -336,6 +371,10 @@ impl Engine {
             settled: false,
             attempted: false,
             accepted: false,
+            refused: false,
+            retries: 0,
+            deferred: false,
+            resumed_previous: false,
         };
         if let Some(mut question) = chat.question.clone() {
             let snapshot = Snapshot::read(&runtime.client, &chat.thread_id, &question.run_id)?;
@@ -373,11 +412,29 @@ impl Engine {
         }
         if let Some(previous) = chat.operations.last_mut() {
             if !previous.settled {
-                let run = previous.run_id.as_deref().ok_or_else(||Fault::held("outcome_unknown","A previous send has no confirmed run ID. Read/reconcile that thread in T3 or start a fresh chat; no new prompt is submitted."))?;
-                if !turn::terminal(&turn::wait(runtime, &chat.thread_id, run, 1)?) {
-                    return Err(Fault::held("chat_busy","The chat's previous backend run is still active. Resume or stop that exact operation before sending another prompt."));
+                if previous.attempted && !previous.accepted {
+                    if previous.retries >= 1 {
+                        return Err(Fault::held("outcome_unknown","The one safe retry is exhausted. Reconcile the original receipt in T3 or start a fresh chat; no new message was sent."));
+                    }
+                    return Ok(resume_previous(previous, token, text));
                 }
-                previous.settled = true;
+                if let Some(run) = previous.run_id.as_deref() {
+                    let status = turn::wait(runtime, &chat.thread_id, run, 1)?;
+                    if status == "completed" || !turn::terminal(&status) {
+                        return Ok(resume_previous(previous, token, text));
+                    }
+                    let snapshot = Snapshot::read(&runtime.client, &chat.thread_id, run)?;
+                    let mut reply = turn::settled_reply(&status, &snapshot);
+                    reply["operation_token"] = json!(previous.token);
+                    previous.reply = Some(reply);
+                    previous.settled = true;
+                    previous.deferred = false;
+                } else {
+                    // A prepared request that never reached the attempted
+                    // write-ahead record cannot have been sent by this binary.
+                    previous.settled = true;
+                    previous.reply = Some(Fault::held("not_submitted","The prior operation ended before submission. A new message superseded it.").reply());
+                }
             }
         }
         if chat.thread_id.is_empty() {
@@ -387,14 +444,6 @@ impl Engine {
             operation.tool = "t3_thread_launch".into();
             operation.arguments = json!({"projectId":project,"title":"Minerva chat","modelSelection":model,"runtimeMode":"approval-required","message":text,"clientRequestId":request_id});
         } else {
-            let snapshot = Snapshot::read(&runtime.client, &chat.thread_id, "")?;
-            if snapshot.thread["providerInstanceId"] != chat.model["instanceId"]
-                || snapshot.thread["model"] != chat.model["model"]
-            {
-                return Err(Fault::held("provider_changed","The bound T3 thread's provider/model changed outside this chat. Restore its recorded Codex selection or start a fresh chat; no message was sent to another provider."));
-            }
-            chat.mode = string(&snapshot.thread, "runtimeMode")?.into();
-            turn::allowed_mode(&chat.mode)?;
             operation.tool = "t3_thread_send".into();
             operation.arguments = json!({"threadId":chat.thread_id,"message":text,"mode":"queue","clientRequestId":request_id});
         }
@@ -417,7 +466,7 @@ impl Engine {
             ));
         }
         if op.attempted && op.tool == "t3_pending_request" {
-            // Respond has no clientRequestId. Never retry its unknown outcome.
+            // Respond has no clientRequestId. Reconcile, never replay.
             let pending = runtime.client.tool(
                 "t3_pending_request",
                 json!({"action":"list","threadId":chat.thread_id}),
@@ -426,34 +475,79 @@ impl Engine {
                 .as_array()
                 .is_none_or(|ids| ids.contains(&op.arguments["requestId"]))
             {
-                return Err(Fault::new("outcome_unknown","A question answer was submitted without a confirmed receipt. Its request still appears pending; reconcile in T3, never automatically resend."));
+                return Err(Fault::new("outcome_unknown","A question answer has no confirmed receipt and still appears pending. Reconcile in T3; it is never automatically resent."));
             }
             chat.operations[index].accepted = true;
             return slot.publish(&self.store, chat);
         }
-        if op.attempted
+        let retry = op.attempted;
+        if retry
             && (op.namespace != runtime.receipt.session_id
                 || op.connection != runtime.client.connection)
         {
             if !chat.thread_id.is_empty() {
-                Snapshot::read(&runtime.client, &chat.thread_id, "")?;
+                turn::thread_detail(runtime, &chat.thread_id)?;
             }
             return Err(Fault::new("outcome_unknown","The prior send outcome is unknown under another MCP/auth session. The public thread was reread when available, but cannot prove the missing receipt. No blind resend: reconcile in T3 or start a fresh chat."));
         }
-        if slot.cancelled(&op.token)? && !op.attempted {
+        if retry && op.retries >= 1 {
+            return Err(Fault::new("outcome_unknown","The one safe same-session retry is exhausted. Reconcile in T3; no new message was submitted."));
+        }
+        if slot.cancelled(&op.token)? && !retry {
             return Err(Fault::held(
                 "cancelled",
                 "Stop was recorded before submission. Nothing was sent.",
             ));
         }
+        turn::verify_workspace(
+            runtime,
+            chat,
+            if op.tool == "t3_thread_launch" {
+                Some(string(&op.arguments, "projectId")?)
+            } else {
+                None
+            },
+        )?;
+        let request_id = op.request_id.clone();
+        if retry {
+            for operation in chat
+                .operations
+                .iter_mut()
+                .filter(|o| o.request_id == request_id)
+            {
+                operation.retries = 1;
+            }
+        }
         chat.operations[index].attempted = true;
         slot.publish(&self.store, chat)?;
         let op = &chat.operations[index];
-        let result = runtime.client.tool(&op.tool, op.arguments.clone())?;
-        if op.tool == "t3_pending_request" {
+        let result = match runtime.client.tool(&op.tool, op.arguments.clone()) {
+            Ok(result) => result,
+            Err(mut fault) => {
+                if !retry && fault.definite_refusal {
+                    let op = &mut chat.operations[index];
+                    op.refused = true;
+                    op.settled = true;
+                    let mut reply = fault.reply();
+                    reply["operation_token"] = json!(op.token);
+                    op.reply = Some(reply);
+                    slot.publish(&self.store, chat)?;
+                } else {
+                    fault.held = false;
+                    if retry {
+                        fault.text.push_str(" A refusal of this retry does not establish that the original request was rejected.");
+                    }
+                }
+                return Err(fault);
+            }
+        };
+        let run = if op.tool == "t3_pending_request" {
             if result["sequence"].as_u64().is_none() {
                 return Err(Fault::new("outcome_unknown","T3 question response omitted its dispatch receipt. Reconcile the known run without resending the answer."));
             }
+            op.run_id.clone().ok_or_else(|| {
+                Fault::new("invalid_state", "Question response lost its bound run.")
+            })?
         } else {
             let thread = string(&result, "threadId")?.to_owned();
             if !chat.thread_id.is_empty() && chat.thread_id != thread {
@@ -464,10 +558,16 @@ impl Engine {
             }
             chat.thread_id = thread;
             slot.publish(&self.store, chat)?;
-            let run = string(&result, "runId")?.to_owned();
-            chat.operations[index].run_id = Some(run);
+            string(&result, "runId")?.to_owned()
+        };
+        for operation in chat
+            .operations
+            .iter_mut()
+            .filter(|o| o.request_id == request_id)
+        {
+            operation.run_id = Some(run.clone());
+            operation.accepted = true;
         }
-        chat.operations[index].accepted = true;
         // Accepted run identity is durable BEFORE the first wait/read.
         slot.publish(&self.store, chat)
     }
@@ -524,4 +624,13 @@ fn wake(peer: &Peer, cause: &str, chat: &str, thread: &str, token: &str) -> Resu
     peer.write(&json!({"jsonrpc":"2.0","method":"minerva/plugin_event",
         "params":{"event":"t3_code.turn_completed","payload":{"cause":cause,"chat_id":chat,"thread_id":thread,"operation_token":token}}}))
         .map_err(|e|Fault::new("host_disconnected",e))
+}
+
+fn resume_previous(previous: &Operation, token: &str, input: &str) -> Operation {
+    let mut operation = previous.clone();
+    operation.token = token.into();
+    operation.input = input.into();
+    operation.reply = None;
+    operation.resumed_previous = true;
+    operation
 }

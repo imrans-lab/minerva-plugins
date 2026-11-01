@@ -112,7 +112,7 @@ impl App {
                         current["runtime_mode_source"] = json!(if current["thread_id"] == "" {
                             "explicit launch setting; no thread yet"
                         } else {
-                            "last observed bound-thread mode"
+                            "last recorded explicit or observed bound-thread mode"
                         });
                         if current["thread_lost"] == true
                             || current["outcome_unknown"] == true

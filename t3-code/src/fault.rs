@@ -6,6 +6,7 @@ pub struct Fault {
     pub code: &'static str,
     pub text: String,
     pub held: bool,
+    pub definite_refusal: bool,
 }
 
 impl Fault {
@@ -14,6 +15,7 @@ impl Fault {
             code,
             text: text.into(),
             held: false,
+            definite_refusal: false,
         }
     }
 
@@ -22,6 +24,16 @@ impl Fault {
             code,
             text: text.into(),
             held: true,
+            definite_refusal: false,
+        }
+    }
+
+    pub fn refused(code: &'static str, text: impl Into<String>) -> Self {
+        Self {
+            code,
+            text: text.into(),
+            held: true,
+            definite_refusal: true,
         }
     }
 

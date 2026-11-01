@@ -24,6 +24,10 @@ pub struct Operation {
     pub settled: bool,
     pub attempted: bool,
     pub accepted: bool,
+    pub refused: bool,
+    pub retries: u8,
+    pub deferred: bool,
+    pub resumed_previous: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

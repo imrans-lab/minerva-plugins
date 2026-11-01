@@ -37,10 +37,49 @@ pub fn select_project(runtime: &Runtime, workspace: &str) -> Result<(String, Val
             )
         })?;
     let fallback = json!({"instanceId":instance,"model":model});
+    let mut found = find_projects(runtime, "workspaceRoot", workspace)?;
+    if found.len() > 1 {
+        return Err(Fault::held(
+            "project_ambiguous",
+            "Multiple T3 projects share this folder. Resolve them in T3 before starting a chat.",
+        ));
+    }
+    let project = if let Some(project) = found.pop() {
+        project
+    } else {
+        runtime.client.tool("t3_project_create",json!({"title":"Minerva","workspaceRoot":workspace,"createWorkspaceRootIfMissing":false,"defaultModelSelection":fallback}))?
+    };
+    let selected = &project["defaultModelSelection"];
+    let selection = if selected.is_null() {
+        fallback
+    } else {
+        let id = string(selected, "instanceId")?;
+        let selected_model = string(selected, "model")?;
+        if !codex.iter().any(|p| {
+            p["providerInstanceId"] == id
+                && p["models"]
+                    .as_array()
+                    .is_some_and(|models| models.iter().any(|m| m["id"] == selected_model))
+        }) {
+            return Err(Fault::held("codex_unavailable","This T3 project's default selection is not an available Codex model. Choose its default in T3; the plugin will not replace it."));
+        }
+        selected.clone()
+    };
+    Ok((string(&project, "id")?.to_owned(), selection))
+}
+
+fn find_projects(runtime: &Runtime, field: &str, value: &str) -> Result<Vec<Value>> {
     let mut args = json!({"limit":100});
     let mut cursors = BTreeSet::new();
     let mut found = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     for _ in 0..1000 {
+        if std::time::Instant::now() >= deadline {
+            return Err(Fault::held(
+                "read_bound",
+                "Project lookup exceeded30 seconds.",
+            ));
+        }
         let page = runtime.client.tool("t3_project_list", args.clone())?;
         let projects = page["projects"]
             .as_array()
@@ -48,43 +87,17 @@ pub fn select_project(runtime: &Runtime, workspace: &str) -> Result<(String, Val
         found.extend(
             projects
                 .iter()
-                .filter(|p| p["workspaceRoot"] == workspace && p["deletedAt"].is_null())
+                .filter(|p| p[field] == value && p["deletedAt"].is_null())
                 .cloned(),
         );
         if page["nextCursor"].is_null() {
-            if found.len() > 1 {
-                return Err(Fault::held("project_ambiguous", "Multiple T3 projects share this folder. Resolve them in T3 before starting a chat."));
-            }
-            let project = if let Some(project) = found.pop() {
-                project
-            } else {
-                runtime.client.tool(
-                    "t3_project_create",
-                    json!({"title":"Minerva", "workspaceRoot":workspace,
-                    "createWorkspaceRootIfMissing":false,"defaultModelSelection":fallback}),
-                )?
-            };
-            let selected = &project["defaultModelSelection"];
-            let selection = if selected.is_null() {
-                fallback
-            } else {
-                let id = string(selected, "instanceId")?;
-                let selected_model = string(selected, "model")?;
-                if !codex.iter().any(|p| {
-                    p["providerInstanceId"] == id
-                        && p["models"]
-                            .as_array()
-                            .is_some_and(|models| models.iter().any(|m| m["id"] == selected_model))
-                }) {
-                    return Err(Fault::held("codex_unavailable", "This T3 project's default selection is not an available Codex model. Choose its default in T3; the plugin will not replace it."));
-                }
-                selected.clone()
-            };
-            return Ok((string(&project, "id")?.to_owned(), selection));
+            return Ok(found);
         }
         let next = page["nextCursor"]
             .as_u64()
-            .filter(|c| cursors.insert(*c))
+            .filter(|c| {
+                args["cursor"].as_u64().is_none_or(|previous| *c > previous) && cursors.insert(*c)
+            })
             .ok_or_else(|| {
                 Fault::new(
                     "contract_mismatch",
@@ -97,6 +110,78 @@ pub fn select_project(runtime: &Runtime, workspace: &str) -> Result<(String, Val
         "read_bound",
         "T3 project list exceeds1000 pages.",
     ))
+}
+
+pub fn thread_detail(runtime: &Runtime, thread: &str) -> Result<Value> {
+    let read = runtime.client.tool(
+        "t3_thread_read",
+        json!({"threadId":thread,"view":"activity","limit":1,"maxCharsPerItem":1}),
+    )?;
+    if read["thread"]["threadId"] != thread {
+        return Err(Fault::new(
+            "contract_mismatch",
+            "T3 read returned another thread.",
+        ));
+    }
+    Ok(read["thread"].clone())
+}
+
+/// T3 root-thread cwd is resolved from the CURRENT project at every turn.
+/// Recheck immediately before submission; the local map never moves with it.
+pub fn verify_workspace(
+    runtime: &Runtime,
+    chat: &Chat,
+    launch_project: Option<&str>,
+) -> Result<()> {
+    let detail = if chat.thread_id.is_empty() {
+        Value::Null
+    } else {
+        thread_detail(runtime, &chat.thread_id)?
+    };
+    if !detail.is_null() {
+        if detail["providerInstanceId"] != chat.model["instanceId"]
+            || detail["model"] != chat.model["model"]
+        {
+            return Err(Fault::held("provider_changed","The bound T3 provider/model changed. Restore its recorded Codex selection or start a fresh chat; no new prompt was sent to another provider."));
+        }
+        allowed_mode(string(&detail, "runtimeMode")?)?;
+    }
+    let project_id = if let Some(project) = launch_project {
+        project
+    } else {
+        string(&detail, "projectId")?
+    };
+    let projects = find_projects(runtime, "id", project_id)?;
+    if projects.len() != 1 {
+        return Err(Fault::held("workspace_changed","The bound T3 project is missing or ambiguous. Restore it or start a fresh chat; no prompt was sent."));
+    }
+    let current = string(&projects[0], "workspaceRoot")?;
+    if !std::path::Path::new(current).is_absolute() || !std::path::Path::new(current).is_dir() {
+        return Err(Fault::held("workspace_changed","T3's bound project root must remain an existing absolute folder. Restore it before retrying."));
+    }
+    let canonical = std::path::Path::new(current).canonicalize().map_err(|_| {
+        Fault::held(
+            "workspace_changed",
+            "The bound T3 folder is unavailable. Restore it before retrying.",
+        )
+    })?;
+    let worktree = detail["worktreePath"]
+        .as_str()
+        .map(std::path::Path::new)
+        .map(std::path::Path::canonicalize)
+        .transpose()
+        .map_err(|_| {
+            Fault::held(
+                "workspace_changed",
+                "The thread's T3 worktree is unavailable.",
+            )
+        })?;
+    if canonical != std::path::Path::new(&chat.workspace)
+        || worktree.is_some_and(|path| path != std::path::Path::new(&chat.workspace))
+    {
+        return Err(Fault::held("workspace_changed","T3's project root/worktree changed from this chat's saved folder. Restore the original folder in T3 or start a fresh chat; this binding never moves and no new prompt was sent."));
+    }
+    Ok(())
 }
 
 pub fn allowed_mode(mode: &str) -> Result<()> {
