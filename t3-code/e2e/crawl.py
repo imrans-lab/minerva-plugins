@@ -17,7 +17,7 @@ Acceptance requires --owner-attended and --config CONFIG.json. CONFIG names:
 Optional: plugin_id, entry_id, generate_tool, status_tool, deadline_sec.
 
 The approved profile must give the runtime its existing owner-approved provider
-login, exact binary/home, project-default permission mode and one read-only
+login, exact binary/home, explicit approval-required mode and one read-only
 Minerva MCP tool: minerva_list_chats. The observer publishes its dynamically
 chosen endpoint in ready.json. The plugin's minerva_mcp_endpoint setting takes
 the {minerva_mcp} placeholder and owns Codex MCP wiring, exposing only the
@@ -638,12 +638,23 @@ class Crawl:
                   visible_error=visible, nothing_written=not denied.exists(), approvals_supported=False)
 
     def interrupt(self) -> None:
-        begun = self.workspace / "interrupt-begun"
-        thread, run = self.send("Run a harmless long operation: create interrupt-begun in this workspace, "
-                                "then wait 120 seconds. Do not finish early. Afterward reply "
-                                + self.config["nonce"] + "-done.")
+        # The controller owns this Linux fixture. Codex only reads it: cat's
+        # open blocks while no writer exists, with no write/approval stimulus.
+        gate = self.workspace / "interrupt-read-gate"
+        os.mkfifo(gate, mode=0o600)
+        thread, run = self.send("Use cat to read interrupt-read-gate in the current workspace. "
+                                "It is a fixture-owned pipe with no writer, so the read should block. "
+                                "Do not create or write files, request permission, or finish early. "
+                                "Keep waiting until Stop; afterward reply " + self.config["nonce"] + "-done.")
         self.phase = "long_operation_started"
-        self.wait(begun.exists, 180)
+
+        def running_command() -> bool:
+            items = self.backend.read(thread, run)
+            command = any(item["type"] == "command_execution"
+                          and item["status"] in {"running", "in_progress"} for item in items)
+            return command and self.backend.settled(thread, run).get("status") == "running"
+
+        self.wait(running_command, 180)
         pressed = self.command("stop", chat_id=self.chat_id).get("pressed", False)
         snapshot, state, _ = self.finish(thread, run)
         event_index = snapshot["turn_event"].get("message_index", -2)
@@ -652,7 +663,7 @@ class Crawl:
             event_index == -1 and reply_index < self.history_start)
         host_cancelled = current_event and snapshot["turn_event"].get("outcome") == "cancelled"
         self.emit("R4", pressed and host_cancelled and state in {"cancelled", "interrupted"},
-                  stop_button_pressed=pressed, backend_terminal=state,
+                  backend_command_started=True, stop_button_pressed=pressed, backend_terminal=state,
                   host_cancelled=host_cancelled, termination=snapshot["termination"])
 
     def final_result(self) -> None:
@@ -670,7 +681,8 @@ class Crawl:
         registration = self.command("short_budget")
         if registration.get("timeout_sec") != 11 or registration.get("error"):
             raise RuntimeError("Provider registration refused R6 budget stimulus")
-        thread, run = self.send("Wait at least 15 seconds using a harmless wait tool, then reply exactly "
+        thread, run = self.send("Wait at least 15 seconds using a read-only wait tool. Do not create or write "
+                                "files or request permission. Then reply exactly "
                                 + self.config["nonce"] + "-pending.")
         snapshot, state, _ = self.finish(thread, run)
         replies = snapshot["replies"][self.reply_start:]
