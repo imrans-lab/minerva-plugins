@@ -591,8 +591,9 @@ impl Engine {
             {
                 return Err(Fault::new("outcome_unknown","A question answer has no confirmed receipt and still appears pending. Reconcile in T3; it is never automatically resent."));
             }
-            chat.operations[index].accepted = true;
-            return slot.publish(&self.store, chat);
+            // Absence proves resolution, not consumption of our answer. The
+            // bound run may be observed, but acceptance remains unknown.
+            return Ok(());
         }
         let retry = op.attempted;
         if retry
@@ -671,9 +672,9 @@ impl Engine {
                     "T3 send returned another thread. The original receipt remains unresolved.",
                 ));
             }
+            let run = string(&result, "runId")?.to_owned();
             chat.thread_id = thread;
-            slot.publish(&self.store, chat)?;
-            string(&result, "runId")?.to_owned()
+            run
         };
         for operation in chat
             .operations
