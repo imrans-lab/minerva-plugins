@@ -1,131 +1,106 @@
+mod app;
 mod contract;
+mod engine;
+mod fault;
+mod mcp;
 mod probe;
 mod protocol;
+mod questions;
+mod runtime;
+mod snapshot;
+mod storage;
+mod turn;
 
+use app::App;
 use contract::Contract;
 use protocol::Peer;
 use serde_json::{json, Value};
 use std::io;
+use std::sync::Arc;
 
 const MANIFEST: &str = include_str!("../manifest.json");
 
 fn tool_result(value: Value) -> Value {
-    json!({"content": [{"type": "text", "text": value.to_string()}]})
-}
-
-fn status(peer: &Peer, contract: &Contract) -> Value {
-    let result = (|| {
-        let fields = peer.capability("host.settings.list", json!({}))?;
-        let project = peer.capability("host.project.current", json!({}))?;
-        let settings = probe::Settings::from_host(&fields, &project)?;
-        probe::inspect(&settings, contract)
-    })();
-    result.unwrap_or_else(|error: String| json!({
-        "state": "not-started", "ready": false, "phase": "A",
-        "thread_id": "", "run_id": "", "provider": "codex", "t3_tag": contract.t3_tag,
-        "endpoint": "", "base_dir": "", "codex_home": "", "errors": [error],
-        "compatibility": contract.compatibility(json!({})),
-        "runtime_message": "No T3 server or agent has been started. Open T3 Code preferences to correct prerequisites."
-    }))
+    json!({"content":[{"type":"text","text":value.to_string()}]})
 }
 
 fn register(peer: &Peer) -> Result<(), String> {
     peer.capability(
         "host.chat_providers.register",
         json!({
-            "entry_id": "t3-code", "display_name": "T3 Code (Codex)",
-            "generate_tool": "minerva_t3_code_generate", "cancel_tool": "minerva_t3_code_cancel",
-            "history_mode": "newest_only", "timeout_sec": 600,
-            "metadata": {"resumable": true, "interrupt_in_place": true}
+            "entry_id":"t3-code","display_name":"T3 Code (Codex)",
+            "generate_tool":"minerva_t3_code_generate","cancel_tool":"minerva_t3_code_cancel",
+            "history_mode":"newest_only","timeout_sec":600,
+            "metadata":{"resumable":true,"interrupt_in_place":true}
         }),
     )
     .map(|_| ())
 }
 
-fn serve(contract: &Contract) -> Result<(), String> {
+fn serve(contract: Contract) -> Result<(), String> {
     let manifest: Value = serde_json::from_str(MANIFEST).map_err(|e| e.to_string())?;
+    let app = Arc::new(App::new(contract));
     let (peer, requests) = Peer::start();
-    let mut registration_error = None;
+    let mut workers: Vec<std::thread::JoinHandle<()>> = Vec::new();
     for request in requests {
+        workers.retain(|worker| !worker.is_finished());
         let method = request["method"].as_str().unwrap_or("");
         if method == "notifications/initialized" {
-            registration_error = register(&peer).err();
-            if let Some(error) = &registration_error {
-                eprintln!("t3-code: {error}");
-            }
+            *app.registration_error
+                .lock()
+                .map_err(|_| "Registration lock failed")? = register(&peer).err();
             continue;
         }
         if request.get("id").is_none() {
             continue;
         }
         let id = &request["id"];
+        if method == "tools/call" {
+            // Independent chats and Stop remain responsive during a bounded
+            // generate wait. Each chat's Engine gate serializes its sends.
+            if workers.len() >= 32 {
+                peer.write(&json!({"jsonrpc":"2.0","id":id,"result":tool_result(
+                    fault::Fault::held("busy","Plugin has32 active calls; retry this held call.").reply())}))?;
+                continue;
+            }
+            let app = Arc::clone(&app);
+            let peer = Arc::clone(&peer);
+            workers.push(std::thread::spawn(move || {
+                let params = &request["params"];
+                let result = app.call(
+                    &peer,
+                    params["name"].as_str().unwrap_or(""),
+                    &params["arguments"],
+                );
+                if let Err(error) = peer.write(
+                    &json!({"jsonrpc":"2.0","id":request["id"],"result":tool_result(result)}),
+                ) {
+                    eprintln!("t3-code: {error}");
+                }
+            }));
+            continue;
+        }
         let result = match method {
-            "initialize" => json!({
-                "protocolVersion": "2024-11-05", "serverName": "t3-code",
-                "serverVersion": env!("CARGO_PKG_VERSION"),
-                "serverInfo": {"name": "t3-code", "version": env!("CARGO_PKG_VERSION")},
-                "capabilities": {"tools": {}}
-            }),
+            "initialize" => json!({"protocolVersion":"2024-11-05","serverName":"t3-code",
+                "serverVersion":env!("CARGO_PKG_VERSION"),"serverInfo":{"name":"t3-code","version":env!("CARGO_PKG_VERSION")},"capabilities":{"tools":{}}}),
             "ping" => json!({}),
             "tools/list" => {
                 let tools = manifest["tools"]
                     .as_array()
                     .ok_or("Embedded manifest has no tools")?;
-                let listed: Vec<Value> = tools
-                    .iter()
-                    .map(|tool| {
-                        json!({
-                            "name": tool["name"], "description": tool["description"],
-                            "inputSchema": tool["input_schema"]
-                        })
-                    })
-                    .collect();
-                json!({"tools": listed})
-            }
-            "tools/call" => {
-                let name = request["params"]["name"].as_str().unwrap_or("");
-                match name {
-                    "minerva_t3_code_status" => {
-                        let mut current = status(&peer, contract);
-                        current["registration_error"] = json!(registration_error);
-                        tool_result(current)
-                    }
-                    "minerva_t3_code_generate" => {
-                        let current = status(&peer, contract);
-                        let mut errors: Vec<&str> = current["errors"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter_map(Value::as_str)
-                            .collect();
-                        if let Some(error) = registration_error.as_deref() {
-                            errors.push(error);
-                        }
-                        errors.push("T3 Code runtime is not started: Phase B is pending the owner's installation decision. No prompt was sent.");
-                        tool_result(
-                            json!({"kind": "error", "code": "runtime_not_started", "held": true,
-                                "hold_reason": "runtime_not_started", "text": errors.join("\n")}),
-                        )
-                    }
-                    "minerva_t3_code_cancel" => tool_result(json!({
-                        "cancelled": false, "state": "not-started",
-                        "text": "No T3 run exists to interrupt.",
-                        "operation_token": request["params"]["arguments"]["operation_token"]
-                    })),
-                    _ => {
-                        peer.write(&json!({"jsonrpc": "2.0", "id": id,
-                            "error": {"code": -32602, "message": "Unknown t3-code tool"}}))?;
-                        continue;
-                    }
-                }
+                json!({"tools":tools.iter().map(|tool|json!({"name":tool["name"],"description":tool["description"],"inputSchema":tool["input_schema"]})).collect::<Vec<_>>()})
             }
             _ => {
-                peer.write(&json!({"jsonrpc": "2.0", "id": id,
-                    "error": {"code": -32601, "message": "Method not found"}}))?;
+                peer.write(&json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Method not found"}}))?;
                 continue;
             }
         };
-        peer.write(&json!({"jsonrpc": "2.0", "id": id, "result": result}))?;
+        peer.write(&json!({"jsonrpc":"2.0","id":id,"result":result}))?;
+    }
+    for worker in workers {
+        if worker.join().is_err() {
+            return Err("Tool worker panicked".into());
+        }
     }
     Ok(())
 }
@@ -134,7 +109,7 @@ fn run() -> Result<(), String> {
     let contract = Contract::embedded()?;
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments.is_empty() {
-        return serve(&contract);
+        return serve(contract);
     }
     if arguments.len() == 2 && arguments[0] == "--check-catalog" {
         let input = std::fs::File::open(&arguments[1]).map_err(|e| e.to_string())?;

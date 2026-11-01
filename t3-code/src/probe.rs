@@ -13,7 +13,7 @@ use crate::contract::Contract;
 pub struct Settings {
     values: BTreeMap<String, String>,
     pub workspace: PathBuf,
-    private: PathBuf,
+    pub private: PathBuf,
 }
 
 impl Settings {
@@ -31,21 +31,20 @@ impl Settings {
         }
         let project_path = project["path"].as_str().unwrap_or("");
         let saved = Path::new(project_path);
-        if !saved.is_absolute()
-            || !saved.is_file()
-            || !saved
+        let workspace = if saved.is_absolute()
+            && saved.is_file()
+            && saved
                 .extension()
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("minproj"))
         {
-            return Err("Save the Minerva project as a .minproj before using T3 Code.".into());
-        }
-        let workspace = saved
-            .parent()
-            .ok_or("Saved project has no folder")?
-            .to_owned();
-        if !workspace.is_dir() {
-            return Err("The saved Minerva project's folder is unavailable.".into());
-        }
+            saved
+                .parent()
+                .filter(|p| p.is_dir())
+                .map(Path::to_owned)
+                .unwrap_or_default()
+        } else {
+            PathBuf::new()
+        };
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .ok_or("HOME is unavailable")?;
@@ -257,6 +256,9 @@ fn installed_t3(path: &str) -> Result<(PathBuf, Version), String> {
 
 pub fn inspect(settings: &Settings, contract: &Contract) -> Result<Value, String> {
     let mut errors = Vec::new();
+    if settings.workspace.as_os_str().is_empty() {
+        errors.push("Save the Minerva project as a .minproj before starting a new T3 chat.".into());
+    }
     if !(cfg!(target_os = "linux") && cfg!(target_arch = "x86_64")
         || cfg!(target_os = "macos") && cfg!(target_arch = "aarch64"))
     {

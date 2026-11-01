@@ -1,8 +1,8 @@
 # T3 Code plugin — crawl
 
-Experimental adapter for Codex through an existing official T3 Code installation. DCR: `experiment:01a14243aa897a5e8eacb7c3276d94cf`; T1: `experiment:01a1988d581579169ec001419dadd6c5`.
+Experimental adapter for Codex through an existing official T3 Code installation. DCR: `experiment:01a14243aa897a5e8eacb7c3276d94cf`; T1: `experiment:01a1988d581579169ec001419dadd6c5`; T2: `experiment:01a1988d71157fe781761ae7287b8ad1`.
 
-Phase A implements the plugin shell and prerequisite diagnostics. It registers one provider and **refuses every generation** with a visible `runtime_not_started` error. It starts no T3 server or agent, issues no bearer, and sends no model request. Live authentication, process ownership and turn delivery remain Phase B/T2. The owner decides when and how to install T3 and a suitable Node version.
+T1 Phase A supplies the plugin shell and prerequisites. T2 adds the source turn engine, which remains **held without the Phase B manager’s owned runtime receipt**. This candidate does not create that receipt, start T3, issue a bearer or send a model request during source validation. The owner decides when and how to install T3 and a suitable Node version. Live authentication, lifecycle and real turn acceptance remain Phase B.
 
 ## Identity and build
 
@@ -14,7 +14,7 @@ cargo build --release --locked
 cp target/release/t3-code-plugin t3-code-plugin
 ```
 
-Install the built `manifest.json` through Minerva's normal local manifest lane. It has no setup script or first-use build. Do not install an unbuilt source directory. No T3 source or executable is bundled. `Cargo.lock` pins the small Rust plugin's dependencies.
+Install the built `manifest.json` through Minerva's normal local manifest lane. It has no setup script or first-use build. Do not install an unbuilt source directory. No T3 source or executable is bundled. Rust1.89 or newer is required for the process writer lock. `Cargo.lock` pins dependencies; `ureq` supplies bounded HTTP with default TLS/compression/proxy features disabled, rather than a handwritten HTTP parser.
 
 Crawl targets Linux x86_64 and macOS arm64. Windows and macOS Intel are unsupported. A successful compilation is not platform acceptance; both supported platforms still need the T4 owner checks.
 
@@ -34,9 +34,29 @@ Preferences has a **T3 Code** tab. Paths name existing executables; they are pas
 
 `{private}` resolves to this plugin's per-user data directory (`$XDG_DATA_HOME/Minerva/plugins/t3_code` or `~/.local/share/Minerva/plugins/t3_code` on Linux; `~/Library/Application Support/Minerva/plugins/t3_code` on macOS). It is separate from the installed plugin. `{workspace}` is the folder of the saved `.minproj`; an unsaved project refuses. `{minerva_mcp}` expands to the declared endpoint setting. The acceptance driver can supply absolute paths under its disposable root.
 
-`minerva_t3_code_status(chat_id)` returns `state: not-started`, `ready: false`, empty `thread_id`, `run_id` and `endpoint`, prerequisite errors, and an authoritative `compatibility` tuple. Static supported values appear in settings help; detected versions are not editable preferences. Phase A reads the resolved native T3 file header and adjacent `.install-complete` version marker without executing any T3 code. An npm/installer launcher or incomplete installation refuses with a copyable prerequisite error: even `t3 --version` can otherwise install a runtime. The detected T3 version is explicitly labelled as marker-derived. Existing Node/Codex version and `codex login status` probes are bounded and use the selected Codex home; they do not log command output or credentials. A prerequisite failure never triggers an installer or changes authentication/billing modes.
+`minerva_t3_code_status(chat_id)` answers before the first turn. It returns the plugin-owned `thread_id`/`run_id`, bound folder and model, observed permission mode, client ceiling, prerequisite errors and compatibility tuple. Without a manager receipt it reports `not-started`, `ready: false` and no endpoint. Detected versions are not editable preferences. T3 inspection only reads the resolved native header and adjacent `.install-complete` marker; it never executes an npm/installer launcher. Existing Node/Codex version and `codex login status` probes are bounded and use the selected home without logging their output. No prerequisite failure installs software or changes authentication/billing modes.
 
-The entry declares `newest_only`, `resumable`, `interrupt_in_place`, generate and cancel tools. Phase A accepts no operation; cancel truthfully returns `cancelled: false, state: not-started`. Completed activity later uses core's generic `HcpData.activity[]` contract, with no T3 UI branch.
+The entry declares `newest_only`, `resumable`, `interrupt_in_place`, generate and cancel tools. Generation and Stop require the host’s stable `operation_token`. Without an owned runtime, generation is held; Stop records its intent privately and reports no invented backend cancellation. Completed activity uses core’s generic `HcpData.activity[]` contract.
+
+## Turn ownership and recovery
+
+The plugin stores `chat_id → thread_id`, the canonical saved `.minproj` folder, state epoch and run receipts under `{private}/chats`, outside disposable T3 state. The directory is 0700 and files are 0600, with one process writer lock and atomic, synced replacement. Receipts include private prompt/reply content and are retained; they are not a scrubbed trace. A chat receipt is bounded to16MiB and transcript reads to 32MiB; exceeding a bound refuses without presenting a partial transcript as final. Two chats bound to one folder share files. Changing the active project never moves an existing thread; an unsaved project refuses only a new chat.
+
+Each launch/send stores its exact request and `clientRequestId` before submission, then stores the accepted `runId` before waiting. A safe retry reuses the same live MCP connection, auth namespace and client ID. After restart/reissue, an unknown outcome causes a public thread reread and a visible reconciliation refusal: the public read lacks the missing client receipt, so the plugin never guesses a run from matching text. Reconcile in T3 or start a fresh Minerva chat. A lost thread is reported as `thread_lost`; no history reconstruction or replacement thread is automatic.
+
+Generation waits at most 2 seconds per backend wait and returns `pending` with the same host operation token. Resume only polls that receipt. Final answers reread the settled snapshot from the beginning, follow `hasMore`/`nextPosition`, and fetch every truncated item via its text offsets. Every item is filtered to the bound source thread and run; position cursors are never treated as an update feed. Snapshot requests have a 30-second aggregate read budget plus the bounded in-flight HTTP request. No incomplete read is a final answer.
+
+Stop has an independent dispatch path. It persists its operation-token intent before interrupting the exact returned run ID, including a Stop that arrives before the send receipt. It never uses `stop:true` or “latest run”, and `cancelled:true` requires T3 to report `cancelled` or `interrupted`.
+
+A user-input card’s random opaque values live only in that chat’s stored pending request. The next message revalidates the request against the bound active run and public pending list/read. Wrong-chat, wrong-run, stale and ambiguous options refuse. Multiple questions are answered locally one at a time, then submitted once. Unknown outcomes from `respond` are reconciled without automatic resubmission because that tool has no client request ID. Permission requests produce a visible deferred error/activity card; this plugin never calls an approval tool. Wake notifications use `t3_code.turn_completed` with `turn_completed`, `input_requested` or `thread_lost`, chat/thread/operation references only. The Phase B manager owns `agent_exited` when an owned process actually exits; a failed or cancelled run alone is a completed turn, not evidence of process exit. No transcript is posted to Docket.
+
+## Owned runtime boundary and native Minerva tools
+
+Only the future T1 Phase B manager writes/retires `{private}/owned-runtime.json`. T2 only reads its 0600 receipt and bearer file; there is no arbitrary endpoint preference or automatic runtime adoption. The manager must establish process ownership, pin the install, revoke on controlled unload and rotate the epoch when disposable T3 state is replaced. Missing/expired/mismatched receipts hold generation. Receipt schema is defined once in `src/runtime.rs` and recorded on T2; a receipt is source plumbing, not live acceptance evidence.
+
+The manager passes `CODEX_HOME` in place and `T3CODE_CODEX_LAUNCH_ARGS` generated by `runtime::codex_launch_args` to its owned T3 process. Those arguments configure a native Codex HTTP MCP entry `minerva_t3_crawl` with the authorized `{minerva_mcp}` endpoint, `enabled_tools = ["minerva_list_chats"]`, and required startup. No real Codex config file is edited, no credential home is copied, and no UGS/Core route is used. Existing owner configuration remains in force; the only Minerva tool introduced by this entry is the scoped read-only chat list. The public T3 thread override preserves other launch MCP entries (pinned `CodexAdapterV2.ts:1354`). See [Codex MCP configuration](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) for `enabled_tools`.
+
+HTTP is explicit loopback IP only, without redirects, environment proxy, remote URLs or credentials in diagnostics. The embedded dependency set is checked against the owned server’s public `tools/list` before turn submission. Native MCP login/tool delivery and all real crawl rows remain unproven until the owner-attended Phase B run.
 
 ## Authentication source spike
 
@@ -44,7 +64,7 @@ Pinned upstream: [v0.1.6](https://github.com/pingdotgg/t3code/releases/tag/v0.1.
 
 The public `t3 auth session issue` CLI accepts `--subject mcp-client`, repeated `--scope orchestration:read --scope orchestration:operate`, explicit `--base-dir`, `--ttl 1h`, `--label` and `--json`. This yields the bearer audience accepted by `/mcp`; its default subject does not. No private server-module import or T3 patch is needed.
 
-This issuance path has an **approval-required ceiling**. It cannot grant full access. Preserve project-default permission semantics and refuse an incompatible mode visibly. Approval handling is deferred to walk; crawl must show a permission deferral and execute nothing rather than broaden a sandbox to avoid the request.
+This issuance path has an **approval-required ceiling**. It cannot grant full access. Every launch explicitly supplies `runtimeMode: "approval-required"`, per Claude’s T2 ruling5524. Pinned T3 otherwise silently narrows an incompatible project default to the client ceiling; the plugin does not claim to preserve that unobservable default. The observed thread mode is recorded and shown, and a later incompatible change refuses a new send. Approval handling is deferred to walk; crawl must show a permission deferral and execute nothing rather than broaden a sandbox to avoid the request.
 
 Phase B must capture issuance JSON privately, put only the raw bearer in the configured file with mode 0600, and keep the session ID/expiry privately for `t3 auth session revoke --base-dir <same-base> <session-id>`. Sessions default to 30 days upstream; the proposed owned session uses one hour. There is no refresh token on this CLI path: re-authentication creates a new session and idempotency namespace, so an accepted or unknown send must not be replayed blindly. None of this issuance/revocation is executed by Phase A.
 

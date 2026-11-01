@@ -2,7 +2,7 @@
   "id": "t3_code",
   "name": "T3 Code",
   "version": "0.1.0",
-  "description": "Experimental Codex chat integration through an existing official T3 Code installation and your existing Codex login. The crawl targets Linux x86_64 and macOS arm64, with approvals deferred; Windows is unsupported. This Phase A shell reports prerequisites and refuses turns until its runtime is implemented.",
+  "description": "Experimental Codex chat integration through an existing official T3 Code installation and your existing Codex login. Source turn engine supports Linux x86_64 and macOS arm64; owned runtime startup and live acceptance remain Phase B. Approvals are deferred; Windows is unsupported.",
   "price": {
     "amount_minor": 0,
     "currency": "USD"
@@ -20,7 +20,7 @@
   "tools": [
     {
       "name": "minerva_t3_code_generate",
-      "description": "Generate or resume a Codex turn for a bound Minerva chat. Phase A refuses with a visible setup/runtime-not-started error and never submits a prompt.",
+      "description": "Generate or resume one exact Codex run bound to this chat. Held without a Phase B owned runtime receipt; unknown outcomes are retained and never blindly resent across sessions.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -49,13 +49,14 @@
         },
         "required": [
           "chat_id",
+          "operation_token",
           "text"
         ]
       }
     },
     {
       "name": "minerva_t3_code_cancel",
-      "description": "Interrupt the exact operation bound to this chat. Phase A reports not-started because no backend run exists.",
+      "description": "Record Stop durably and interrupt only the run bound to this operation token. cancelled is true only after T3 reports cancelled/interrupted.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -73,13 +74,14 @@
           }
         },
         "required": [
-          "chat_id"
+          "chat_id",
+          "operation_token"
         ]
       }
     },
     {
       "name": "minerva_t3_code_status",
-      "description": "Read prerequisite diagnostics and the authoritative compatibility tuple. Returns thread_id/run_id empty and state not-started before any runtime turn; no bearer is exposed.",
+      "description": "Read the plugin-owned chat/thread/run map, bound folder, permission/ceiling and supported/detected tuple, including before the first turn. Exposes no bearer.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -140,7 +142,7 @@
       "type": "string",
       "label": "Minerva MCP endpoint",
       "default": "",
-      "help": "The authorized Minerva MCP URL used by native Codex. {minerva_mcp} in other settings expands to this value. No Core or UGS connection is used. Supported tuple: plugin 0.1.0 / T3 v0.1.6 / Codex existing login in place / project-default mode, approval-required client ceiling. Detected tuple is authoritative in minerva_t3_code_status."
+      "help": "The authorized Minerva MCP URL used by native Codex. {minerva_mcp} in other settings expands to this value. No Core or UGS connection is used. Supported tuple: plugin 0.1.0 / T3 v0.1.6 / Codex existing login in place / explicit approval-required launch mode and client ceiling. Detected tuple is authoritative in minerva_t3_code_status."
     }
   ],
   "permissions": {
@@ -163,5 +165,10 @@
     "ipc_messages": []
   },
   "editor_items": [],
-  "events": []
+  "events": [
+    {
+      "name": "t3_code.turn_completed",
+      "description": "Turn wake cause: turn_completed, input_requested, agent_exited or thread_lost. Payload includes chat_id, thread_id and operation_token; no transcript or credential."
+    }
+  ]
 }

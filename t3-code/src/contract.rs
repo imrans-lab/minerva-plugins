@@ -19,7 +19,7 @@ impl Contract {
             "t3_commit": self.t3_commit, "detected_versions": detected_versions,
             "auth_path": "public CLI mcp-client bearer", "access_ceiling": "approval-required",
             "home_strategy": "owner login in place; never copied",
-            "runtime_mode": "not-started", "runtime_policy": "project-default"
+            "runtime_mode": "not-started", "runtime_policy": "explicit approval-required on launch"
         })
     }
 
