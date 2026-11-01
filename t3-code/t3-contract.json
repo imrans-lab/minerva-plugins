@@ -48,7 +48,7 @@
       "clientRequestId"
     ]
   },
-  "required": {
+  "baseline_required": {
     "orchestrator_capabilities": [],
     "t3_project_list": [],
     "t3_project_create": [
@@ -70,5 +70,15 @@
     "t3_thread_interrupt": [
       "threadId"
     ]
+  },
+  "baseline_required_sources": {
+    "orchestrator_capabilities": "packages/contracts/src/orchestratorMcp.ts:572-580",
+    "t3_project_list": "apps/server/src/mcp/toolkits/project/tools.ts:51-58",
+    "t3_project_create": "apps/server/src/mcp/toolkits/project/tools.ts:80-84; packages/contracts/src/project.ts:178-184",
+    "t3_thread_launch": "apps/server/src/mcp/toolkits/project/tools.ts:127-152 (only title is not Schema.optional)",
+    "t3_thread_send": "packages/contracts/src/orchestratorMcp.ts:501-507",
+    "t3_thread_read": "packages/contracts/src/orchestratorMcp.ts:406-422",
+    "t3_thread_wait": "packages/contracts/src/orchestratorMcp.ts:521-532",
+    "t3_thread_interrupt": "packages/contracts/src/orchestratorMcp.ts:546-558"
   }
 }

@@ -103,7 +103,8 @@ fn serve(contract: &Contract) -> Result<(), String> {
                         }
                         errors.push("T3 Code runtime is not started: Phase B is pending the owner's installation decision. No prompt was sent.");
                         tool_result(
-                            json!({"kind": "error", "code": "runtime_not_started", "text": errors.join("\n")}),
+                            json!({"kind": "error", "code": "runtime_not_started", "held": true,
+                                "hold_reason": "runtime_not_started", "text": errors.join("\n")}),
                         )
                     }
                     "minerva_t3_code_cancel" => tool_result(json!({

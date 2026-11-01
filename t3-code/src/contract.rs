@@ -2,7 +2,7 @@
 
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 #[derive(Deserialize)]
 pub struct Contract {
@@ -10,7 +10,6 @@ pub struct Contract {
     pub t3_commit: String,
     pub node_engine: String,
     pub tools: BTreeMap<String, Vec<String>>,
-    pub required: BTreeMap<String, Vec<String>>,
 }
 
 impl Contract {
@@ -50,13 +49,6 @@ impl Contract {
                     ));
                 }
             }
-            let supported: BTreeSet<&str> = self
-                .required
-                .get(name)
-                .into_iter()
-                .flatten()
-                .map(String::as_str)
-                .collect();
             if let Some(required) = schema.get("required") {
                 for value in required
                     .as_array()
@@ -65,7 +57,7 @@ impl Contract {
                     let field = value
                         .as_str()
                         .ok_or_else(|| format!("{name}: malformed required field"))?;
-                    if !supported.contains(field) {
+                    if !fields.iter().any(|supplied| supplied == field) {
                         return Err(format!(
                             "{name}: T3 now requires unsupported argument {field}. Use T3 {}.",
                             self.t3_tag

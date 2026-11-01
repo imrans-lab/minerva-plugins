@@ -52,7 +52,7 @@ T3 retains its database, provider logs, attachments, secrets and checkpoints und
 
 ## Public-contract drift probe
 
-`t3-contract.json` is the single stored dependency list shared with T2 (comment 14). The validator checks only the tools/input properties used by this adapter, and rejects new required arguments. Extra tools and optional properties are accepted. The normal startup probe will consume the owned server's `tools/list` in Phase B; status explicitly reports that no live probe ran in Phase A.
+`t3-contract.json` is the single stored dependency list shared with T2 (comment 14). The validator checks only the tools/input properties used by this adapter, and rejects newly required arguments outside the supplied field set. A supplied field becoming required is compatible. The pinned schema-required baseline is source-cited documentary metadata, not the compatibility whitelist. Extra tools and optional properties are accepted. The normal startup probe will consume the owned server's `tools/list` in Phase B; status explicitly reports that no live probe ran in Phase A.
 
 For an existing authorized `tools/list` JSON export, the same validator is available as a diagnostic command, without starting T3:
 
