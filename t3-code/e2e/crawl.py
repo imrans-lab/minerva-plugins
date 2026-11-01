@@ -741,7 +741,7 @@ def main() -> int:
         parser.error("Missing config fields: " + ", ".join(sorted(required - config.keys())))
     if config["settings"].get("minerva_mcp_endpoint") != "{minerva_mcp}":
         parser.error("Plugin must wire minerva_mcp_endpoint from {minerva_mcp}")
-    config = {"plugin_id": "t3-code", "entry_id": "t3-code", "generate_tool": "minerva_t3_code_generate",
+    config = {"plugin_id": "t3_code", "entry_id": "t3-code", "generate_tool": "minerva_t3_code_generate",
               "status_tool": "minerva_t3_code_status", **config, "nonce": secrets.token_hex(10)}
     os.umask(0o077)
     private = Path(tempfile.mkdtemp(prefix="minerva-t3-crawl-"))
