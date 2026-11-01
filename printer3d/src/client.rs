@@ -643,54 +643,97 @@ pub fn probe(host: &str) -> Result<Option<Discovered>> {
     let started = Instant::now();
     let timeout = Duration::from_secs(4);
     let host = normalize_host(host)?;
-    let mut endpoint = Url::parse(&host).map_err(|_| Error::Invalid("Invalid printer host"))?;
+    let endpoint = Url::parse(&host).map_err(|_| Error::Invalid("Invalid printer host"))?;
     let hostname = endpoint
         .host_str()
         .map(str::to_owned)
         .ok_or(Error::Invalid("Invalid printer host"))?;
-    if endpoint.scheme() == "http" && matches!(endpoint.host(), Some(url::Host::Domain(_))) {
-        let uri = host
-            .parse()
-            .map_err(|_| Error::Invalid("Invalid printer host"))?;
-        let addresses = DefaultResolver::default()
-            .resolve(
-                &uri,
-                &agent_config(timeout),
-                NextTimeout {
-                    after: timeout.into(),
-                    ..NextTimeout::default()
-                },
-            )
-            .map_err(|error| transport(error, false))?;
-        let address = addresses
-            .iter()
-            .find(|address| address.is_ipv4())
-            .ok_or(Error::Io("Printer host has no IPv4 address"))?;
-        endpoint
-            .set_ip_host(address.ip())
-            .map_err(|_| Error::Invalid("Invalid printer host"))?;
+    let endpoints =
+        if endpoint.scheme() == "http" && matches!(endpoint.host(), Some(url::Host::Domain(_))) {
+            let uri = host
+                .parse()
+                .map_err(|_| Error::Invalid("Invalid printer host"))?;
+            let addresses = DefaultResolver::default()
+                .resolve(
+                    &uri,
+                    &agent_config(timeout),
+                    NextTimeout {
+                        after: timeout.into(),
+                        ..NextTimeout::default()
+                    },
+                )
+                .map_err(|error| transport(error, false))?;
+            let endpoints = addresses
+                .iter()
+                .filter(|address| address.is_ipv4())
+                .map(|address| {
+                    let mut endpoint = endpoint.clone();
+                    endpoint
+                        .set_ip_host(address.ip())
+                        .map_err(|_| Error::Invalid("Invalid printer host"))?;
+                    Ok(endpoint)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if endpoints.is_empty() {
+                return Err(Error::Io("Printer host has no IPv4 address"));
+            }
+            endpoints
+        } else {
+            vec![endpoint]
+        };
+    let mut connection_error = Error::Io("Cannot reach discovered printer");
+    for endpoint in endpoints {
+        let host = endpoint.as_str().trim_end_matches('/').to_owned();
+        // Resolution and address fallback share the existing four seconds.
+        let remaining = timeout
+            .checked_sub(started.elapsed())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or(Error::Io("Printer discovery timed out"))?;
+        let result = match agent(remaining).get(format!("{host}/api/version")).call() {
+            Ok(result) => result,
+            Err(error) if discovery_connection_failure(&error) => {
+                connection_error = transport(error, false);
+                continue;
+            }
+            Err(error) => return Err(transport(error, false)),
+        };
+        let identity = match result.status().as_u16() {
+            401 => result
+                .headers()
+                .get_all("WWW-Authenticate")
+                .iter()
+                .filter_map(|header| header.to_str().ok())
+                .any(|header| Challenge::parse(header).is_ok_and(|c| c.realm == "Printer API")),
+            200 => json(result)?["text"] == "PrusaLink",
+            _ => false,
+        };
+        // A responding endpoint is authoritative, even if it is not PrusaLink.
+        return Ok(identity.then_some(Discovered { host, hostname }));
     }
-    let host = endpoint.as_str().trim_end_matches('/').to_owned();
-    // Resolution and the numeric endpoint probe share the existing four seconds.
-    let remaining = timeout
-        .checked_sub(started.elapsed())
-        .filter(|remaining| !remaining.is_zero())
-        .ok_or(Error::Io("Printer discovery timed out"))?;
-    let result = agent(remaining)
-        .get(format!("{host}/api/version"))
-        .call()
-        .map_err(|error| transport(error, false))?;
-    let identity = match result.status().as_u16() {
-        401 => result
-            .headers()
-            .get_all("WWW-Authenticate")
-            .iter()
-            .filter_map(|header| header.to_str().ok())
-            .any(|header| Challenge::parse(header).is_ok_and(|c| c.realm == "Printer API")),
-        200 => json(result)?["text"] == "PrusaLink",
+    Err(connection_error)
+}
+
+fn discovery_connection_failure(error: &ureq::Error) -> bool {
+    match error {
+        ureq::Error::ConnectionFailed
+        | ureq::Error::HostNotFound
+        | ureq::Error::Timeout(ureq::Timeout::Connect) => true,
+        ureq::Error::Io(error) => {
+            #[cfg(windows)]
+            if error.raw_os_error() == Some(10013) {
+                // Match the default connector's address-specific WSAEACCES fallback.
+                return true;
+            }
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::HostUnreachable
+                    | std::io::ErrorKind::NetworkUnreachable
+                    | std::io::ErrorKind::AddrNotAvailable
+            )
+        }
         _ => false,
-    };
-    Ok(identity.then_some(Discovered { host, hostname }))
+    }
 }
 
 #[cfg(test)]
