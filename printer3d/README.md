@@ -189,8 +189,8 @@ URLs or advance the marketplace selection.
 
 - Reuse one DNS resolution within each status call to reduce repeated `.local`
   lookups.
-- HTTP Discover results use resolved IPv4 endpoints while retaining the original
-  hostname for display.
+- When Discover probes an HTTP hostname, results use resolved IPv4 endpoints
+  while retaining the original hostname for display.
 - Refresh printer cards after Remove and after saving configuration, including
   when the password step fails. Preserve mutation and list-refresh errors.
 - Give explicit-host discovery an eight-second shared probe budget, including
