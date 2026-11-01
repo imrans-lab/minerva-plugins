@@ -129,6 +129,38 @@ pub fn read_private(path: &Path) -> Result<String> {
     Ok(text)
 }
 
+/// Atomic replacement within a validated private directory. Token and receipt
+/// writers share this owner; no caller can expose a half-written credential.
+pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| Fault::held("private_state", "Private file has no parent directory."))?;
+    check_private(parent, true)?;
+    if path.try_exists()? {
+        check_private(path, false)?;
+    }
+    if bytes.len() > 16 * 1024 * 1024 {
+        return Err(Fault::new(
+            "private_state_full",
+            "Private state exceeds its16MiB write bound; existing state is preserved.",
+        ));
+    }
+    let temporary = path.with_extension(format!("{}.tmp", random_id()?));
+    let mut options = OpenOptions::new();
+    use std::os::unix::fs::OpenOptionsExt;
+    options
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW);
+    let mut file = options.open(&temporary)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    fs::rename(&temporary, path)?;
+    File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
 pub struct Store {
     root: PathBuf,
     _lock: File,
@@ -208,22 +240,6 @@ impl Store {
     }
 
     fn write(&self, path: &Path, bytes: &[u8]) -> Result<()> {
-        if bytes.len() > 16 * 1024 * 1024 {
-            return Err(Fault::new("private_state_full","This chat's retained receipts exceed16MiB. The existing file is preserved; reconcile any submitted operation before starting a fresh chat."));
-        }
-        let temporary = path.with_extension(format!("{}.tmp", random_id()?));
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-        }
-        let mut file = options.open(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(&temporary, path)?;
-        File::open(self.root.join("chats"))?.sync_all()?;
-        Ok(())
+        write_private(path, bytes)
     }
 }

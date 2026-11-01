@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use crate::contract::Contract;
 
+#[derive(Clone)]
 pub struct Settings {
     values: BTreeMap<String, String>,
     pub workspace: PathBuf,
@@ -98,7 +99,7 @@ impl Settings {
 }
 
 #[cfg(unix)]
-fn stop_group(child: &mut std::process::Child) -> Result<(), String> {
+pub fn stop_group(child: &mut std::process::Child) -> Result<(), String> {
     let group = i32::try_from(child.id()).map_err(|_| "Probe process id is invalid")?;
     // SAFETY: the caller created this process_group(0) child and has not
     // reaped it (waitid uses WNOWAIT), so its reserved pid cannot be reused.
@@ -113,7 +114,7 @@ fn stop_group(child: &mut std::process::Child) -> Result<(), String> {
 }
 
 #[cfg(unix)]
-fn exited(child: &std::process::Child) -> Result<bool, String> {
+pub fn exited(child: &std::process::Child) -> Result<bool, String> {
     let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
     // SAFETY: info points to writable siginfo_t storage and this is our own
     // child's positive pid. WNOWAIT retains it until group cleanup and wait.
@@ -145,9 +146,10 @@ pub fn command(path: &str, arguments: &[&str], codex_home: Option<&str>) -> Resu
     let mut command = Command::new(path);
     command
         .args(arguments)
+        .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::null());
     if let Some(home) = codex_home {
         command.env("CODEX_HOME", home);
     }
@@ -159,8 +161,16 @@ pub fn command(path: &str, arguments: &[&str], codex_home: Option<&str>) -> Resu
     let mut child = command.spawn().map_err(|e| {
         format!("Cannot run {path}: {e}. Set its executable path in T3 Code preferences.")
     })?;
+    let mut output = child.stdout.take().ok_or("Probe has no output pipe")?;
+    nonblocking(&output)?;
+    let mut bytes = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
+        if let Err(error) = drain(&mut output, &mut bytes, 8 * 1024 * 1024) {
+            stop_group(&mut child)?;
+            child.wait().map_err(|e| e.to_string())?;
+            return Err(error);
+        }
         #[cfg(unix)]
         let finished = exited(&child)?;
         #[cfg(not(unix))]
@@ -180,15 +190,49 @@ pub fn command(path: &str, arguments: &[&str], codex_home: Option<&str>) -> Resu
     }
     #[cfg(unix)]
     stop_group(&mut child)?;
-    let output = child.wait_with_output().map_err(|e| e.to_string())?;
-    if !output.status.success() {
+    drain(&mut output, &mut bytes, 8 * 1024 * 1024)?;
+    let status = child.wait().map_err(|e| e.to_string())?;
+    if !status.success() {
         return Err(format!(
             "{path} {} did not succeed ({}). Check its installation or the existing Codex login.",
             arguments.join(" "),
-            output.status
+            status
         ));
     }
-    String::from_utf8(output.stdout).map_err(|_| format!("{path} returned non-UTF-8 output"))
+    String::from_utf8(bytes).map_err(|_| format!("{path} returned non-UTF-8 output"))
+}
+
+pub fn nonblocking(pipe: &impl std::os::fd::AsRawFd) -> Result<(), String> {
+    let fd = pipe.as_raw_fd();
+    // SAFETY: fd is borrowed from a live owned pipe; fcntl only changes its
+    // status flags. No pointer is passed and ownership remains with the pipe.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    // SAFETY: same live borrowed fd and integer-only fcntl operation as above.
+    let changed = if flags < 0 {
+        -1
+    } else {
+        unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) }
+    };
+    if changed < 0 {
+        return Err("Cannot make the owned output pipe nonblocking".into());
+    }
+    Ok(())
+}
+
+pub fn drain(reader: &mut impl Read, bytes: &mut Vec<u8>, maximum: usize) -> Result<(), String> {
+    let mut buffer = [0u8; 8192];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(size) if bytes.len().saturating_add(size) <= maximum => {
+                bytes.extend_from_slice(&buffer[..size])
+            }
+            Ok(_) => return Err("Owned command output exceeded its bound".into()),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err("Cannot read owned command output".into()),
+        }
+    }
 }
 
 fn version(path: &str) -> Result<Version, String> {
