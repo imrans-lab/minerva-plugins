@@ -7,6 +7,7 @@ pub struct Fault {
     pub text: String,
     pub held: bool,
     pub definite_refusal: bool,
+    pub prior_operation: Option<(String, Option<String>)>,
 }
 
 impl Fault {
@@ -16,6 +17,7 @@ impl Fault {
             text: text.into(),
             held: false,
             definite_refusal: false,
+            prior_operation: None,
         }
     }
 
@@ -25,6 +27,7 @@ impl Fault {
             text: text.into(),
             held: true,
             definite_refusal: false,
+            prior_operation: None,
         }
     }
 
@@ -34,12 +37,22 @@ impl Fault {
             text: text.into(),
             held: true,
             definite_refusal: true,
+            prior_operation: None,
         }
     }
 
     pub fn reply(&self) -> Value {
-        json!({"kind": "error", "code": self.code, "text": self.text,
-            "held": self.held, "hold_reason": if self.held { self.code } else { "" }})
+        let mut reply = json!({"kind": "error", "code": self.code, "text": self.text,
+            "held": self.held, "hold_reason": if self.held { self.code } else { "" }});
+        if let Some((token, run)) = &self.prior_operation {
+            reply["prior_operation_token"] = json!(token);
+            reply["prior_run_id"] = json!(run);
+            reply["hold_reason"] = json!(format!(
+                "prior_operation:{token}:{}",
+                run.as_deref().unwrap_or("unconfirmed")
+            ));
+        }
+        reply
     }
 }
 

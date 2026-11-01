@@ -28,6 +28,10 @@ fn pending(client: &Client, thread: &str) -> Result<Vec<String>> {
         .collect()
 }
 
+pub fn still_pending(client: &Client, thread: &str, request: &str) -> Result<bool> {
+    Ok(pending(client, thread)?.iter().any(|id| id == request))
+}
+
 fn corroborate(snapshot: &Snapshot, run: &str, questions: &[Value]) -> Result<()> {
     if snapshot.thread["activeRunId"] != run {
         return Err(Fault::held(

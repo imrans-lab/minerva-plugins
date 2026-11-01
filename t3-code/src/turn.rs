@@ -113,9 +113,12 @@ fn find_projects(runtime: &Runtime, field: &str, value: &str) -> Result<Vec<Valu
 }
 
 pub fn thread_detail(runtime: &Runtime, thread: &str) -> Result<Value> {
+    // Empty metadata page at the public JS-safe position ceiling. Asking for
+    // a1-character item would split an emoji surrogate in pinned T3's slice.
+
     let read = runtime.client.tool(
         "t3_thread_read",
-        json!({"threadId":thread,"view":"activity","limit":1,"maxCharsPerItem":1}),
+        json!({"threadId":thread,"view":"activity","limit":1,"maxCharsPerItem":8000,"afterPosition":9_007_199_254_740_991_u64}),
     )?;
     if read["thread"]["threadId"] != thread {
         return Err(Fault::new(

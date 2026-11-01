@@ -27,7 +27,8 @@ pub struct Operation {
     pub refused: bool,
     pub retries: u8,
     pub deferred: bool,
-    pub resumed_previous: bool,
+    pub question_backup: Option<Question>,
+    pub terminal_state: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
