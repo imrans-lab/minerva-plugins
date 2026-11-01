@@ -641,7 +641,9 @@ pub struct Discovered {
 }
 pub fn probe(host: &str) -> Result<Option<Discovered>> {
     let started = Instant::now();
-    let timeout = Duration::from_secs(4);
+    // A .local lookup can take about five seconds. Leave time for the identity
+    // request within the panel bridge's fifteen-second timeout.
+    let timeout = Duration::from_secs(8);
     let host = normalize_host(host)?;
     let endpoint = Url::parse(&host).map_err(|_| Error::Invalid("Invalid printer host"))?;
     let hostname = endpoint
@@ -684,7 +686,7 @@ pub fn probe(host: &str) -> Result<Option<Discovered>> {
     let mut connection_error = Error::Io("Cannot reach discovered printer");
     for endpoint in endpoints {
         let host = endpoint.as_str().trim_end_matches('/').to_owned();
-        // Resolution and address fallback share the existing four seconds.
+        // Resolution and address fallback share the same discovery deadline.
         let remaining = timeout
             .checked_sub(started.elapsed())
             .filter(|remaining| !remaining.is_zero())
