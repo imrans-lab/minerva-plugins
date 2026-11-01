@@ -173,7 +173,7 @@ gh workflow run printer3d.yml --repo imrans-lab/minerva-plugins --ref "${PLUGIN_
 ```
 
 After the required checks and owner's publishing GO, push an annotated
-manifest-matching tag, such as `printer3d-v0.1.1`. `printer3d-tags.yml` calls the
+manifest-matching tag, such as `printer3d-v0.1.2`. `printer3d-tags.yml` calls the
 same package workflow; dispatch/tag builds run the existing Cargo suite on Linux
 and the MCP handshake on each target before publication. The existing publication
 guard validates the annotated tag against the manifest and source commit. Manual
@@ -184,6 +184,17 @@ Registry selection already includes this plugin. Run `scripts/regen_registry.py`
 from the repository root only after the real release tag/assets exist, then commit
 the updated `registry.json`; source version changes alone do not create download
 URLs or advance the marketplace selection.
+
+### 0.1.2 release notes
+
+- Reuse one DNS resolution within each status call to reduce repeated `.local`
+  lookups.
+- HTTP Discover results use resolved IPv4 endpoints while retaining the original
+  hostname for display.
+- Refresh printer cards after Remove and after saving configuration, including
+  when the password step fails. Preserve mutation and list-refresh errors.
+- Give explicit-host discovery an eight-second shared probe budget, including
+  hostname resolution, address fallback and the identity request.
 
 ### 0.1.1 release notes
 
