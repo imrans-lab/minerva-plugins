@@ -35,6 +35,7 @@ oracle checks a real unsupported request is visible and executes nothing.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import http.client
 import json
@@ -44,6 +45,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -203,6 +205,17 @@ func _snapshot(chat_id: String) -> Dictionary:
 func _serve(request: Dictionary) -> void:
     var result: Dictionary = {}
     match str(request.action):
+        "settings":
+            var store: Object = singleton.get("plugin_settings_store")
+            result = {"ok": true}
+            for key: String in request.get("values", {}):
+                if not config.settings.has(key):
+                    result = {"error": "undeclared_setting", "key": key}
+                    break
+                var applied: Dictionary = store.call("set_value", "plugin:" + str(config.plugin_id), key, request["values"][key])
+                if not applied.get("success", false):
+                    result = {"error": "invalid_plugin_setting", "key": key}
+                    break
         "install":
             result = await plugins.call("install_plugin", str(config.manifest), true)
             if result.get("ok", false):
@@ -578,9 +591,9 @@ class Crawl:
                   host_outcome=snapshot["turn_event"].get("outcome", ""),
                   termination=snapshot["termination"])
 
-    def activity(self) -> None:
-        thread, run = self.send("List harmless.txt in the current workspace using a filesystem tool. "
-                                "Then reply exactly " + self.config["nonce"] + "-activity.")
+    def activity(self, stimulus: str | None = None) -> None:
+        thread, run = self.send(stimulus or ("List harmless.txt in the current workspace using a filesystem tool. "
+                                "Then reply exactly " + self.config["nonce"] + "-activity."))
         snapshot, state, items = self.finish(thread, run)
         activity = last_item(snapshot).get("HcpData", {}).get("activity", [])
         labels = [a.get("label", "") for a in activity if isinstance(a, dict)]
@@ -613,11 +626,11 @@ class Crawl:
         self.emit("R2b", state == "completed" and self.answer(snapshot) and native_result and delivered,
                   successful_native_minerva_result=native_result, fresh_result_delivered=delivered)
 
-    def permission(self) -> None:
+    def permission(self, stimulus: str | None = None) -> None:
         denied = self.private / "permission-sentinel"
-        thread, run = self.send("Use the native permission-request mechanism to request write access to "
+        thread, run = self.send(stimulus or ("Use the native permission-request mechanism to request write access to "
             + str(denied) + ". It is outside the workspace. Do not write or use a bypass unless permission "
-            "is granted. The crawl controller cannot approve permissions.")
+            "is granted. The crawl controller cannot approve permissions."))
         self.phase = "unsupported_permission_deferral"
         self.wait(lambda: not self.snapshot()["active"], 90)
         snapshot = self.snapshot()
@@ -637,34 +650,65 @@ class Crawl:
         self.emit("R3", passed, native_request=requested, host_deferral=native_deferral,
                   visible_error=visible, nothing_written=not denied.exists(), approvals_supported=False)
 
-    def interrupt(self) -> None:
+    def interrupt(self, *, prefill: bool = False, command_wait_sec: float = 180) -> None:
         # The controller owns this Linux fixture. Codex only reads it: cat's
         # open blocks while no writer exists, with no write/approval stimulus.
         gate = self.workspace / "interrupt-read-gate"
         os.mkfifo(gate, mode=0o600)
-        thread, run = self.send("Use cat to read interrupt-read-gate in the current workspace. "
-                                "It is a fixture-owned pipe with no writer, so the read should block. "
-                                "Do not create or write files, request permission, or finish early. "
-                                "Keep waiting until Stop; afterward reply " + self.config["nonce"] + "-done.")
-        self.phase = "long_operation_started"
+        stop_writer = threading.Event()
+        writer_errors: list[str] = []
 
-        def running_command() -> bool:
-            items = self.backend.read(thread, run)
-            command = any(item["type"] == "command_execution"
-                          and item["status"] in {"running", "in_progress"} for item in items)
-            return command and self.backend.settled(thread, run).get("status") == "running"
+        def feed_fifo() -> None:
+            while not stop_writer.is_set() and time.monotonic() < self.deadline:
+                try:
+                    descriptor = os.open(gate, os.O_WRONLY | os.O_NONBLOCK)
+                except OSError as error:
+                    if error.errno != errno.ENXIO:
+                        writer_errors.append(type(error).__name__)
+                        return
+                    stop_writer.wait(0.05)
+                    continue
+                try:
+                    os.write(descriptor, b"controller-ready\n")
+                except OSError as error:
+                    writer_errors.append(type(error).__name__)
+                finally:
+                    os.close(descriptor)
+                return
 
-        self.wait(running_command, 180)
-        pressed = self.command("stop", chat_id=self.chat_id).get("pressed", False)
-        snapshot, state, _ = self.finish(thread, run)
-        event_index = snapshot["turn_event"].get("message_index", -2)
-        reply_index = snapshot["live_reply"].get("message_index", -1)
-        current_event = (event_index == reply_index and reply_index >= self.history_start) or (
-            event_index == -1 and reply_index < self.history_start)
-        host_cancelled = current_event and snapshot["turn_event"].get("outcome") == "cancelled"
-        self.emit("R4", pressed and host_cancelled and state in {"cancelled", "interrupted"},
-                  backend_command_started=True, stop_button_pressed=pressed, backend_terminal=state,
-                  host_cancelled=host_cancelled, termination=snapshot["termination"])
+        writer = threading.Thread(target=feed_fifo, daemon=True) if prefill else None
+        if writer is not None:
+            writer.start()
+        try:
+            thread, run = self.send("Use cat to read interrupt-read-gate in the current workspace. "
+                                    "It is a fixture-owned pipe with no writer, so the read should block. "
+                                    "Do not create or write files, request permission, or finish early. "
+                                    "Keep waiting until Stop; afterward reply " + self.config["nonce"] + "-done.")
+            self.phase = "long_operation_started"
+
+            def running_command() -> bool:
+                if writer_errors:
+                    raise Prerequisite("Controller FIFO writer failed")
+                items = self.backend.read(thread, run)
+                command = any(item["type"] == "command_execution"
+                              and item["status"] in {"running", "in_progress"} for item in items)
+                return command and self.backend.settled(thread, run).get("status") == "running"
+
+            self.wait(running_command, command_wait_sec)
+            pressed = self.command("stop", chat_id=self.chat_id).get("pressed", False)
+            snapshot, state, _ = self.finish(thread, run)
+            event_index = snapshot["turn_event"].get("message_index", -2)
+            reply_index = snapshot["live_reply"].get("message_index", -1)
+            current_event = (event_index == reply_index and reply_index >= self.history_start) or (
+                event_index == -1 and reply_index < self.history_start)
+            host_cancelled = current_event and snapshot["turn_event"].get("outcome") == "cancelled"
+            self.emit("R4", pressed and host_cancelled and state in {"cancelled", "interrupted"},
+                      backend_command_started=True, stop_button_pressed=pressed, backend_terminal=state,
+                      host_cancelled=host_cancelled, termination=snapshot["termination"])
+        finally:
+            stop_writer.set()
+            if writer is not None:
+                writer.join(1)
 
     def final_result(self) -> None:
         nonce = self.config["nonce"]
@@ -676,14 +720,15 @@ class Crawl:
                   completed=state == "completed", transcript_matches=backend_text == last_message(snapshot),
                   host_answer=self.answer(snapshot))
 
-    def pending(self) -> None:
+    def pending(self, stimulus: str | None = None, *, short_budget: bool = True) -> None:
         self.phase = "short_call_budget"
-        registration = self.command("short_budget")
-        if registration.get("timeout_sec") != 11 or registration.get("error"):
-            raise RuntimeError("Provider registration refused R6 budget stimulus")
-        thread, run = self.send("Wait at least 15 seconds using a read-only wait tool. Do not create or write "
+        if short_budget:
+            registration = self.command("short_budget")
+            if registration.get("timeout_sec") != 11 or registration.get("error"):
+                raise RuntimeError("Provider registration refused R6 budget stimulus")
+        thread, run = self.send(stimulus or ("Wait at least 15 seconds using a read-only wait tool. Do not create or write "
                                 "files or request permission. Then reply exactly "
-                                + self.config["nonce"] + "-pending.")
+                                + self.config["nonce"] + "-pending."))
         snapshot, state, _ = self.finish(thread, run)
         replies = snapshot["replies"][self.reply_start:]
         pending = [r for r in replies if r["kind"] == "pending" and r["token"]]
