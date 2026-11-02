@@ -5,12 +5,14 @@ panel or geometry build. It returns `{pass, findings:[{rule,line,message,fix}]}`
 Rules flag three or more identical primitives outside modules/loops, repeated
 numeric literals (except 0, 1, 2, 0.5, 90, 180, 360), subtracted cylinders without
 a `g_*` process global or `clear_r`/`tap_r`/`press_r` fit helper in the radius,
-literal additions to diameter/2 radii, and finishes on assemblies of placed
-copies. Each finding names its repair. This source critic follows dimensional
+literal additions to diameter/2 radii. Each finding names its repair. This source critic follows dimensional
 checks and does not prove dimensions, fit or runtime geometry validity.
-Literal position lists and aliases are analysed in order. Dynamic loop bounds
-or an exhausted analysis budget return an actionable `analysis-limit` finding,
-so an incomplete analysis never claims a pass.
+The four v0 rules inspect source syntax once; modules, loops and branches are
+not expanded. Repeated shapes compare primitive-call subtrees with translation
+and rotation wrappers stripped. Simple aliases are followed for subtracted
+cylinders; unresolved radius fit intent gives an actionable `analysis-limit`.
+Finishing assembled copies is deferred until component provenance can be
+determined reliably.
 
 See [measurement record v0](docs/measurement-record.md) for nominal measured
 inputs and per-parameter uncertainty, and the

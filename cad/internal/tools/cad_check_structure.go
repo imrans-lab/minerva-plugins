@@ -9,7 +9,7 @@ import (
 func CheckStructure() ToolSpec {
 	return ToolSpec{
 		Name:        "minerva_cad_check_structure",
-		Description: "Check parsed .mcad source structure without building geometry. Returns {pass, findings:[{rule,line,message,fix}]} for repeated primitives/literals, holes without fit intent, literal radial allowances, and finishes on assembled copies. Each finding gives a concrete repair; this does not replace dimensional or fit checks.",
+		Description: "Check parsed .mcad source syntax without building geometry or expanding modules/loops. Returns {pass, findings:[{rule,line,message,fix}]} for repeated primitives/literals, holes without fit intent and literal radial allowances. Unresolved fit intent gives analysis-limit. Each finding gives a concrete repair; this does not replace dimensional or fit checks.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"source":{"type":"string","description":"Complete .mcad DSL source"}},"required":["source"],"additionalProperties":false}`),
 	}
 }

@@ -25,7 +25,7 @@
     {
       "name": "minerva_cad_check_structure",
       "executor": "backend",
-      "description": "Check parsed .mcad source structure without building geometry. Returns {pass, findings:[{rule,line,message,fix}]} for repeated primitives/literals, holes without fit intent, literal radial allowances and finishes on assembled copies. Each finding gives a concrete repair. Run after dimensional checks; this does not establish fit.",
+      "description": "Check parsed .mcad source syntax without building geometry or expanding modules/loops. Returns {pass, findings:[{rule,line,message,fix}]} for repeated primitives/literals, holes without fit intent and literal radial allowances. Unresolved fit intent gives analysis-limit. Each finding gives a concrete repair. Run after dimensional checks; this does not establish fit.",
       "input_schema": {
         "type": "object",
         "properties": {"source": {"type": "string", "description": "Complete .mcad DSL source"}},
