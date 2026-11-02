@@ -19,6 +19,7 @@ from typing import Any
 class Number:
     """Numeric literal (int or float)."""
     value: float
+    line: int = 0
 
     def __repr__(self) -> str:
         # Show ints without trailing .0 for readability

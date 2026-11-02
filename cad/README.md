@@ -1,5 +1,19 @@
 # CAD Plugin for Minerva
 
+`minerva_cad_check_structure {source}` checks the parsed DSL without a live
+panel or geometry build. It returns `{pass, findings:[{rule,line,message,fix}]}`.
+Rules flag three or more identical primitives outside modules/loops, repeated
+numeric literals (except 0, 1, 2, 0.5, 90, 180, 360), subtracted cylinders without
+a `g_*` process global or `clear_r`/`tap_r`/`press_r` fit helper in the radius,
+literal additions to diameter/2 radii, and finishes on assemblies of placed
+copies. Each finding names its repair. This source critic follows dimensional
+checks and does not prove dimensions, fit or runtime geometry validity.
+
+See [measurement record v0](docs/measurement-record.md) for nominal measured
+inputs and per-parameter uncertainty, and the
+[HW-504 composite example](docs/examples/hw504_mount.mcad) for a post module,
+four loop-placed supports, radial process allowance and a composite edge finish.
+
 The CAD plugin brings parametric boundary-representation modeling to Minerva
 via the `.mcad` DSL. A Go MCP shim wraps a Python worker (build123d + OCCT)
 that evaluates CAD scripts and returns B-Rep geometry. The Godot-based

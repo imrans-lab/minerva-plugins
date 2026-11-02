@@ -23,6 +23,17 @@
   },
   "tools": [
     {
+      "name": "minerva_cad_check_structure",
+      "executor": "backend",
+      "description": "Check parsed .mcad source structure without building geometry. Returns {pass, findings:[{rule,line,message,fix}]} for repeated primitives/literals, holes without fit intent, literal radial allowances and finishes on assembled copies. Each finding gives a concrete repair. Run after dimensional checks; this does not establish fit.",
+      "input_schema": {
+        "type": "object",
+        "properties": {"source": {"type": "string", "description": "Complete .mcad DSL source"}},
+        "required": ["source"],
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "minerva_cad_get_mesh_info",
       "executor": "panel",
       "description": "Return geometry summary for a live CAD editor: vertex count, face count, axis-aligned bounding box, and whether any geometry exists. Bounding box coordinates are in millimetres (CAD always uses mm). has_geometry is false when the panel has not yet evaluated any DSL source. Use minerva_doc_read (with the editor's file path) to check what DSL is loaded.",
