@@ -1,8 +1,8 @@
 """Source structure advice from the parsed MCAD AST, without geometry or I/O."""
 from __future__ import annotations
 
-from collections import defaultdict
-from dataclasses import fields, is_dataclass
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field, fields, is_dataclass
 from typing import TypedDict
 
 from mcad import ast_nodes as ast
@@ -65,31 +65,60 @@ def _fit_intent(node: object, bindings: dict[str, object], seen: frozenset[str] 
     return any(_fit_intent(child, bindings, seen) for child in _children(node))
 
 
-def _placements(node: object, bindings: dict[str, object], groups: set[str], seen: frozenset[str] = frozenset()) -> int:
-    if isinstance(node, ast.Index):
-        return _placements(node.target, bindings, groups, seen)
-    if isinstance(node, ast.Tuple):
-        return max((_placements(child, bindings, groups, seen) for child in node.elements), default=0)
+@dataclass
+class _Shape:
+    """Symbolic component identity and the placed copies it contains."""
+    key: tuple
+    copies: Counter[tuple] = field(default_factory=Counter)
+    items: tuple[_Shape, ...] = ()
+
+
+def _shape(node: object, symbols: dict[str, _Shape], modules: dict[str, _Shape]) -> _Shape:
     if isinstance(node, ast.Identifier):
-        if node.name in groups:
-            return 2
-        if node.name in bindings and node.name not in seen:
-            return _placements(bindings[node.name], bindings, groups, seen | {node.name})
-    if isinstance(node, ast.AtClause):
-        return 1
-    if isinstance(node, ast.FuncCall):
-        if node.name == "translate":
-            return 1
-        if node.name in groups:
-            return 2
-    if isinstance(node, ast.MethodCall):
-        return 1 if node.method == "translate" else _placements(node.target, bindings, groups, seen)
+        return symbols.get(node.name, _Shape(("name", node.name)))
+    if isinstance(node, ast.Tuple):
+        items = tuple(_shape(child, symbols, modules) for child in node.elements)
+        return _Shape(("tuple", *(item.key for item in items)), items=items)
+    if isinstance(node, ast.Index):
+        target = _shape(node.target, symbols, modules)
+        if (isinstance(node.index, ast.Number) and -len(target.items) <= node.index.value < len(target.items)
+                and node.index.value % 1 == 0):
+            return target.items[int(node.index.value)]
+        return _Shape(("index", target.key, _key(node.index)))
     if isinstance(node, ast.BinOp):
-        if node.op == "+":
-            return _placements(node.left, bindings, groups, seen) + _placements(node.right, bindings, groups, seen)
-        if node.op == "-":
-            return _placements(node.left, bindings, groups, seen)
-    return 0
+        left, right = _shape(node.left, symbols, modules), _shape(node.right, symbols, modules)
+        copies = left.copies + right.copies if node.op == "+" else left.copies.copy() if node.op == "-" else Counter()
+        return _Shape((node.op, left.key, right.key), copies)
+    if isinstance(node, ast.AtClause):
+        target = _shape(node.target, symbols, modules)
+        return _Shape(("at", target.key, _key(node.position)), target.copies.copy() or Counter({target.key: 1}))
+    if isinstance(node, ast.FuncCall):
+        args = [_shape(child, symbols, modules) for child in node.args]
+        keywords = tuple((key, _shape(value, symbols, modules).key) for key, value in sorted(node.kwargs.items()))
+        key = (node.name, tuple(arg.key for arg in args), keywords)
+        if node.name in ("translate", "rotate", "scale", "mirror") and args:
+            target = args[-1]
+            copies = target.copies.copy()
+            if node.name == "translate":
+                copies = copies or Counter({target.key: 1})
+            else:
+                copies = Counter({(node.name, tuple(arg.key for arg in args[:-1]), item): count for item, count in copies.items()})
+            return _Shape(key, copies)
+        if node.name in modules:
+            result = modules[node.name]
+            return _Shape(key, result.copies.copy(), result.items)
+        return _Shape(key)
+    if isinstance(node, ast.MethodCall):
+        target = _shape(node.target, symbols, modules)
+        args = tuple(_shape(child, symbols, modules).key for child in node.args)
+        key = (node.method, target.key, args)
+        copies = target.copies.copy()
+        if node.method == "translate":
+            copies = copies or Counter({target.key: 1})
+        else:
+            copies = Counter({(node.method, args, item): count for item, count in copies.items()})
+        return _Shape(key, copies)
+    return _Shape((_key(node),))
 
 
 def check_program(program: ast.Program) -> StructureReport:
@@ -154,41 +183,41 @@ def check_program(program: ast.Program) -> StructureReport:
         for child in _children(node):
             holes(child, bindings, line, negative, seen)
 
-    def statements(nodes: list[object], inherited: dict[str, object], inherited_groups: set[str],
-                   loop: bool = False) -> set[str]:
-        bindings, groups = inherited.copy(), inherited_groups.copy()
+    def statements(nodes: list[object], bindings: dict[str, object], symbols: dict[str, _Shape],
+                   modules: dict[str, _Shape]) -> _Shape | None:
+        returned = None
         for node in nodes:
             line = getattr(node, "line", 0) or 1
             if isinstance(node, ast.ModuleDef):
-                local = {key: value for key, value in bindings.items() if key not in {p.name for p in node.params}}
-                module_groups = statements(node.body, local, groups - {p.name for p in node.params})
-                if any(isinstance(statement, ast.Return) and _placements(statement.value, local, module_groups) >= 2 for statement in node.body):
-                    groups.add(node.name)
+                parameters = {p.name for p in node.params}
+                local = {key: value for key, value in bindings.items() if key not in parameters}
+                local_symbols = {key: value for key, value in symbols.items() if key not in parameters}
+                result = statements(node.body, local, local_symbols, modules.copy())
+                if result is not None:
+                    modules[node.name] = result
                 continue
             if isinstance(node, (ast.ForLoop, ast.While)):
-                groups.update(statements(node.body, bindings, groups, loop=True))
+                statements(node.body, bindings, symbols, modules)
                 continue
             if isinstance(node, ast.If):
-                groups.update(statements(node.then_body, bindings, groups, loop))
-                groups.update(statements(node.else_body, bindings, groups, loop))
+                statements(node.then_body, bindings, symbols, modules)
+                statements(node.else_body, bindings, symbols, modules)
                 continue
             if (isinstance(node, ast.Command) and node.name in ("fillet", "chamfer") and node.args
-                    and _placements(node.args[0], bindings, groups) >= 2):
+                    and max(_shape(node.args[0], symbols, modules).copies.values(), default=0) >= 2):
                 emit("finish-on-assembly", line, "Edge finish is applied after assembling several placed copies.",
                      "Apply the fillet/chamfer to the composite module before placing its copies.")
             value = node.value if isinstance(node, (ast.Assignment, ast.Return)) else node
             holes(value, bindings, line)
             if isinstance(node, ast.Assignment):
-                count = _placements(value, bindings, groups)
-                if count >= 2 or (loop and isinstance(value, ast.BinOp) and value.op == "+" and count >= 1):
-                    groups.add(node.name)
-                else:
-                    groups.discard(node.name)
+                symbols[node.name] = _shape(value, symbols, modules)
                 bindings[node.name] = value
-        return groups
+            if isinstance(node, ast.Return):
+                returned = _shape(node.value, symbols, modules)
+        return returned
 
     syntax(program)
-    statements(program.statements, {}, set())
+    statements(program.statements, {}, {}, {})
     for lines in shapes.values():
         if len(lines) >= 3:
             emit("repeated-shape", lines[0], f"The same primitive occurs {len(lines)} times outside a module or loop.",
