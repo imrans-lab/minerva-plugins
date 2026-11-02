@@ -1,0 +1,41 @@
+# HW-504 fixture: nominal measured hole pattern, origin at pattern centre.
+# Radial process allowance: zero for thread-forming M3 in the original PLA.
+g_xyTolerance = 0
+hole_dx = 26.4
+hole_dy = 19.9
+plate_w = 40
+plate_d = 32
+screw_id = 3
+plate_t = screw_id  # base thickness is one nominal screw diameter
+post_od = 6
+post_h = 8
+base_engagement = 1
+cut_overrun = 1
+
+module post(id, h):
+    bore = translate([0, 0, -base_engagement], cylinder(h + base_engagement + cut_overrun, id/2 + g_xyTolerance))
+    p = cylinder(h, post_od/2) - bore
+    # Finish the composite screw-entry rim before placing copies.
+    chamfer p, [3], d=0.4
+    # The void also enters the base, preserving the original blind-hole depth.
+    return [p, bore]
+
+module hw504_mount(h, id):
+    first = true
+    for sx in [-1, 1]:
+        for sy in [-1, 1]:
+            unit = post(id, h)
+            position = [sx*hole_dx/2, sy*hole_dy/2, plate_t]
+            if first:
+                supports = translate(position, unit[0])
+                bores = translate(position, unit[1])
+                first = false
+            else:
+                supports = supports + translate(position, unit[0])
+                bores = bores + translate(position, unit[1])
+    return [supports, bores]
+
+base = translate([-plate_w/2, -plate_d/2, 0], cube(plate_w, plate_d, plate_t))
+mount = hw504_mount(post_h, screw_id)
+fixture = base + mount[0] - mount[1]
+fixture

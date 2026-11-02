@@ -873,6 +873,12 @@ def handle_request(req: dict) -> dict | None:
         result["id"] = req_id
         return result
 
+    if method == "check_structure":
+        from .structure import check_structure
+        result = check_structure(req.get("params"))
+        result["id"] = req_id
+        return result
+
     if method == "evaluate":
         result = _evaluate(req.get("params") or {})
         result["id"] = req_id

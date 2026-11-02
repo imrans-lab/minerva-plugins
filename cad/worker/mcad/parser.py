@@ -538,7 +538,7 @@ class Parser:
         # Number literal
         if tok.type == TT.NUMBER:
             self._advance()
-            return Number(tok.value)
+            return Number(tok.value, line=tok.line)
 
         # Boolean literal
         if tok.type == TT.BOOL:
