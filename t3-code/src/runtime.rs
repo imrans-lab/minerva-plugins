@@ -25,7 +25,12 @@ pub struct Receipt {
     pub base_dir: String,
     pub codex_home: String,
     pub codex_binary: String,
+    pub resolved_codex_binary: String,
     pub codex_launch_args: String,
+    pub disabled_mcp_entries: Vec<String>,
+    pub ownership: String,
+    pub workspace: String,
+    pub token_file: String,
     pub runtime_mode_ceiling: String,
 }
 
@@ -38,7 +43,7 @@ pub fn now() -> Result<u64> {
 
 /// Pass this string as the owned T3 process's T3CODE_CODEX_LAUNCH_ARGS, and
 /// CODEX_HOME separately. T3 tokenizes it; no shell or Codex config-file edit.
-pub fn codex_launch_args(settings: &Settings) -> Result<String> {
+pub fn codex_launch_args(settings: &Settings, disabled: &[String]) -> Result<String> {
     let endpoint = settings
         .get("minerva_mcp_endpoint")
         .map_err(|e| Fault::held("settings", e))?;
@@ -50,14 +55,28 @@ pub fn codex_launch_args(settings: &Settings) -> Result<String> {
         ("disabled_tools", json!([])),
         ("required", json!(true)),
     ];
-    entries
-        .into_iter()
-        .map(|(key, value)| {
-            let argument = format!("mcp_servers.minerva_t3_crawl.{key}={value}");
-            Ok(format!("--config {}", serde_json::to_string(&argument)?))
-        })
-        .collect::<Result<Vec<_>>>()
-        .map(|args| args.join(" "))
+    let mut arguments = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for name in disabled {
+        if name.is_empty() || name == "minerva_t3_crawl" || !seen.insert(name) {
+            return Err(Fault::held(
+                "mcp_identity",
+                "Disabled MCP entry names are invalid or duplicated.",
+            ));
+        }
+        let argument = format!("mcp_servers.{}.enabled=false", serde_json::to_string(name)?);
+        arguments.push(format!("--config {}", serde_json::to_string(&argument)?));
+    }
+    arguments.extend(
+        entries
+            .into_iter()
+            .map(|(key, value)| {
+                let argument = format!("mcp_servers.minerva_t3_crawl.{key}={value}");
+                Ok(format!("--config {}", serde_json::to_string(&argument)?))
+            })
+            .collect::<Result<Vec<_>>>()?,
+    );
+    Ok(arguments.join(" "))
 }
 
 pub struct Runtime {
@@ -78,14 +97,28 @@ impl RuntimeCache {
         }
         let receipt: Receipt = serde_json::from_str(&read_private(&path)?)?;
         let setting = |key| settings.get(key).map_err(|e| Fault::held("settings", e));
-        if receipt.schema != 1
+        if receipt.schema != 2
             || receipt.t3_tag != contract.t3_tag
             || receipt.server_epoch.is_empty()
             || receipt.session_id.is_empty()
             || receipt.base_dir != setting("t3_base_dir")?
             || receipt.codex_home != setting("codex_home")?
             || receipt.codex_binary != setting("codex_binary")?
-            || receipt.codex_launch_args != codex_launch_args(settings)?
+            || !std::path::Path::new(&receipt.resolved_codex_binary).is_absolute()
+            || receipt.token_file != setting("t3_token_file")?
+            || receipt.codex_launch_args
+                != codex_launch_args(settings, &receipt.disabled_mcp_entries)?
+            || settings
+                .workspace
+                .canonicalize()
+                .ok()
+                .as_ref()
+                .and_then(|p| p.to_str())
+                != Some(receipt.workspace.as_str())
+            || !matches!(
+                receipt.ownership.as_str(),
+                "systemd-user-scope" | "process-group-and-tracked-pids-best-effort"
+            )
             || receipt.runtime_mode_ceiling != "approval-required"
         {
             return Err(Fault::held("runtime_identity_changed", "Owned runtime receipt does not match the pinned installation/settings/native MCP identity. Phase B must reconcile it; no endpoint is adopted automatically."));

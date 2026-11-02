@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct Contract {
     pub t3_tag: String,
     pub t3_commit: String,

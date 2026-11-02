@@ -114,15 +114,7 @@ impl Engine {
             // An I/O/JSON error after a submitted request must never tell the
             // host's notify ledger that the original message was held. A new
             // message that has no submitted receipt is itself held.
-            if let Some(id) = args["chat_id"].as_str() {
-                if let Some(chat) = self.slot(id)?.chat()? {
-                    fault.held = !chat.operations.iter().any(|o| {
-                        o.token == args["operation_token"].as_str().unwrap_or("")
-                            && o.attempted
-                            && !o.refused
-                    });
-                }
-            }
+            self.correct_held(args, fault)?;
             if fault.code == "thread_lost" {
                 let id = input(args, "chat_id", 100)?;
                 let slot = self.slot(id)?;
@@ -142,6 +134,44 @@ impl Engine {
             }
         }
         result
+    }
+
+    /// A lifecycle refusal on resume cannot make an earlier attempted send
+    /// become held. The durable operation receipt owns that fact in both paths.
+    pub fn correct_held(&self, args: &Value, fault: &mut Fault) -> Result<()> {
+        if let Some(id) = args["chat_id"].as_str() {
+            if let Some(chat) = self.slot(id)?.chat()? {
+                fault.held = !chat.operations.iter().any(|o| {
+                    o.token == args["operation_token"].as_str().unwrap_or("")
+                        && o.attempted
+                        && !o.refused
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub fn process_exited(&self, peer: &Peer) -> Result<()> {
+        let slots = self
+            .slots
+            .lock()
+            .map_err(|_| Fault::new("lock_failed", "Chat registry lock failed."))?;
+        for slot in slots.values() {
+            if let Some(chat) = slot.chat()? {
+                if let Some(operation) =
+                    chat.operations.last().filter(|o| o.attempted && !o.settled)
+                {
+                    wake(
+                        peer,
+                        "agent_exited",
+                        &chat.chat_id,
+                        &chat.thread_id,
+                        &operation.token,
+                    )?;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn generate_inner(

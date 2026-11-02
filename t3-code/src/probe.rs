@@ -140,6 +140,15 @@ pub fn exited(child: &std::process::Child) -> Result<bool, String> {
 }
 
 pub fn command(path: &str, arguments: &[&str], codex_home: Option<&str>) -> Result<String, String> {
+    command_bounded(path, arguments, codex_home, Duration::from_secs(5))
+}
+
+pub fn command_bounded(
+    path: &str,
+    arguments: &[&str],
+    codex_home: Option<&str>,
+    timeout: Duration,
+) -> Result<String, String> {
     if !cfg!(any(target_os = "linux", target_os = "macos")) {
         return Err("T3 Code crawl does not support this operating system.".into());
     }
@@ -161,37 +170,31 @@ pub fn command(path: &str, arguments: &[&str], codex_home: Option<&str>) -> Resu
     let mut child = command.spawn().map_err(|e| {
         format!("Cannot run {path}: {e}. Set its executable path in T3 Code preferences.")
     })?;
-    let mut output = child.stdout.take().ok_or("Probe has no output pipe")?;
-    nonblocking(&output)?;
-    let mut bytes = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Err(error) = drain(&mut output, &mut bytes, 8 * 1024 * 1024) {
-            stop_group(&mut child)?;
-            child.wait().map_err(|e| e.to_string())?;
-            return Err(error);
-        }
-        #[cfg(unix)]
-        let finished = exited(&child)?;
-        #[cfg(not(unix))]
-        let finished = false;
-        match finished {
-            true => break,
-            false if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            false => {
-                #[cfg(unix)]
-                stop_group(&mut child)?;
-                child.wait().map_err(|e| e.to_string())?;
-                return Err(format!(
-                    "{path} prerequisite probe timed out after 5 seconds."
-                ));
+    let captured = (|| -> Result<Vec<u8>, String> {
+        let mut output = child.stdout.take().ok_or("Probe has no output pipe")?;
+        nonblocking(&output)?;
+        let mut bytes = Vec::new();
+        let deadline = Instant::now() + timeout;
+        loop {
+            drain(&mut output, &mut bytes, 8 * 1024 * 1024)?;
+            if exited(&child)? {
+                break;
             }
+            if Instant::now() >= deadline {
+                return Err(format!("{path} prerequisite probe timed out."));
+            }
+            std::thread::sleep(Duration::from_millis(15));
         }
-    }
-    #[cfg(unix)]
-    stop_group(&mut child)?;
-    drain(&mut output, &mut bytes, 8 * 1024 * 1024)?;
-    let status = child.wait().map_err(|e| e.to_string())?;
+        drain(&mut output, &mut bytes, 8 * 1024 * 1024)?;
+        Ok(bytes)
+    })();
+    // Every post-spawn error goes through this cleanup while the child PID is
+    // still reserved. No pipe/configuration failure can leak the probe.
+    let cleanup = stop_group(&mut child);
+    let status = child.wait().map_err(|e| e.to_string());
+    cleanup?;
+    let status = status?;
+    let bytes = captured?;
     if !status.success() {
         return Err(format!(
             "{path} {} did not succeed ({}). Check its installation or the existing Codex login.",
@@ -243,21 +246,25 @@ fn version(path: &str) -> Result<Version, String> {
         .ok_or_else(|| format!("Cannot read a version from {path} --version."))
 }
 
-fn installed_t3(path: &str) -> Result<(PathBuf, Version), String> {
+pub fn resolve_executable(path: &str) -> Result<PathBuf, String> {
     let requested = Path::new(path);
     let located = if requested.is_absolute() || requested.components().count() > 1 {
         requested.to_owned()
     } else {
         std::env::var_os("PATH").into_iter().flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
             .map(|directory| directory.join(requested)).find(|candidate| candidate.is_file())
-            .ok_or("T3 is not installed on PATH. Ask the owner to choose an installation, then set its native executable in T3 Code preferences.")?
+            .ok_or_else(||format!("Executable {path} is not installed on PATH; choose its existing executable in T3 Code preferences."))?
     };
-    let executable = located.canonicalize().map_err(|_| {
+    located.canonicalize().map_err(|_| {
         format!(
-            "Existing T3 executable is unavailable: {}. No installer was run.",
+            "Existing executable is unavailable: {}. No installer was run.",
             located.display()
         )
-    })?;
+    })
+}
+
+fn installed_t3(path: &str) -> Result<(PathBuf, Version), String> {
+    let executable = resolve_executable(path)?;
     let mut file = std::fs::File::open(&executable)
         .map_err(|e| format!("Cannot inspect existing T3 executable: {e}"))?;
     let mut magic = [0u8; 4];

@@ -2,6 +2,7 @@ use crate::{
     contract::Contract,
     engine::Engine,
     fault::{Fault, Result},
+    manager::Manager,
     probe::{self, Settings},
     protocol::Peer,
     runtime,
@@ -15,6 +16,8 @@ pub struct App {
     pub contract: Contract,
     pub registration_error: Mutex<Option<String>>,
     engines: Mutex<BTreeMap<PathBuf, Arc<Engine>>>,
+    manager: Mutex<Option<Arc<Manager>>>,
+    startup_error: Mutex<Option<String>>,
 }
 
 impl App {
@@ -23,6 +26,51 @@ impl App {
             contract,
             registration_error: Mutex::new(None),
             engines: Mutex::new(BTreeMap::new()),
+            manager: Mutex::new(None),
+            startup_error: Mutex::new(None),
+        }
+    }
+
+    /// Host initialization is the only start input. Tool calls never invoke it.
+    pub fn start(&self, peer: Arc<Peer>) {
+        let result = (|| -> Result<()> {
+            let mut manager = self
+                .manager
+                .lock()
+                .map_err(|_| Fault::new("lock_failed", "Runtime registry lock failed."))?;
+            if manager.is_some() {
+                return Ok(());
+            }
+            let settings = self.settings(&peer)?;
+            let engine = self.engine(&settings)?;
+            *manager = Some(Manager::launch(
+                settings,
+                self.contract.clone(),
+                peer,
+                engine,
+            ));
+            Ok(())
+        })();
+        if let Err(error) = result {
+            if let Ok(mut slot) = self.startup_error.lock() {
+                *slot = Some(error.text);
+            }
+        }
+    }
+
+    fn manager(&self) -> Result<Arc<Manager>> {
+        self.manager.lock().map_err(|_|Fault::new("lock_failed","Runtime registry lock failed."))?.as_ref().cloned()
+            .ok_or_else(||Fault::held("runtime_not_started","Runtime lifecycle initialization did not complete. Check status and restart the plugin; Generate never starts it."))
+    }
+
+    pub fn shutdown(&self) {
+        let manager = self
+            .manager
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().cloned());
+        if let Some(manager) = manager {
+            manager.shutdown();
         }
     }
 
@@ -52,7 +100,7 @@ impl App {
     pub fn call(&self, peer: &Peer, name: &str, args: &Value) -> Value {
         self.call_inner(peer, name, args).unwrap_or_else(|fault| {
             if name == "minerva_t3_code_status" {
-                json!({"state":"not-started","ready":false,"thread_id":"","run_id":"","endpoint":"",
+                json!({"state":"NO_INSTALL","ready":false,"thread_id":"","run_id":"","endpoint":"",
                     "provider":"codex","t3_tag":self.contract.t3_tag,"errors":[fault.text],
                     "compatibility":self.contract.compatibility(json!({}))})
             } else {
@@ -80,9 +128,54 @@ impl App {
                 {
                     return Err(Fault::held("registration_failed", error));
                 }
-                engine.generate(peer, &settings, &self.contract, args)
+                let authorization = (|| -> Result<Arc<Manager>> {
+                    let manager = self.manager()?;
+                    let chat = if let Some(id) = args["chat_id"].as_str() {
+                        engine.chat_status(id)?
+                    } else {
+                        json!({})
+                    };
+                    manager.workspace(&settings, chat["workspace"].as_str())?;
+                    manager.authorize(&settings)?;
+                    Ok(manager)
+                })();
+                let manager = match authorization {
+                    Ok(manager) => manager,
+                    Err(mut fault) => {
+                        engine.correct_held(args, &mut fault)?;
+                        return Err(fault);
+                    }
+                };
+                let result = engine.generate(peer, &settings, &self.contract, args);
+                if result
+                    .as_ref()
+                    .is_err_and(|error| error.code == "auth_required")
+                {
+                    manager.auth_failed();
+                }
+                result
             }
-            "minerva_t3_code_cancel" => engine.cancel(&settings, &self.contract, args),
+            "minerva_t3_code_cancel" => {
+                if !self
+                    .manager()
+                    .and_then(|manager| manager.can_cancel(&settings))
+                    .unwrap_or(false)
+                {
+                    return Ok(
+                        json!({"cancelled":false,"state":"runtime_unavailable","operation_token":args["operation_token"]}),
+                    );
+                }
+                let result = engine.cancel(&settings, &self.contract, args);
+                if result
+                    .as_ref()
+                    .is_err_and(|error| error.code == "auth_required")
+                {
+                    if let Ok(manager) = self.manager() {
+                        manager.auth_failed();
+                    }
+                }
+                result
+            }
             "minerva_t3_code_status" => {
                 let mut current = probe::inspect(&settings, &self.contract)
                     .map_err(|e| Fault::held("prerequisites", e))?;
@@ -97,13 +190,35 @@ impl App {
                     .registration_error
                     .lock()
                     .map_err(|_| Fault::new("lock_failed", "Registration lock failed."))?);
+                current["startup_error"] = json!(*self
+                    .startup_error
+                    .lock()
+                    .map_err(|_| Fault::new("lock_failed", "Startup error lock failed."))?);
+                if let Ok(manager) = self.manager() {
+                    manager.observe_version(&current, &self.contract)?;
+                }
+                let lifecycle=self.manager().and_then(|manager|manager.status()).unwrap_or_else(|error|json!({"state":"NO_INSTALL","ready":false,"runtime_message":error.text}));
+                for (key, value) in lifecycle.as_object().ok_or_else(|| {
+                    Fault::new("manager_state", "Runtime status is not an object.")
+                })? {
+                    current[key] = value.clone();
+                }
+                current["compatibility"]["ownership"] = current["ownership"].clone();
+                current["compatibility"]["runtime_workspace"] =
+                    current["runtime_workspace"].clone();
+                current["compatibility"]["owned_versions"] = current["owned_versions"].clone();
+                current["version_warning"] = if current["prerequisites_ok"] != true {
+                    current["errors"].clone()
+                } else {
+                    Value::Null
+                };
+                if current["ready"] != true {
+                    return Ok(current);
+                }
                 match engine.runtimes.get(&settings, &self.contract) {
                     Ok(runtime) => {
-                        current["state"] = json!("owned-runtime");
-                        current["phase"] = json!("B");
-                        current["ready"] = json!(current["prerequisites_ok"] == true);
                         current["endpoint"] = json!(runtime.receipt.endpoint);
-                        current["runtime_message"] = json!("Using the Phase B manager's owned runtime receipt. Model calls begin only on Generate.");
+                        current["runtime_message"] = json!("Owned T3 runtime is ready. Model calls begin only on Generate; installation drift takes effect on next plugin start.");
                         current["drift_probe"] = json!("passed: owned server tools/list");
                         let mode = current["permission"]["runtime_mode"]
                             .as_str()
@@ -130,6 +245,13 @@ impl App {
                             .unwrap_or(Value::Null);
                     }
                     Err(error) => {
+                        current["ready"] = json!(false);
+                        if error.code == "auth_required" {
+                            if let Ok(manager) = self.manager() {
+                                manager.auth_failed();
+                            }
+                            current["state"] = json!("DEGRADED");
+                        }
                         current["runtime_message"] = json!(error.text);
                         current["runtime_error"] = json!(error.code);
                     }
@@ -138,5 +260,11 @@ impl App {
             }
             _ => Err(Fault::held("unknown_tool", "Unknown T3 Code tool.")),
         }
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }

@@ -2,7 +2,7 @@
   "id": "t3_code",
   "name": "T3 Code",
   "version": "0.1.0",
-  "description": "Experimental Codex chat integration through an existing official T3 Code installation and your existing Codex login. Source turn engine supports Linux x86_64 and macOS arm64; owned runtime startup and live acceptance remain Phase B. Approvals are deferred; Windows is unsupported.",
+  "description": "Experimental Codex chat integration through an existing official T3 Code installation and your existing Codex login. Unaccepted source runtime/turn candidate for Linux x86_64 and macOS arm64; live auth/lifecycle/turn acceptance remain gated. Hard plugin kill and fallback cleanup are marked limitations. Approvals are deferred; Windows is unsupported.",
   "price": {
     "amount_minor": 0,
     "currency": "USD"

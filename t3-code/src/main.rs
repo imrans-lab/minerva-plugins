@@ -2,11 +2,16 @@ mod app;
 mod contract;
 mod engine;
 mod fault;
+mod inventory;
+mod manager;
 mod mcp;
+mod owned_process;
 mod probe;
 mod protocol;
 mod questions;
 mod runtime;
+mod runtime_files;
+mod shutdown;
 mod snapshot;
 mod storage;
 mod turn;
@@ -38,17 +43,31 @@ fn register(peer: &Peer) -> Result<(), String> {
 }
 
 fn serve(contract: Contract) -> Result<(), String> {
+    shutdown::install()?;
     let manifest: Value = serde_json::from_str(MANIFEST).map_err(|e| e.to_string())?;
     let app = Arc::new(App::new(contract));
     let (peer, requests) = Peer::start();
     let mut workers: Vec<std::thread::JoinHandle<()>> = Vec::new();
-    for request in requests {
+    loop {
+        if shutdown::requested() {
+            break;
+        }
+        let request = match requests.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(request) => request,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
         workers.retain(|worker| !worker.is_finished());
         let method = request["method"].as_str().unwrap_or("");
         if method == "notifications/initialized" {
+            let registration = register(&peer);
+            let registered = registration.is_ok();
             *app.registration_error
                 .lock()
-                .map_err(|_| "Registration lock failed")? = register(&peer).err();
+                .map_err(|_| "Registration lock failed")? = registration.err();
+            if registered {
+                app.start(Arc::clone(&peer));
+            }
             continue;
         }
         if request.get("id").is_none() {
@@ -97,6 +116,7 @@ fn serve(contract: Contract) -> Result<(), String> {
         };
         peer.write(&json!({"jsonrpc":"2.0","id":id,"result":result}))?;
     }
+    app.shutdown();
     for worker in workers {
         if worker.join().is_err() {
             return Err("Tool worker panicked".into());
