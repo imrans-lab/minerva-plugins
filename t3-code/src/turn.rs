@@ -265,7 +265,7 @@ pub fn settled_reply(status: &str, snapshot: &Snapshot) -> Value {
 pub fn verify_chat(chat: &Chat, runtime: &Runtime) -> Result<()> {
     if chat.lost
         || chat.base_dir != runtime.receipt.base_dir
-        || chat.epoch != runtime.receipt.server_epoch
+        || chat.epoch != runtime.receipt.base_identity
     {
         return Err(Fault::new("thread_lost", "The chat's T3 state was replaced or its thread was lost. Start a new Minerva chat for a fresh thread; history is retained and never reconstructed into a replacement thread."));
     }

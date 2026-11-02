@@ -31,7 +31,7 @@ fn stop_unit(unit: &str) -> Result<()> {
         "systemctl",
         &["--user", "stop", unit],
         None,
-        Duration::from_millis(1500),
+        Duration::from_millis(2500),
     )
     .is_ok()
         || inspect().is_ok_and(|text| gone(&text))
@@ -108,6 +108,7 @@ pub struct OwnedProcess {
     unit: Option<String>,
     tracked: BTreeMap<u32, Process>,
     reaped: bool,
+    grace: Duration,
 }
 
 pub struct Launch<'a> {
@@ -149,7 +150,7 @@ impl Launch<'_> {
                     "--collect",
                     "--unit",
                     unit,
-                    "--property=TimeoutStopSec=1s",
+                    "--property=TimeoutStopSec=2s",
                     "--",
                     "/usr/bin/env",
                     "XDG_RUNTIME_DIR=",
@@ -208,8 +209,15 @@ impl Launch<'_> {
             unit,
             tracked: BTreeMap::new(),
             reaped: false,
+            grace: if self.scope {
+                Duration::from_secs(2)
+            } else {
+                Duration::from_millis(200)
+            },
         };
-        owned.track()?;
+        if let Err(error) = owned.track() {
+            eprintln!("t3-code: {}", error.text);
+        }
         Ok(owned)
     }
 
@@ -356,7 +364,7 @@ impl OwnedProcess {
         unsafe {
             libc::kill(-group, libc::SIGTERM);
         }
-        let deadline = Instant::now() + Duration::from_millis(500);
+        let deadline = Instant::now() + self.grace;
         while !self.exited()? && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(25));
         }

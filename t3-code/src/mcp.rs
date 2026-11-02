@@ -5,7 +5,7 @@ use crate::fault::{Fault, Result};
 use crate::storage::random_id;
 use serde_json::{json, Value};
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Mutex,
 };
 use std::time::Duration;
@@ -37,6 +37,26 @@ pub struct Client {
 
 impl Client {
     pub fn connect(endpoint: &str, bearer: String) -> Result<Self> {
+        Self::connect_timed(endpoint, bearer, Duration::from_secs(8), None)
+    }
+
+    pub fn connect_timed(
+        endpoint: &str,
+        bearer: String,
+        timeout: Duration,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Self> {
+        let check = || {
+            if cancel.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+                Err(Fault::held(
+                    "runtime_stopping",
+                    "Plugin unload interrupted MCP initialization.",
+                ))
+            } else {
+                Ok(())
+            }
+        };
+        check()?;
         loopback_url(endpoint)?;
         if bearer.trim().is_empty() || bearer.len() > 16384 || bearer.contains(['\r', '\n']) {
             return Err(Fault::held(
@@ -48,7 +68,7 @@ impl Client {
             .proxy(None)
             .max_redirects(0)
             .http_status_as_error(false)
-            .timeout_global(Some(Duration::from_secs(8)))
+            .timeout_global(Some(timeout))
             .build()
             .into();
         let client = Self {
@@ -65,6 +85,7 @@ impl Client {
             json!({"protocolVersion":"2025-03-26", "capabilities":{},
             "clientInfo":{"name":"minerva-t3-code","version":env!("CARGO_PKG_VERSION")}}),
         )?;
+        check()?;
         let version = initialized["protocolVersion"].as_str().ok_or_else(|| {
             Fault::new(
                 "contract_mismatch",
@@ -85,6 +106,7 @@ impl Client {
             json!({"jsonrpc":"2.0", "method":"notifications/initialized"}),
             None,
         )?;
+        check()?;
         Ok(client)
     }
 

@@ -388,7 +388,6 @@ dependencies = [
 name = "t3-code-plugin"
 version = "0.1.0"
 dependencies = [
- "base64",
  "libc",
  "semver",
  "serde",

@@ -48,81 +48,86 @@ fn serve(contract: Contract) -> Result<(), String> {
     let app = Arc::new(App::new(contract));
     let (peer, requests) = Peer::start();
     let mut workers: Vec<std::thread::JoinHandle<()>> = Vec::new();
-    loop {
-        if shutdown::requested() {
-            break;
-        }
-        let request = match requests.recv_timeout(std::time::Duration::from_millis(100)) {
-            Ok(request) => request,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-        };
-        workers.retain(|worker| !worker.is_finished());
-        let method = request["method"].as_str().unwrap_or("");
-        if method == "notifications/initialized" {
-            let registration = register(&peer);
-            let registered = registration.is_ok();
-            *app.registration_error
-                .lock()
-                .map_err(|_| "Registration lock failed")? = registration.err();
-            if registered {
-                app.start(Arc::clone(&peer));
+    let dispatch = (|| -> Result<(), String> {
+        loop {
+            if shutdown::requested() {
+                break;
             }
-            continue;
-        }
-        if request.get("id").is_none() {
-            continue;
-        }
-        let id = &request["id"];
-        if method == "tools/call" {
-            // Independent chats and Stop remain responsive during a bounded
-            // generate wait. Each chat's Engine gate serializes its sends.
-            if workers.len() >= 32 {
-                peer.write(&json!({"jsonrpc":"2.0","id":id,"result":tool_result(
-                    fault::Fault::held("busy","Plugin has32 active calls; retry this held call.").reply())}))?;
-                continue;
-            }
-            let app = Arc::clone(&app);
-            let peer = Arc::clone(&peer);
-            workers.push(std::thread::spawn(move || {
-                let params = &request["params"];
-                let result = app.call(
-                    &peer,
-                    params["name"].as_str().unwrap_or(""),
-                    &params["arguments"],
-                );
-                if let Err(error) = peer.write(
-                    &json!({"jsonrpc":"2.0","id":request["id"],"result":tool_result(result)}),
-                ) {
-                    eprintln!("t3-code: {error}");
+            let request = match requests.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(request) => request,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            };
+            workers.retain(|worker| !worker.is_finished());
+            let method = request["method"].as_str().unwrap_or("");
+            if method == "notifications/initialized" {
+                let registration = register(&peer);
+                let registered = registration.is_ok();
+                *app.registration_error
+                    .lock()
+                    .map_err(|_| "Registration lock failed")? = registration.err();
+                if registered {
+                    app.start(Arc::clone(&peer));
                 }
-            }));
-            continue;
-        }
-        let result = match method {
-            "initialize" => json!({"protocolVersion":"2024-11-05","serverName":"t3-code",
-                "serverVersion":env!("CARGO_PKG_VERSION"),"serverInfo":{"name":"t3-code","version":env!("CARGO_PKG_VERSION")},"capabilities":{"tools":{}}}),
-            "ping" => json!({}),
-            "tools/list" => {
-                let tools = manifest["tools"]
-                    .as_array()
-                    .ok_or("Embedded manifest has no tools")?;
-                json!({"tools":tools.iter().map(|tool|json!({"name":tool["name"],"description":tool["description"],"inputSchema":tool["input_schema"]})).collect::<Vec<_>>()})
-            }
-            _ => {
-                peer.write(&json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Method not found"}}))?;
                 continue;
             }
-        };
-        peer.write(&json!({"jsonrpc":"2.0","id":id,"result":result}))?;
-    }
+            if request.get("id").is_none() {
+                continue;
+            }
+            let id = &request["id"];
+            if method == "tools/call" {
+                // Independent chats and Stop remain responsive during a bounded
+                // generate wait. Each chat's Engine gate serializes its sends.
+                if workers.len() >= 32 {
+                    peer.write(&json!({"jsonrpc":"2.0","id":id,"result":tool_result(
+                    fault::Fault::held("busy","Plugin has32 active calls; retry this held call.").reply())}))?;
+                    continue;
+                }
+                let app = Arc::clone(&app);
+                let peer = Arc::clone(&peer);
+                workers.push(std::thread::spawn(move || {
+                    let params = &request["params"];
+                    let result = app.call(
+                        &peer,
+                        params["name"].as_str().unwrap_or(""),
+                        &params["arguments"],
+                    );
+                    if let Err(error) = peer.write(
+                        &json!({"jsonrpc":"2.0","id":request["id"],"result":tool_result(result)}),
+                    ) {
+                        eprintln!("t3-code: {error}");
+                    }
+                }));
+                continue;
+            }
+            let result = match method {
+                "initialize" => json!({"protocolVersion":"2024-11-05","serverName":"t3-code",
+                "serverVersion":env!("CARGO_PKG_VERSION"),"serverInfo":{"name":"t3-code","version":env!("CARGO_PKG_VERSION")},"capabilities":{"tools":{}}}),
+                "ping" => json!({}),
+                "tools/list" => {
+                    let tools = manifest["tools"]
+                        .as_array()
+                        .ok_or("Embedded manifest has no tools")?;
+                    json!({"tools":tools.iter().map(|tool|json!({"name":tool["name"],"description":tool["description"],"inputSchema":tool["input_schema"]})).collect::<Vec<_>>()})
+                }
+                _ => {
+                    peer.write(&json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Method not found"}}))?;
+                    continue;
+                }
+            };
+            peer.write(&json!({"jsonrpc":"2.0","id":id,"result":result}))?;
+        }
+        Ok(())
+    })();
+    // Dispatcher errors must retire the runtime even while tool workers still
+    // hold App Arcs. process::exit must never be the first lifetime boundary.
     app.shutdown();
     for worker in workers {
         if worker.join().is_err() {
             return Err("Tool worker panicked".into());
         }
     }
-    Ok(())
+    dispatch
 }
 
 fn run() -> Result<(), String> {

@@ -255,8 +255,11 @@ impl Manager {
         Ok(())
     }
 
-    pub fn can_cancel(&self, settings: &Settings) -> Result<bool> {
-        self.same_settings(settings)?;
+    pub fn owned_settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    pub fn can_cancel(&self) -> Result<bool> {
         let view = self.view()?;
         Ok(matches!(view.state, State::Ready | State::Degraded)
             && view.receipt_current
@@ -465,7 +468,14 @@ impl Manager {
     }
 
     fn probe_catalog(&self, files: &Files, receipt: &Receipt, contract: &Contract) -> Result<()> {
-        let client = Client::connect(&receipt.endpoint, read_private(&files.token)?)?;
+        self.check_stop()?;
+        let client = Client::connect_timed(
+            &receipt.endpoint,
+            read_private(&files.token)?,
+            Duration::from_secs(1),
+            Some(&self.stop),
+        )?;
+        self.check_stop()?;
         contract
             .check_catalog(&client.rpc("tools/list", json!({}))?)
             .map_err(|e| Fault::held("contract_mismatch", e))
@@ -576,7 +586,9 @@ impl Manager {
             let owned = process
                 .as_mut()
                 .ok_or_else(|| Fault::new("manager_state", "Supervisor lost its owned process."))?;
-            owned.track()?;
+            if let Err(error) = owned.track() {
+                eprintln!("t3-code: {}", error.text);
+            }
             if owned.exited()? {
                 self.view()?.state = State::Crashed;
                 let cleanup = self.cleanup(&mut files, &mut process);

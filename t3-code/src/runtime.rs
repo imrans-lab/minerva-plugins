@@ -19,6 +19,7 @@ pub struct Receipt {
     pub schema: u32,
     pub endpoint: String,
     pub server_epoch: String,
+    pub base_identity: String,
     pub session_id: String,
     pub expires_at_unix: u64,
     pub t3_tag: String,
@@ -64,7 +65,7 @@ pub fn codex_launch_args(settings: &Settings, disabled: &[String]) -> Result<Str
                 "Disabled MCP entry names are invalid or duplicated.",
             ));
         }
-        let argument = format!("mcp_servers.{}.enabled=false", serde_json::to_string(name)?);
+        let argument = disable_entry(name)?;
         arguments.push(format!("--config {}", serde_json::to_string(&argument)?));
     }
     arguments.extend(
@@ -77,6 +78,17 @@ pub fn codex_launch_args(settings: &Settings, disabled: &[String]) -> Result<Str
             .collect::<Result<Vec<_>>>()?,
     );
     Ok(arguments.join(" "))
+}
+
+pub fn disable_entry(name: &str) -> Result<String> {
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(Fault::held("mcp_override_name","A Minerva MCP entry has an unusual name. Rename it using letters, digits, underscores or hyphens, then restart; quoted-key override parsing is unproven and no owner config was edited."));
+    }
+    Ok(format!("mcp_servers.{name}.enabled=false"))
 }
 
 pub struct Runtime {
@@ -100,6 +112,7 @@ impl RuntimeCache {
         if receipt.schema != 2
             || receipt.t3_tag != contract.t3_tag
             || receipt.server_epoch.is_empty()
+            || receipt.base_identity.is_empty()
             || receipt.session_id.is_empty()
             || receipt.base_dir != setting("t3_base_dir")?
             || receipt.codex_home != setting("codex_home")?

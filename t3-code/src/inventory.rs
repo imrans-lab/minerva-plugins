@@ -88,11 +88,39 @@ impl Discovery<'_> {
                 return Err(problem());
             }
             if self.tracked_at.elapsed() >= Duration::from_secs(1) {
-                self.process.track()?;
+                if let Err(error) = self.process.track() {
+                    eprintln!("t3-code: {}", error.text);
+                }
                 self.tracked_at = Instant::now();
             }
             std::thread::sleep(Duration::from_millis(30));
         }
+    }
+
+    fn ready_server(&mut self, mut server: Value) -> Result<Value> {
+        let name = server["name"].as_str().ok_or_else(problem)?.to_owned();
+        while matches!(
+            server["runtimeStatus"].as_str(),
+            Some("starting" | "notStarted")
+        ) {
+            if Instant::now() >= self.deadline {
+                return Err(problem());
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            let page = self.rpc(
+                "mcpServerStatus/list",
+                json!({"serverName":name,"detail":"toolsAndAuthOnly"}),
+            )?;
+            if let Some(found) = page["data"]
+                .as_array()
+                .ok_or_else(problem)?
+                .iter()
+                .find(|entry| entry["name"] == name)
+            {
+                server = found.clone();
+            }
+        }
+        Ok(server)
     }
 }
 
@@ -145,10 +173,7 @@ pub fn disabled_entries(
     // remaining entries with the same real home, cwd and provider routing.
     let mut args = Vec::new();
     for name in &disabled {
-        args.extend([
-            "--config".into(),
-            format!("mcp_servers.{}.enabled=false", serde_json::to_string(name)?),
-        ]);
+        args.extend(["--config".into(), crate::runtime::disable_entry(name)?]);
     }
     args.extend(["app-server".into(), "--stdio".into()]);
     let mut process = Launch {
@@ -183,6 +208,13 @@ pub fn disabled_entries(
             json!({"cursor":cursor,"limit":100,"detail":"toolsAndAuthOnly"}),
         )?;
         for server in page["data"].as_array().ok_or_else(problem)? {
+            if server["name"]
+                .as_str()
+                .is_some_and(|name| disabled.contains(name))
+            {
+                continue;
+            }
+            let server = discovery.ready_server(server.clone())?;
             let name = server["name"].as_str().ok_or_else(problem)?;
             if disabled.contains(name) {
                 continue;

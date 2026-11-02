@@ -230,7 +230,7 @@ impl Engine {
                 chat_id: id.into(),
                 workspace,
                 base_dir: runtime.receipt.base_dir.clone(),
-                epoch: runtime.receipt.server_epoch.clone(),
+                epoch: runtime.receipt.base_identity.clone(),
                 thread_id: String::new(),
                 mode: "approval-required".into(),
                 model: Value::Null,
@@ -784,7 +784,7 @@ impl Engine {
         Err(fault)
     }
 
-    pub fn cancel(&self, settings: &Settings, contract: &Contract, args: &Value) -> Result<Value> {
+    pub fn record_cancel(&self, args: &Value) -> Result<()> {
         let id = input(args, "chat_id", 100)?;
         let token = input(args, "operation_token", 256)?;
         let slot = self.slot(id)?;
@@ -796,6 +796,18 @@ impl Engine {
             tokens.insert(token.into());
             self.store.cancel(id, &tokens)?;
         }
+        Ok(())
+    }
+
+    pub fn cancel_recorded(
+        &self,
+        settings: &Settings,
+        contract: &Contract,
+        args: &Value,
+    ) -> Result<Value> {
+        let id = input(args, "chat_id", 100)?;
+        let token = input(args, "operation_token", 256)?;
+        let slot = self.slot(id)?;
         let Some(chat) = slot.chat()? else {
             return Ok(
                 json!({"cancelled":false,"state":"cancel_recorded","operation_token":token}),

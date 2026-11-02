@@ -9,7 +9,6 @@ use crate::{
     runtime::{self, Receipt},
     storage::{private_dir, read_private, write_private},
 };
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde_json::{json, Value};
 use std::{
     fs::{self, File, OpenOptions},
@@ -91,6 +90,80 @@ fn scopes(value: &Value) -> Option<std::collections::BTreeSet<&str>> {
     value.as_array()?.iter().map(Value::as_str).collect()
 }
 
+/// Public issuer expiresAt is DateTime.formatIso(toUtc(...)). Only its
+/// canonical UTC form is accepted; the signed token stays opaque.
+fn expiry(text: &str) -> Result<u64> {
+    let invalid = || {
+        Fault::held(
+            "issuer_shape",
+            "Public issuer expiresAt is not a canonical UTC ISO timestamp.",
+        )
+    };
+    if text.len() != 24
+        || !text.is_ascii()
+        || ![
+            (4, b'-'),
+            (7, b'-'),
+            (10, b'T'),
+            (13, b':'),
+            (16, b':'),
+            (19, b'.'),
+            (23, b'Z'),
+        ]
+        .iter()
+        .all(|(index, byte)| text.as_bytes().get(*index) == Some(byte))
+    {
+        return Err(invalid());
+    }
+    let number = |start: usize, end: usize| -> Result<u64> {
+        let value = text.get(start..end).ok_or_else(invalid)?;
+        if !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(invalid());
+        }
+        value.parse().map_err(|_| invalid())
+    };
+    let year = number(0, 4)?;
+    let month = number(5, 7)?;
+    let day = number(8, 10)?;
+    let hour = number(11, 13)?;
+    let minute = number(14, 16)?;
+    let second = number(17, 19)?;
+    number(20, 23)?;
+    if !(1970..=9999).contains(&year)
+        || !(1..=12).contains(&month)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return Err(invalid());
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let months = [
+        31u64,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let month_index = (month - 1) as usize;
+    if day == 0 || day > months[month_index] {
+        return Err(invalid());
+    }
+    let before =
+        |year: u64| 365 * (year - 1) + (year - 1) / 4 - (year - 1) / 100 + (year - 1) / 400;
+    // month_index is0..11 and year1970..9999 above: these slices and bounded
+    // Gregorian calculations cannot overflow or panic on an issuer response.
+    let days = before(year) - before(1970) + months[..month_index].iter().sum::<u64>() + day - 1;
+    Ok(days * 86400 + hour * 3600 + minute * 60 + second)
+}
+
 pub struct Files {
     pub settings: Settings,
     pub base: PathBuf,
@@ -100,6 +173,7 @@ pub struct Files {
     pub epoch: String,
     pub session: Option<String>,
     pub codex_binary: String,
+    base_identity: String,
     _base_lock: File,
     token_owned: bool,
     receipt_owned: bool,
@@ -124,12 +198,20 @@ impl Files {
             ));
         }
         let owner = base.join(".minerva-owner.json");
-        let identity = json!({"schema":1,"plugin_private":settings.private.canonicalize()?});
+        let private = settings.private.canonicalize()?;
+        let mut identity =
+            json!({"schema":2,"plugin_private":private,"instance_id":crate::storage::random_id()?});
         let lock = if owner.try_exists()? {
             let current: Value = serde_json::from_str(&read_private(&owner)?)?;
-            if current != identity {
+            if current["schema"] != 2
+                || current["plugin_private"] != identity["plugin_private"]
+                || !current["instance_id"].as_str().is_some_and(|id| {
+                    id.len() == 48 && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+            {
                 return Err(Fault::held("base_not_owned","T3 base belongs to another plugin instance; select an empty private directory."));
             }
+            identity = current;
             use std::os::unix::fs::OpenOptionsExt;
             OpenOptions::new()
                 .read(true)
@@ -177,6 +259,12 @@ impl Files {
         // Existing arbitrary files are never overwritten or deleted. This file
         // is created exclusively by this process before any issuer is invoked.
         let environment = environment(&settings)?;
+        let base_identity = serde_json::to_string(&json!([
+            canonical,
+            target,
+            settings.workspace.canonicalize()?,
+            identity["instance_id"]
+        ]))?;
         let mut files = Self {
             settings,
             base,
@@ -186,18 +274,12 @@ impl Files {
             epoch,
             session: None,
             codex_binary,
+            base_identity,
             _base_lock: lock,
             token_owned: false,
             receipt_owned: false,
         };
         files.recover()?;
-        if files
-            .base
-            .join("userdata/server-runtime.json")
-            .try_exists()?
-        {
-            return Err(Fault::held("stale_runtime","A prior T3 server record remains after stale-scope reconciliation. Inspect that server before restarting; no saved PID is adopted or signalled."));
-        }
         exclusive(&files.token).map_err(|_|Fault::held("token_path_busy","Bearer path already exists or cannot be created privately. Reconcile the old runtime and choose a fresh token path; no existing file was overwritten."))?;
         files.token_owned = true;
         Ok(files)
@@ -349,40 +431,15 @@ impl Files {
         let session = string(&issued, "sessionId")?.to_owned();
         self.session = Some(session.clone());
         let bearer = string(&issued, "token")?;
-        // Pinned v0.1.6 SessionStore.ts741: base64url(JSON).signature, not JWT.
-        // These are trusted CLI metadata, NOT client-side authentication. T3
-        // still verifies the signature, revocation and scopes on every call.
-        let payload = bearer
-            .split_once('.')
-            .ok_or_else(|| {
-                Fault::held(
-                    "issuer_shape",
-                    "Public issuer returned an unsupported token shape.",
-                )
-            })?
-            .0;
-        let bytes = URL_SAFE_NO_PAD.decode(payload).map_err(|_| {
-            Fault::held(
-                "issuer_shape",
-                "Public issuer returned invalid expiry metadata.",
-            )
-        })?;
-        let claims: Value = serde_json::from_slice(&bytes)?;
-        let expiry = claims["exp"].as_u64().ok_or_else(|| {
-            Fault::held("issuer_shape", "Public issuer returned no expiry metadata.")
-        })? / 1000;
+        let expiry = expiry(string(&issued, "expiresAt")?)?;
         let now = runtime::now()?;
         let expected =
             std::collections::BTreeSet::from(["orchestration:read", "orchestration:operate"]);
-        if claims["sid"] != session
-            || claims["sub"] != "mcp-client"
-            || claims["method"] != "bearer-access-token"
-            || issued["subject"] != "mcp-client"
+        if issued["subject"] != "mcp-client"
             || issued["method"] != "bearer-access-token"
             || expiry <= now.saturating_add(10)
             || expiry > now.saturating_add(3610)
             || scopes(&issued["scopes"]).as_ref() != Some(&expected)
-            || scopes(&claims["scopes"]).as_ref() != Some(&expected)
         {
             return Err(Fault::held(
                 "issuer_shape",
@@ -394,6 +451,7 @@ impl Files {
             schema: 2,
             endpoint: endpoint.into(),
             server_epoch: self.epoch.clone(),
+            base_identity: self.base_identity.clone(),
             session_id: session,
             expires_at_unix: expiry,
             t3_tag: contract.t3_tag.clone(),
