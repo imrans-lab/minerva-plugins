@@ -141,8 +141,23 @@ func _on_reply(tool: String, payload: Dictionary) -> void:
     replies.append({"kind": str(value.get("kind", "")),
         "token": str(value.get("operation_token", "")), "activity": value.get("activity", [])})
 
+func _observe_connection() -> void:
+    var current: Object = plugins.call("get_connection", str(config.plugin_id))
+    if current == null:
+        return
+    if is_instance_valid(connection) and current == connection:
+        return
+    if is_instance_valid(connection) and connection.is_connected("tool_result_received", _on_reply):
+        connection.disconnect("tool_result_received", _on_reply)
+    connection = current
+    if not connection.is_connected("tool_result_received", _on_reply):
+        connection.connect("tool_result_received", _on_reply)
+
 func _process(_delta: float) -> void:
-    if busy or server == null:
+    if server == null:
+        return
+    _observe_connection()
+    if busy:
         return
     var path: String = folder.path_join("command.json")
     if not FileAccess.file_exists(path):
@@ -219,9 +234,7 @@ func _serve(request: Dictionary) -> void:
                         break
             if result.get("ok", false):
                 result = await plugins.call("start_plugin", str(config.plugin_id))
-                connection = plugins.call("get_connection", str(config.plugin_id))
-                if connection != null:
-                    connection.connect("tool_result_received", _on_reply)
+                _observe_connection()
         "tool":
             result = await server.call("call_tool", str(request.tool), request.arguments)
         "snapshot":
