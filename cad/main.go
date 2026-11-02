@@ -243,6 +243,7 @@ func pluginRootDir() (string, error) {
 func (s *server) initRegistry() {
 	s.registry = tools.NewRegistry()
 	s.registry.Register(tools.Validate, tools.HandleValidate)
+	s.registry.Register(tools.CheckStructure(), tools.HandleCheckStructure)
 	s.registry.Register(tools.ListEdges, tools.HandleListEdges)
 	s.registry.Register(tools.Evaluate, tools.HandleEvaluate)
 	s.registry.Register(tools.Export, tools.HandleExport)

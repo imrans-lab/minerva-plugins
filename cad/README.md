@@ -1,5 +1,32 @@
 # CAD Plugin for Minerva
 
+`minerva_cad_check_structure {source}` checks the parsed DSL without a live
+panel or geometry build. It returns `{pass, findings:[{rule,line,message,fix}]}`.
+Rules flag three or more identical primitives outside modules/loops, repeated
+numeric literals (except 0, 1, 2, 0.5, 90, 180, 360), subtracted cylinders without
+a `g_*` process global or `clear_r`/`tap_r`/`press_r` fit helper in the radius,
+literal additions to diameter/2 radii. Each finding names its repair. This source critic follows dimensional
+checks and does not prove dimensions, fit or runtime geometry validity.
+The four v0 rules inspect source syntax once; modules, loops and branches are
+not expanded. Repeated shapes compare primitive-call subtrees with translation
+and rotation wrappers stripped. Simple aliases are followed for subtracted
+cylinders with assignment-time dependencies (maximum alias depth 32);
+branch/loop-written bindings are invalidated rather than executed. Unresolved
+radius fit intent gives an actionable `analysis-limit`. Hole fit intent is
+checked where the hole cylinder is visible in the subtraction; module-returned
+voids and indexed subtrahends are not traced in v0.
+When a plain name is used as a subtrahend, every visible cylinder assigned into
+that name in its containing module/top-level scope is checked, including loop
+accumulations. No iteration is executed. Header/default expressions are also
+visited once for radius syntax.
+Finishing assembled copies is deferred until component provenance can be
+determined reliably.
+
+See [measurement record v0](docs/measurement-record.md) for nominal measured
+inputs and per-parameter uncertainty, and the
+[HW-504 composite example](docs/examples/hw504_mount.mcad) for a post module,
+four loop-placed supports, radial process allowance and a composite edge finish.
+
 The CAD plugin brings parametric boundary-representation modeling to Minerva
 via the `.mcad` DSL. A Go MCP shim wraps a Python worker (build123d + OCCT)
 that evaluates CAD scripts and returns B-Rep geometry. The Godot-based
