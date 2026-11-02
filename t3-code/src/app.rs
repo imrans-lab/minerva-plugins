@@ -136,6 +136,9 @@ impl App {
                         json!({})
                     };
                     manager.workspace(&settings, chat["workspace"].as_str())?;
+                    if args["resume"] == true {
+                        manager.wait_for_auth()?;
+                    }
                     manager.authorize(&settings)?;
                     Ok(manager)
                 })();
@@ -165,7 +168,7 @@ impl App {
                         )
                     }
                 };
-                if !manager.wait_to_cancel()? {
+                if !manager.wait_for_auth()? {
                     return Ok(
                         json!({"cancelled":false,"state":"runtime_unavailable","operation_token":args["operation_token"]}),
                     );

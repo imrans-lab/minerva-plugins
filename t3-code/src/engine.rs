@@ -11,7 +11,7 @@ use crate::{
 };
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 
 struct Slot {
     generate: Mutex<()>,
@@ -93,7 +93,7 @@ impl Engine {
             let op = chat.operations.last();
             json!({"thread_id":chat.thread_id,"run_id":op.and_then(|o|o.run_id.as_deref()).unwrap_or(""),
                 "workspace":chat.workspace,"permission":crate::runtime::permission(&chat.mode),"model_selection":chat.model,
-                "thread_lost":chat.lost,"outcome_unknown":op.is_some_and(|o|o.attempted && !o.accepted && !o.refused),
+                "thread_lost":chat.lost,"outcome_unknown":op.is_some_and(|o|o.attempted && !o.accepted && !o.refused && !o.settled),
                 "deferred":op.is_some_and(|o|o.deferred),"refused":op.is_some_and(|o|o.refused),
                 "delivered_via":op.and_then(|o|o.delivered_via.as_deref()),
                 "operation_token":op.map(|o|o.token.as_str()).unwrap_or("")})
@@ -193,7 +193,27 @@ impl Engine {
             ));
         }
         let slot = self.slot(id)?;
-        let _gate = slot.generate.try_lock().map_err(|_|Fault::held("chat_busy","A generate call already owns this chat. Resume its operation instead of sending concurrently."))?;
+        let _gate = match slot.generate.try_lock() {
+            Ok(gate) => gate,
+            Err(TryLockError::WouldBlock) => {
+                // A concurrent reader returns only its own published receipt;
+                // it must not save a stale chat over the active writer.
+                if args["resume"] == true {
+                    if let Some(reply) = slot.chat()?.and_then(|chat| {
+                        chat.operations
+                            .into_iter()
+                            .find(|o| o.token == token)
+                            .and_then(|o| o.reply)
+                    }) {
+                        return Ok(reply);
+                    }
+                }
+                return Err(Fault::held("chat_busy", "A generate call already owns this chat; no stored reply is available for this operation."));
+            }
+            Err(TryLockError::Poisoned(_)) => {
+                return Err(Fault::new("lock_failed", "Generate lock failed."))
+            }
+        };
         let saved = slot.chat()?;
         let runtime = self.runtimes.get(settings,contract).map_err(|mut fault| {
             if saved.as_ref().is_some_and(|c|c.operations.iter().any(|o|o.token == token && o.attempted && !o.refused)) {
@@ -331,6 +351,17 @@ impl Engine {
         };
         if let Err(fault) = self.submit(&slot, &mut chat, index, &runtime) {
             let operation = &mut chat.operations[index];
+            if operation.tool == "t3_pending_request"
+                && operation.attempted
+                && !operation.accepted
+                && !operation.refused
+                && fault.code == "outcome_unknown"
+            {
+                let reply = pending(token, "outcome_unknown");
+                operation.reply = Some(reply.clone());
+                slot.publish(&self.store, &chat)?;
+                return Ok(reply);
+            }
             if operation.tool == "t3_pending_request" && !operation.attempted && !operation.refused
             {
                 if let Some(question) = operation.question_backup.clone() {
@@ -370,6 +401,8 @@ impl Engine {
             chat.operations[index].settled = true;
             chat.question = None;
             turn::settled_reply(&status, &snapshot)
+        } else if !chat.operations[index].accepted {
+            pending(token, "outcome_unknown")
         } else if snapshot.permission_pending() {
             let mut activity = snapshot.activity();
             activity.push(json!({"kind":"permission_request","label":"Permission required in T3 Code","status":"deferred"}));
@@ -391,23 +424,8 @@ impl Engine {
         };
         reply["operation_token"] = json!(token);
         if chat.operations[index].settled {
-            for operation in chat
-                .operations
-                .iter_mut()
-                .filter(|o| o.run_id.as_deref() == Some(&run))
-            {
-                operation.terminal_state = Some(status.clone());
-                operation.settled = true;
-                operation.deferred = false;
-                if operation.accepted {
-                    let mut final_reply = reply.clone();
-                    final_reply["operation_token"] = json!(operation.token);
-                    operation.reply = Some(final_reply);
-                } else if !operation.refused {
-                    operation.reply = Some(Fault::new("outcome_unknown","The bound backend run finished, but this question answer's acceptance was never confirmed. It is not replayed.").reply());
-                }
-            }
-        } else if reply["kind"] == "question" {
+            settle_run(&mut chat, &run, &status, &reply, None);
+        } else {
             chat.operations[index].reply = Some(reply.clone());
         }
         slot.publish(&self.store, &chat)?;
@@ -447,23 +465,7 @@ impl Engine {
                 let mut notice = Fault::held("prior_run_completed",format!("Earlier turn finished in T3 while this chat was waiting; its answer:\n\n{}\n\nNew text was not submitted. Your next message can proceed.",snapshot.answer_notice()));
                 notice.prior_operation =
                     Some((chat.operations[index].token.clone(), Some(run.clone())));
-                for operation in chat
-                    .operations
-                    .iter_mut()
-                    .filter(|o| o.run_id.as_deref() == Some(&run))
-                {
-                    operation.settled = true;
-                    operation.deferred = false;
-                    operation.terminal_state = Some(status.clone());
-                    if operation.accepted {
-                        let mut reply = final_reply.clone();
-                        reply["operation_token"] = json!(operation.token);
-                        operation.reply = Some(reply);
-                        operation.delivered_via = Some("held_notice".into());
-                    } else if !operation.refused {
-                        operation.reply = Some(Fault::new("outcome_unknown","The bound run completed, but this answer's acceptance was never confirmed. It is not replayed.").reply());
-                    }
-                }
+                settle_run(chat, &run, &status, &final_reply, Some("held_notice"));
                 slot.publish(&self.store, chat)?;
                 return Err(notice);
             }
@@ -471,24 +473,9 @@ impl Engine {
                 status.as_str(),
                 "cancelled" | "interrupted" | "failed" | "rolled_back"
             ) {
-                for operation in chat
-                    .operations
-                    .iter_mut()
-                    .filter(|o| o.run_id.as_deref() == Some(&run))
-                {
-                    operation.settled = true;
-                    operation.deferred = false;
-                    operation.terminal_state = Some(status.clone());
-                    if operation.accepted {
-                        let mut reply =
-                            Fault::new("run_retired", format!("T3 run {run} ended {status}."))
-                                .reply();
-                        reply["operation_token"] = json!(operation.token);
-                        operation.reply = Some(reply);
-                    } else if !operation.refused {
-                        operation.reply = Some(Fault::new("outcome_unknown","The bound run ended, but this answer's acceptance was never confirmed. It is not replayed.").reply());
-                    }
-                }
+                let reply =
+                    Fault::new("run_retired", format!("T3 run {run} ended {status}.")).reply();
+                settle_run(chat, &run, &status, &reply, None);
                 return slot.publish(&self.store, chat);
             }
         }
@@ -661,6 +648,10 @@ impl Engine {
             chat.operations[index].connection = runtime.client.connection.clone();
         }
         chat.operations[index].attempted = true;
+        if chat.operations[index].tool == "t3_pending_request" {
+            chat.operations[index].reply =
+                Some(pending(&chat.operations[index].token, "outcome_unknown"));
+        }
         slot.publish(&self.store, chat)?;
         self.check_stop_before_send(slot, chat, index, runtime, retry)?;
         let op = &chat.operations[index];
@@ -842,6 +833,30 @@ fn input<'a>(args: &'a Value, key: &str, max: usize) -> Result<&'a str> {
 
 fn pending(token: &str, status: &str) -> Value {
     json!({"kind":"pending","operation_token":token,"state":status})
+}
+
+fn settle_run(
+    chat: &mut Chat,
+    run: &str,
+    status: &str,
+    reply: &Value,
+    delivered_via: Option<&str>,
+) {
+    // A terminal observation settles the bound run, without claiming that an
+    // unconfirmed control response was accepted or replaying that response.
+    for operation in chat
+        .operations
+        .iter_mut()
+        .filter(|o| o.run_id.as_deref() == Some(run) && !o.refused)
+    {
+        operation.terminal_state = Some(status.into());
+        operation.settled = true;
+        operation.deferred = false;
+        let mut reply = reply.clone();
+        reply["operation_token"] = json!(operation.token);
+        operation.reply = Some(reply);
+        operation.delivered_via = delivered_via.map(str::to_owned);
+    }
 }
 
 fn wake(peer: &Peer, cause: &str, chat: &str, thread: &str, token: &str) -> Result<()> {
