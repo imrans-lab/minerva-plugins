@@ -70,7 +70,13 @@ class _Shape:
     """Symbolic component identity and the placed copies it contains."""
     key: tuple
     copies: Counter[tuple] = field(default_factory=Counter)
-    items: tuple[_Shape, ...] = ()
+    items: tuple[_Shape, ...] | None = None
+
+
+def _qualified(shape: _Shape, call: tuple) -> _Shape:
+    """Module arguments distinguish components even when their bodies match."""
+    return _Shape((call, shape.key), Counter({(call, key): count for key, count in shape.copies.items()}),
+                  tuple(_qualified(item, call) for item in shape.items) if shape.items is not None else None)
 
 
 def _shape(node: object, symbols: dict[str, _Shape], modules: dict[str, _Shape]) -> _Shape:
@@ -81,9 +87,10 @@ def _shape(node: object, symbols: dict[str, _Shape], modules: dict[str, _Shape])
         return _Shape(("tuple", *(item.key for item in items)), items=items)
     if isinstance(node, ast.Index):
         target = _shape(node.target, symbols, modules)
-        if (isinstance(node.index, ast.Number) and -len(target.items) <= node.index.value < len(target.items)
+        items = target.items or ()
+        if (isinstance(node.index, ast.Number) and -len(items) <= node.index.value < len(items)
                 and node.index.value % 1 == 0):
-            return target.items[int(node.index.value)]
+            return items[int(node.index.value)]
         return _Shape(("index", target.key, _key(node.index)))
     if isinstance(node, ast.BinOp):
         left, right = _shape(node.left, symbols, modules), _shape(node.right, symbols, modules)
@@ -105,8 +112,7 @@ def _shape(node: object, symbols: dict[str, _Shape], modules: dict[str, _Shape])
                 copies = Counter({(node.name, tuple(arg.key for arg in args[:-1]), item): count for item, count in copies.items()})
             return _Shape(key, copies)
         if node.name in modules:
-            result = modules[node.name]
-            return _Shape(key, result.copies.copy(), result.items)
+            return _qualified(modules[node.name], key)
         return _Shape(key)
     if isinstance(node, ast.MethodCall):
         target = _shape(node.target, symbols, modules)
@@ -127,6 +133,7 @@ def check_program(program: ast.Program) -> StructureReport:
     emitted: set[tuple[str, int, str]] = set()
     literals: dict[float, list[int]] = defaultdict(list)
     shapes: dict[tuple, list[int]] = defaultdict(list)
+    remaining = 10000  # Bound symbolic expansion; never return a false pass at exhaustion.
 
     def emit(rule: str, line: int, message: str, fix: str) -> None:
         identity = (rule, line, message)
@@ -185,9 +192,15 @@ def check_program(program: ast.Program) -> StructureReport:
 
     def statements(nodes: list[object], bindings: dict[str, object], symbols: dict[str, _Shape],
                    modules: dict[str, _Shape]) -> _Shape | None:
+        nonlocal remaining
         returned = None
         for node in nodes:
             line = getattr(node, "line", 0) or 1
+            remaining -= 1
+            if remaining < 0:
+                emit("analysis-limit", line, "Symbolic source analysis exceeded its bounded expansion.",
+                     "Reduce the literal placement list or split the part into smaller composite modules before checking again.")
+                return returned
             if isinstance(node, ast.ModuleDef):
                 parameters = {p.name for p in node.params}
                 local = {key: value for key, value in bindings.items() if key not in parameters}
@@ -196,12 +209,33 @@ def check_program(program: ast.Program) -> StructureReport:
                 if result is not None:
                     modules[node.name] = result
                 continue
-            if isinstance(node, (ast.ForLoop, ast.While)):
-                statements(node.body, bindings, symbols, modules)
+            if isinstance(node, ast.ForLoop):
+                iterable = _shape(node.iterable, symbols, modules)
+                if iterable.items is None:
+                    emit("analysis-limit", line, "The placement loop's iterable is not statically known.",
+                         "Use a literal list of positions (or a named literal list) so copy structure can be checked.")
+                    continue
+                for item in iterable.items or ():
+                    symbols[node.variable] = item
+                    statements(node.body, bindings, symbols, modules)
+                    if remaining < 0:
+                        break
+                continue
+            if isinstance(node, ast.While):
+                emit("analysis-limit", line, "While-loop copy counts are not statically known.",
+                     "Use a bounded for loop over explicit positions for repeatable placement structure.")
                 continue
             if isinstance(node, ast.If):
-                statements(node.then_body, bindings, symbols, modules)
-                statements(node.else_body, bindings, symbols, modules)
+                condition = node.condition
+                visited: set[str] = set()
+                while isinstance(condition, ast.Identifier) and condition.name in bindings and condition.name not in visited:
+                    visited.add(condition.name)
+                    condition = bindings[condition.name]
+                if isinstance(condition, ast.Bool):
+                    statements(node.then_body if condition.value else node.else_body, bindings, symbols, modules)
+                else:
+                    statements(node.then_body, bindings, symbols, modules)
+                    statements(node.else_body, bindings, symbols, modules)
                 continue
             if (isinstance(node, ast.Command) and node.name in ("fillet", "chamfer") and node.args
                     and max(_shape(node.args[0], symbols, modules).copies.values(), default=0) >= 2):

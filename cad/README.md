@@ -8,6 +8,9 @@ a `g_*` process global or `clear_r`/`tap_r`/`press_r` fit helper in the radius,
 literal additions to diameter/2 radii, and finishes on assemblies of placed
 copies. Each finding names its repair. This source critic follows dimensional
 checks and does not prove dimensions, fit or runtime geometry validity.
+Literal position lists and aliases are analysed in order. Dynamic loop bounds
+or an exhausted analysis budget return an actionable `analysis-limit` finding,
+so an incomplete analysis never claims a pass.
 
 See [measurement record v0](docs/measurement-record.md) for nominal measured
 inputs and per-parameter uncertainty, and the
