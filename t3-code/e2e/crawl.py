@@ -403,10 +403,10 @@ class Crawl:
         result = self.wait(ready_answer)
         return result[0]
 
-    def tool(self, name: str, **arguments: object) -> dict[str, Any]:
-        result = object_result(self.command("tool", tool=name, arguments=arguments))
+    def tool(self, tool_name: str, **arguments: object) -> dict[str, Any]:
+        result = object_result(self.command("tool", tool=tool_name, arguments=arguments))
         if result.get("error") or result.get("success") is False:
-            raise RuntimeError("Minerva tool refused: " + name)
+            raise RuntimeError("Minerva tool refused: " + tool_name)
         return result
 
     def snapshot(self) -> dict[str, Any]:
