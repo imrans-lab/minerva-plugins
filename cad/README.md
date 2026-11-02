@@ -15,6 +15,10 @@ branch/loop-written bindings are invalidated rather than executed. Unresolved
 radius fit intent gives an actionable `analysis-limit`. Hole fit intent is
 checked where the hole cylinder is visible in the subtraction; module-returned
 voids and indexed subtrahends are not traced in v0.
+When a plain name is used as a subtrahend, every visible cylinder assigned into
+that name in its containing module/top-level scope is checked, including loop
+accumulations. No iteration is executed. Header/default expressions are also
+visited once for radius syntax.
 Finishing assembled copies is deferred until component provenance can be
 determined reliably.
 

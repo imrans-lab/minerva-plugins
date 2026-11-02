@@ -63,6 +63,46 @@ def _key(node: object) -> object:
 class _Binding:
     value: object
     scope: dict[str, _Binding]
+    producers_checked: bool = False
+
+
+def _source_cylinders(node: object) -> list[ast.FuncCall]:
+    if isinstance(node, ast.FuncCall):
+        if node.name == "cylinder":
+            return [node]
+        if node.name in ("translate", "rotate", "scale", "mirror") and node.args:
+            return _source_cylinders(node.args[-1])
+        return []
+    if isinstance(node, (ast.Index, ast.ModuleDef)):
+        return []
+    return [cylinder for child in _children(node) for cylinder in _source_cylinders(child)]
+
+
+def _assignments(nodes: list[object]) -> list[ast.Assignment]:
+    result: list[ast.Assignment] = []
+    for node in nodes:
+        if isinstance(node, ast.Assignment):
+            result.append(node)
+        elif isinstance(node, (ast.ForLoop, ast.While)):
+            result.extend(_assignments(node.body))
+        elif isinstance(node, ast.If):
+            result.extend(_assignments(node.then_body))
+            result.extend(_assignments(node.else_body))
+    return result
+
+
+def _subtrahend_names(node: object, negative: bool = False) -> set[str]:
+    if isinstance(node, (ast.Index, ast.ModuleDef)):
+        return set()
+    if isinstance(node, ast.Identifier):
+        return {node.name} if negative else set()
+    if isinstance(node, ast.BinOp) and node.op == "-":
+        return _subtrahend_names(node.left, negative) | _subtrahend_names(node.right, not negative)
+    if isinstance(node, ast.FuncCall):
+        if node.name in ("translate", "rotate", "scale", "mirror") and node.args:
+            return _subtrahend_names(node.args[-1], negative)
+        negative = False
+    return set().union(*(_subtrahend_names(child, negative) for child in _children(node)))
 
 
 def _used_names(node: object) -> set[str]:
@@ -167,6 +207,8 @@ def check_program(program: ast.Program) -> StructureReport:
         if isinstance(node, ast.Identifier):
             if node.name in bindings:
                 binding = bindings[node.name]
+                if negative and binding.value is None and binding.producers_checked:
+                    return  # Each visible cylinder producer was checked at its source assignment.
                 if negative and (binding.value is None or id(binding) in seen or len(seen) >= MAX_ALIAS_DEPTH):
                     emit("analysis-limit", line, "A branch/loop-written, cyclic or deep alias prevents deciding the subtracted shape.",
                          "Give the hole primitive and its radius explicit acyclic names outside conditional/loop assignments.")
@@ -209,11 +251,21 @@ def check_program(program: ast.Program) -> StructureReport:
         for child in _children(node):
             holes(child, bindings, line, negative, seen)
 
-    def statements(nodes: list[object], inherited: dict[str, _Binding]) -> None:
+    def statements(nodes: list[object], inherited: dict[str, _Binding],
+                   targets: set[str] | None = None, checked: set[str] | None = None) -> None:
         bindings = inherited.copy()
+        if targets is None:
+            targets = _subtrahend_names(nodes)
+            checked = {assignment.name for assignment in _assignments(nodes)
+                       if assignment.name in targets and _source_cylinders(assignment.value)}
+        if checked is None:
+            checked = set()
         for node in nodes:
             line = getattr(node, "line", 0) or 1
             if isinstance(node, ast.ModuleDef):
+                for parameter in node.params:
+                    if parameter.default is not None:
+                        holes(parameter.default, bindings, line)
                 local = {key: value for key, value in bindings.items() if key not in {p.name for p in node.params}}
                 statements(node.body, local)
                 continue
@@ -221,23 +273,30 @@ def check_program(program: ast.Program) -> StructureReport:
                 local = bindings.copy()
                 written = _written_names(node.body)
                 if isinstance(node, ast.ForLoop):
+                    holes(node.iterable, bindings, line)
                     written.add(node.variable)
+                else:
+                    holes(node.condition, bindings, line)
                 for name in written:
-                    local[name] = _Binding(None, {})
-                statements(node.body, local)
+                    local[name] = _Binding(None, {}, name in checked)
+                statements(node.body, local, targets, checked)
                 for name in written:
-                    bindings[name] = _Binding(None, {})
+                    bindings[name] = _Binding(None, {}, name in checked)
                 continue
             if isinstance(node, ast.If):
                 # Each syntactic branch has its own bindings. Neither runs.
-                statements(node.then_body, bindings)
-                statements(node.else_body, bindings)
+                holes(node.condition, bindings, line)
+                statements(node.then_body, bindings, targets, checked)
+                statements(node.else_body, bindings, targets, checked)
                 for name in _written_names(node.then_body) | _written_names(node.else_body):
-                    bindings[name] = _Binding(None, {})
+                    bindings[name] = _Binding(None, {}, name in checked)
                 continue
             value = node.value if isinstance(node, (ast.Assignment, ast.Return)) else node
             holes(value, bindings, line)
             if isinstance(node, ast.Assignment):
+                if node.name in targets:
+                    for cylinder in _source_cylinders(value):
+                        holes(cylinder, bindings, line, True)
                 # Retain only the RHS dependencies at assignment time. Sharing
                 # immutable binding records avoids copying the whole environment.
                 scope = {name: bindings[name] for name in _used_names(value) if name in bindings}
