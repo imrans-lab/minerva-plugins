@@ -97,7 +97,7 @@ def _subtrahend_names(node: object, negative: bool = False) -> set[str]:
     if isinstance(node, ast.Identifier):
         return {node.name} if negative else set()
     if isinstance(node, ast.BinOp) and node.op == "-":
-        return _subtrahend_names(node.left, negative) | _subtrahend_names(node.right, not negative)
+        return _subtrahend_names(node.left, negative) | _subtrahend_names(node.right, True)
     if isinstance(node, ast.FuncCall):
         if node.name in ("translate", "rotate", "scale", "mirror") and node.args:
             return _subtrahend_names(node.args[-1], negative)
