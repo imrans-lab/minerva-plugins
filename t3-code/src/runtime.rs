@@ -93,6 +93,7 @@ pub fn disable_entry(name: &str) -> Result<String> {
 
 pub struct Runtime {
     pub receipt: Receipt,
+    pub t3_binary: String,
     pub client: Client,
     bearer: String,
     pub capabilities: Value,
@@ -157,8 +158,13 @@ impl RuntimeCache {
             .check_catalog(&client.rpc("tools/list", json!({}))?)
             .map_err(|e| Fault::held("contract_mismatch", e))?;
         let capabilities = client.tool("orchestrator_capabilities", json!({}))?;
+        let t3_binary = crate::probe::resolve_executable(&setting("t3_binary")?)
+            .map_err(|e| Fault::held("prerequisites", e))?
+            .to_string_lossy()
+            .into_owned();
         let runtime = Arc::new(Runtime {
             receipt,
+            t3_binary,
             client,
             bearer,
             capabilities,
