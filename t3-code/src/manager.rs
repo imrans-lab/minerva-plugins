@@ -79,6 +79,7 @@ struct View {
 }
 enum Input {
     Renew(mpsc::Sender<Result<()>>),
+    CancelBarrier(mpsc::Sender<Result<bool>>),
     Stop,
 }
 pub struct Manager {
@@ -259,11 +260,21 @@ impl Manager {
         &self.settings
     }
 
-    pub fn can_cancel(&self) -> Result<bool> {
-        let view = self.view()?;
-        Ok(matches!(view.state, State::Ready | State::Degraded)
-            && view.receipt_current
-            && !view.renewing)
+    pub fn wait_to_cancel(&self) -> Result<bool> {
+        if !matches!(self.view()?.state, State::Ready | State::Degraded) {
+            return Ok(false);
+        }
+        let (send, receive) = mpsc::channel();
+        // The same supervisor serializes renewal and this barrier. A Stop for
+        // another chat therefore waits for fresh auth without issuing auth or
+        // relying on a later Generate for the stopped chat to deliver it.
+        self.send.send(Input::CancelBarrier(send)).map_err(|_| {
+            Fault::held(
+                "runtime_crashed",
+                "Stop remains recorded; the runtime supervisor stopped before interruption.",
+            )
+        })?;
+        receive.recv_timeout(Duration::from_secs(90)).map_err(|_|Fault::held("auth_required","Stop remains recorded; waiting for auth renewal timed out. Interruption was not confirmed."))?
     }
 
     pub fn observe_version(&self, probe: &Value, contract: &Contract) -> Result<()> {
@@ -610,6 +621,22 @@ impl Manager {
                         contract,
                     );
                     if reply.send(result).is_err() { /* Caller timed out; status retains the outcome. */
+                    }
+                }
+                Ok(Input::CancelBarrier(reply)) => {
+                    let view = self.view()?;
+                    let result = if matches!(view.state, State::Ready | State::Degraded)
+                        && view.receipt_current
+                        && !view.renewing
+                    {
+                        Ok(true)
+                    } else if view.state == State::Degraded {
+                        Err(Fault::held("auth_required","Stop remains recorded; credential renewal failed, so interruption was not confirmed."))
+                    } else {
+                        Ok(false)
+                    };
+                    drop(view);
+                    if reply.send(result).is_err() { /* Caller ended; its durable Stop intent remains. */
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}

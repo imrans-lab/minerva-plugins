@@ -220,7 +220,7 @@ impl Files {
                 .open(&owner)?
         } else {
             if fs::read_dir(&base)?.next().is_some() {
-                return Err(Fault::held("base_not_owned","T3 base is nonempty and has no plugin ownership receipt. Select an empty private directory; existing T3 data will not be adopted or rewritten."));
+                return Err(Fault::held("base_not_owned","T3 base is nonempty and its ownership marker is missing. This plugin cannot recover existing chat bindings without the original identity marker. Select an empty private directory for new chats; existing T3 data is preserved."));
             }
             let mut lock = exclusive(&owner)?;
             lock.write_all(&serde_json::to_vec(&identity)?)?;

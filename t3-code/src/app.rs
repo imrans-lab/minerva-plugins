@@ -157,21 +157,19 @@ impl App {
             }
             "minerva_t3_code_cancel" => {
                 engine.record_cancel(args)?;
-                let manager = self.manager().ok();
-                if !manager
-                    .as_ref()
-                    .is_some_and(|manager| manager.can_cancel().unwrap_or(false))
-                {
+                let manager = match self.manager() {
+                    Ok(manager) => manager,
+                    Err(_) => {
+                        return Ok(
+                            json!({"cancelled":false,"state":"runtime_unavailable","operation_token":args["operation_token"]}),
+                        )
+                    }
+                };
+                if !manager.wait_to_cancel()? {
                     return Ok(
                         json!({"cancelled":false,"state":"runtime_unavailable","operation_token":args["operation_token"]}),
                     );
                 }
-                let manager = manager.ok_or_else(|| {
-                    Fault::held(
-                        "runtime_not_started",
-                        "Runtime is unavailable; Stop remains durably recorded.",
-                    )
-                })?;
                 let result = engine.cancel_recorded(manager.owned_settings(), &self.contract, args);
                 if result
                     .as_ref()
