@@ -111,7 +111,8 @@ func _setup() -> void:
         return
     manager.call("connect_minerva_server")
     server = manager.get("minerva_server")
-    if server == null or int(manager.call("start_http_server", int(config.port))) != OK:
+    if server == null or (not bool(manager.call("is_http_server_running"))
+            and int(manager.call("start_http_server", int(config.port))) != OK):
         _write("stop", {"stage": "mcp_not_ready"})
         return
     var http: Object = manager.get("http_server")
