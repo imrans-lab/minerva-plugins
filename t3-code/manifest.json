@@ -107,7 +107,7 @@
       "type": "string",
       "label": "Node executable",
       "default": "node",
-      "help": "T3 requires ^22.16 || ^23.11 || >=24.10. The owner chooses any installation or upgrade."
+      "help": "Host Node for child CLI shebangs. The official native T3 runtime bundles Node; its source-engine version range is informational and is not imposed on this executable."
     },
     {
       "key": "codex_binary",

@@ -25,7 +25,7 @@ Preferences has a **T3 Code** tab. Paths name existing executables; they are pas
 | Setting | Meaning |
 | --- | --- |
 | `t3_binary` | Existing native executable from a completed official T3 v0.1.6 CLI installation; launcher scripts are refused without execution. |
-| `node_binary` | Node satisfying `^22.16 || ^23.11 || >=24.10`. |
+| `node_binary` | Host Node for child CLI shebangs. Native T3 bundles Node; its source-engine range is reported for information and does not gate this executable. |
 | `codex_binary` | Existing Codex CLI. |
 | `codex_home` | Explicit owner-approved login home, default `~/.codex`, used in place. Credentials are never copied, moved or deleted. |
 | `t3_base_dir` | Empty private directory on first start, then retained plugin-owned T3 state; default `{private}/t3`. An unrelated existing T3 base is refused. |

@@ -350,15 +350,8 @@ pub fn inspect(settings: &Settings, contract: &Contract) -> Result<Value, String
     for (name, path) in [("node", &node), ("codex", &codex)] {
         match version(path) {
             Ok(found) => {
-                if name == "node"
-                    && (!found.pre.is_empty()
-                        || !((found.major == 22 && found.minor >= 16)
-                            || (found.major == 23 && found.minor >= 11)
-                            || found.major > 24
-                            || (found.major == 24 && found.minor >= 10)))
-                {
-                    errors.push(format!("Node {found} is below T3's supported engine {}. Ask the owner to choose an appropriate Node installation.", contract.node_engine));
-                }
+                // Official native T3 contains Node. The selected host Node
+                // serves child CLI shebangs, not the T3 source-build engine.
                 versions.insert(name, found.to_string());
             }
             Err(error) => errors.push(error),
@@ -373,6 +366,8 @@ pub fn inspect(settings: &Settings, contract: &Contract) -> Result<Value, String
         "endpoint": "", "base_dir": base_dir, "codex_home": codex_home,
         "workspace": settings.workspace, "t3_token_file": token_file,
         "t3_executable": t3_executable, "t3_version_source": "official install-complete marker; T3 not executed",
+        "t3_source_node_engine": contract.node_engine,
+        "host_node_role": "child CLI shebangs; native T3 uses its bundled Node, so the T3 source-engine range is informational",
         "prerequisites_ok": errors.is_empty(), "errors": errors,
         "compatibility": contract.compatibility(json!(versions)),
         "runtime_message": "Phase B is pending the owner's T3 installation decision. No T3 server or agent has been started.",
