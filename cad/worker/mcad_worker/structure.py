@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from typing import TypedDict
 
 from mcad import ast_nodes as ast
 from mcad.lexer import LexError
 from mcad.parser import ParseError, parse
+
+MAX_ALIAS_DEPTH = 32
 
 
 class Finding(TypedDict):
@@ -57,13 +59,44 @@ def _key(node: object) -> object:
     return node
 
 
-def _fit_intent(node: object, bindings: dict[str, object], seen: frozenset[str] = frozenset()) -> bool | None:
+@dataclass(frozen=True)
+class _Binding:
+    value: object
+    scope: dict[str, _Binding]
+
+
+def _used_names(node: object) -> set[str]:
+    if isinstance(node, ast.Identifier):
+        return {node.name}
+    return set().union(*(_used_names(child) for child in _children(node)))
+
+
+def _written_names(nodes: list[object]) -> set[str]:
+    names: set[str] = set()
+    for node in nodes:
+        if isinstance(node, ast.Assignment):
+            names.add(node.name)
+        elif isinstance(node, ast.ForLoop):
+            names.add(node.variable)
+            names.update(_written_names(node.body))
+        elif isinstance(node, ast.While):
+            names.update(_written_names(node.body))
+        elif isinstance(node, ast.If):
+            names.update(_written_names(node.then_body))
+            names.update(_written_names(node.else_body))
+    return names
+
+
+def _fit_intent(node: object, bindings: dict[str, _Binding], seen: frozenset[int] = frozenset()) -> bool | None:
+    if node is None or isinstance(node, ast.Index) or len(seen) >= MAX_ALIAS_DEPTH:
+        return None
     if isinstance(node, ast.Identifier):
         if node.name.startswith("g_"):
             return True
-        if node.name not in bindings or node.name in seen:
+        if node.name not in bindings or id(bindings[node.name]) in seen:
             return None
-        return _fit_intent(bindings[node.name], bindings, seen | {node.name})
+        binding = bindings[node.name]
+        return _fit_intent(binding.value, binding.scope, seen | {id(binding)})
     if isinstance(node, ast.FuncCall) and node.name in ("clear_r", "tap_r", "press_r"):
         return True
     decisions = [_fit_intent(child, bindings, seen) for child in _children(node)]
@@ -74,16 +107,25 @@ def _fit_intent(node: object, bindings: dict[str, object], seen: frozenset[str] 
     return False
 
 
-def _allowance(node: object, bindings: dict[str, object], seen: frozenset[str] = frozenset()) -> bool:
-    if isinstance(node, ast.Identifier) and node.name in bindings and node.name not in seen:
-        return _allowance(bindings[node.name], bindings, seen | {node.name})
+def _allowance(node: object, bindings: dict[str, _Binding], seen: frozenset[int] = frozenset()) -> bool | None:
+    if node is None or isinstance(node, ast.Index) or len(seen) >= MAX_ALIAS_DEPTH:
+        return None
+    if isinstance(node, ast.Identifier) and node.name in bindings:
+        binding = bindings[node.name]
+        if id(binding) in seen:
+            return None
+        return _allowance(binding.value, binding.scope, seen | {id(binding)})
     if isinstance(node, ast.BinOp) and node.op == "+":
         division, value = node.left, node.right
         if (isinstance(division, ast.BinOp) and division.op == "/"
                 and isinstance(division.right, ast.Number) and division.right.value == 2
-                and isinstance(value, ast.Number)):
+                and (isinstance(value, ast.Number) or (isinstance(value, ast.UnaryOp)
+                     and value.op == "-" and isinstance(value.operand, ast.Number)))):
             return True
-    return any(_allowance(child, bindings, seen) for child in _children(node))
+    decisions = [_allowance(child, bindings, seen) for child in _children(node)]
+    if any(decision is True for decision in decisions):
+        return True
+    return None if any(decision is None for decision in decisions) else False
 
 
 def check_program(program: ast.Program) -> StructureReport:
@@ -110,15 +152,19 @@ def check_program(program: ast.Program) -> StructureReport:
         for child in _children(node):
             syntax(child, line, structured)
 
-    def holes(node: object, bindings: dict[str, object], line: int, negative: bool = False,
-              seen: frozenset[str] = frozenset()) -> None:
+    def holes(node: object, bindings: dict[str, _Binding], line: int, negative: bool = False,
+              seen: frozenset[int] = frozenset()) -> None:
         line = getattr(node, "line", 0) or line
+        if isinstance(node, ast.Index):
+            return  # Indexed subtrahends are outside the v0 cylinder rule.
         if isinstance(node, ast.Identifier):
-            if node.name in bindings and node.name not in seen:
-                holes(bindings[node.name], bindings, line, negative, seen | {node.name})
-            elif negative and node.name in seen:
-                emit("analysis-limit", line, "A cyclic binding prevents deciding the subtracted shape.",
-                     "Give the hole primitive and its radius explicit acyclic names with a g_* process global or fit helper.")
+            if node.name in bindings:
+                binding = bindings[node.name]
+                if negative and (binding.value is None or id(binding) in seen or len(seen) >= MAX_ALIAS_DEPTH):
+                    emit("analysis-limit", line, "A branch/loop-written, cyclic or deep alias prevents deciding the subtracted shape.",
+                         "Give the hole primitive and its radius explicit acyclic names outside conditional/loop assignments.")
+                elif id(binding) not in seen and len(seen) < MAX_ALIAS_DEPTH:
+                    holes(binding.value, binding.scope, line, negative, seen | {id(binding)})
             return
         if isinstance(node, ast.BinOp) and node.op == "-":
             holes(node.left, bindings, line, negative, seen)
@@ -128,9 +174,13 @@ def check_program(program: ast.Program) -> StructureReport:
             radii = [node.kwargs[key] for key in ("r", "r1", "r2") if key in node.kwargs]
             if len(node.args) > 1:
                 radii.append(node.args[1])
-            if any(_allowance(radius, bindings) for radius in radii):
+            allowances = [_allowance(radius, bindings) for radius in radii]
+            if any(decision is True for decision in allowances):
                 emit("tolerance-literal", line, "Radius adds a literal allowance to a diameter / 2.",
                      "Replace the added allowance with g_xyTolerance (a radial process allowance).")
+            if any(decision is None for decision in allowances):
+                emit("analysis-limit", line, "An unresolved radius prevents deciding a literal allowance.",
+                     "Write the radius directly or use an acyclic plain-name alias of depth below 32.")
             if negative:
                 decisions = [_fit_intent(radius, bindings) for radius in radii]
                 if any(decision is False for decision in decisions):
@@ -139,10 +189,15 @@ def check_program(program: ast.Program) -> StructureReport:
                 if any(decision is None for decision in decisions):
                     emit("analysis-limit", line, "An unresolved radius prevents deciding the hole's fit intent.",
                          "State fit intent in the radius expression with a g_* process global or clear_r/tap_r/press_r.")
+            return
+        if isinstance(node, ast.FuncCall):
+            if node.name in ("translate", "rotate") and node.args:
+                holes(node.args[-1], bindings, line, negative, seen)
+            return  # Module-call subtrahends are outside the v0 rule.
         for child in _children(node):
             holes(child, bindings, line, negative, seen)
 
-    def statements(nodes: list[object], inherited: dict[str, object]) -> None:
+    def statements(nodes: list[object], inherited: dict[str, _Binding]) -> None:
         bindings = inherited.copy()
         for node in nodes:
             line = getattr(node, "line", 0) or 1
@@ -155,16 +210,26 @@ def check_program(program: ast.Program) -> StructureReport:
                 if isinstance(node, ast.ForLoop):
                     local.pop(node.variable, None)
                 statements(node.body, local)
+                written = _written_names(node.body)
+                if isinstance(node, ast.ForLoop):
+                    written.add(node.variable)
+                for name in written:
+                    bindings[name] = _Binding(None, {})
                 continue
             if isinstance(node, ast.If):
                 # Each syntactic branch has its own bindings. Neither runs.
                 statements(node.then_body, bindings)
                 statements(node.else_body, bindings)
+                for name in _written_names(node.then_body) | _written_names(node.else_body):
+                    bindings[name] = _Binding(None, {})
                 continue
             value = node.value if isinstance(node, (ast.Assignment, ast.Return)) else node
             holes(value, bindings, line)
             if isinstance(node, ast.Assignment):
-                bindings[node.name] = value
+                # Retain only the RHS dependencies at assignment time. Sharing
+                # immutable binding records avoids copying the whole environment.
+                scope = {name: bindings[name] for name in _used_names(value) if name in bindings}
+                bindings[node.name] = _Binding(value, scope)
 
     syntax(program)
     statements(program.statements, {})

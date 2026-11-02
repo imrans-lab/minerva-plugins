@@ -10,7 +10,11 @@ checks and does not prove dimensions, fit or runtime geometry validity.
 The four v0 rules inspect source syntax once; modules, loops and branches are
 not expanded. Repeated shapes compare primitive-call subtrees with translation
 and rotation wrappers stripped. Simple aliases are followed for subtracted
-cylinders; unresolved radius fit intent gives an actionable `analysis-limit`.
+cylinders with assignment-time dependencies (maximum alias depth 32);
+branch/loop-written bindings are invalidated rather than executed. Unresolved
+radius fit intent gives an actionable `analysis-limit`. Hole fit intent is
+checked where the hole cylinder is visible in the subtraction; module-returned
+voids and indexed subtrahends are not traced in v0.
 Finishing assembled copies is deferred until component provenance can be
 determined reliably.
 
