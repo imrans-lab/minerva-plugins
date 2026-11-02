@@ -47,7 +47,16 @@ pub fn select_project(runtime: &Runtime, workspace: &str) -> Result<(String, Val
     let project = if let Some(project) = found.pop() {
         project
     } else {
-        runtime.client.tool("t3_project_create",json!({"title":"Minerva","workspaceRoot":workspace,"createWorkspaceRootIfMissing":false,"defaultModelSelection":fallback}))?
+        // The public CLI issuer caps this client at approval-required. T3
+        // requires full access to register projects, so the owner does it once.
+        return Err(Fault::held(
+            "project_unregistered",
+            format!(
+                "No prompt was sent. Register this saved folder in T3 once, then retry:\nt3 project add --base-dir '{}' '{}'",
+                runtime.receipt.base_dir.replace('\'', "'\"'\"'"),
+                workspace.replace('\'', "'\"'\"'")
+            ),
+        ));
     };
     let selected = &project["defaultModelSelection"];
     let selection = if selected.is_null() {
