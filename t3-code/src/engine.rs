@@ -110,6 +110,30 @@ impl Engine {
         args: &Value,
     ) -> Result<Value> {
         let mut result = self.generate_inner(peer, settings, contract, args);
+        if result
+            .as_ref()
+            .is_err_and(|fault| fault.code == "outcome_unknown")
+        {
+            // Losing a reconciliation read cannot replace this control
+            // operation's durable pending reply with a terminal host error.
+            // Read only: another Generate may now own the chat gate.
+            if let Some(id) = args["chat_id"].as_str() {
+                if let Some(reply) = self.slot(id)?.chat()?.and_then(|chat| {
+                    chat.operations
+                        .into_iter()
+                        .find(|op| {
+                            op.token == args["operation_token"].as_str().unwrap_or("")
+                                && op.tool == "t3_pending_request"
+                                && op.attempted
+                                && !op.accepted
+                                && !op.refused
+                        })
+                        .and_then(|op| op.reply)
+                }) {
+                    result = Ok(reply);
+                }
+            }
+        }
         if let Err(fault) = &mut result {
             // An I/O/JSON error after a submitted request must never tell the
             // host's notify ledger that the original message was held. A new
@@ -351,17 +375,6 @@ impl Engine {
         };
         if let Err(fault) = self.submit(&slot, &mut chat, index, &runtime) {
             let operation = &mut chat.operations[index];
-            if operation.tool == "t3_pending_request"
-                && operation.attempted
-                && !operation.accepted
-                && !operation.refused
-                && fault.code == "outcome_unknown"
-            {
-                let reply = pending(token, "outcome_unknown");
-                operation.reply = Some(reply.clone());
-                slot.publish(&self.store, &chat)?;
-                return Ok(reply);
-            }
             if operation.tool == "t3_pending_request" && !operation.attempted && !operation.refused
             {
                 if let Some(question) = operation.question_backup.clone() {
