@@ -205,17 +205,6 @@ func _snapshot(chat_id: String) -> Dictionary:
 func _serve(request: Dictionary) -> void:
     var result: Dictionary = {}
     match str(request.action):
-        "settings":
-            var store: Object = singleton.get("plugin_settings_store")
-            result = {"ok": true}
-            for key: String in request.get("values", {}):
-                if not config.settings.has(key):
-                    result = {"error": "undeclared_setting", "key": key}
-                    break
-                var applied: Dictionary = store.call("set_value", "plugin:" + str(config.plugin_id), key, request["values"][key])
-                if not applied.get("success", false):
-                    result = {"error": "invalid_plugin_setting", "key": key}
-                    break
         "install":
             result = await plugins.call("install_plugin", str(config.manifest), true)
             if result.get("ok", false):
@@ -677,6 +666,16 @@ class Crawl:
                 return
 
         writer = threading.Thread(target=feed_fifo, daemon=True) if prefill else None
+
+        def settle_writer() -> None:
+            stop_writer.set()
+            if writer is not None:
+                writer.join(1)
+                if writer.is_alive():
+                    raise Prerequisite("Controller FIFO writer did not stop")
+            if writer_errors:
+                raise Prerequisite("Controller FIFO writer failed")
+
         if writer is not None:
             writer.start()
         try:
@@ -702,13 +701,12 @@ class Crawl:
             current_event = (event_index == reply_index and reply_index >= self.history_start) or (
                 event_index == -1 and reply_index < self.history_start)
             host_cancelled = current_event and snapshot["turn_event"].get("outcome") == "cancelled"
+            settle_writer()
             self.emit("R4", pressed and host_cancelled and state in {"cancelled", "interrupted"},
                       backend_command_started=True, stop_button_pressed=pressed, backend_terminal=state,
                       host_cancelled=host_cancelled, termination=snapshot["termination"])
         finally:
-            stop_writer.set()
-            if writer is not None:
-                writer.join(1)
+            settle_writer()
 
     def final_result(self) -> None:
         nonce = self.config["nonce"]
