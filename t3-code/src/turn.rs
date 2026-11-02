@@ -52,7 +52,8 @@ pub fn select_project(runtime: &Runtime, workspace: &str) -> Result<(String, Val
         return Err(Fault::held(
             "project_unregistered",
             format!(
-                "No prompt was sent. Register this saved folder in T3 once, then retry:\nt3 project add --base-dir '{}' '{}'",
+                "No prompt was sent. Register this saved folder in T3 once, then retry:\n'{}' project add --base-dir '{}' '{}'",
+                runtime.t3_binary.replace('\'', "'\"'\"'"),
                 runtime.receipt.base_dir.replace('\'', "'\"'\"'"),
                 workspace.replace('\'', "'\"'\"'")
             ),
