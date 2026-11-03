@@ -2,6 +2,7 @@
 
 use crate::{
     fault::{string, Fault, Result},
+    launch,
     runtime::Runtime,
     snapshot::Snapshot,
     storage::{Chat, Operation},
@@ -9,7 +10,7 @@ use crate::{
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
-pub fn select_project(runtime: &Runtime, workspace: &str) -> Result<(String, Value)> {
+pub fn codex_provider(runtime: &Runtime) -> Result<&Value> {
     let providers = runtime.capabilities["providers"]
         .as_array()
         .ok_or_else(|| Fault::new("contract_mismatch", "T3 capabilities omitted providers."))?;
@@ -17,14 +18,21 @@ pub fn select_project(runtime: &Runtime, workspace: &str) -> Result<(String, Val
         .iter()
         .filter(|p| p["driverKind"] == "codex")
         .collect();
-    let provider = if let Some(default) = codex.iter().find(|p| p["providerInstanceId"] == "codex")
-    {
-        *default
+    if let Some(default) = codex.iter().find(|p| p["providerInstanceId"] == "codex") {
+        Ok(*default)
     } else if codex.len() == 1 {
-        codex[0]
+        Ok(codex[0])
     } else {
-        return Err(Fault::held("codex_unavailable", "T3 has no unambiguous Codex provider. Configure the existing Codex login in T3; no other provider or billing mode is selected."));
-    };
+        Err(Fault::held("codex_unavailable", "T3 has no unambiguous Codex provider. Configure the existing Codex login in T3; no other provider or billing mode is selected."))
+    }
+}
+
+pub fn select_project(
+    runtime: &Runtime,
+    workspace: &str,
+    explicit: Option<&Value>,
+) -> Result<(String, Value)> {
+    let provider = codex_provider(runtime)?;
     let instance = string(provider, "providerInstanceId")?;
     let model = provider["models"]
         .as_array()
@@ -37,14 +45,7 @@ pub fn select_project(runtime: &Runtime, workspace: &str) -> Result<(String, Val
             )
         })?;
     let fallback = json!({"instanceId":instance,"model":model});
-    let mut found = find_projects(runtime, "workspaceRoot", workspace)?;
-    if found.len() > 1 {
-        return Err(Fault::held(
-            "project_ambiguous",
-            "Multiple T3 projects share this folder. Resolve them in T3 before starting a chat.",
-        ));
-    }
-    let project = if let Some(project) = found.pop() {
+    let project = if let Some(project) = project(runtime, workspace)? {
         project
     } else {
         // The public CLI issuer caps this client at approval-required. T3
@@ -59,23 +60,44 @@ pub fn select_project(runtime: &Runtime, workspace: &str) -> Result<(String, Val
             ),
         ));
     };
+    if let Some(selection) = explicit {
+        launch::validate(runtime, selection)?;
+        return Ok((string(&project, "id")?.to_owned(), selection.clone()));
+    }
     let selected = &project["defaultModelSelection"];
     let selection = if selected.is_null() {
         fallback
     } else {
         let id = string(selected, "instanceId")?;
         let selected_model = string(selected, "model")?;
-        if !codex.iter().any(|p| {
-            p["providerInstanceId"] == id
-                && p["models"]
-                    .as_array()
-                    .is_some_and(|models| models.iter().any(|m| m["id"] == selected_model))
-        }) {
+        if !runtime.capabilities["providers"]
+            .as_array()
+            .is_some_and(|providers| {
+                providers.iter().any(|p| {
+                    p["driverKind"] == "codex"
+                        && p["providerInstanceId"] == id
+                        && p["models"]
+                            .as_array()
+                            .is_some_and(|models| models.iter().any(|m| m["id"] == selected_model))
+                })
+            })
+        {
             return Err(Fault::held("codex_unavailable","This T3 project's default selection is not an available Codex model. Choose its default in T3; the plugin will not replace it."));
         }
         selected.clone()
     };
     Ok((string(&project, "id")?.to_owned(), selection))
+}
+
+pub fn project(runtime: &Runtime, workspace: &str) -> Result<Option<Value>> {
+    let mut found = find_projects(runtime, "workspaceRoot", workspace)?;
+    if found.len() > 1 {
+        return Err(Fault::held(
+            "project_ambiguous",
+            "Multiple T3 projects share this folder. Resolve them in T3 before starting a chat.",
+        ));
+    }
+    Ok(found.pop())
 }
 
 fn find_projects(runtime: &Runtime, field: &str, value: &str) -> Result<Vec<Value>> {

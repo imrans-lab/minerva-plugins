@@ -81,5 +81,30 @@
     "t3_thread_wait": "packages/contracts/src/orchestratorMcp.ts:521-532",
     "t3_thread_interrupt": "packages/contracts/src/orchestratorMcp.ts:546-558",
     "t3_pending_request": "apps/server/src/mcp/toolkits/thread/tools.ts:127-145; handlers.ts:224-261 (user_input only)"
+  },
+  "session_selection": {
+    "input": "t3_thread_launch.modelSelection.options",
+    "encoding": [
+      {
+        "id": "reasoningEffort",
+        "value": "advertised string choice"
+      }
+    ],
+    "capability_fields": [
+      "providers[].providerInstanceId",
+      "providers[].driverKind",
+      "providers[].models[].id",
+      "providers[].models[].options[].id",
+      "providers[].models[].options[].values",
+      "providers[].models[].options[].default (optional)"
+    ],
+    "missing_effort_descriptors": "unverified; no explicit effort accepted",
+    "sources": [
+      "packages/contracts/src/modelSelection.ts:9-13",
+      "packages/contracts/src/model.ts:49-52",
+      "packages/contracts/src/orchestratorMcp.ts:582-602",
+      "apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts:761-765"
+    ],
+    "validation": "Nested choices validated at launch; catalog probe still checks the unchanged top-level eight-tool input surface."
   }
 }

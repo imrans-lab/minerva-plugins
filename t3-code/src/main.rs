@@ -3,6 +3,7 @@ mod contract;
 mod engine;
 mod fault;
 mod inventory;
+mod launch;
 mod manager;
 mod mcp;
 mod owned_process;

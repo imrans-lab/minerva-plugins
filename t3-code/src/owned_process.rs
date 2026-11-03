@@ -229,7 +229,49 @@ impl Launch<'_> {
         timeout: Duration,
         cancel: Option<&AtomicBool>,
     ) -> Result<String> {
-        let mut process = self.spawn((Stdio::null(), Stdio::piped(), Stdio::null()))?;
+        self.capture_inner(maximum, timeout, cancel, false)
+    }
+
+    /// Assert the fixed public project-add shape before enabling diagnostics:
+    /// no bearer, auth command or credential argument can enter this path.
+    /// Issuer/revoke keep using capture(), with failure output hidden.
+    pub fn capture_project_registration(
+        self,
+        maximum: usize,
+        timeout: Duration,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<String> {
+        if self.args.len() != 5
+            || self.args[0] != "project"
+            || self.args[1] != "add"
+            || self.args[2] != "--base-dir"
+            || std::path::Path::new(&self.args[3]) != self.directory
+            || !std::path::Path::new(&self.args[4]).is_absolute()
+        {
+            return Err(Fault::held(
+                "registration_command",
+                "Only the owned public project-add command may expose CLI diagnostics.",
+            ));
+        }
+        self.capture_inner(maximum, timeout, cancel, true)
+    }
+
+    fn capture_inner(
+        self,
+        maximum: usize,
+        timeout: Duration,
+        cancel: Option<&AtomicBool>,
+        diagnostics: bool,
+    ) -> Result<String> {
+        let mut process = self.spawn((
+            Stdio::null(),
+            Stdio::piped(),
+            if diagnostics {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            },
+        ))?;
         let mut output = process
             .child
             .stdout
@@ -237,6 +279,13 @@ impl Launch<'_> {
             .ok_or_else(|| Fault::new("process_output", "Owned command has no output pipe."))?;
         probe::nonblocking(&output)
             .map_err(|_| Fault::new("process_output", "Cannot observe owned command output."))?;
+        let mut errors = process.child.stderr.take();
+        if let Some(errors) = &errors {
+            probe::nonblocking(errors).map_err(|_| {
+                Fault::new("process_output", "Cannot observe public CLI diagnostics.")
+            })?;
+        }
+        let mut error_bytes = Vec::new();
         let mut bytes = Vec::new();
         let deadline = Instant::now() + timeout;
         loop {
@@ -252,6 +301,20 @@ impl Launch<'_> {
                     "Owned command exceeded its output bound or failed to return UTF-8.",
                 )
             })?;
+            if let Some(errors) = &mut errors {
+                probe::drain(errors, &mut error_bytes, maximum).map_err(|_| {
+                    Fault::new(
+                        "process_output",
+                        "Public CLI diagnostics exceeded their bound.",
+                    )
+                })?;
+            }
+            if bytes.len().saturating_add(error_bytes.len()) > maximum {
+                return Err(Fault::new(
+                    "process_output",
+                    "Public CLI output exceeded its combined bound.",
+                ));
+            }
             if process.exited()? {
                 break;
             }
@@ -265,7 +328,31 @@ impl Launch<'_> {
         }
         probe::drain(&mut output, &mut bytes, maximum)
             .map_err(|_| Fault::new("process_output", "Owned command output exceeds its bound."))?;
+        if let Some(errors) = &mut errors {
+            probe::drain(errors, &mut error_bytes, maximum).map_err(|_| {
+                Fault::new(
+                    "process_output",
+                    "Public CLI diagnostics exceeded their bound.",
+                )
+            })?;
+        }
+        if bytes.len().saturating_add(error_bytes.len()) > maximum {
+            return Err(Fault::new(
+                "process_output",
+                "Public CLI output exceeded its combined bound.",
+            ));
+        }
         let status = process.stop()?;
+        if !status.success() && diagnostics {
+            return Err(Fault::held(
+                "project_registration_failed",
+                format!(
+                    "T3 project registration failed ({status}):\n{}\n{}",
+                    String::from_utf8_lossy(&bytes),
+                    String::from_utf8_lossy(&error_bytes)
+                ),
+            ));
+        }
         if !status.success() {
             return Err(Fault::new("process_failed",format!("Owned public CLI command failed ({status}); output is kept out of diagnostics.")));
         }
