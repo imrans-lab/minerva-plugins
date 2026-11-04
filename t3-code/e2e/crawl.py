@@ -15,8 +15,17 @@ Acceptance requires --owner-attended and --config CONFIG.json. CONFIG names:
   t3_token_file: external MCP-client credential produced by T1's auth setup
   t3_endpoint: private loopback /mcp URL, or omit to use public status result
 Optional: plugin_id, entry_id, generate_tool, status_tool, deadline_sec,
-  launch_paid_turns: paid Codex turns D3/D4 may spend (default 0). Each
-  spends at most one; without budget the row reports not_run, never pass.
+  paid_turns: ceiling on Codex sends for the whole run (default 0), granted
+  in row order (D3, D4, then R1-R6), one per paid row. A row without budget
+  reports not_run/no_budget, never pass; at 0 no Codex send happens at all.
+  send() refuses any send without a reserved turn. (launch_paid_turns is
+  retired and refused.)
+
+The fixture enables Minerva's Local (Ollama) provider in the copied profile's
+config_file.cfg so D5 has an ordinary zero-cost core model; no key, no
+generation. Launch rows poll status while the plugin reports
+capabilities_pending (bounded) and report blocked_pending with the elapsed
+seconds if models never appear; pending is never treated as ready.
 
 The approved profile must give the runtime its existing owner-approved provider
 login, exact binary/home, explicit approval-required mode and one read-only
@@ -92,6 +101,10 @@ RED = {
     "D5": "W1 entries appended to the default picker set, or the bound chat reads (offline)/other text",
     "D6": "chat_discarder not called on a launch error: the session chat remains listed",
 }
+# D3-D6 also go red if a capabilities_pending catalog is treated as ready.
+for _row in ("D3", "D4", "D5", "D6"):
+    RED[_row] += "; or capabilities_pending treated as ready instead of blocked_pending"
+
 # Owner-only steps; the crawl never marks these green.
 HITL = {
     "D1": "Release build, saved project, T3 Code running: click the passthrough (horizontal arrows) "
@@ -469,6 +482,20 @@ class Prerequisite(RuntimeError):
     """Environment failure, never credited as a product red."""
 
 
+class Pending(RuntimeError):
+    """The plugin kept reporting capabilities_pending for the whole bound."""
+
+    def __init__(self, elapsed: float) -> None:
+        super().__init__("capabilities_pending")
+        self.elapsed = elapsed
+
+
+# Rows whose method sends exactly one Codex turn; run() reserves it first.
+PAID_R_ROWS = {"R1", "R2", "R2b", "R3", "R4", "R5", "R6"}
+PENDING_BOUND_SEC = 180.0
+PENDING_POLL_SEC = 2.0
+
+
 class Mcp:
     """External JSON-RPC payloads are dynamic; credentials never enter traces."""
 
@@ -578,7 +605,8 @@ class Crawl:
         self.send_attempted = False
         self.main_chat = ""
         self.project_path = ""
-        self.paid_turns_left = int(config.get("launch_paid_turns", 0))
+        self.paid_turns_left = int(config.get("paid_turns", 0))
+        self.turns_reserved = 0
         self.backend: Mcp
 
     def wait(self, observation: Callable[[], T], seconds: float = 180) -> T:
@@ -639,6 +667,9 @@ class Crawl:
 
     def send(self, text: str) -> tuple[str, str]:
         self.phase = "send"
+        if self.turns_reserved <= 0:
+            raise RuntimeError("Codex send without a reserved paid turn")
+        self.turns_reserved -= 1
         self.bound = None
         self.reply_start = len(self.snapshot()["replies"])
         previous = self.receipt()[:2] if self.chat_id else ("", "")
@@ -682,6 +713,7 @@ class Crawl:
                         ignore=shutil.ignore_patterns("target", "node_modules", "__pycache__", ".git"))
         user = self.private / "data/godot/app_userdata/Minerva"
         shutil.copytree(profile, user)
+        enable_local_provider(user / "config_file.cfg")
         workspace = self.private / "workspace"
         workspace.mkdir()
         (workspace / "harmless.txt").write_text("crawl fixture\n")
@@ -725,7 +757,12 @@ class Crawl:
         created = self.tool("minerva_create_chat", name="crawl-" + self.config["nonce"],
                             provider="plugin:" + self.config["plugin_id"] + ":" + self.config["entry_id"])
         self.chat_id = self.main_chat = created["chat_id"]
-        _, _, status = self.receipt()
+        # Chat-scoped status needs no model catalog; wait for the real READY.
+        def ready() -> dict[str, Any] | None:
+            current = self.receipt()[2]
+            return current if current.get("ready") is True else None
+
+        status = self.wait(ready)
         if status.get("provider") != self.config["provider"] or status.get("t3_tag") != self.config["t3_tag"]:
             raise Prerequisite("Runtime provider or release tag differs from acceptance inputs")
         base_dir = Path(status["base_dir"]).resolve()
@@ -775,9 +812,15 @@ class Crawl:
         for row, operation in operations:
             self.active_row, self.phase = row, "start"
             self.chat_id = self.main_chat
-            self.bound, self.send_attempted = None, False
+            self.bound, self.send_attempted, self.turns_reserved = None, False, 0
+            if row in PAID_R_ROWS and not self.paid_turn():
+                self.emit(row, False, status="not_run", paid_turn="no_budget", R_method_invoked=False)
+                continue
             try:
                 operation()
+            except Pending as pending:
+                self.emit(row, False, status="blocked_pending", phase=self.phase,
+                          pending_elapsed_sec=round(pending.elapsed))
             except (OSError, ValueError, KeyError, TypeError, RuntimeError,
                     TimeoutError, http.client.HTTPException) as error:
                 self.emit(row, False, status="blocked" if isinstance(error, Prerequisite) else "fail",
@@ -968,10 +1011,22 @@ class Crawl:
         return "plugin:" + self.config["plugin_id"] + ":" + self.config["entry_id"]
 
     def launch_options(self) -> dict[str, Any]:
-        options = self.tool(self.config["status_tool"]).get("launch_options")
-        if not isinstance(options, dict) or options.get("available") is not True:
-            raise Prerequisite("T3 launch options unavailable")
-        return options
+        # capabilities_pending is not ready: poll status (one plugin discovery
+        # RPC per call) within the bound; only advertised models count.
+        self.phase = "launch_options"
+        started = time.monotonic()
+        end = min(self.deadline, started + PENDING_BOUND_SEC)
+        while True:
+            options = self.tool(self.config["status_tool"]).get("launch_options")
+            if not isinstance(options, dict):
+                raise Prerequisite("T3 launch options missing")
+            if options.get("available") is True and options.get("models"):
+                return options
+            if options.get("error_code") != "capabilities_pending":
+                raise Prerequisite("T3 launch options unavailable")
+            if time.monotonic() + PENDING_POLL_SEC > end:
+                raise Pending(time.monotonic() - started)
+            time.sleep(PENDING_POLL_SEC)
 
     def dialog(self, name: str = "", **choices: str) -> dict[str, Any]:
         seen = self.command("dialog", name=name, kind=T3_KIND if name else "", **choices)
@@ -986,6 +1041,7 @@ class Crawl:
         if self.paid_turns_left <= 0:
             return False
         self.paid_turns_left -= 1
+        self.turns_reserved += 1
         return True
 
     def one_chat(self, seen: dict[str, Any]) -> dict[str, Any]:
@@ -1018,6 +1074,7 @@ class Crawl:
         # plugin call; the refusal and the dialog's cleanup are real. Control:
         # the recorded chat_id proves a chat was created first. Red: RED["D6"].
         name, bogus = "D6-" + self.config["nonce"], "crawl-unadvertised-" + self.config["nonce"]
+        self.launch_options()
         self.phase = "forced_plugin_refusal"
         seen = self.dialog(name, force_model=bogus)
         calls = seen["launch_calls"]
@@ -1038,8 +1095,9 @@ class Crawl:
         # Oracle: notice names the folder, Start registers it through the
         # plugin and shows the output, chat is a locked non-CallerDriven
         # passthrough; then (paid) exact first answer. Red: RED["D3"].
+        options = self.launch_options()
         self.phase = "first_use_precondition"
-        if self.launch_options().get("registered") is not False:
+        if options.get("registered") is not False:
             raise Prerequisite("Pinned folder already registered; first use is not observable")
         nonce, name = self.config["nonce"], "D3-" + self.config["nonce"]
         self.phase = "dialog_start"
@@ -1132,6 +1190,7 @@ class Crawl:
         keys = plain_view.get("registry_keys", [])
         leaked = [item for item in plain_view.get("items", []) if item["meta"] in keys]
         models_only = key in keys and bool(plain_view.get("items")) and not leaked
+        self.launch_options()
         self.phase = "bound_chat"
         seen = self.dialog("D5-" + self.config["nonce"])
         chat = self.one_chat(seen)
@@ -1183,6 +1242,24 @@ class Crawl:
                 self.process.kill()
                 self.process.wait(10)
         self.log.close()
+
+
+def enable_local_provider(path: Path) -> None:
+    """Seed AISettings' Local toggle (EnabledProviders/LOCAL) in the copy."""
+    lines = path.read_text().splitlines() if path.exists() else []
+    section, kept = "", []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped
+        if section == "[EnabledProviders]" and stripped.split("=", 1)[0].strip() == "LOCAL":
+            continue
+        kept.append(line)
+    if "[EnabledProviders]" not in (line.strip() for line in kept):
+        kept += ["", "[EnabledProviders]"]
+    header = next(i for i, line in enumerate(kept) if line.strip() == "[EnabledProviders]")
+    kept.insert(header + 1, "LOCAL=true")
+    path.write_text("\n".join(kept) + "\n")
 
 
 def object_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -1259,8 +1336,11 @@ def main() -> int:
         parser.error("Missing config fields: " + ", ".join(sorted(required - config.keys())))
     if config["settings"].get("minerva_mcp_endpoint") != "{minerva_mcp}":
         parser.error("Plugin must wire minerva_mcp_endpoint from {minerva_mcp}")
-    if not isinstance(config.get("launch_paid_turns", 0), int) or config.get("launch_paid_turns", 0) < 0:
-        parser.error("launch_paid_turns must be a non-negative integer")
+    if "launch_paid_turns" in config:
+        parser.error("launch_paid_turns is retired; paid_turns budgets every row")
+    budget = config.get("paid_turns", 0)
+    if not isinstance(budget, int) or isinstance(budget, bool) or budget < 0:
+        parser.error("paid_turns must be a non-negative integer")
     config = {"plugin_id": "t3_code", "entry_id": "t3-code", "generate_tool": "minerva_t3_code_generate",
               "status_tool": "minerva_t3_code_status", **config, "nonce": secrets.token_hex(10)}
     os.umask(0o077)
