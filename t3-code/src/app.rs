@@ -238,7 +238,12 @@ impl App {
                 if current["ready"] != true {
                     return Ok(current);
                 }
-                match engine.runtimes.get(&settings, &self.contract) {
+                let runtime = if args["chat_id"].is_null() {
+                    engine.runtimes.get_ready(&settings, &self.contract)
+                } else {
+                    engine.runtimes.get(&settings, &self.contract)
+                };
+                match runtime {
                     Ok(runtime) => {
                         current["endpoint"] = json!(runtime.receipt.endpoint);
                         current["runtime_message"] = json!("Owned T3 runtime is ready. Model calls begin only on Generate; installation drift takes effect on next plugin start.");
@@ -281,6 +286,10 @@ impl App {
                         }
                         current["runtime_message"] = json!(error.text);
                         current["runtime_error"] = json!(error.code);
+                        if args["chat_id"].is_null() {
+                            current["launch_options"]["error_code"] = json!(error.code);
+                            current["launch_options"]["error_message"] = json!(error.text);
+                        }
                     }
                 }
                 Ok(current)

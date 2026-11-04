@@ -94,7 +94,7 @@ pub fn disable_entry(name: &str) -> Result<String> {
 pub struct Runtime {
     pub receipt: Receipt,
     pub t3_binary: String,
-    pub client: Client,
+    pub client: Arc<Client>,
     bearer: String,
     pub capabilities: Value,
 }
@@ -103,7 +103,20 @@ pub struct Runtime {
 pub struct RuntimeCache(Mutex<Option<Arc<Runtime>>>);
 
 impl RuntimeCache {
+    pub fn get_ready(&self, settings: &Settings, contract: &Contract) -> Result<Arc<Runtime>> {
+        self.lookup(settings, contract, true)
+    }
+
     pub fn get(&self, settings: &Settings, contract: &Contract) -> Result<Arc<Runtime>> {
+        self.lookup(settings, contract, false)
+    }
+
+    fn lookup(
+        &self,
+        settings: &Settings,
+        contract: &Contract,
+        require_models: bool,
+    ) -> Result<Arc<Runtime>> {
         let path = settings.private.join("owned-runtime.json");
         if !path.try_exists()? {
             return Err(Fault::held("runtime_not_started", "No owned T3 runtime receipt exists. T1 Phase B is pending the owner's install decision; no prompt was sent."));
@@ -148,20 +161,30 @@ impl RuntimeCache {
             .0
             .lock()
             .map_err(|_| Fault::new("lock_failed", "Runtime cache lock failed."))?;
-        if let Some(runtime) = cached.as_ref() {
-            if runtime.receipt == receipt && runtime.bearer == bearer {
+        let previous = cached
+            .as_ref()
+            .filter(|runtime| runtime.receipt == receipt && runtime.bearer == bearer);
+        if let Some(runtime) = previous {
+            if !require_models || crate::turn::ready_codex_provider(runtime).is_ok() {
                 return Ok(Arc::clone(runtime));
             }
         }
-        let client = Client::connect(&receipt.endpoint, bearer.clone())?;
-        contract
-            .check_catalog(&client.rpc("tools/list", json!({}))?)
-            .map_err(|e| Fault::held("contract_mismatch", e))?;
+        // Rediscovery retains the same MCP session/connection, so an uncertain
+        // existing send can still use its one safe same-session retry.
+        let (client, t3_binary) = if let Some(runtime) = previous {
+            (Arc::clone(&runtime.client), runtime.t3_binary.clone())
+        } else {
+            let client = Arc::new(Client::connect(&receipt.endpoint, bearer.clone())?);
+            contract
+                .check_catalog(&client.rpc("tools/list", json!({}))?)
+                .map_err(|e| Fault::held("contract_mismatch", e))?;
+            let binary = crate::probe::resolve_executable(&setting("t3_binary")?)
+                .map_err(|e| Fault::held("prerequisites", e))?
+                .to_string_lossy()
+                .into_owned();
+            (client, binary)
+        };
         let capabilities = client.tool("orchestrator_capabilities", json!({}))?;
-        let t3_binary = crate::probe::resolve_executable(&setting("t3_binary")?)
-            .map_err(|e| Fault::held("prerequisites", e))?
-            .to_string_lossy()
-            .into_owned();
         let runtime = Arc::new(Runtime {
             receipt,
             t3_binary,
@@ -169,7 +192,12 @@ impl RuntimeCache {
             bearer,
             capabilities,
         });
+        // Retain transport even while models are pending. Model lookups must
+        // rediscover before reusing an unusable capabilities snapshot.
         *cached = Some(Arc::clone(&runtime));
+        if require_models {
+            crate::turn::ready_codex_provider(&runtime)?;
+        }
         Ok(runtime)
     }
 }

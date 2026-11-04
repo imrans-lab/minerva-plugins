@@ -27,12 +27,45 @@ pub fn codex_provider(runtime: &Runtime) -> Result<&Value> {
     }
 }
 
+/// Model-selection readiness, separate from transport access for existing runs.
+pub fn ready_codex_provider(runtime: &Runtime) -> Result<&Value> {
+    let pending = || {
+        Fault::held(
+        "capabilities_pending",
+        "Waiting for T3 to list usable Codex models. Wait, then reopen the launch dialog or retry status/launch; if this persists, inspect the owned T3 provider configuration. No prompt was sent.",
+    )
+    };
+    let provider = codex_provider(runtime).map_err(|fault| {
+        let no_codex = runtime.capabilities["providers"]
+            .as_array()
+            .is_some_and(|providers| {
+                !providers
+                    .iter()
+                    .any(|provider| provider["driverKind"] == "codex")
+            });
+        if fault.code == "codex_unavailable" && no_codex {
+            pending()
+        } else {
+            fault
+        }
+    })?;
+    if provider["models"].as_array().is_none_or(Vec::is_empty)
+        || provider["canRunChildTask"] == false
+        || provider["constraints"]
+            .as_array()
+            .is_some_and(|constraints| !constraints.is_empty())
+    {
+        return Err(pending());
+    }
+    Ok(provider)
+}
+
 pub fn select_project(
     runtime: &Runtime,
     workspace: &str,
     explicit: Option<&Value>,
 ) -> Result<(String, Value)> {
-    let provider = codex_provider(runtime)?;
+    let provider = ready_codex_provider(runtime)?;
     let instance = string(provider, "providerInstanceId")?;
     let model = provider["models"]
         .as_array()
