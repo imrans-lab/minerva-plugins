@@ -314,7 +314,19 @@ impl Engine {
             }
         };
         let saved = slot.chat()?;
-        let runtime = self.runtimes.get(settings,contract).map_err(|mut fault| {
+        let needs_selection = args["resume"] != true
+            && saved.as_ref().is_none_or(|chat| {
+                chat.thread_id.is_empty()
+                    && !chat
+                        .operations
+                        .iter()
+                        .any(|operation| operation.token == token)
+            });
+        let runtime = if needs_selection {
+            self.runtimes.get_ready(settings, contract)
+        } else {
+            self.runtimes.get(settings, contract)
+        }.map_err(|mut fault| {
             if saved.as_ref().is_some_and(|c|c.operations.iter().any(|o|o.token == token && o.attempted && !o.refused)) {
                 fault.held = false;
                 fault.text.push_str(" The original operation may already be accepted; its receipt remains authoritative.");
