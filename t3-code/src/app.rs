@@ -2,6 +2,7 @@ use crate::{
     contract::Contract,
     engine::Engine,
     fault::{Fault, Result},
+    launch,
     manager::Manager,
     probe::{self, Settings},
     protocol::Peer,
@@ -119,7 +120,13 @@ impl App {
         let settings = self.settings(peer)?;
         let engine = self.engine(&settings)?;
         match name {
-            "minerva_t3_code_generate" => {
+            "minerva_t3_code_generate" | "minerva_t3_code_launch" => {
+                if name == "minerva_t3_code_launch" && settings.workspace.as_os_str().is_empty() {
+                    return Err(Fault::held(
+                        "project_unsaved",
+                        "Save the Minerva project as a .minproj before starting a T3 session.",
+                    ));
+                }
                 if let Some(error) = self
                     .registration_error
                     .lock()
@@ -149,7 +156,11 @@ impl App {
                         return Err(fault);
                     }
                 };
-                let result = engine.generate(peer, &settings, &self.contract, args);
+                let result = if name == "minerva_t3_code_launch" {
+                    engine.launch(&settings, &self.contract, args, &manager)
+                } else {
+                    engine.generate(peer, &settings, &self.contract, args)
+                };
                 if result
                     .as_ref()
                     .is_err_and(|error| error.code == "auth_required")
@@ -220,6 +231,10 @@ impl App {
                 } else {
                     Value::Null
                 };
+                if args["chat_id"].is_null() {
+                    current["launch_options"] = json!({"available":false,"workspace":settings.workspace,
+                        "registered":null,"models":[],"default":null,"error_code":"runtime_not_ready"});
+                }
                 if current["ready"] != true {
                     return Ok(current);
                 }
@@ -251,6 +266,10 @@ impl App {
                             .get("model_selection")
                             .cloned()
                             .unwrap_or(Value::Null);
+                        if args["chat_id"].is_null() {
+                            current["launch_options"] = launch::options(&runtime).unwrap_or_else(|fault| json!({"available":false,"workspace":runtime.receipt.workspace,
+                                "registered":null,"models":[],"default":null,"error_code":fault.code,"error_message":fault.text}));
+                        }
                     }
                     Err(error) => {
                         current["ready"] = json!(false);

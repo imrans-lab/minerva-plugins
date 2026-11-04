@@ -80,6 +80,7 @@ struct View {
 enum Input {
     Renew(mpsc::Sender<Result<()>>),
     AuthBarrier(mpsc::Sender<Result<bool>>),
+    RegisterProject(mpsc::Sender<Result<Value>>),
     Stop,
 }
 pub struct Manager {
@@ -225,6 +226,23 @@ impl Manager {
                 )
             })??;
         self.check_stop()
+    }
+
+    /// Serialized with auth/lifecycle; only the startup-pinned folder/base can
+    /// reach the public registration CLI. The MCP credential is unchanged.
+    pub fn register_project(&self, settings: &Settings) -> Result<Value> {
+        self.same_settings(settings)?;
+        self.workspace(settings, None)?;
+        self.authorize(settings)?;
+        self.check_stop()?;
+        let (send, receive) = mpsc::channel();
+        self.send.send(Input::RegisterProject(send)).map_err(|_| {
+            Fault::held(
+                "runtime_crashed",
+                "Runtime supervisor stopped before project registration.",
+            )
+        })?;
+        receive.recv_timeout(Duration::from_secs(90)).map_err(|_| Fault::held("registration_unknown", "Project registration did not finish within90 seconds. Read launch options before retrying; no automatic retry was made."))?
     }
 
     pub fn auth_failed(&self) {
@@ -625,6 +643,35 @@ impl Manager {
                         contract,
                     );
                     if reply.send(result).is_err() { /* Caller timed out; status retains the outcome. */
+                    }
+                }
+                Ok(Input::RegisterProject(reply)) => {
+                    let result = (|| -> Result<Value> {
+                        self.check_stop()?;
+                        if self.view()?.state != State::Ready {
+                            return Err(Fault::held(
+                                "runtime_unavailable",
+                                "Runtime must be ready before registering its pinned folder.",
+                            ));
+                        }
+                        let runtime = engine.runtimes.get(&self.settings, contract)?;
+                        if crate::turn::project(&runtime, &runtime.receipt.workspace)?.is_some() {
+                            return Ok(
+                                json!({"performed":false,"output":"Folder is already registered."}),
+                            );
+                        }
+                        let output = files
+                            .as_ref()
+                            .ok_or_else(|| {
+                                Fault::new("manager_state", "Supervisor lost its owned files.")
+                            })?
+                            .register_project(&self.stop)?;
+                        if crate::turn::project(&runtime, &runtime.receipt.workspace)?.is_none() {
+                            return Err(Fault::held("registration_unknown", format!("T3 CLI returned success, but the pinned folder is not visible yet. Read launch options before retrying.\n{output}")));
+                        }
+                        Ok(json!({"performed":true,"output":output}))
+                    })();
+                    if reply.send(result).is_err() { /* Caller ended; a later launch rereads registration before any CLI call. */
                     }
                 }
                 Ok(Input::AuthBarrier(reply)) => {

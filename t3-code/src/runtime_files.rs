@@ -349,6 +349,29 @@ impl Files {
         )
     }
 
+    pub fn register_project(&self, cancel: &AtomicBool) -> Result<String> {
+        let args = vec![
+            "project".into(),
+            "add".into(),
+            "--base-dir".into(),
+            self.base.to_string_lossy().into_owned(),
+            self.settings.workspace.to_string_lossy().into_owned(),
+        ];
+        Launch {
+            program: &self.executable,
+            args: &args,
+            epoch: &format!("cli-{}", crate::storage::random_id()?),
+            environment: &self.environment,
+            directory: &self.base,
+            scope: false,
+        }
+        .capture_project_registration(
+            64 * 1024,
+            std::time::Duration::from_secs(30),
+            Some(cancel),
+        )
+    }
+
     pub fn configure(&self, disabled: &[String]) -> Result<String> {
         let args = runtime::codex_launch_args(&self.settings, disabled)?;
         let path = self.base.join("userdata/settings.json");

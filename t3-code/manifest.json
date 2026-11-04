@@ -19,6 +19,36 @@
   },
   "tools": [
     {
+      "name": "minerva_t3_code_launch",
+      "description": "Prepare a Codex session for this saved, startup-pinned folder. Validate model/effort against owned T3 capabilities, register the folder through the public CLI on first use, and persist confirmed choices. Creates no thread or model turn; first Generate launches lazily.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "chat_id": {
+            "type": "string",
+            "description": "Identity of the newly created Minerva session chat."
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Advertised Codex model id; omit to use the project default or first advertised model. JSON null is treated as omitted."
+          },
+          "effort": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Advertised reasoningEffort choice; omit to use the advertised default, or the provider default when unverified. JSON null is treated as omitted."
+          }
+        },
+        "required": [
+          "chat_id"
+        ]
+      }
+    },
+    {
       "name": "minerva_t3_code_generate",
       "description": "Generate or resume one exact Codex run bound to this chat. Held without a Phase B owned runtime receipt; unknown outcomes are retained and never blindly resent across sessions.",
       "input_schema": {
@@ -81,7 +111,7 @@
     },
     {
       "name": "minerva_t3_code_status",
-      "description": "Read the plugin-owned chat/thread/run map, bound folder, permission/ceiling and supported/detected tuple, including before the first turn. Exposes no bearer.",
+      "description": "Read the plugin-owned chat/thread/run map, bound folder, permission/ceiling and supported/detected tuple, including before the first turn. Exposes no bearer. Without chat_id, launch_options reports the pinned workspace, registration, advertised model/effort choices and default; unavailable values are explicit.",
       "input_schema": {
         "type": "object",
         "properties": {

@@ -1,6 +1,8 @@
 use crate::{
     contract::Contract,
     fault::{string, Fault, Result},
+    launch,
+    manager::Manager,
     probe::Settings,
     protocol::Peer,
     questions,
@@ -99,6 +101,79 @@ impl Engine {
                 "operation_token":op.map(|o|o.token.as_str()).unwrap_or("")})
         } else {
             json!({"thread_id":"","run_id":""})
+        })
+    }
+
+    pub fn launch(
+        &self,
+        settings: &Settings,
+        contract: &Contract,
+        args: &Value,
+        manager: &Manager,
+    ) -> Result<Value> {
+        let id = input(args, "chat_id", 100)?;
+        let slot = self.slot(id)?;
+        let _gate = slot.generate.try_lock().map_err(|_| {
+            Fault::held(
+                "chat_busy",
+                "Another launch or Generate owns this chat; retry after it completes.",
+            )
+        })?;
+        let runtime = self.runtimes.get(settings, contract)?;
+        let mut chat = match slot.chat()? {
+            Some(chat) => {
+                turn::verify_chat(&chat, &runtime)?;
+                chat
+            }
+            None => Self::new_chat(settings, &runtime, id)?,
+        };
+        if !chat.thread_id.is_empty() || !chat.operations.is_empty() {
+            return Err(Fault::held("session_started", "Session choices are fixed once its first turn starts. Launch a new chat to select another model or effort."));
+        }
+        let selection =
+            if !chat.model.is_null() && args["model"].is_null() && args["effort"].is_null() {
+                launch::validate(&runtime, &chat.model)?;
+                chat.model.clone()
+            } else {
+                launch::selection(&runtime, args)?
+            };
+        if !chat.model.is_null() && chat.model != selection {
+            return Err(Fault::held("session_configured", "This chat already has confirmed session choices. Launch a new chat to select another model or effort."));
+        }
+        let registration = manager.register_project(settings)?;
+        chat.model = selection;
+        slot.publish(&self.store, &chat)?;
+        Ok(launch::confirmed(
+            id,
+            &chat.workspace,
+            &chat.model,
+            registration,
+        ))
+    }
+
+    fn new_chat(settings: &Settings, runtime: &Runtime, id: &str) -> Result<Chat> {
+        if settings.workspace.as_os_str().is_empty() {
+            return Err(Fault::held(
+                "project_unsaved",
+                "Save the Minerva project as a .minproj before starting a T3 chat.",
+            ));
+        }
+        Ok(Chat {
+            schema: 1,
+            chat_id: id.into(),
+            workspace: settings
+                .workspace
+                .canonicalize()?
+                .to_string_lossy()
+                .into_owned(),
+            base_dir: runtime.receipt.base_dir.clone(),
+            epoch: runtime.receipt.base_identity.clone(),
+            thread_id: String::new(),
+            mode: "approval-required".into(),
+            model: Value::Null,
+            operations: Vec::new(),
+            question: None,
+            lost: false,
         })
     }
 
@@ -258,30 +333,7 @@ impl Engine {
                     "No receipt exists for this resume. No prompt was sent.",
                 ));
             }
-            if settings.workspace.as_os_str().is_empty() {
-                return Err(Fault::held(
-                    "project_unsaved",
-                    "Save the Minerva project as a .minproj before starting a T3 chat.",
-                ));
-            }
-            let workspace = settings
-                .workspace
-                .canonicalize()?
-                .to_string_lossy()
-                .into_owned();
-            Chat {
-                schema: 1,
-                chat_id: id.into(),
-                workspace,
-                base_dir: runtime.receipt.base_dir.clone(),
-                epoch: runtime.receipt.base_identity.clone(),
-                thread_id: String::new(),
-                mode: "approval-required".into(),
-                model: Value::Null,
-                operations: Vec::new(),
-                question: None,
-                lost: false,
-            }
+            Self::new_chat(settings, &runtime, id)?
         };
         if let Some(question) = &chat.question {
             if !questions::still_pending(&runtime.client, &chat.thread_id, &question.request_id)? {
@@ -583,7 +635,11 @@ impl Engine {
         }
         if chat.thread_id.is_empty() {
             turn::allowed_mode(&chat.mode)?;
-            let (project, model) = turn::select_project(runtime, &chat.workspace)?;
+            let (project, model) = turn::select_project(
+                runtime,
+                &chat.workspace,
+                (!chat.model.is_null()).then_some(&chat.model),
+            )?;
             chat.model = model.clone();
             operation.tool = "t3_thread_launch".into();
             operation.arguments = json!({"projectId":project,"title":"Minerva chat","modelSelection":model,"runtimeMode":"approval-required","message":text,"clientRequestId":request_id});
