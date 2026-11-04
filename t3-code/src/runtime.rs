@@ -103,6 +103,12 @@ pub struct Runtime {
 pub struct RuntimeCache(Mutex<Option<Arc<Runtime>>>);
 
 impl RuntimeCache {
+    pub fn get_ready(&self, settings: &Settings, contract: &Contract) -> Result<Arc<Runtime>> {
+        let runtime = self.get(settings, contract)?;
+        crate::turn::ready_codex_provider(&runtime)?;
+        Ok(runtime)
+    }
+
     pub fn get(&self, settings: &Settings, contract: &Contract) -> Result<Arc<Runtime>> {
         let path = settings.private.join("owned-runtime.json");
         if !path.try_exists()? {
@@ -169,25 +175,11 @@ impl RuntimeCache {
             bearer,
             capabilities,
         });
-        // One discovery attempt per uncached lookup. An incomplete snapshot must
-        // never pin an empty model list for this epoch; the next call tries again.
-        let pending = || {
-            Fault::held(
-                "capabilities_pending",
-                "Waiting for T3 to list Codex models. Retry status or launch; if this persists, inspect the owned T3 provider configuration. No prompt was sent.",
-            )
-        };
-        let provider = crate::turn::codex_provider(&runtime).map_err(|fault| {
-            if fault.code == "codex_unavailable" {
-                pending()
-            } else {
-                fault
-            }
-        })?;
-        if provider["models"].as_array().is_none_or(Vec::is_empty) {
-            return Err(pending());
+        // Control/recovery callers can use the connection while discovery is
+        // incomplete. Only usable capabilities may persist for this epoch.
+        if crate::turn::ready_codex_provider(&runtime).is_ok() {
+            *cached = Some(Arc::clone(&runtime));
         }
-        *cached = Some(Arc::clone(&runtime));
         Ok(runtime)
     }
 }

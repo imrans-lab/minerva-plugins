@@ -119,7 +119,7 @@ impl Engine {
                 "Another launch or Generate owns this chat; retry after it completes.",
             )
         })?;
-        let runtime = self.runtimes.get(settings, contract)?;
+        let runtime = self.runtimes.get_ready(settings, contract)?;
         let mut chat = match slot.chat()? {
             Some(chat) => {
                 turn::verify_chat(&chat, &runtime)?;
