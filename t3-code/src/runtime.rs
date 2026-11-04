@@ -169,6 +169,24 @@ impl RuntimeCache {
             bearer,
             capabilities,
         });
+        // One discovery attempt per uncached lookup. An incomplete snapshot must
+        // never pin an empty model list for this epoch; the next call tries again.
+        let pending = || {
+            Fault::held(
+                "capabilities_pending",
+                "Waiting for T3 to list Codex models. Retry status or launch; if this persists, inspect the owned T3 provider configuration. No prompt was sent.",
+            )
+        };
+        let provider = crate::turn::codex_provider(&runtime).map_err(|fault| {
+            if fault.code == "codex_unavailable" {
+                pending()
+            } else {
+                fault
+            }
+        })?;
+        if provider["models"].as_array().is_none_or(Vec::is_empty) {
+            return Err(pending());
+        }
         *cached = Some(Arc::clone(&runtime));
         Ok(runtime)
     }

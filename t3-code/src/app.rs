@@ -281,6 +281,10 @@ impl App {
                         }
                         current["runtime_message"] = json!(error.text);
                         current["runtime_error"] = json!(error.code);
+                        if args["chat_id"].is_null() {
+                            current["launch_options"]["error_code"] = json!(error.code);
+                            current["launch_options"]["error_message"] = json!(error.text);
+                        }
                     }
                 }
                 Ok(current)
