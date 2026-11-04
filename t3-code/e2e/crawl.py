@@ -14,7 +14,9 @@ Acceptance requires --owner-attended and --config CONFIG.json. CONFIG names:
   codex_home: explicit owner-approved existing login path; never copied
   t3_token_file: external MCP-client credential produced by T1's auth setup
   t3_endpoint: private loopback /mcp URL, or omit to use public status result
-Optional: plugin_id, entry_id, generate_tool, status_tool, deadline_sec.
+Optional: plugin_id, entry_id, generate_tool, status_tool, deadline_sec,
+  launch_paid_turns: paid Codex turns D3/D4 may spend (default 0). Each
+  spends at most one; without budget the row reports not_run, never pass.
 
 The approved profile must give the runtime its existing owner-approved provider
 login, exact binary/home, explicit approval-required mode and one read-only
@@ -31,6 +33,13 @@ T0 authors oracles only. As each path becomes reachable, collect its localized
 red by breaking that step, then its green, on the same test. A missing plugin
 does not count as per-row red. R3 approve/deny stays deferred to walk; its crawl
 oracle checks a real unsupported request is visible and executes nothing.
+
+D1-D6 (DCR minerva:01a1a2fe74de) drive the real passthrough launch dialog
+through its own controls (button pressed, OptionButton select + item_selected,
+Start pressed) and read control state, the chat list and public MCP results.
+The fixture saves its .minproj through the real project save before install,
+so the plugin pins that folder at start. Headless control state is not pixels:
+the parts listed in HITL stay owner steps and are reported pending, not green.
 """
 from __future__ import annotations
 
@@ -67,7 +76,34 @@ ROWS = {
     "R4": "real Stop button ends the bound backend run, not a local timeout label",
     "R5": "complete settled backend assistant transcript agrees with Minerva",
     "R6": "one send, actual pending reply, automatic resume, truthful completion",
+    "D1": "dialog offers T3 Code only while plugin:t3_code:t3-code is registered",
+    "D2": "unsaved project refused inline: no chat, no launch call",
+    "D3": "first-use Start registers the folder via the plugin; first turn exact text (paid)",
+    "D4": "chosen non-default model/effort in status and the thread modelSelection (paid)",
+    "D5": "picker lists no W1 entry; a dialog-bound chat shows its live item",
+    "D6": "plugin-refused launch leaves no chat, no restorable chat, no plugin record",
 }
+# How each launch-dialog row goes red (localized break, same test).
+RED = {
+    "D1": "kind offered with the entry dropped (stop plugin), or not offered while registered",
+    "D2": "saved-project check removed: Start creates a chat or calls minerva_t3_code_launch",
+    "D3": "registration skipped/unreported, output hidden, chat not locked or CallerDriven, wrong answer",
+    "D4": "dialog/plugin drops the choice: launch args, status or thread show the project default",
+    "D5": "W1 entries appended to the default picker set, or the bound chat reads (offline)/other text",
+    "D6": "chat_discarder not called on a launch error: the session chat remains listed",
+}
+# Owner-only steps; the crawl never marks these green.
+HITL = {
+    "D1": "Release build, saved project, T3 Code running: click the passthrough (horizontal arrows) "
+          "button; Launch kind lists Terminal and T3 Code. Stop T3 Code in Plugins; reopen: no Launch "
+          "kind selector, terminal fields only. Start T3 Code; reopen: T3 Code listed again.",
+    "D2": "File > New project (unsaved); passthrough button; choose T3 Code: the form reads 'Save the "
+          "current project before starting T3 Code.'; press Start: same inline text, no new chat tab.",
+    "D5": "Open the model picker on an ordinary chat: no T3 Code (Codex), Council or agent-relay "
+          "entries. Switch to a dialog-launched T3 tab: picker disabled, showing 'T3 Code · Codex · "
+          "<model> · <effort>' without (offline).",
+}
+T3_KIND = "T3 Code"
 TERMINAL = {"completed", "failed", "cancelled", "interrupted", "rolled_back"}
 T = TypeVar("T")
 
@@ -218,6 +254,156 @@ func _snapshot(chat_id: String) -> Dictionary:
         "http_tools": http_tools.duplicate(), "termination": history.get("termination_reason"),
         "turn_event": turn_events.get(chat_id, {})}
 
+func _find(node: Node, check: Callable) -> Node:
+    if check.call(node):
+        return node
+    for child: Node in node.get_children():
+        var found: Node = _find(child, check)
+        if found != null:
+            return found
+    return null
+
+func _wait_until(check: Callable, seconds: float) -> bool:
+    var deadline: int = Time.get_ticks_msec() + int(seconds * 1000.0)
+    while Time.get_ticks_msec() < deadline:
+        if check.call():
+            return true
+        await get_tree().create_timer(0.1).timeout
+    return bool(check.call())
+
+func _chat_ids() -> Array[String]:
+    var ids: Array[String] = []
+    for history: Variant in singleton.get("ChatList"):
+        ids.append(str(history.HistoryId))
+    return ids
+
+func _registry_keys() -> Array[String]:
+    var keys: Array[String] = []
+    var registry: Object = plugins.call("get_chat_provider_registry")
+    for entry: Variant in registry.call("list_entries"):
+        keys.append(str(entry.get("key", "")))
+    return keys
+
+# Real project menu save; "" is Minerva's unsaved project.
+func _project(path_: String) -> Dictionary:
+    if path_.is_empty():
+        singleton.set("current_project_path", "")
+    else:
+        var is_menu: Callable = func(n: Node) -> bool:
+            return n.has_method("save_project_as") and n.has_method("save_project")
+        var menu: Node = _find(get_tree().root, is_menu)
+        if menu == null:
+            return {"error": "project_menu_missing"}
+        menu.call("save_project_as", path_)
+        var saved: Callable = func() -> bool:
+            return FileAccess.file_exists(path_) and str(singleton.get("current_project_path")) == path_
+        await _wait_until(saved, 30.0)
+    var current: String = str(singleton.get("current_project_path"))
+    return {"path": current, "exists": not current.is_empty() and FileAccess.file_exists(current)}
+
+# Opens the dialog with its top-bar button and uses only its own controls. The
+# launch callable is wrapped to RECORD the plugin call; only D6 forces a model.
+func _dialog(request: Dictionary) -> Dictionary:
+    var pane: Object = singleton.get("Chats")
+    var is_launcher: Callable = func(n: Node) -> bool:
+        return n is Button and str(n.get("tooltip_text")) == "New passthrough chat"
+    var button: Node = _find(get_tree().root, is_launcher)
+    if button == null:
+        return {"error": "passthrough_button_missing"}
+    button.emit_signal("pressed")
+    var dialog: Object = pane.get("_passthrough_launch_dialog")
+    if dialog == null or not bool(dialog.get("visible")):
+        return {"error": "launch_dialog_missing"}
+    await get_tree().process_frame
+    var cancel: Button = dialog.get("_cancel_button")
+    var kinds_button: OptionButton = dialog.get("_kind_dropdown")
+    var kinds: Array[String] = []
+    for index: int in range(kinds_button.item_count):
+        kinds.append(kinds_button.get_item_text(index))
+    var key: String = "plugin:%s:%s" % [config.plugin_id, config.entry_id]
+    var result: Dictionary = {"kinds": kinds, "kind_visible": kinds_button.visible,
+        "registered": _registry_keys().has(key), "completed": false, "error": "", "notice_before": "",
+        "result_text": "", "launch_calls": [], "new_chats": []}
+    var kind_index: int = kinds.find(str(request.get("kind", "")))
+    if kind_index < 0:
+        cancel.emit_signal("pressed")
+        if not str(request.get("kind", "")).is_empty():
+            result["error"] = "launch_kind_missing"
+        return result
+    kinds_button.select(kind_index)
+    kinds_button.item_selected.emit(kind_index)
+    var form: Node = dialog.get("_t3_form")
+    var loaded: Callable = func() -> bool:
+        return not bool(form.get("_loading"))
+    await _wait_until(loaded, 120.0)
+    var models: OptionButton = form.get("_models")
+    var efforts: OptionButton = form.get("_efforts")
+    var choices: Array = form.get("_choices")
+    if not str(request.get("model", "")).is_empty():
+        for index: int in range(choices.size()):
+            if str(choices[index].get("id")) == str(request.model):
+                models.select(index)
+                models.item_selected.emit(index)
+    if not str(request.get("effort", "")).is_empty():
+        for index: int in range(efforts.item_count):
+            if str(efforts.get_item_metadata(index)) == str(request.effort):
+                efforts.select(index)
+                efforts.item_selected.emit(index)
+    result["notice_before"] = str((form.get("_notice") as Label).text)
+    var name_edit: LineEdit = dialog.get("_name_edit")
+    name_edit.text = str(request.get("name", ""))
+    name_edit.text_changed.emit(name_edit.text)
+    var real: Callable = dialog.get("tool_caller")
+    var reader: Callable = dialog.get("project_reader")
+    var calls: Array = []
+    var forced_model: String = str(request.get("force_model", ""))
+    var recorder: Callable = func(tool: String, arguments: Dictionary) -> Dictionary:
+        var sent: Dictionary = arguments.duplicate(true)
+        if tool == "minerva_t3_code_launch" and not forced_model.is_empty():
+            sent["model"] = forced_model
+        var reply: Dictionary = await real.call(tool, sent)
+        if tool == "minerva_t3_code_launch":
+            calls.append({"args": sent.duplicate(true), "reply": reply.duplicate(true)})
+        return reply
+    form.call("configure", recorder, reader)
+    var before: Array[String] = _chat_ids()
+    (dialog.get("_start_button") as Button).emit_signal("pressed")
+    var settled: Callable = func() -> bool:
+        return not bool(dialog.get("_launching"))
+    await _wait_until(settled, 240.0)
+    form.call("configure", real, reader)
+    result["completed"] = bool(dialog.get("_completed"))
+    result["error"] = str(dialog.call("current_error"))
+    result["result_text"] = str((form.get("_result") as TextEdit).text)
+    result["launch_calls"] = calls
+    for history: Variant in singleton.get("ChatList"):
+        if not before.has(str(history.HistoryId)):
+            var provider: Variant = history.get("provider")
+            var entry_key: String = ""
+            if provider is Object and "entry_key" in provider:
+                entry_key = str(provider.get("entry_key"))
+            result["new_chats"].append({"chat_id": str(history.HistoryId), "name": str(history.get("HistoryName")),
+                "passthrough": bool(history.PassthroughMode), "caller_driven": bool(history.CallerDriven),
+                "badge": str(history.PassthroughName), "entry_key": entry_key})
+    cancel.emit_signal("pressed")
+    return result
+
+func _picker(chat_id: String) -> Dictionary:
+    var history: Object = _history(chat_id)
+    if history == null:
+        return {"error": "chat_missing"}
+    var pane: Object = singleton.get("Chats")
+    pane.set("current_tab", (singleton.get("ChatList") as Array).find(history))
+    await get_tree().process_frame
+    await get_tree().process_frame
+    var picker: OptionButton = pane.get("_provider_option_button")
+    var items: Array[Dictionary] = []
+    for index: int in range(picker.item_count):
+        var meta: Variant = picker.get_item_metadata(index)
+        items.append({"text": picker.get_item_text(index), "meta": meta if meta is String else "",
+            "disabled": picker.is_item_disabled(index), "selected": index == picker.selected})
+    return {"items": items, "registry_keys": _registry_keys(), "locked": bool(picker.call("is_locked"))}
+
 func _serve(request: Dictionary) -> void:
     var result: Dictionary = {}
     match str(request.action):
@@ -263,6 +449,17 @@ func _serve(request: Dictionary) -> void:
                     result = {"pressed": true}
         "shutdown":
             result = await plugins.call("stop_plugin", str(config.plugin_id))
+        "start_plugin":
+            result = await plugins.call("start_plugin", str(config.plugin_id))
+            _observe_connection()
+        "registry":
+            result = {"keys": _registry_keys()}
+        "project":
+            result = await _project(str(request.path))
+        "dialog":
+            result = await _dialog(request)
+        "picker":
+            result = await _picker(str(request.chat_id))
     _write("answer", {"serial": serial, "result": result})
     busy = false
 '''
@@ -379,6 +576,9 @@ class Crawl:
         self.reply_start = 0
         self.history_start = 0
         self.send_attempted = False
+        self.main_chat = ""
+        self.project_path = ""
+        self.paid_turns_left = int(config.get("launch_paid_turns", 0))
         self.backend: Mcp
 
     def wait(self, observation: Callable[[], T], seconds: float = 180) -> T:
@@ -516,12 +716,15 @@ class Crawl:
         self.process = subprocess.Popen([self.config["godot"], "--headless", "--path", str(project)],
                                         env=environment, stdout=self.log, stderr=subprocess.STDOUT)
         self.wait(lambda: (self.private / "ready.json").exists())
+        # The plugin pins the saved .minproj folder at start: save it first.
+        self.project_path = str(workspace / "crawl.minproj")
+        self.save_project()
         installed = self.command("install")
         if installed.get("error") or not installed.get("ok"):
             raise Prerequisite("Local plugin installation/start failed")
         created = self.tool("minerva_create_chat", name="crawl-" + self.config["nonce"],
                             provider="plugin:" + self.config["plugin_id"] + ":" + self.config["entry_id"])
-        self.chat_id = created["chat_id"]
+        self.chat_id = self.main_chat = created["chat_id"]
         _, _, status = self.receipt()
         if status.get("provider") != self.config["provider"] or status.get("t3_tag") != self.config["t3_tag"]:
             raise Prerequisite("Runtime provider or release tag differs from acceptance inputs")
@@ -562,11 +765,16 @@ class Crawl:
         self.wait(lambda: not self.snapshot()["active"], 30)
 
     def run(self) -> None:
-        operations = (("R1", self.start), ("R2", self.activity), ("R2b", self.minerva_tool),
+        # D6 refuses before registration, so D3 still observes first use. D1
+        # restarts the plugin and runs last; nothing after it uses the backend.
+        operations = (("D2", self.unsaved), ("D6", self.failed_launch), ("D3", self.first_use),
+                      ("D4", self.chosen_settings), ("D5", self.picker),
+                      ("R1", self.start), ("R2", self.activity), ("R2b", self.minerva_tool),
                       ("R3", self.permission), ("R4", self.interrupt),
-                      ("R5", self.final_result), ("R6", self.pending))
+                      ("R5", self.final_result), ("R6", self.pending), ("D1", self.offered))
         for row, operation in operations:
             self.active_row, self.phase = row, "start"
+            self.chat_id = self.main_chat
             self.bound, self.send_attempted = None, False
             try:
                 operation()
@@ -749,6 +957,217 @@ class Crawl:
                   pending_replies=len(pending), generate_replies=len(replies),
                   completed=state == "completed", host_answer=self.answer(snapshot))
 
+    # ---- Launch-dialog rows (DCR 01a1a2fe74de). Each opens its own dialog. ----
+
+    def save_project(self) -> None:
+        saved = self.command("project", path=self.project_path)
+        if saved.get("path") != self.project_path or saved.get("exists") is not True:
+            raise Prerequisite("Real project save did not produce the saved .minproj")
+
+    def entry_key(self) -> str:
+        return "plugin:" + self.config["plugin_id"] + ":" + self.config["entry_id"]
+
+    def launch_options(self) -> dict[str, Any]:
+        options = self.tool(self.config["status_tool"]).get("launch_options")
+        if not isinstance(options, dict) or options.get("available") is not True:
+            raise Prerequisite("T3 launch options unavailable")
+        return options
+
+    def dialog(self, name: str = "", **choices: str) -> dict[str, Any]:
+        seen = self.command("dialog", name=name, kind=T3_KIND if name else "", **choices)
+        if seen.get("error") in {"passthrough_button_missing", "launch_dialog_missing", "launch_kind_missing"}:
+            raise RuntimeError("Launch dialog refused: " + str(seen["error"]))
+        return seen
+
+    def listed(self, name: str) -> bool:
+        return name in json.dumps(self.tool("minerva_list_chats"))
+
+    def paid_turn(self) -> bool:
+        if self.paid_turns_left <= 0:
+            return False
+        self.paid_turns_left -= 1
+        return True
+
+    def one_chat(self, seen: dict[str, Any]) -> dict[str, Any]:
+        chats = seen["new_chats"]
+        return chats[0] if len(chats) == 1 else {}
+
+    def attended_session(self, chat: dict[str, Any]) -> bool:
+        return (chat.get("passthrough") is True and chat.get("caller_driven") is False
+                and chat.get("entry_key") == self.entry_key())
+
+    def unsaved(self) -> None:
+        # Oracle: inline refusal, no chat, no plugin call. Control: D3 Start
+        # with the saved project. Red: RED["D2"].
+        name = "D2-" + self.config["nonce"]
+        self.phase = "unsaved_project"
+        try:
+            if self.command("project", path="").get("path") != "":
+                raise Prerequisite("Unable to clear the current project")
+            seen = self.dialog(name)
+        finally:
+            self.phase = "restore_saved_project"
+            self.save_project()
+        refused = not seen["completed"] and "Save the current project" in seen["error"]
+        no_chat = not seen["new_chats"] and not self.listed(name)
+        self.emit("D2", refused and no_chat and not seen["launch_calls"], inline_refusal=refused,
+                  no_chat=no_chat, launch_calls=len(seen["launch_calls"]))
+
+    def failed_launch(self) -> None:
+        # Stimulus: the recorder forces one unadvertised model into the real
+        # plugin call; the refusal and the dialog's cleanup are real. Control:
+        # the recorded chat_id proves a chat was created first. Red: RED["D6"].
+        name, bogus = "D6-" + self.config["nonce"], "crawl-unadvertised-" + self.config["nonce"]
+        self.phase = "forced_plugin_refusal"
+        seen = self.dialog(name, force_model=bogus)
+        calls = seen["launch_calls"]
+        chat_id = str(calls[0]["args"].get("chat_id", "")) if len(calls) == 1 else ""
+        reply = plain(calls[0]["reply"]) if chat_id else {}
+        # Code placement varies by host envelope; the dialog shows the same code.
+        refused = bool(chat_id) and "model_unavailable" in json.dumps(reply)
+        shown = not seen["completed"] and "model_unavailable" in seen["error"]
+        self.phase = "no_orphan"
+        gone = (not seen["new_chats"] and not self.listed(name)
+                and name not in json.dumps(self.tool("minerva_list_deleted_chats")))
+        record = self.tool(self.config["status_tool"], chat_id=chat_id) if chat_id else {}
+        no_record = bool(chat_id) and record.get("model_selection") is None and record.get("thread_id") == ""
+        self.emit("D6", refused and shown and gone and no_record, chat_created_then_refused=refused,
+                  inline_error=shown, no_chat_left=gone, no_plugin_record=no_record)
+
+    def first_use(self) -> None:
+        # Oracle: notice names the folder, Start registers it through the
+        # plugin and shows the output, chat is a locked non-CallerDriven
+        # passthrough; then (paid) exact first answer. Red: RED["D3"].
+        self.phase = "first_use_precondition"
+        if self.launch_options().get("registered") is not False:
+            raise Prerequisite("Pinned folder already registered; first use is not observable")
+        nonce, name = self.config["nonce"], "D3-" + self.config["nonce"]
+        self.phase = "dialog_start"
+        seen = self.dialog(name)
+        reply = plain(seen["launch_calls"][-1]["reply"]) if seen["launch_calls"] else {}
+        raw_registration = reply.get("registration")
+        registration: dict[str, Any] = raw_registration if isinstance(raw_registration, dict) else {}
+        output = str(registration.get("output", "")).strip()
+        performed = registration.get("performed") is True and bool(output)
+        named = "First use: register " + str(self.workspace) in seen["notice_before"]
+        shown = performed and output in seen["result_text"]
+        chat = self.one_chat(seen)
+        registered = self.launch_options().get("registered") is True
+        prepared = seen["completed"] and performed and named and shown and self.attended_session(chat) and registered
+        observed: dict[str, Any] = {"registration_performed": performed, "folder_named": named,
+            "output_shown": shown, "locked_attended_chat": self.attended_session(chat), "registered_after": registered}
+        if not prepared:
+            self.emit("D3", False, **observed)
+            return
+        if not self.paid_turn():
+            self.emit("D3", False, status="not_run", paid_turn="no_budget", **observed)
+            return
+        self.chat_id = chat["chat_id"]
+        thread, run = self.send("Reply with exactly " + nonce + "-d3. Do not run tools.")
+        snapshot, state, _ = self.finish(thread, run)
+        exact = last_message(snapshot) == nonce + "-d3"
+        self.emit("D3", state == "completed" and self.answer(snapshot) and exact,
+                  backend_completed=state == "completed", exact_answer=exact, **observed)
+
+    def chosen_settings(self) -> None:
+        # Choice is never the project default, so a dropped selection shows.
+        # Oracle: launch args, reply, badge, status; then (paid) the T3
+        # thread's modelSelection via read-only t3_thread_configure. Red: RED["D4"].
+        options = self.launch_options()
+        raw_default = options.get("default")
+        default: dict[str, Any] = raw_default if isinstance(raw_default, dict) else {}
+        default_pair = (default.get("model"), selection_effort(default))
+        models = [m for m in options.get("models", []) if isinstance(m, dict)]
+        if not any(isinstance(m.get("efforts"), list) and m["efforts"] for m in models):
+            self.emit("D4", False, effort_advertised=False)
+            return
+        candidates = [(str(m["id"]), str(e)) for m in models if isinstance(m.get("efforts"), list)
+                      for e in m["efforts"] if (m["id"], e) != default_pair and e != m.get("default_effort")]
+        if not candidates:
+            raise Prerequisite("No non-default advertised model/effort pair to choose")
+        model, effort = sorted(candidates, key=lambda pair: pair[0] == default_pair[0])[0]
+        seen = self.dialog("D4-" + self.config["nonce"], model=model, effort=effort)
+        sent = seen["launch_calls"][-1]["args"] if seen["launch_calls"] else {}
+        reply = plain(seen["launch_calls"][-1]["reply"]) if seen["launch_calls"] else {}
+        chat = self.one_chat(seen)
+        badge = "T3 Code · Codex · " + model + " · " + effort
+        host_sent = sent.get("model") == model and sent.get("effort") == effort
+        confirmed = (seen["completed"] and reply.get("model") == model and reply.get("effort") == effort
+                     and reply.get("display_name") == badge and chat.get("badge") == badge)
+        stored = self.tool(self.config["status_tool"], chat_id=chat.get("chat_id", "")).get("model_selection") \
+            if chat else None
+        in_status = isinstance(stored, dict) and stored.get("model") == model and selection_effort(stored) == effort
+        observed: dict[str, Any] = {"dialog_sent_choice": host_sent, "confirmed_and_badge": confirmed,
+            "status_selection": in_status, "model_is_default": model == default_pair[0]}
+        if not (host_sent and confirmed and in_status):
+            self.emit("D4", False, **observed)
+            return
+        if not self.paid_turn():
+            self.emit("D4", False, status="not_run", paid_turn="no_budget", **observed)
+            return
+        self.chat_id = chat["chat_id"]
+        thread, run = self.send("Reply with exactly " + self.config["nonce"] + "-d4. Do not run tools.")
+        _, state, _ = self.finish(thread, run)
+        snapshot = self.backend.tool("t3_thread_configure", threadId=thread).get("modelSelection")
+        in_thread = (isinstance(snapshot, dict) and snapshot.get("model") == model
+                     and selection_effort(snapshot) == effort
+                     and snapshot.get("instanceId") == options.get("instance_id"))
+        self.emit("D4", state == "completed" and in_thread, thread_selection=in_thread,
+                  backend_completed=state == "completed", **observed)
+
+    def picker(self) -> None:
+        # Oracle: an ordinary core-model chat's picker holds no registered W1
+        # key; a dialog-bound chat shows exactly its live item. Control: the
+        # key is registered and MCP list_models still lists it. Red: RED["D5"].
+        key = self.entry_key()
+        self.phase = "ordinary_chat"
+        providers = self.tool("minerva_list_models").get("providers", [])
+        core = next((str(p["key"]) for p in providers if isinstance(p, dict) and p.get("key") not in {None, "plugin"}), "")
+        rows = self.tool("minerva_list_models", provider=core).get("models", []) if core else []
+        spec = next((r["model_spec"] for r in rows if isinstance(r, dict) and isinstance(r.get("model_spec"), dict)), None)
+        if spec is None:
+            raise Prerequisite("No core model available for an ordinary chat")
+        ordinary = self.tool("minerva_create_chat", name="D5-model-" + self.config["nonce"], model_spec=spec)["chat_id"]
+        plain_view = self.command("picker", chat_id=ordinary)
+        keys = plain_view.get("registry_keys", [])
+        leaked = [item for item in plain_view.get("items", []) if item["meta"] in keys]
+        models_only = key in keys and bool(plain_view.get("items")) and not leaked
+        self.phase = "bound_chat"
+        seen = self.dialog("D5-" + self.config["nonce"])
+        chat = self.one_chat(seen)
+        bound_view = self.command("picker", chat_id=chat["chat_id"]) if chat else {}
+        live = [item for item in bound_view.get("items", []) if item["meta"] == key]
+        shows = (len(live) == 1 and live[0]["selected"] and bound_view.get("locked") is True
+                 and live[0]["text"] == chat.get("badge") and not live[0]["text"].endswith("(offline)"))
+        mcp_listed = key in json.dumps(self.tool("minerva_list_models", provider="plugin"))
+        self.emit("D5", models_only and seen["completed"] and shows and mcp_listed, picker_models_only=models_only,
+                  leaked_entries=len(leaked), bound_live_item=shows, mcp_lists_entry=mcp_listed)
+
+    def offered(self) -> None:
+        # Oracle and control in one row: offered while registered, absent once
+        # the stopped plugin's entry drops, offered again after restart. MCP
+        # list_models must agree each time. Red: RED["D1"].
+        key = self.entry_key()
+
+        def state() -> tuple[bool, bool]:
+            seen = self.dialog()
+            listed = key in json.dumps(self.tool("minerva_list_models", provider="plugin"))
+            return T3_KIND in seen["kinds"] and seen["kind_visible"] and seen["registered"] and listed, (
+                seen["kinds"] == ["Terminal"] and not seen["kind_visible"] and not seen["registered"] and not listed)
+
+        self.phase = "registered"
+        offered, _ = state()
+        self.phase = "entry_dropped"
+        self.command("shutdown")
+        self.wait(lambda: key not in self.command("registry")["keys"], 60)
+        _, hidden = state()
+        self.phase = "entry_restored"
+        self.command("start_plugin")
+        self.wait(lambda: key in self.command("registry")["keys"], 180)
+        reoffered, _ = state()
+        self.emit("D1", offered and hidden and reoffered, offered_registered=offered,
+                  hidden_unregistered=hidden, offered_after_restart=reoffered)
+
     def close(self) -> None:
         if self.process is None:
             return
@@ -782,6 +1201,31 @@ def object_result(result: dict[str, Any]) -> dict[str, Any]:
     raise RuntimeError("Tool returned no structured object")
 
 
+def plain(reply: Any) -> dict[str, Any]:
+    """A recorded host tool reply, unwrapped without raising on errors."""
+    if not isinstance(reply, dict):
+        return {}
+    if isinstance(reply.get("structuredContent"), dict):
+        return reply["structuredContent"]
+    for part in reply.get("content", []) if isinstance(reply.get("content"), list) else []:
+        if isinstance(part, dict) and part.get("type") == "text":
+            try:
+                value = json.loads(part.get("text", ""))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                return value
+    return reply
+
+
+def selection_effort(selection: dict[str, Any]) -> str | None:
+    options = selection.get("options")
+    for option in options if isinstance(options, list) else []:
+        if isinstance(option, dict) and option.get("id") == "reasoningEffort":
+            return str(option.get("value"))
+    return None
+
+
 def last_item(snapshot: dict[str, Any]) -> dict[str, Any]:
     items = snapshot["history"]["HistoryItemList"]
     return next((i for i in reversed(items) if i.get("Role") in {1, 2}), {})
@@ -799,7 +1243,12 @@ def main() -> int:
     args = parser.parse_args()
     if args.describe:
         for row, oracle in ROWS.items():
-            print(json.dumps({"row": row, "status": "authored_not_executed", "oracle": oracle}))
+            described: dict[str, str] = {"row": row, "status": "authored_not_executed", "oracle": oracle}
+            if row in RED:
+                described["red"] = RED[row]
+            print(json.dumps(described))
+        for row, steps in HITL.items():
+            print(json.dumps({"row": row, "status": "hitl_manual", "steps": steps}))
         return 0
     if not args.owner_attended or args.config is None:
         parser.error("Real-account execution requires --owner-attended --config")
@@ -810,6 +1259,8 @@ def main() -> int:
         parser.error("Missing config fields: " + ", ".join(sorted(required - config.keys())))
     if config["settings"].get("minerva_mcp_endpoint") != "{minerva_mcp}":
         parser.error("Plugin must wire minerva_mcp_endpoint from {minerva_mcp}")
+    if not isinstance(config.get("launch_paid_turns", 0), int) or config.get("launch_paid_turns", 0) < 0:
+        parser.error("launch_paid_turns must be a non-negative integer")
     config = {"plugin_id": "t3_code", "entry_id": "t3-code", "generate_tool": "minerva_t3_code_generate",
               "status_tool": "minerva_t3_code_status", **config, "nonce": secrets.token_hex(10)}
     os.umask(0o077)
@@ -836,7 +1287,8 @@ def main() -> int:
                "failure_type": failure, "environment_failure": crawl.environment_failure,
                "cleanup_failure": crawl.cleanup_failure, "script_errors": script_errors,
                "private_evidence": str(private), "retention": "retained owner-only; raw logs/profile/history never published",
-               "test_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), "rows": list(crawl.rows.values())}
+               "test_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+               "hitl_pending": sorted(HITL), "rows": list(crawl.rows.values())}
     (private / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(json.dumps({k: v for k, v in receipt.items() if k != "rows"}))
     return 0 if accepted else (90 if failure or crawl.environment_failure or crawl.cleanup_failure or script_errors else 1)
