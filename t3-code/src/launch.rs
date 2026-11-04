@@ -136,7 +136,7 @@ pub fn options(runtime: &Runtime) -> Result<Value> {
 pub fn selection(runtime: &Runtime, args: &Value) -> Result<Value> {
     let available = options(runtime)?;
     let default = &available["default"];
-    let requested_model = match args.get("model") {
+    let requested_model = match args.get("model").filter(|value| !value.is_null()) {
         None => default["model"].as_str().ok_or_else(|| Fault::held("model_unavailable", "The project default is not an advertised Codex selection. Choose a listed model explicitly."))?,
         Some(value) => value
             .as_str()
@@ -155,7 +155,7 @@ pub fn selection(runtime: &Runtime, args: &Value) -> Result<Value> {
     } else {
         json!({"instanceId":provider["providerInstanceId"],"model":requested_model})
     };
-    let requested_effort = match args.get("effort") {
+    let requested_effort = match args.get("effort").filter(|value| !value.is_null()) {
         None => effort(&selected).or_else(|| effort_descriptor(advertised).and_then(|option| option["default"].as_str())),
         Some(value) => Some(value.as_str().filter(|value| !value.is_empty() && value.len() <= 64)
             .ok_or_else(|| Fault::held("invalid_selection", "effort must be a nonempty string of at most64 bytes; omit it to use the default."))?),

@@ -232,8 +232,9 @@ impl Launch<'_> {
         self.capture_inner(maximum, timeout, cancel, false)
     }
 
-    /// Assert the fixed public project-add shape before enabling diagnostics:
-    /// no bearer, auth command or credential argument can enter this path.
+    /// Check the fixed public project-add argv before enabling diagnostics:
+    /// the plugin's bearer/auth command cannot enter this path. Upstream's own
+    /// internal CLI-token redaction is unverified; output remains bounded.
     /// Issuer/revoke keep using capture(), with failure output hidden.
     pub fn capture_project_registration(
         self,

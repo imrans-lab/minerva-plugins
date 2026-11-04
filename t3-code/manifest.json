@@ -29,12 +29,18 @@
             "description": "Identity of the newly created Minerva session chat."
           },
           "model": {
-            "type": "string",
-            "description": "Advertised Codex model id; omit to use the project default or first advertised model."
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Advertised Codex model id; omit to use the project default or first advertised model. JSON null is treated as omitted."
           },
           "effort": {
-            "type": "string",
-            "description": "Advertised reasoningEffort choice; omit to use the advertised default, or the provider default when unverified."
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Advertised reasoningEffort choice; omit to use the advertised default, or the provider default when unverified. JSON null is treated as omitted."
           }
         },
         "required": [

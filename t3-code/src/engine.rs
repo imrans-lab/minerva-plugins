@@ -131,8 +131,7 @@ impl Engine {
             return Err(Fault::held("session_started", "Session choices are fixed once its first turn starts. Launch a new chat to select another model or effort."));
         }
         let selection =
-            if !chat.model.is_null() && args.get("model").is_none() && args.get("effort").is_none()
-            {
+            if !chat.model.is_null() && args["model"].is_null() && args["effort"].is_null() {
                 launch::validate(&runtime, &chat.model)?;
                 chat.model.clone()
             } else {
